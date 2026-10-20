@@ -1,0 +1,12 @@
+# Ruff configuration for Nadare.
+# Kept separate from pyproject.toml so lint config is discoverable and
+# consistent across source, tests, packaging, and scripts.
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = [
+    # Whitespace before ':' — conflicts with ruff-format slice formatting.
+    "E203",
+]

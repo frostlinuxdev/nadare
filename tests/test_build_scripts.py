@@ -1,0 +1,327 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Regression guards for the build/CI tooling (scripts/, ci/, packaging/, docs).
+
+These are mostly shell/config artefacts, so the guards are a mix of functional
+checks (running a script) and static assertions on the exact patterns the audit
+flagged; each one fails if the corresponding bug is reintroduced.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _text(rel: str) -> str:
+    return (_REPO_ROOT / rel).read_text(encoding="utf-8")
+
+
+def _maintainer_doc(rel: str) -> str:
+    """A maintainer-only doc that the public snapshot does not ship (see
+    ``scripts/make_public_snapshot.sh``): skip, rather than fail, without it."""
+    path = _REPO_ROOT / rel
+    if not path.is_file():
+        pytest.skip(f"{rel} is not shipped in the public snapshot")
+    return path.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# 07-3 — CI exists for the Nadare repo itself
+# ---------------------------------------------------------------------------
+class TestCIWorkflow:
+    def test_workflow_runs_pytest_and_ruff_on_both_interpreters(self):
+        workflow = _REPO_ROOT / ".forgejo" / "workflows" / "ci.yml"
+        assert workflow.is_file(), "no CI workflow for the repository itself"
+        text = workflow.read_text(encoding="utf-8")
+        assert "python -m pytest tests -q" in text
+        assert "ruff check src tests packaging scripts" in text
+        assert '"3.12"' in text and '"3.13"' in text
+        assert "QT_QPA_PLATFORM: offscreen" in text
+
+
+# ---------------------------------------------------------------------------
+# 07-5 — the release appimagetool is pinned/verified
+# ---------------------------------------------------------------------------
+class TestAppimagetoolPin:
+    def test_release_default_is_not_a_moving_tag(self):
+        script = _text("scripts/build_appimage.sh")
+        # The old moving-tag default must be gone, the verifier must exist, and
+        # an explicit opt-out must be the only way to skip the digest.
+        assert 'APPIMAGETOOL_RELEASE="${APPIMAGETOOL_RELEASE:-continuous}"' not in script
+        assert "releases/download/continuous/appimagetool-x86_64.AppImage" not in script
+        assert "APPIMAGETOOL_ALLOW_UNVERIFIED" in script
+        assert "verify_appimagetool" in script
+
+    def test_release_build_without_a_digest_fails_closed(self, tmp_path):
+        """A release build (NADARE_RELEASE=1) must not ship an unverified tool."""
+        tool = tmp_path / "appimagetool"
+        tool.write_bytes(b"not the real appimagetool")
+        env = dict(os.environ)
+        env["APPIMAGETOOL"] = str(tool)
+        env["NADARE_RELEASE"] = "1"
+        for key in ("APPIMAGETOOL_SHA256", "APPIMAGETOOL_RELEASE", "APPIMAGETOOL_ALLOW_UNVERIFIED"):
+            env.pop(key, None)
+        result = subprocess.run(
+            ["bash", str(_REPO_ROOT / "scripts" / "build_appimage.sh")],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode != 0
+        assert "APPIMAGETOOL_SHA256" in result.stderr
+
+    def test_unset_digest_fails_closed_without_an_explicit_override(self, tmp_path):
+        """Even a local build refuses an unverified tool unless it opts in."""
+        tool = tmp_path / "appimagetool"
+        tool.write_bytes(b"not the real appimagetool")
+        env = dict(os.environ)
+        env["APPIMAGETOOL"] = str(tool)
+        for key in (
+            "APPIMAGETOOL_SHA256",
+            "APPIMAGETOOL_RELEASE",
+            "APPIMAGETOOL_ALLOW_UNVERIFIED",
+            "NADARE_RELEASE",
+        ):
+            env.pop(key, None)
+        result = subprocess.run(
+            ["bash", str(_REPO_ROOT / "scripts" / "build_appimage.sh")],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode != 0
+        assert "refusing to use an unverified appimagetool" in result.stderr
+
+    def test_bad_digest_fails_closed_before_the_build(self, tmp_path):
+        tool = tmp_path / "appimagetool"
+        tool.write_bytes(b"not the real appimagetool")
+        env = dict(os.environ)
+        env["APPIMAGETOOL"] = str(tool)
+        env["APPIMAGETOOL_SHA256"] = "0" * 64
+        result = subprocess.run(
+            ["bash", str(_REPO_ROOT / "scripts" / "build_appimage.sh")],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        assert result.returncode != 0
+        assert "integrity check FAILED" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# release hardening: runtime pin (#80), version (#107), ELF class (#25), LICENSE (#7)
+# ---------------------------------------------------------------------------
+class TestAppImageReleaseHardening:
+    @staticmethod
+    def _env(tmp_path, **extra):
+        import hashlib
+
+        tool = tmp_path / "appimagetool"
+        tool.write_bytes(b"stub appimagetool")
+        env = dict(os.environ)
+        for key in (
+            "APPIMAGE_RUNTIME_RELEASE",
+            "APPIMAGE_RUNTIME_SHA256",
+            "APPIMAGE_RUNTIME_FILE",
+            "NADARE_RELEASE",
+            "NADARE_ALLOW_NO_KEYRING",
+        ):
+            env.pop(key, None)
+        env.update(
+            APPIMAGETOOL=str(tool),
+            APPIMAGETOOL_SHA256=hashlib.sha256(tool.read_bytes()).hexdigest(),
+            APPIMAGETOOL_RELEASE="1.9.1",
+        )
+        env.update(extra)
+        return env
+
+    @staticmethod
+    def _run(env):
+        return subprocess.run(
+            ["bash", str(_REPO_ROOT / "scripts" / "build_appimage.sh")],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=_REPO_ROOT,
+        )
+
+    def test_release_build_requires_a_pinned_runtime(self, tmp_path):
+        env = self._env(tmp_path, NADARE_RELEASE="1", PYTHON="/bin/false")
+        result = self._run(env)
+        assert result.returncode != 0
+        assert "APPIMAGE_RUNTIME_SHA256" in result.stderr
+
+    def test_runtime_with_a_wrong_digest_fails_before_the_build(self, tmp_path):
+        runtime = tmp_path / "runtime-x86_64"
+        runtime.write_bytes(b"not the real runtime")
+        env = self._env(
+            tmp_path,
+            NADARE_RELEASE="1",
+            APPIMAGE_RUNTIME_FILE=str(runtime),
+            APPIMAGE_RUNTIME_SHA256="0" * 64,
+            PYTHON="/bin/false",
+        )
+        result = self._run(env)
+        assert result.returncode != 0
+        assert "runtime integrity check FAILED" in result.stderr
+
+    def test_runtime_with_the_right_digest_gets_past_the_check(self, tmp_path):
+        import hashlib
+
+        runtime = tmp_path / "runtime-x86_64"
+        runtime.write_bytes(b"pinned runtime bytes")
+        env = self._env(
+            tmp_path,
+            NADARE_RELEASE="1",
+            APPIMAGE_RUNTIME_FILE=str(runtime),
+            APPIMAGE_RUNTIME_SHA256=hashlib.sha256(runtime.read_bytes()).hexdigest(),
+            PYTHON="/bin/false",  # stop at the keyring check, before PyInstaller
+        )
+        result = self._run(env)
+        assert "runtime verified" in result.stdout
+        assert "integrity check FAILED" not in result.stderr
+
+    def test_unreadable_version_fails_the_build(self, tmp_path):
+        """No silent '0.1.0' fallback: it would mislabel the artifact (#107)."""
+        py = tmp_path / "py"
+        py.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            '  *"import keyring"*) exit 0 ;;\n'
+            '  *"import nadare"*) exit 1 ;;\n'
+            "esac\nexit 0\n"
+        )
+        py.chmod(0o755)
+        env = self._env(tmp_path, PYTHON=str(py))
+        result = self._run(env)
+        assert result.returncode != 0
+        assert "cannot read nadare.__version__" in result.stderr
+
+    def test_system_lib_lookup_is_64_bit_only_and_checked(self):
+        script = _text("scripts/build_appimage.sh")
+        assert "x86-64" in script  # ldconfig entries tagged for this arch
+        assert "is_elf64" in script
+        assert "cp -L \"$src\" \"$dest/\"" in script
+
+    def test_license_is_staged_in_every_package(self):
+        assert "LICENSE" in _text("scripts/build_appimage.sh").split("copy_system_libs libGL")[1]
+        assert "LICENSE" in _text("scripts/build_flatpak.sh")
+        assert "LICENSE" in _text("packaging/flatpak/io.github.nadare_launcher.Nadare.yml")
+
+    def test_other_packagers_do_not_fall_back_to_a_fake_version(self):
+        assert "|| echo 0.1.0" not in _text("scripts/build_deb.sh")
+        assert "|| echo 0.1.0" not in _text("scripts/build_appimage.sh")
+
+
+# ---------------------------------------------------------------------------
+# 07-6 / 07-7 — test_appimage.sh quoting, log path, and backend check
+# ---------------------------------------------------------------------------
+class TestAppimageSmokeScript:
+    def test_path_is_passed_as_argv_not_spliced_into_the_shell(self):
+        script = _text("scripts/test_appimage.sh")
+        # The old injection vector: the path inside single quotes in a string.
+        assert "cp '$appimage'" not in script
+        assert "inx_argv" in script
+        assert '_ "$appimage"' in script
+
+    def test_warmup_log_is_a_private_mktemp_file(self):
+        script = _text("scripts/test_appimage.sh")
+        assert "/tmp/nadare-test-warmup.log" not in script
+        assert "mktemp" in script
+        assert 'trap \'rm -f "$warmup_log"\' EXIT' in script
+
+    def test_backends_check_cannot_pass_vacuously(self):
+        script = _text("scripts/test_appimage.sh")
+        assert "grep -qv MISSING" not in script
+        assert "grep -v MISSING | grep -q ." in script
+
+
+# ---------------------------------------------------------------------------
+# 07-9 — dev.sh setup uses the committed lock
+# ---------------------------------------------------------------------------
+class TestDevSetup:
+    def test_setup_prefers_uv_sync_with_a_pip_fallback(self):
+        script = _text("scripts/dev.sh")
+        assert "uv sync --frozen --extra dev" in script
+        # The pip path is retained only as a fallback.
+        assert 'install -r requirements.txt' in script
+
+    def test_setup_actually_calls_uv_sync(self, tmp_path, monkeypatch):
+        import shutil
+
+        repo = tmp_path / "repo"
+        (repo / "scripts").mkdir(parents=True)
+        shutil.copy(_REPO_ROOT / "scripts" / "dev.sh", repo / "scripts" / "dev.sh")
+        venv_bin = repo / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        for name in ("python", "pip"):
+            stub = venv_bin / name
+            stub.write_text("#!/bin/sh\nexit 0\n")
+            stub.chmod(0o755)
+        (repo / "uv.lock").write_text("")
+
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        log = tmp_path / "uv.log"
+        uv = bindir / "uv"
+        uv.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\n')
+        uv.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bindir}:{os.environ['PATH']}")
+
+        result = subprocess.run(
+            ["bash", str(repo / "scripts" / "dev.sh"), "setup"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        calls = log.read_text()
+        assert "sync" in calls and "--frozen" in calls
+        assert "install -r requirements.txt" not in calls
+
+
+# ---------------------------------------------------------------------------
+# 07-8 / R4-5 — docs and packaging recipe match reality
+# ---------------------------------------------------------------------------
+class TestDocsMatchReality:
+    def test_test_report_is_marked_a_snapshot(self):
+        report = _maintainer_doc("docs/test-reports/2026-10-12.md")
+        assert "Historical snapshot" in report
+        # The dead link to an untracked scratch report is gone.
+        assert "tests/live-network-report.md" not in report
+
+    def test_appimage_builder_recipe_is_marked_superseded(self):
+        recipe = _text("packaging/AppImageBuilder.yml")
+        assert "SUPERSEDED" in recipe
+        assert "calls `appimage-builder --recipe" not in recipe
+
+    def test_metainfo_version_matches_the_project_version(self):
+        import tomllib
+
+        project = tomllib.loads(_text("pyproject.toml"))["project"]["version"]
+        metainfo = _text("packaging/flatpak/io.github.nadare_launcher.Nadare.metainfo.xml")
+        assert f'<release version="{project}"' in metainfo
+
+    def test_package_version_matches_the_project_version(self):
+        import tomllib
+
+        import nadare
+
+        project = tomllib.loads(_text("pyproject.toml"))["project"]["version"]
+        assert nadare.__version__ == project
+
+    def test_testing_md_names_the_current_artifact_version(self):
+        testing = _maintainer_doc("TESTING.md")
+        # The stale pre-release artifact name (0.1.0) is gone, replaced by the
+        # project version's spelling (0.1.0b1).
+        assert "Nadare-0.1.0-x86_64.AppImage" not in testing
+        assert "Nadare-0.1.0b1-x86_64.AppImage" in testing
+
+    def test_contributing_does_not_call_the_recipe_current(self):
+        contributing = _text("CONTRIBUTING.md")
+        assert "`packaging/AppImageBuilder.yml` is the AppImage recipe" not in contributing
+        assert "superseded" in contributing

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.nadare_launcher.Nadare</id>
+  <name>Nadare</name>
+  <summary>Open-source Linux launcher for anime gacha games</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <description>
+    <p>Nadare installs, updates and launches anime gacha games on Linux:
+    Arknights, Stella Sora, Chaos Zero Nightmare and Fate/Grand Order (via Lepton),
+    with official news and art from each publisher.</p>
+    <p>Beta: expect bugs.</p>
+  </description>
+  <launchable type="desktop-id">io.github.nadare_launcher.Nadare.desktop</launchable>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <!-- Keep in sync with pyproject.toml [project].version. -->
+    <release version="0.1.0b1" date="2026-10-12"/>
+  </releases>
+</component>

@@ -1,0 +1,26 @@
+# Nadare runtime dependencies.
+#
+# Pinned for reproducible installs. Nadare targets Python 3.12+ (see
+# pyproject.toml). Install with:
+#
+#     python3 -m venv .venv
+#     .venv/bin/pip install -r requirements.txt
+#
+# A downloaded Nadare package (AppImage/.deb) bundles these; you only need this
+# file when running from a source checkout.
+
+# --- GUI --------------------------------------------------------------------
+PyQt6==6.11.0
+
+# --- STOVE / HTTP -----------------------------------------------------------
+# STOVE's CDN filters by TLS/JA3. curl_cffi's Chrome impersonation is required
+# for the CZN auth and updater paths; plain `requests` gets reset.
+curl_cffi==0.16.3
+
+# --- OS keyring ---------------------------------------------------------------
+# Tokens live in the system keyring (Secret Service / KWallet). Required for
+# "Remember me": the bundled AppImage/Flatpak must be built with these. Without
+# them Nadare cannot save a login (account tokens are keyring-only). See
+# PRIVACY.md.
+keyring==25.7.0
+SecretStorage==3.5.0

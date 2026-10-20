@@ -1,0 +1,61 @@
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+.venv*
+venv/
+env/
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Packaging --------------------------------------------------------------
+*.spec.bak
+*.AppImage
+*.AppImage.zsync
+*.deb
+*.rpm
+*.tar.gz
+*.tar.xz
+*.zip
+AppDir/
+appimage-build/
+squashfs-root/
+_deb_build/
+pyinstaller/
+
+# --- Windows helper / cross builds ------------------------------------------
+*.exe
+*.dll
+*.o
+*.obj
+tools/
+
+# --- Secrets, sessions and tokens (never commit) ----------------------------
+# Nadare never stores tokens in config.json, but users may drop these here.
+secrets.json
+session.json
+czn_auth.json
+czn_qr.png
+*.session
+*.token
+*.pem
+.env
+.env.*
+
+# --- Local data / scratch ---------------------------------------------------
+/nadare-data/
+/scratch/
+*.log
+!docs/**/*.log
+packaging/flatpak/staging/
+build/flatpak/
+!src/nadare/assets/czn_pcsdk_stub.exe

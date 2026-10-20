@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the Nadare index (WebView2 installer hashes)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Adjust the paths if the checkouts live elsewhere.
+Environment=NADARE_INDEX_DIR=%h/nadare-index
+ExecStart=%h/nadare/scripts/refresh_index.sh
+TimeoutStartSec=30min

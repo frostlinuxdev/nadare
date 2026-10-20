@@ -1,0 +1,96 @@
+# Nadare as a Flatpak bundle (beta).
+#
+# Wraps the same PyInstaller onedir bundle the AppImage uses (built on Ubuntu
+# 22.04), so no Python stack is rebuilt here. Build with
+# scripts/build_flatpak.sh, which stages dist/nadare next to this file.
+#
+# This is a *permissive* bundle, not a real sandbox: games live anywhere on
+# disk (host filesystem), and Lepton (FGO), Waydroid and gamescope run on the
+# host through flatpak-spawn --host. Proton runs inside the sandbox with the
+# 32-bit compat extensions.
+#
+# The app id is provisional until the project's public home is decided;
+# changing it later moves user data (~/.var/app/<id>).
+id: io.github.nadare_launcher.Nadare
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+command: nadare
+separate-locales: false
+# appstreamcli compose fails to read the icon inside org.flatpak.Builder
+# (icon-file-read-error, both SVG and PNG). The metainfo is still installed;
+# only the composed catalog is skipped, which a hand-installed bundle never uses.
+appstream-compose: false
+
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=all
+  - --filesystem=host
+  - --allow=multiarch
+  - --allow=per-app-dev-shm
+  - --talk-name=org.freedesktop.secrets
+  - --talk-name=org.kde.kwalletd6
+  - --talk-name=org.kde.kwalletd5
+  - --talk-name=org.freedesktop.Notifications
+  # Lepton / Waydroid / gamescope live on the host.
+  - --talk-name=org.freedesktop.Flatpak
+  - --env=NADARE_FLATPAK=1
+
+add-extensions:
+  org.freedesktop.Platform.Compat.i386:
+    directory: lib/i386-linux-gnu
+    version: '25.08'
+  org.freedesktop.Platform.GL32:
+    directory: lib/i386-linux-gnu/GL
+    version: '1.4'
+    versions: 25.08;1.4
+    subdirectories: true
+    no-autodownload: true
+    autodelete: false
+    add-ld-path: lib
+    merge-dirs: vulkan/icd.d;glvnd/egl_vendor.d;egl/egl_external_platform.d;OpenCL/vendors;lib/dri;lib/d3d;lib/gbm;vulkan/explicit_layer.d;vulkan/implicit_layer.d
+    download-if: active-gl-driver
+    enable-if: active-gl-driver
+
+modules:
+  - name: compat-i386
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/lib/i386-linux-gnu /app/lib/i386-linux-gnu/GL
+      - install -Dm644 ld.so.conf /app/etc/ld.so.conf
+    sources:
+      - type: inline
+        dest-filename: ld.so.conf
+        contents: |
+          /app/lib32
+          /app/lib/i386-linux-gnu
+
+  - name: nadare
+    buildsystem: simple
+    build-commands:
+      - mkdir -p /app/lib/nadare /app/bin
+      - cp -a bundle/. /app/lib/nadare/
+      # Use the runtime's copies of these (newer, and matched to the runtime's
+      # font config and GL/Vulkan driver extensions) instead of the Ubuntu
+      # 22.04 ones PyInstaller bundled for the AppImage.
+      - >-
+        cd /app/lib/nadare/_internal && rm -f
+        libfontconfig.so.1 libfreetype.so.6 libexpat.so.1 libvulkan.so.1
+        libglib-2.0.so.0 libpng16.so.16 libz.so.1
+        libX11.so.6 libX11-xcb.so.1 libXau.so.6 libXdmcp.so.6 libXext.so.6 libXrender.so.1
+        libxcb-glx.so.0 libxcb-randr.so.0 libxcb-render.so.0 libxcb-shape.so.0
+        libxcb-shm.so.0 libxcb-sync.so.1 libxcb-xfixes.so.0 libxcb-xkb.so.1
+        libxkbcommon.so.0 libxkbcommon-x11.so.0
+      - ln -s /app/lib/nadare/nadare /app/bin/nadare
+      - install -Dm644 nadare.desktop /app/share/applications/${FLATPAK_ID}.desktop
+      - desktop-file-edit --set-icon=${FLATPAK_ID} --set-key=StartupWMClass --set-value=nadare /app/share/applications/${FLATPAK_ID}.desktop
+      - for s in 128 256 512; do install -Dm644 nadare-$s.png /app/share/icons/hicolor/${s}x${s}/apps/${FLATPAK_ID}.png; done
+      - install -Dm644 ${FLATPAK_ID}.metainfo.xml /app/share/metainfo/${FLATPAK_ID}.metainfo.xml
+      - install -Dm644 LICENSE /app/share/licenses/${FLATPAK_ID}/LICENSE
+    sources:
+      - type: dir
+        path: staging

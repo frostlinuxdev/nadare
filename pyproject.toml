@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nadare-launcher"
+version = "0.1.0b1"
+description = "An open-source Linux launcher for anime gacha games (Fate/Grand Order, Chaos Zero Nightmare, and more)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "GPL-3.0-or-later" }
+dependencies = [
+  "PyQt6>=6.6,<7",
+  # STOVE's CDN filters by TLS/JA3; Chrome impersonation needs curl_cffi, whose
+  # API moves between 0.x minors (requirements.txt pins the tested release).
+  "curl_cffi>=0.7,<0.17",
+  # "Remember me" keeps account tokens in the OS keyring only; without these the
+  # feature is silently unavailable after a plain `pip install`.
+  "keyring>=24",
+  "SecretStorage>=3.3",
+]
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.6"]
+dev = ["pytest>=8", "pytest-qt>=4.4", "ruff>=0.6"]
+# Enables "Remember me": stores CZN logins in the OS keyring (never plaintext).
+secure = ["keyring>=24"]
+
+[project.scripts]
+nadare = "nadare.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::DeprecationWarning:nadare"]
+
+[tool.setuptools.package-data]
+nadare = ["assets/*", "assets/fonts/*", "backends/**/*.c", "backends/**/*.desktop", "backends/czn/build_stub.sh"]

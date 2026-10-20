@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Nadare
+GenericName=Game Launcher
+Comment=Open-source Linux launcher for anime gacha games
+Comment[de]=Open-Source-Launcher für Anime-Gacha-Spiele unter Linux
+Exec=nadare
+TryExec=nadare
+Icon=nadare
+Terminal=false
+Categories=Game;Utility;
+Keywords=gacha;launcher;Fate;Grand;Order;Chaos;Zero;Nightmare;STOVE;
+StartupNotify=true
+StartupWMClass=nadare
+# The packaged binary starts the GUI with no arguments and behaves as the CLI
+# with arguments, so a single entry point is enough.

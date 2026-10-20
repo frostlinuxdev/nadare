@@ -1,0 +1,95 @@
+# Template: publish Nadare's Yostar direct-download manifests.
+#
+# This is a *template* and is deliberately not wired to any real repository.
+# It must run in a checkout of the **Nadare client repo**: `actions/checkout`
+# takes the repo the workflow file lives in, and the step below runs
+# `ci/yostar-manifests/generate.py`, which imports `nadare.core.yostar` from the
+# same checkout's `src/`. Copy it to `.forgejo/workflows/` (or
+# `.github/workflows/`) in that repo and set the secrets below. The *published
+# manifests* repo is a separate clone (MANIFESTS_REPO) written only into
+# `published/`; it does not host this workflow.
+#
+# Required repository secrets:
+#   SALT_STELLASORA_EN   signed API salt for StellaSora_EN
+#   SALT_ARKNIGHTS_EN    signed API salt for Arknights_EN
+#   MANIFESTS_TOKEN      HTTPS token allowed to clone/push the manifests repo
+#                        (optional: with an SSH MANIFESTS_REPO the URL's own
+#                        deploy key is used and the token is ignored)
+#   MANIFESTS_REPO       e.g. "git@example.com:you/yostar-manifests.git"
+#
+# Optional repository variables (launcher version strings used in the signed
+# `head`; they only need to look like a real launcher build):
+#   VERSION_STELLASORA_EN  (default "1.0.0")
+#   VERSION_ARKNIGHTS_EN   (default "1.0.0")
+
+name: yostar-manifests
+
+on:
+  schedule:
+    - cron: "17 * * * *" # hourly
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yostar-manifests
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the manifest tooling
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generate and publish the manifests
+        env:
+          SALT_STELLASORA_EN: ${{ secrets.SALT_STELLASORA_EN }}
+          SALT_ARKNIGHTS_EN: ${{ secrets.SALT_ARKNIGHTS_EN }}
+          VERSION_STELLASORA_EN: ${{ vars.VERSION_STELLASORA_EN || '1.0.0' }}
+          VERSION_ARKNIGHTS_EN: ${{ vars.VERSION_ARKNIGHTS_EN || '1.0.0' }}
+          MANIFESTS_REPO: ${{ secrets.MANIFESTS_REPO }}
+          MANIFESTS_TOKEN: ${{ secrets.MANIFESTS_TOKEN }}
+        run: |
+          set -eu
+          test -n "$MANIFESTS_REPO"
+
+          # If a token is provided, hand it to git as a credential helper via
+          # the environment so it never reaches argv or published/.git/config.
+          # Without a token we fall back to whatever auth the MANIFESTS_REPO
+          # URL itself carries (e.g. an SSH deploy key).
+          if [ -n "${MANIFESTS_TOKEN:-}" ]; then
+            export GIT_CONFIG_COUNT=1
+            export GIT_CONFIG_KEY_0=credential.helper
+            export GIT_CONFIG_VALUE_0='!f() { echo username=x-access-token; echo "password=$MANIFESTS_TOKEN"; }; f'
+          else
+            echo "MANIFESTS_TOKEN is not set; using the auth in MANIFESTS_REPO" >&2
+          fi
+
+          git clone --depth 1 "$MANIFESTS_REPO" published
+
+          # Generate into a scratch dir, then merge only the files refreshed
+          # this run over the published checkout.  A tag that failed keeps its
+          # last-good entry and file (see scripts/publish_index.py); nothing is
+          # ever deleted wholesale.  The step fails if no game was generated
+          # (exit 2) or the merge would drop a previously published tag
+          # (exit 1); a newly added or half-configured game only warns so it
+          # cannot wedge the job.
+          python ci/yostar-manifests/generate.py --out dist/manifests --merge-into published
+
+          cd published
+          git config user.name "yostar-manifests bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -- '*.json'
+          if git diff --cached --quiet; then
+            echo "no manifest changes"
+            exit 0
+          fi
+          git commit -m "Yostar manifests $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push origin HEAD:main
