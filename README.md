@@ -64,7 +64,7 @@ feeds.*
 | **Chaos Zero Nightmare** | `stove-czn` | First-class: install, update, QR login, launch on Proton. Tested on NVIDIA and AMD. |
 | **Arknights** (EN, Yostar) | `arknights-yostar` | Install/update/launch through Proton; official launcher downloads are direct and verified. |
 | **Stella Sora** (EN, Yostar) | `stellasora-yostar` | Install/update/launch through Proton. |
-| **Fate/Grand Order (NA)** | `fgo-lepton` | **Experimental**: Android container (lepton-fgo); needs podman, a kernel with binderfs and an NVIDIA GPU. **Not installable in 0.1.0b2** (its lepton-fgo release is not in the public index yet); planned for a later beta. |
+| **Fate/Grand Order (NA)** | `fgo-lepton` | **Experimental**: Android container (lepton-fgo); needs podman, a kernel with binderfs and an NVIDIA GPU. **Not installable in 0.1.0b3** (its lepton-fgo release is not in the public index yet); planned for a later beta. |
 | Wine / Steam / script / Waydroid | generic | Scaffolding: you supply the prefix, exe or app. Not a supported product yet. |
 
 Nadare is a beta: the first three are the tested paths (FGO is experimental,
@@ -94,8 +94,9 @@ Mint 22.1; those VM runs have no GPU).
 3. **Launch** refreshes the game token, applies updates and starts the game. The
    game then downloads its own content (several GB) on first run.
 
-**Remember me** (*Settings → Account*) keeps the STOVE login in your OS keyring
-between runs. It is off by default and needs a Secret Service keyring; if it is
+**Remember me** keeps the STOVE login in your OS keyring between runs. Tick it on
+the game page or right under the login QR code (it is also in *Settings → Account*).
+It is off by default and needs a Secret Service keyring; if it is
 unavailable, `nadare doctor` prints the reason on its `keyring:` line. **Log out**
 on the game page forgets the saved login.
 
@@ -130,6 +131,7 @@ Commands like `nadare doctor` or `nadare login -p <profile>` run as
 | CZN `exit 9` | A runner download failed its checksum. Delete `~/.local/share/nadare/runners` and retry. |
 | Arknights / Stella Sora freezes on the first frame (window drawn, CPU idle), native Wayland, NVIDIA | DXVK 3.1.1 (bundled with DW-Proton 11.0-14, Proton-CachyOS 20261005, GE-Proton11-9) can hang a game on its first present through its `VK_EXT_present_timing` path. Arknights sets `DXVK_CONFIG="dxvk.enablePresentTiming = False"` by default, so it is not affected; for another DXVK game add `"extra_env": {"DXVK_CONFIG": "dxvk.enablePresentTiming = False"}` to the profile, or pin a runner with DXVK 3.1 (DW-Proton 11.0-13, GE-Proton11-7, Proton-CachyOS 20260703). `"display": "x11"` also avoids it. The launch log line `runner: <build>, display: <driver>` shows what is in use. Do not point a profile at a moving `... Latest` runner directory: it can change under you. |
 | Stella Sora: the gacha swipe (mouse drag) does nothing on Wayland | Wine's native Wayland driver does not deliver that drag; XWayland does. Stella Sora therefore defaults to XWayland (`PROTON_ENABLE_WAYLAND=0`). To go back to native Wayland set `"display": "wayland"` on the profile in `~/.config/nadare/config.json`; `"x11"` / `"auto"` keep XWayland. Arknights defaults to native Wayland. The launch log line `runner: <build>, display: <driver>` shows which is in use. |
+| Chaos Zero Nightmare shows only a flat colour with *Display backend* set to X11 (XWayland) | Known problem on NVIDIA with KDE Plasma 6.8 (not seen on other setups yet). CZN is tested on native Wayland; leave *Display backend* on Auto. |
 | Stub build fails | Install `mingw-w64` (`gcc-mingw-w64-x86-64` / `mingw-w64-gcc`). |
 | WebView2 install fails | Delete `~/.cache/nadare/czn/MicrosoftEdgeWebView2RuntimeInstallerX64.exe` and retry; the prefix must be writable. |
 | FGO host check fails | Run `lepton-fgo`'s `check-host.sh` and install what it lists. |
@@ -229,7 +231,7 @@ reports the exact list. In short: a live Wayland session, `podman` with the
 Mesa GPU. Nadare downloads a pinned, sha256-checked `lepton-fgo` release on the
 first install, unless you point the profile (or `$LEPTON_FGO_REPO`) at your own
 checkout. FGO support is **experimental** (tested on NVIDIA + CachyOS only) and the
-install step does not work in 0.1.0b2: the public index does not carry the
+install step does not work in 0.1.0b3: the public index does not carry the
 `lepton-fgo` release yet. It is planned for a later beta.
 
 ### Install system packages (source installs)

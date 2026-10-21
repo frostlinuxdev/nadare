@@ -139,7 +139,11 @@ Known limits:
 - The first hours are the worst: the GPU driver's shader cache is cold, so new effects can
   hitch once and then not again. Judge smoothness after a few sessions, not the first.
 - MangoHud can stop the game from starting under `umu-run`; leave it off.
-- FGO (Fate/Grand Order) **does not install in 0.1.0b2**: its lepton-fgo release
+- Chaos Zero Nightmare is tested on **native Wayland**. With *Display backend* set to
+  X11 (XWayland) its window showed only a flat colour on NVIDIA + KDE Plasma 6.8 (the
+  game runs and connects, it just does not draw). Leave the setting on Auto, and
+  tell us if X11 works or fails on yours.
+- FGO (Fate/Grand Order) **does not install in 0.1.0b3**: its lepton-fgo release
   is not in the public index yet (planned for a later beta). It is experimental, needs
   podman and a binderfs kernel, and on SELinux
   distros (Fedora) it installs a system policy module that stays after you delete

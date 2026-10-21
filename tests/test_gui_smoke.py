@@ -1578,7 +1578,10 @@ def test_remember_notice_reaches_the_user_after_settings_save(tmp_path, qapp, mo
         window._on_event("czn", Event("status", REMEMBER_NOTICE))
         window._on_succeeded("czn", "set_remember", 0)
         assert shown, "the no-keyring notice must reach the user"
-        assert shown[0][2] == REMEMBER_NOTICE
+        assert shown[0][2].startswith(REMEMBER_NOTICE)
+        # With no keyring nothing can be saved, so Remember me is switched back off.
+        assert "turned off" in shown[0][2]
+        assert not config.profile("czn").get("remember_me", False)
     finally:
         window.close()
         window.deleteLater()

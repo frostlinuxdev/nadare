@@ -25,6 +25,7 @@ from PyQt6.QtGui import (
     QPixmap,
 )
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -431,6 +432,13 @@ class NewsCard(QFrame):
 NewsRow = NewsCard
 
 
+_REMEMBER_TEXT = "Remember me on this device"
+_REMEMBER_TIP = (
+    "Keeps you logged in by storing the login in your system keyring, so you "
+    "do not need to scan the QR code each time. Turning it off deletes the saved login."
+)
+
+
 class _QrPanel(QFrame):
     """The STOVE login QR as a card overlaid on the launcher (not a new window).
 
@@ -441,6 +449,7 @@ class _QrPanel(QFrame):
 
     QR_SIZE = 320
     cancel_clicked = pyqtSignal()
+    remember_clicked = pyqtSignal(bool)
 
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent)
@@ -462,6 +471,12 @@ class _QrPanel(QFrame):
         self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.hint.setWordWrap(True)
         layout.addWidget(self.hint)
+        # Where the decision is made: tick it before approving the scan.
+        self.remember = QCheckBox(_REMEMBER_TEXT)
+        self.remember.setToolTip(_REMEMBER_TIP)
+        self.remember.setVisible(False)
+        self.remember.clicked.connect(self.remember_clicked.emit)
+        layout.addWidget(self.remember, 0, Qt.AlignmentFlag.AlignCenter)
         self.cancel_button = QPushButton("Cancel login")
         self.cancel_button.setObjectName("GhostButton")
         self.cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -487,6 +502,7 @@ class GameView(QWidget):
     cancel_requested = pyqtSignal()
     back_requested = pyqtSignal()
     settings_requested = pyqtSignal()
+    remember_toggled = pyqtSignal(bool)  # the user ticked/unticked Remember me
 
     #: Text shown under the login QR for each coarse auth state.
     _QR_HINTS = {
@@ -634,6 +650,12 @@ class GameView(QWidget):
         secondary.addStretch(1)
         copy.addLayout(secondary)
 
+        self.remember = QCheckBox(_REMEMBER_TEXT)
+        self.remember.setToolTip(_REMEMBER_TIP)
+        self.remember.setVisible(False)
+        self.remember.clicked.connect(self._on_remember_clicked)
+        copy.addWidget(self.remember)
+
         hero_layout.addLayout(copy, 1)
 
         self.art = QFrame()
@@ -713,6 +735,7 @@ class GameView(QWidget):
         self.qr_label = self.qr_frame.label
         self.qr_hint = self.qr_frame.hint
         self.qr_frame.cancel_clicked.connect(self.cancel_requested.emit)
+        self.qr_frame.remember_clicked.connect(self._on_remember_clicked)
 
         # ---- console --------------------------------------------------------
         log_head = QHBoxLayout()
@@ -945,6 +968,22 @@ class GameView(QWidget):
         self.login.setVisible(supported)
         self.logout.setVisible(supported)
         self._refresh_actions()
+
+    def set_remember(self, supported: bool, checked: bool) -> None:
+        """Show Remember me (page + QR card) for backends that support it."""
+        for box in (self.remember, self.qr_frame.remember):
+            box.blockSignals(True)
+            box.setVisible(bool(supported))
+            box.setChecked(bool(checked))
+            box.blockSignals(False)
+
+    def _on_remember_clicked(self, checked: bool) -> None:
+        # Keep the page and QR-card boxes in step, then tell the window.
+        for box in (self.remember, self.qr_frame.remember):
+            box.blockSignals(True)
+            box.setChecked(bool(checked))
+            box.blockSignals(False)
+        self.remember_toggled.emit(bool(checked))
 
     @staticmethod
     def _polish(widget: QWidget) -> None:

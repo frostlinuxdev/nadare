@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core import backends as core_backends
-from ..core import paths, shortcuts
+from ..core import paths, secrets, shortcuts
 from ..core.backends import (
     Status,
     supports_login,
@@ -148,6 +148,7 @@ class MainWindow(QMainWindow):
         self.game.back_requested.connect(self.show_library)
         self.game.action_requested.connect(self._on_game_action)
         self.game.cancel_requested.connect(self._on_cancel)
+        self.game.remember_toggled.connect(self._on_remember_toggled)
         self.game.settings_requested.connect(self.open_settings)
         self.settings.saved.connect(self._on_settings_saved)
         self.settings.cancelled.connect(self.show_library)
@@ -310,6 +311,10 @@ class MainWindow(QMainWindow):
         )
         self.game.set_account_controls(
             supports_login(str(self.config.profiles[profile].get("backend") or ""))
+        )
+        self.game.set_remember(
+            supports_remember_me(str(self.config.profiles[profile].get("backend") or "")),
+            bool(self.config.profiles[profile].get("remember_me", False)),
         )
         self.stack.setCurrentIndex(PAGE_GAME)
         self._set_active_nav("library")
@@ -476,6 +481,25 @@ class MainWindow(QMainWindow):
         self._sync_remember(profile)
         self.refresh_library()
         self.show_library()
+
+    def _on_remember_toggled(self, enabled: bool) -> None:
+        """Remember me ticked on the game page or the login QR card."""
+        profile = self._current_profile
+        data = self.config.profiles.get(profile)
+        if not data or not supports_remember_me(str(data.get("backend") or "")):
+            return
+        before = bool(data.get("remember_me", False))
+        try:
+            with self.config.locked():
+                data["remember_me"] = bool(enabled)
+                self.config.save()
+        except OSError as exc:
+            with self.config.locked():
+                data["remember_me"] = before
+            self.game.set_remember(True, before)
+            QMessageBox.critical(self, "Remember me", f"Could not save config: {exc}")
+            return
+        self._sync_remember(profile)
 
     def _sync_remember(self, profile: str) -> None:
         """Apply the Remember me flag immediately (turning it off forgets the login)."""
@@ -746,7 +770,30 @@ class MainWindow(QMainWindow):
         self._remember_watching.discard(profile)
         notice = self._remember_notice.pop(profile, "")
         if notice:
+            data = self.config.profiles.get(profile)
+            usable = secrets.SecretStore(allow_fallback=False).secure
+            if data and data.get("remember_me") and not usable:
+                # Nothing can be saved, so a ticked box would only mislead.
+                self._undo_remember(profile)
+                notice += (
+                    "\n\nRemember me has been turned off; "
+                    "you will need to scan the QR code each time."
+                )
             QMessageBox.information(self, "Remember me", notice)
+
+    def _undo_remember(self, profile: str) -> None:
+        """Clear the Remember me flag (and the boxes) when it cannot work."""
+        data = self.config.profiles.get(profile)
+        if not data:
+            return
+        try:
+            with self.config.locked():
+                data["remember_me"] = False
+                self.config.save()
+        except OSError:
+            log.debug("could not save Remember me off", exc_info=True)
+        if profile == self._current_profile:
+            self.game.set_remember(True, False)
 
     def _apply_pending_remember(self, profile: str) -> None:
         """Apply a Remember-me change that was requested while the profile was busy."""
