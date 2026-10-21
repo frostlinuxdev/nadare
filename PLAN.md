@@ -1,8 +1,8 @@
 # Nadare roadmap
 
-Where Nadare stands at the 0.1.0b1 beta, what is limited, and what comes next.
+Where Nadare stands at the 0.1.0b2 beta, what is limited, and what comes next.
 
-## What works in 0.1.0b1
+## What works in 0.1.0b2
 
 - **Chaos Zero Nightmare:** install, update, QR login, launch on Proton, with an
   optional *Remember me* in your OS keyring. Tested on NVIDIA and AMD.
@@ -12,7 +12,7 @@ Where Nadare stands at the 0.1.0b1 beta, what is limited, and what comes next.
   settings, and crash-safe, resumable downloads and updates. The AppImage is
   the supported way to run it.
 - **Experimental:** Fate/Grand Order (NA) through the lepton-fgo Android
-  container. It does not install in 0.1.0b1.
+  container. It does not install in 0.1.0b2.
 - **Scaffolding only:** generic `wine`, `steam`, `script` and `waydroid`
   backends. They work, but are not a supported product.
 
@@ -29,7 +29,7 @@ Where Nadare stands at the 0.1.0b1 beta, what is limited, and what comes next.
 ## Next
 
 - Fate/Grand Order install: publish the lepton-fgo release in the public index
-  (planned for 0.1.0b2).
+  (planned for a later beta).
 - A guided first-run flow (add a game, configure, install).
 - A GUI profile editor for every backend option, and tested uninstall and
   "move installation" flows.

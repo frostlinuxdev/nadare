@@ -139,8 +139,8 @@ Known limits:
 - The first hours are the worst: the GPU driver's shader cache is cold, so new effects can
   hitch once and then not again. Judge smoothness after a few sessions, not the first.
 - MangoHud can stop the game from starting under `umu-run`; leave it off.
-- FGO (Fate/Grand Order) **does not install in 0.1.0b1**: its lepton-fgo release
-  is not in the public index yet (planned for 0.1.0b2). It is experimental, needs
+- FGO (Fate/Grand Order) **does not install in 0.1.0b2**: its lepton-fgo release
+  is not in the public index yet (planned for a later beta). It is experimental, needs
   podman and a binderfs kernel, and on SELinux
   distros (Fedora) it installs a system policy module that stays after you delete
   Nadare. Remove it with `sudo semodule -r lepton_binder`

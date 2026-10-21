@@ -64,7 +64,7 @@ feeds.*
 | **Chaos Zero Nightmare** | `stove-czn` | First-class: install, update, QR login, launch on Proton. Tested on NVIDIA and AMD. |
 | **Arknights** (EN, Yostar) | `arknights-yostar` | Install/update/launch through Proton; official launcher downloads are direct and verified. |
 | **Stella Sora** (EN, Yostar) | `stellasora-yostar` | Install/update/launch through Proton. |
-| **Fate/Grand Order (NA)** | `fgo-lepton` | **Experimental**: Android container (lepton-fgo); needs podman, a kernel with binderfs and an NVIDIA GPU. **Not installable in 0.1.0b1** (its lepton-fgo release is not in the public index yet); coming in 0.1.0b2. |
+| **Fate/Grand Order (NA)** | `fgo-lepton` | **Experimental**: Android container (lepton-fgo); needs podman, a kernel with binderfs and an NVIDIA GPU. **Not installable in 0.1.0b2** (its lepton-fgo release is not in the public index yet); planned for a later beta. |
 | Wine / Steam / script / Waydroid | generic | Scaffolding: you supply the prefix, exe or app. Not a supported product yet. |
 
 Nadare is a beta: the first three are the tested paths (FGO is experimental,
@@ -229,8 +229,8 @@ reports the exact list. In short: a live Wayland session, `podman` with the
 Mesa GPU. Nadare downloads a pinned, sha256-checked `lepton-fgo` release on the
 first install, unless you point the profile (or `$LEPTON_FGO_REPO`) at your own
 checkout. FGO support is **experimental** (tested on NVIDIA + CachyOS only) and the
-install step does not work in 0.1.0b1: the public index does not carry the
-`lepton-fgo` release yet. It is planned for 0.1.0b2.
+install step does not work in 0.1.0b2: the public index does not carry the
+`lepton-fgo` release yet. It is planned for a later beta.
 
 ### Install system packages (source installs)
 
