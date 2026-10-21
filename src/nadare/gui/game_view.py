@@ -432,6 +432,14 @@ class NewsCard(QFrame):
 NewsRow = NewsCard
 
 
+def _version_text(version: object) -> str:
+    """``v``-prefixed version for the pill row; some backends already include the ``v``."""
+    text = str(version or "").strip()
+    if not text:
+        return ""
+    return text if text[0] in "vV" and text[1:2].isdigit() else f"v{text}"
+
+
 _REMEMBER_TEXT = "Remember me on this device"
 _REMEMBER_TIP = (
     "Keeps you logged in by storing the login in your system keyring, so you "
@@ -884,7 +892,7 @@ class GameView(QWidget):
     def _apply_status(self, status: Status) -> None:
         self._status = status
         self._set_badge(status.state, status.message)
-        self.version_label.setText(f"v{status.version}" if status.version else "")
+        self.version_label.setText(_version_text(status.version))
         self._set_account(status)
         self._set_detail(status.message or "")
 

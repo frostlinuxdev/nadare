@@ -630,7 +630,8 @@ class SettingsPage(QWidget):
                     int(option.default) if option.default is not None else editor.minimum()
                 )
         elif kind == "bool":
-            editor.setChecked(bool(value))
+            # An unset key means "use the option's default", not "off".
+            editor.setChecked(bool(option.default) if value is None else bool(value))
         elif kind == "choice":
             index = editor.findData(value)
             if index < 0 and value not in (None, ""):

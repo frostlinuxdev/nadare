@@ -230,3 +230,41 @@ def test_switching_backends_does_not_leak_option_editors(tmp_path, qapp):
     finally:
         page.deleteLater()
         qapp.processEvents()
+
+
+def test_an_unset_bool_option_takes_the_options_default(qapp):
+    """An unset key means "use the default", not "off" (#214)."""
+    from PyQt6.QtWidgets import QCheckBox
+
+    from nadare.core.backends import Option
+
+    page = SettingsPage()
+    try:
+        on_by_default = Option("x", "X", "bool", "help", default=True)
+        off_by_default = Option("y", "Y", "bool", "help", default=False)
+        box = QCheckBox()
+        page._set_editor(on_by_default, box, None)
+        assert box.isChecked()
+        page._set_editor(on_by_default, box, False)
+        assert not box.isChecked(), "an explicit false stays off"
+        page._set_editor(off_by_default, box, None)
+        assert not box.isChecked()
+        page._set_editor(off_by_default, box, True)
+        assert box.isChecked()
+    finally:
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_czn_has_no_visual_cpp_runtime_toggle(tmp_path, qapp):
+    """The VC++ runtime is always installed for CZN, so Settings must not offer to skip it."""
+    config = _config(tmp_path, "stove-czn")
+    page = SettingsPage()
+    try:
+        page.load(config, "sample")
+        assert page.option_widget("vcredist") is None
+        page.save()
+        assert "vcredist" not in config.profile("sample")
+    finally:
+        page.deleteLater()
+        qapp.processEvents()

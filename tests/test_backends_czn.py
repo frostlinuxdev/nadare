@@ -2661,6 +2661,18 @@ class TestVcredist:
 
         assert called == []
 
+    def test_a_leftover_vcredist_false_no_longer_opts_out(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = self._backend(make_backend_context, tmp_path)
+        backend.ctx.profile["vcredist"] = False
+        calls: list[object] = []
+        monkeypatch.setattr(czn_backend.vcredist, "ensure", lambda *a, **k: calls.append(1))
+
+        backend._ensure_vcredist()
+
+        assert calls == [1], "the runtime install must always be attempted for CZN"
+
     def test_hash_mismatch_warns_and_never_runs(
         self, make_backend_context, tmp_path, monkeypatch
     ):

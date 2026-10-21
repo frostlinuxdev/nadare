@@ -69,6 +69,11 @@ INFO = "#8ab4ff"
 CARD_RADIUS = 14
 
 #: Object-name based stylesheet. Widgets opt in with ``setObjectName``.
+#: Tick drawn inside a checked box (dark ink on the accent). Without the file the
+#: box still shows as accent-filled, just without the mark.
+_CHECK_ICON = Path(__file__).resolve().parent.parent / "assets" / "icons" / "check.svg"
+_CHECK_IMAGE = f"image: url({_CHECK_ICON.as_posix()});" if _CHECK_ICON.is_file() else ""
+
 STYLESHEET = f"""
 * {{
     color: {TEXT};
@@ -403,7 +408,7 @@ QCheckBox::indicator {{
     background: {FIELD_BG};
 }}
 QCheckBox::indicator:hover {{ border-color: {BORDER_HI}; }}
-QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; {_CHECK_IMAGE} }}
 QRadioButton {{ spacing: 9px; color: {TEXT_SOFT}; }}
 QRadioButton:checked {{ color: {TEXT}; }}
 QRadioButton:disabled {{ color: {TEXT_SOFT}; }}

@@ -423,15 +423,6 @@ class CznBackend(GameBackend):
             "turn it off if the game hangs on the logo.",
             default=False,
         ),
-        Option(
-            "vcredist",
-            "Visual C++ runtime",
-            "bool",
-            "Install the Microsoft Visual C++ runtime into the prefix (recommended; "
-            "fixes stutter in some games). On for a newly created prefix; uncheck to "
-            "disable it on an existing one.",
-            default=True,
-        ),
     )
 
     #: Official STOVE/CZN news (publisher's own board); image host is the CZN CDN.
@@ -1550,10 +1541,9 @@ class CznBackend(GameBackend):
     def _ensure_vcredist(self) -> None:
         """Best-effort VC++ runtime install; never aborts the caller.
 
-        ``vcredist: false`` opts out. Only a user cancellation propagates.
+        Always runs for CZN (it is not a user setting; an old ``vcredist: false`` in
+        a profile is ignored). Only a user cancellation propagates.
         """
-        if _profile_setting(self.ctx.profile, "vcredist") is False:
-            return
         with self._installer_environment():
             vcredist.ensure(
                 self.prefix(),

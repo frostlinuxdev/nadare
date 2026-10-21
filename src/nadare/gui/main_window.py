@@ -70,6 +70,10 @@ SILENT_OPERATIONS = frozenset({"status", "news", "media"})
 log = logging.getLogger(__name__)
 
 
+#: Side-status wording for operations whose name reads badly as-is.
+_OPERATION_LABELS = {"set_remember": "Saving"}
+
+
 class MainWindow(QMainWindow):
     """Nadare's main window."""
 
@@ -674,7 +678,8 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, self._finish_background_close)
         if profile == self._current_profile and active:
             self.game.set_busy(operation)
-            self.side_status.setText(f"{operation.capitalize()} · {profile}")
+            label = _OPERATION_LABELS.get(operation, operation.replace("_", " ").capitalize())
+            self.side_status.setText(f"{label} · {profile}")
 
     def _on_cancel(self) -> None:
         if self._current_profile:

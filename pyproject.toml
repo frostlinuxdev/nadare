@@ -38,4 +38,4 @@ addopts = "-q"
 filterwarnings = ["error::DeprecationWarning:nadare"]
 
 [tool.setuptools.package-data]
-nadare = ["assets/*", "assets/fonts/*", "backends/**/*.c", "backends/**/*.desktop", "backends/czn/build_stub.sh"]
+nadare = ["assets/*", "assets/fonts/*", "assets/icons/*", "backends/**/*.c", "backends/**/*.desktop", "backends/czn/build_stub.sh"]
