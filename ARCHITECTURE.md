@@ -95,7 +95,8 @@ include `supports_login`, `supports_remember_me`, `account_notice`,
 2. **No secrets in logs.** Tokens are masked to first/last 4 chars.
 3. **State lives under `core.paths`** — never a hard-coded `~`.
 4. **Derived code keeps its licence header.** `backends/czn/auth.py` is GPL-3.0-only
-   (from yporoc via czn-linux); everything else is GPL-3.0-or-later.
+   (from yporoc via czn-linux); every other file is offered as GPL-3.0-or-later, but
+   the combined work is GPL-3.0-only (see [docs/AI.md](docs/AI.md)).
 5. **Nadare drives external installers, it does not fork them.** For FGO that is
    `lepton-fgo`; for STOVE games it is `czn_auth.py`; for the Yostar games it is
    Yostar's own launcher or a signed manifest. If the tool grows a `--json` mode,
@@ -143,8 +144,7 @@ FGO-free target.
 ## Packaging
 
 - `packaging/nadare.spec` is the PyInstaller onedir recipe (onedir by default).
-- `scripts/build_appimage.sh` builds the AppImage with `appimagetool`;
-  `packaging/AppImageBuilder.yml` is superseded and no longer used.
+- `scripts/build_appimage.sh` builds the AppImage with `appimagetool`.
 - `scripts/build_deb.sh` builds the `.deb`.
 - `packaging/flatpak/` holds a Flatpak manifest and `scripts/build_flatpak.sh`
   builds it, but **Flatpak is deferred** and a Flatpak/Flathub build would ship

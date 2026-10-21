@@ -256,3 +256,8 @@ ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$appimagetool" "${runtime_args[@]}" AppD
 
 echo "[+] Built: $image  ($(du -h "$image" | cut -f1))"
 echo "    sha256 $(sha256sum "$image" | cut -d' ' -f1)"
+
+# One machine-readable checksum file next to the artifact (sha256sum format,
+# bare file names) so packagers and the release job have a single thing to fetch.
+( cd "$(dirname "$image")" && sha256sum "$(basename "$image")" > SHA256SUMS )
+echo "[+] Wrote $(dirname "$image")/SHA256SUMS"

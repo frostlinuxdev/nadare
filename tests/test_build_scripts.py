@@ -211,7 +211,7 @@ class TestAppImageReleaseHardening:
     def test_license_is_staged_in_every_package(self):
         assert "LICENSE" in _text("scripts/build_appimage.sh").split("copy_system_libs libGL")[1]
         assert "LICENSE" in _text("scripts/build_flatpak.sh")
-        assert "LICENSE" in _text("packaging/flatpak/io.github.nadare_launcher.Nadare.yml")
+        assert "LICENSE" in _text("packaging/flatpak/io.github.frostlinuxdev.Nadare.yml")
 
     def test_other_packagers_do_not_fall_back_to_a_fake_version(self):
         assert "|| echo 0.1.0" not in _text("scripts/build_deb.sh")
@@ -244,6 +244,21 @@ class TestAppimageSmokeScript:
 # ---------------------------------------------------------------------------
 # 07-9 — dev.sh setup uses the committed lock
 # ---------------------------------------------------------------------------
+class TestReleaseNaming:
+    def test_appimage_name_comes_from_the_package_version(self):
+        script = _text("scripts/build_appimage.sh")
+        assert "Nadare-${version}-x86_64.AppImage" in script or "Nadare-$version" in script
+
+    def test_appimage_build_writes_sha256sums(self):
+        script = _text("scripts/build_appimage.sh")
+        assert "SHA256SUMS" in script
+
+    def test_contributing_documents_the_naming_rule(self):
+        contributing = _text("CONTRIBUTING.md")
+        assert "Nadare-<version>-x86_64.AppImage" in contributing
+        assert "0.1.0-beta.1" in contributing  # named only as the form to avoid
+
+
 class TestDevSetup:
     def test_setup_prefers_uv_sync_with_a_pip_fallback(self):
         script = _text("scripts/dev.sh")
@@ -294,16 +309,14 @@ class TestDocsMatchReality:
         # The dead link to an untracked scratch report is gone.
         assert "tests/live-network-report.md" not in report
 
-    def test_appimage_builder_recipe_is_marked_superseded(self):
-        recipe = _text("packaging/AppImageBuilder.yml")
-        assert "SUPERSEDED" in recipe
-        assert "calls `appimage-builder --recipe" not in recipe
+    def test_appimage_builder_recipe_is_gone(self):
+        assert not (_REPO_ROOT / "packaging" / "AppImageBuilder.yml").exists()
 
     def test_metainfo_version_matches_the_project_version(self):
         import tomllib
 
         project = tomllib.loads(_text("pyproject.toml"))["project"]["version"]
-        metainfo = _text("packaging/flatpak/io.github.nadare_launcher.Nadare.metainfo.xml")
+        metainfo = _text("packaging/flatpak/io.github.frostlinuxdev.Nadare.metainfo.xml")
         assert f'<release version="{project}"' in metainfo
 
     def test_package_version_matches_the_project_version(self):
@@ -323,5 +336,4 @@ class TestDocsMatchReality:
 
     def test_contributing_does_not_call_the_recipe_current(self):
         contributing = _text("CONTRIBUTING.md")
-        assert "`packaging/AppImageBuilder.yml` is the AppImage recipe" not in contributing
-        assert "superseded" in contributing
+        assert "AppImageBuilder" not in contributing

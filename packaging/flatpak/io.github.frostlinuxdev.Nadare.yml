@@ -11,7 +11,7 @@
 #
 # The app id is provisional until the project's public home is decided;
 # changing it later moves user data (~/.var/app/<id>).
-id: io.github.nadare_launcher.Nadare
+id: io.github.frostlinuxdev.Nadare
 runtime: org.freedesktop.Platform
 runtime-version: '25.08'
 sdk: org.freedesktop.Sdk

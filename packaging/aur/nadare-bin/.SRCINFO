@@ -1,0 +1,24 @@
+pkgbase = nadare-bin
+	pkgdesc = Open-source Linux launcher for anime gacha games (prebuilt AppImage)
+	pkgver = 0.1.0b1
+	pkgrel = 1
+	url = https://github.com/frostlinuxdev/nadare
+	arch = x86_64
+	license = GPL-3.0-only
+	depends = glibc
+	optdepends = umu-launcher: preferred Proton runner for Windows games
+	optdepends = wine: Windows games and the generic Wine backend
+	optdepends = mingw-w64-gcc: rebuild the Chaos Zero Nightmare PCSDK stub from source
+	optdepends = podman: Fate/Grand Order (experimental, lepton-fgo)
+	optdepends = gnome-keyring: Secret Service keyring for account tokens
+	optdepends = kwallet: Secret Service keyring for account tokens
+	provides = nadare=0.1.0b1
+	conflicts = nadare
+	conflicts = nadare-git
+	noextract = Nadare-0.1.0b1-x86_64.AppImage
+	options = !strip
+	options = !debug
+	source = Nadare-0.1.0b1-x86_64.AppImage::https://github.com/frostlinuxdev/nadare/releases/download/v0.1.0b1/Nadare-0.1.0b1-x86_64.AppImage
+	sha256sums = 4413006abc92d6e071c5d9c1a3d83e500b0d35d0e277ecf6a234b3b587e5f741
+
+pkgname = nadare-bin

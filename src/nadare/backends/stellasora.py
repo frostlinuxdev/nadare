@@ -99,10 +99,11 @@ class StellaSoraBackend(ArknightsBackend):
     news_source = staticmethod(fetch_stellasora_news)
     official_image_hosts = IMAGE_HOSTS
 
-    #: Yostar lists Stella Sora on Steam (app 4813850, "coming soon").
+    #: Stella Sora launched on Steam on 2026-10-19 (app 4813850, free-to-play).
     page_notice = (
-        "Stella Sora is coming to Steam (free-to-play, published by Yostar). "
-        "Once it launches you can also play it through Steam with Proton.",
+        "Stella Sora is out on Steam (free-to-play, published by Yostar). Playing "
+        "it through Steam with Proton is the recommended way; this profile runs "
+        "the official client directly.",
         "https://store.steampowered.com/app/4813850/",
         "Steam store page",
     )

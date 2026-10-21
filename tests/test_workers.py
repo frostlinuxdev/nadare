@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 
 
 def test_wait_detached_survives_a_worker_whose_cpp_object_is_gone():

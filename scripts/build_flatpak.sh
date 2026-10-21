@@ -14,7 +14,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
-app_id="io.github.nadare_launcher.Nadare"
+app_id="io.github.frostlinuxdev.Nadare"
 manifest_dir="packaging/flatpak"
 bundle_src="${BUNDLE_DIR:-dist/nadare}"
 version="$(grep -m1 '^__version__' src/nadare/__init__.py | cut -d'"' -f2)"

@@ -1,0 +1,54 @@
+# Maintainer: Nadare contributors <https://github.com/frostlinuxdev/nadare>
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Repackages the upstream AppImage: it is unpacked into /opt/nadare (no FUSE or
+# noexec-/tmp dependency at run time) and /usr/bin/nadare points at it.
+# TODO(#190): pacman owns updates for this package, so the in-app update check
+# should be disabled here once the client supports turning it off.
+pkgname=nadare-bin
+_pkgname=nadare
+pkgver=0.1.0b1
+pkgrel=1
+pkgdesc='Open-source Linux launcher for anime gacha games (prebuilt AppImage)'
+arch=('x86_64')
+url='https://github.com/frostlinuxdev/nadare'
+license=('GPL-3.0-only')
+depends=('glibc')
+optdepends=(
+  'umu-launcher: preferred Proton runner for Windows games'
+  'wine: Windows games and the generic Wine backend'
+  'mingw-w64-gcc: rebuild the Chaos Zero Nightmare PCSDK stub from source'
+  'podman: Fate/Grand Order (experimental, lepton-fgo)'
+  'gnome-keyring: Secret Service keyring for account tokens'
+  'kwallet: Secret Service keyring for account tokens'
+)
+provides=("${_pkgname}=${pkgver}")
+conflicts=("${_pkgname}" "${_pkgname}-git")
+options=('!strip' '!debug')
+_asset="Nadare-${pkgver}-${CARCH}.AppImage"
+source=("${_asset}::${url}/releases/download/v${pkgver}/${_asset}")
+noextract=("${_asset}")
+sha256sums=('4413006abc92d6e071c5d9c1a3d83e500b0d35d0e277ecf6a234b3b587e5f741')
+
+prepare() {
+  chmod +x "${_asset}"
+  # --appimage-extract needs no FUSE.
+  ./"${_asset}" --appimage-extract >/dev/null
+}
+
+package() {
+  cd squashfs-root
+
+  install -dm755 "${pkgdir}/opt/${_pkgname}"
+  cp -a --no-preserve=ownership usr AppRun "${pkgdir}/opt/${_pkgname}/"
+
+  install -dm755 "${pkgdir}/usr/bin"
+  ln -s "/opt/${_pkgname}/usr/bin/nadare" "${pkgdir}/usr/bin/nadare"
+
+  install -Dm644 usr/share/applications/nadare.desktop \
+    "${pkgdir}/usr/share/applications/nadare.desktop"
+  install -Dm644 nadare.svg \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/nadare.svg"
+  install -Dm644 usr/share/licenses/nadare/LICENSE \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

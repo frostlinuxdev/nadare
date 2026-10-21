@@ -24,7 +24,7 @@ from typing import Any
 from . import sandbox
 
 #: Application id under which the Flatpak build is published.
-FLATPAK_ID = "io.github.nadare_launcher.Nadare"
+FLATPAK_ID = "io.github.frostlinuxdev.Nadare"
 
 #: Characters that force a Desktop Entry ``Exec`` argument to be quoted. The
 #: spec reserves these; quoting them is always safe.

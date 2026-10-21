@@ -1027,7 +1027,7 @@ def test_settings_refuses_to_save_an_unknown_backend(tmp_path, qapp, monkeypatch
     )
     try:
         page.load(config, "odd")
-        assert page.backend.currentText() == "not-a-backend"
+        assert page._backend_kind == "not-a-backend"
         page.save()
         assert config.profile("odd")["backend"] == "not-a-backend"
         assert errors, "an unknown backend must be refused on save"
@@ -1471,20 +1471,47 @@ def test_busy_badge_resets_after_fail_and_cancel(qapp, monkeypatch):
         qapp.processEvents()
 
 
-def test_switching_backend_reveals_the_remember_card(tmp_path, qapp):
-    """G-7: changing the Backend combo to stove-czn must reveal the Account card."""
+def test_remember_card_follows_the_profiles_backend(tmp_path, qapp):
+    """G-7: the Account card shows for stove-czn and stays hidden for wine."""
     from nadare.gui.settings import SettingsPage
 
     config = Config.load(tmp_path / "config.json")
     config.add_profile("winey", backend="wine")
+    config.add_profile("czn", backend="stove-czn")
     page = SettingsPage()
     try:
         page.load(config, "winey")
         assert page.account_card.isHidden(), "wine has no Remember me"
-        page.backend.setCurrentText("stove-czn")
+        page.load(config, "czn")
         assert not page.account_card.isHidden(), "stove-czn supports Remember me"
-        page.backend.setCurrentText("wine")
+        page.load(config, "winey")
         assert page.account_card.isHidden()
+    finally:
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_settings_has_no_backend_picker(tmp_path, qapp):
+    """The backend is fixed when a game is added; settings must not offer to change it."""
+    from PyQt6.QtWidgets import QComboBox
+
+    from nadare.core.backends import kinds
+    from nadare.gui.settings import SettingsPage
+
+    config = Config.load(tmp_path / "config.json")
+    config.add_profile("czn", backend="stove-czn")
+    page = SettingsPage()
+    try:
+        page.load(config, "czn")
+        assert not hasattr(page, "backend")
+        offered = {
+            combo.itemText(i)
+            for combo in page.findChildren(QComboBox)
+            for i in range(combo.count())
+        }
+        assert not offered & set(kinds()), "a backend kind is selectable in settings"
+        page.save()
+        assert config.profile("czn")["backend"] == "stove-czn"
     finally:
         page.deleteLater()
         qapp.processEvents()

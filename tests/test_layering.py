@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Import-direction guard: core <- backends <- gui/app; nothing reaches back."""
 
 from __future__ import annotations

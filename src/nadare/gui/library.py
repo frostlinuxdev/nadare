@@ -349,7 +349,9 @@ class LibraryPage(QWidget):
         self._flow.addWidget(add)
         count = len(self._cards)
         self.hint.setText(f"{count} game{'s' if count != 1 else ''}")
-        self._container.adjustSize()
+        # Not adjustSize(): while the page is hidden (a removal runs from the game
+        # page) that shrinks the container to one card wide, and nothing re-flows it.
+        self._flow.invalidate()
 
     def _clear(self) -> None:
         self._cards.clear()

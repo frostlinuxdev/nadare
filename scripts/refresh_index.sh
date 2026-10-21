@@ -13,11 +13,21 @@
 # (SALT_<TAG>/VERSION_<TAG>, see ci/yostar-manifests/README.md). Put them in
 # NADARE_YOSTAR_ENV (default ~/nadare-index-refresh/yostar.env, mode 600); when
 # that file is absent the Yostar step is skipped, as before.
+#
+# Set NADARE_HEARTBEAT_URL (e.g. an Uptime Kuma push monitor URL) to be pinged
+# after every successful run, including "nothing to publish". A monitor that
+# expects a ping every ~15 minutes then alerts when the whole pipeline stops.
 set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 index="${NADARE_INDEX_DIR:-$root/../nadare-index}"
 [[ -d "$index/.git" ]] || { echo "refresh_index: no git checkout at $index" >&2; exit 1; }
+
+heartbeat() {
+    [[ -n "${NADARE_HEARTBEAT_URL:-}" ]] || return 0
+    curl -fsS -m 10 --retry 2 -o /dev/null "$NADARE_HEARTBEAT_URL" \
+        || echo "refresh_index: heartbeat ping failed" >&2
+}
 
 lock="${XDG_RUNTIME_DIR:-/tmp}/nadare-refresh-index.lock"
 [[ ! -L "$lock" ]] || { echo "refresh_index: lock path is a symlink: $lock" >&2; exit 1; }
@@ -45,6 +55,7 @@ python3 "$root/scripts/publish_index.py" --index "$index" $skip_yostar --skip-cz
 rc=$?
 if [[ $rc -eq 3 ]]; then
     echo "refresh_index: nothing to publish"
+    heartbeat
     exit 0
 fi
 [[ $rc -eq 0 ]] || { echo "refresh_index: publish failed (exit $rc)" >&2; exit "$rc"; }
@@ -54,8 +65,11 @@ git -C "$index" add yostar
 git -C "$index" add vcredist
 if git -C "$index" diff --cached --quiet; then
     echo "refresh_index: nothing to publish"
+    heartbeat
     exit 0
 fi
 git -C "$index" commit -q -m "webview2: refresh installer hash list" \
     || { echo "refresh_index: commit failed" >&2; exit 1; }
-git -C "$index" push --quiet origin HEAD && echo "refresh_index: published"
+git -C "$index" push --quiet origin HEAD || exit 1
+echo "refresh_index: published"
+heartbeat

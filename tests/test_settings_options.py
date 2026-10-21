@@ -185,13 +185,12 @@ def test_env_to_text_is_sorted_and_stable() -> None:
     assert _env_to_text(None) == ""
 
 
-def test_switching_backend_rebuilds_the_option_editors(tmp_path, qapp):
-    config = _config(tmp_path, "wine")
+def test_loading_another_backend_rebuilds_the_option_editors(tmp_path, qapp):
     page = SettingsPage()
     try:
-        page.load(config, "sample")
+        page.load(_config(tmp_path / "a.json", "wine"), "sample")
         assert page.option_widget("launch_args") is not None
-        page.backend.setCurrentText("waydroid")
+        page.load(_config(tmp_path / "b.json", "waydroid"), "sample")
         assert page.option_widget("waydroid_package") is not None
         assert page.option_widget("launch_args") is None
     finally:

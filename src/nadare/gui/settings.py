@@ -238,18 +238,17 @@ class SettingsPage(QWidget):
 
         # ---- profile --------------------------------------------------------
         profile_card, profile_form = self._section(
-            "Profile", "Basic identity and the backend that drives this game."
+            "Profile", "Basic identity. The backend is fixed when the game is added."
         )
         self.profile_name = QLineEdit()
         self.profile_name.setReadOnly(True)
         self.title = QLineEdit()
         self.title.setPlaceholderText("name shown in the library")
-        self.backend = QComboBox()
-        self.backend.addItems(kinds())
-        self.backend.currentTextChanged.connect(self._on_backend_changed)
+        # The backend is chosen once, in Add game. Switching it afterwards would
+        # point the game's existing prefix and files at the wrong driver.
+        self._backend_kind = ""
         profile_form.addRow("Profile", self.profile_name)
         profile_form.addRow("Title", self.title)
-        profile_form.addRow("Backend", self.backend)
         content_layout.addWidget(profile_card)
 
         # ---- account --------------------------------------------------------
@@ -651,24 +650,6 @@ class SettingsPage(QWidget):
             if editor is not None:
                 self._set_editor(option, editor, self._option_value(data, option.key))
 
-    def _on_backend_changed(self, kind: str) -> None:
-        """Rebuild the option editors when the backend is switched in the form."""
-        if self._config is None or not self._profile:
-            return
-        try:
-            data = self._config.profile(self._profile)
-        except KeyError:
-            return
-        self._load_options(kind, data)
-        # The Account card's Remember-me toggle is backend-dependent; recompute
-        # it here too, or switching to stove-czn would leave it hidden until a
-        # reload.
-        supported = supports_remember_me(kind)
-        self.account_card.setVisible(supported)
-        if supported:
-            self.remember.setChecked(bool(data.get("remember_me", False)))
-        self._update_free_hints()
-
     def _read_editor(self, option: Option, editor: QWidget, warnings: list[str]) -> Any:
         kind = option.kind
         if kind in ("text", "args"):
@@ -721,20 +702,7 @@ class SettingsPage(QWidget):
         self.heading.setText(f"Settings — {profile}")
         self.title.setText(str(data.get("title") or ""))
         kind = str(data.get("backend") or "")
-        # Rebuild the picker from the known kinds, then keep an unknown backend
-        # visible (and unselectable) rather than silently reassigning it.
-        self.backend.blockSignals(True)
-        self.backend.clear()
-        self.backend.addItems(kinds())
-        self.backend.blockSignals(False)
-        index = self.backend.findText(kind)
-        if index < 0 and kind:
-            self.backend.addItem(kind)
-            index = self.backend.count() - 1
-            item = self.backend.model().item(index)
-            if item is not None:
-                item.setEnabled(False)
-        self.backend.setCurrentIndex(index if index >= 0 else 0)
+        self._backend_kind = kind
         self.install_dir.setText(str(data.get("install_dir") or ""))
         self._update_free_hints()
         self._reload_runners(str(data.get("runner") or ""))
@@ -764,13 +732,13 @@ class SettingsPage(QWidget):
             self.cancelled.emit()
             return
 
-        backend = self.backend.currentText().strip()
+        backend = self._backend_kind
         if backend not in kinds():
             QMessageBox.critical(
                 self,
                 "Settings",
-                f"{backend!r} is not a backend this build knows. "
-                "Pick a valid backend before saving.",
+                f"{backend!r} is not a backend this build knows, so this game's "
+                "settings cannot be saved.",
             )
             return
 

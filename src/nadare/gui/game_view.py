@@ -523,6 +523,10 @@ class GameView(QWidget):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # The page height depends on its width (16:9 thumbnails, wrapped titles),
+        # so an as-needed bar can flip on and off with each resize it causes and
+        # recurse until the stack overflows. Always reserve the (transparent) track.
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         outer.addWidget(self.scroll)
 
         content = QWidget()

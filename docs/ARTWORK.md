@@ -135,3 +135,10 @@ PY
 ```
 
 Then set `custom_background` to the saved path.
+
+## The Nadare icon
+
+`packaging/nadare.svg` (the snowflake mark) is the project's own original artwork,
+owned by the maintainer and distributed under the project license. It was drawn
+as SVG paths with AI assistance (see [AI.md](AI.md)); no third-party artwork is
+included.

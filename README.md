@@ -189,14 +189,19 @@ update code are especially welcome.
 
 ## License
 
-Nadare is free software under the **GNU General Public License v3.0 or later**
-(`GPL-3.0-or-later`); the full text is in [LICENSE](LICENSE). Every source file
-carries an SPDX header.
+Nadare is free software; the combined work is distributed under the **GNU General
+Public License v3.0 only** (`GPL-3.0-only`), and the full text is in
+[LICENSE](LICENSE). Every source file carries an SPDX header.
 
-One exception: `src/nadare/backends/czn/auth.py` is **GPL-3.0-only**. It derives
-from yporoc's ChaosZeroNightmareLauncher-Lite, which grants no "or later" clause,
-so that single file cannot be relicensed. Keep its header intact if you touch
-it. See [ARCHITECTURE.md](ARCHITECTURE.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
+Copyright (C) 2026 Nadare contributors.
+
+Most files say `GPL-3.0-or-later`, but that per-file grant cannot upgrade the
+package: `src/nadare/backends/czn/auth.py` is **GPL-3.0-only**. It derives from
+yporoc's ChaosZeroNightmareLauncher-Lite, which grants no "or later" clause, so
+that single file cannot be relicensed. Keep its header intact if you touch it.
+Packagers: use `License: GPL-3.0-only`. How the code was produced, and why the
+project is GPLv3, is in [docs/AI.md](docs/AI.md).
+See [ARCHITECTURE.md](ARCHITECTURE.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
@@ -264,7 +269,7 @@ You can build it from source (`packaging/flatpak`) and install the bundle:
 
 ```sh
 flatpak install --user Nadare-*.flatpak
-flatpak run io.github.nadare_launcher.Nadare        # or use the menu entry
+flatpak run io.github.frostlinuxdev.Nadare        # or use the menu entry
 ```
 
 Notes for the beta:
@@ -272,7 +277,7 @@ Notes for the beta:
 - Proton runs **inside** the sandbox with the Flatpak runtime's GPU drivers. On
   NVIDIA the `org.freedesktop.Platform.GL.nvidia-<version>` extension must match
   your host driver; `flatpak update` installs it. `nadare doctor` (run it with
-  `flatpak run io.github.nadare_launcher.Nadare doctor`) shows the Vulkan device
+  `flatpak run io.github.frostlinuxdev.Nadare doctor`) shows the Vulkan device
   it sees.
 - The bundle has no auto-update yet: install the new `.flatpak` to update.
 - Use the GUI to stop a game. A separate `flatpak run … stop` cannot see a game

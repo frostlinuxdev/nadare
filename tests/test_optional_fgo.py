@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """A build without ``nadare.backends.fgo`` must still run (Flathub / no-FGO bundle)."""
 
 from __future__ import annotations

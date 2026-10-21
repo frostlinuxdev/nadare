@@ -5,8 +5,10 @@ contributions right now are **new backends**, **packaging/portability fixes**,
 and **honest compatibility reports** (distro, GPU, runtime versions, what broke).
 
 By participating you agree your contributions are licensed under
-`GPL-3.0-or-later`. One file is the exception: keep `src/nadare/backends/czn/auth.py`
-as `GPL-3.0-only` (see [License](#license)).
+`GPL-3.0-or-later` at the file level; the combined work is `GPL-3.0-only`.
+`src/nadare/backends/czn/auth.py` is `GPL-3.0-only` and must stay that way (see
+[License](#license)). If AI assisted your change, say so in the PR description;
+see [docs/AI.md](docs/AI.md).
 
 ## Development setup
 
@@ -55,7 +57,7 @@ src/nadare/
   gui/                # PyQt6 umbrella UI
 packaging/            # PyInstaller spec, .desktop, Flatpak manifest, systemd
 scripts/              # dev + build helpers
-docs/                 # BACKENDS.md, ARTWORK.md, NEWS-SOURCES.md,
+docs/                 # AI.md, BACKENDS.md, ARTWORK.md, NEWS-SOURCES.md,
                       # ACCOUNT-SAFETY.md, TESTERS.md
 ```
 
@@ -160,8 +162,7 @@ with the backend excluded, and tests must not assume it is present — see
 
 - `packaging/nadare.spec` is the PyInstaller recipe (onedir by default); it
   honours `NADARE_WITHOUT_FGO=1` to drop `nadare.backends.fgo`.
-- `scripts/build_appimage.sh` builds the AppImage with `appimagetool`
-  (`packaging/AppImageBuilder.yml` is superseded and no longer used), and
+- `scripts/build_appimage.sh` builds the AppImage with `appimagetool`, and
   `scripts/build_deb.sh` builds the `.deb`.
 - `packaging/flatpak/` and `scripts/build_flatpak.sh` build a Flatpak bundle,
   but Flatpak is deferred and would ship without FGO.
@@ -179,9 +180,25 @@ update the spec **and** the `.deb` staging in the same PR.
 - Do not include tokens, logs, screenshots with QR codes, or downloaded assets.
 - Run `ruff check`, `ruff format --check`, and `pytest` before pushing.
 
+## Release artifacts and versioning
+
+One version string, everywhere: the PEP 440 form in `src/nadare/__init__.py`
+(`__version__`, mirrored in `pyproject.toml`), for example `0.1.0b1`.
+
+- **Git tag:** `v<version>` (`v0.1.0b1`).
+- **AppImage:** `Nadare-<version>-x86_64.AppImage` (`scripts/build_appimage.sh`
+  builds this name from `__version__`; never rename it by hand).
+- **Checksums:** `SHA256SUMS` in `sha256sum` format next to the artifact, uploaded
+  with it on every host that publishes the release.
+- **Packaging versions** are derived from it in the package recipe only (for
+  example the AUR `pkgver` is `0.1.0b1`; an RPM maps it to `0.1.0~b1`). Do not
+  invent a second spelling such as `0.1.0-beta.1`: hyphens are illegal in
+  `pkgver` and RPM `Version`, so packagers cannot use such assets.
+
 ## License
 
-Nadare is `GPL-3.0-or-later`. `src/nadare/backends/czn/auth.py` is
+The combined work is `GPL-3.0-only`; source files are offered as
+`GPL-3.0-or-later` except `src/nadare/backends/czn/auth.py`, which is
 `GPL-3.0-only` because it derives from a work with no "or later" grant; keep its
 header and do not relicense it. If you port code from another project, preserve
 its license header and note the source in the docstring, and make sure the

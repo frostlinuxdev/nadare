@@ -5,10 +5,8 @@ leak of those tokens as seriously as a leaked password.
 
 ## Reporting a vulnerability
 
-**Do not open a public issue for a security problem.** Use one of:
-
-- GitHub's **private vulnerability reporting / Security Advisories** on the
-  Nadare repository (Security tab → "Report a vulnerability").
+**Do not open a public issue for a security problem.** Use GitHub's
+**private vulnerability reporting** on the Nadare repository (Security tab → "Report a vulnerability").
 
 Please include:
 
