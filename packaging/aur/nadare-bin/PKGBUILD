@@ -7,7 +7,7 @@
 # should be disabled here once the client supports turning it off.
 pkgname=nadare-bin
 _pkgname=nadare
-pkgver=0.1.0b2
+pkgver=0.1.0b3
 pkgrel=1
 pkgdesc='Open-source Linux launcher for anime gacha games (prebuilt AppImage)'
 arch=('x86_64')
@@ -28,7 +28,7 @@ options=('!strip' '!debug')
 _asset="Nadare-${pkgver}-${CARCH}.AppImage"
 source=("${_asset}::${url}/releases/download/v${pkgver}/${_asset}")
 noextract=("${_asset}")
-sha256sums=('45080ffdc2d2e7170b9767eac66c680681211783697ba19afef63fcff3298edb')
+sha256sums=('bbe62487ad60984dc0e2ad5fefe9479b01edc57a929bd87aa6f8339f71f2e71e')
 
 prepare() {
   chmod +x "${_asset}"
