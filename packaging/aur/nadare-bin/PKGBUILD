@@ -28,7 +28,7 @@ options=('!strip' '!debug')
 _asset="Nadare-${pkgver}-${CARCH}.AppImage"
 source=("${_asset}::${url}/releases/download/v${pkgver}/${_asset}")
 noextract=("${_asset}")
-sha256sums=('bbe62487ad60984dc0e2ad5fefe9479b01edc57a929bd87aa6f8339f71f2e71e')
+sha256sums=('92f7d296b2665bd7280538fa238051d7e37c08dcd440fac8e6199467bcdda998')
 
 prepare() {
   chmod +x "${_asset}"
