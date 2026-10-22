@@ -29,7 +29,7 @@ def make_probe(
     environ=None,
     writable=True,
     user="tester",
-    free=20 * (1 << 30),
+    free=40 * (1 << 30),
     release="6.12.0-test",
     os_release_text="ID=arch\n",
     which=None,
@@ -124,8 +124,8 @@ def test_detect_unknown() -> None:
 def test_missing_tools_one_combined_command_fedora() -> None:
     probe = make_probe(missing={"podman", "crun"}, os_release_text="ID=fedora\n")
     checks = _by_name(run_checks(probe))
-    assert checks["podman"].fix == "dnf install podman crun"
-    assert checks["crun"].fix == "dnf install podman crun"
+    assert checks["podman"].fix == "sudo dnf install podman crun"
+    assert checks["crun"].fix == "sudo dnf install podman crun"
     assert checks["podman"].ok is False
 
 
@@ -133,7 +133,7 @@ def test_missing_all_tools_arch_command() -> None:
     probe = make_probe(missing=set(readiness._TOOL_ORDER))
     checks = _by_name(run_checks(probe))
     assert checks["podman"].fix == (
-        "pacman -S --needed podman crun catatonit attr inotify-tools python curl tar zstd"
+        "sudo pacman -S --needed podman crun catatonit attr inotify-tools python curl tar zstd"
     )
 
 
@@ -183,7 +183,8 @@ def test_binder_nothing_prints_kernel_message() -> None:
     probe = make_probe(files={"/proc/filesystems": ""})
     check = _by_name(run_checks(probe))["kernel binder"]
     assert check.ok is False
-    assert "CONFIG_ANDROID_BINDERFS" in check.fix
+    assert "Rust Binder built in" in check.fix
+    assert "/proc/filesystems" in check.fix
     assert "no binder" in check.detail
 
 
@@ -243,6 +244,16 @@ def test_wayland_socket_missing_is_blocking() -> None:
     check = _by_name(run_checks(probe))["Wayland session"]
     assert check.tier == "blocking"
     assert check.ok is False
+
+
+def test_absolute_wayland_display_is_the_socket_path() -> None:
+    probe = make_probe(
+        environ={"WAYLAND_DISPLAY": "/tmp/custom/wl-sock"},
+        existing={"/tmp/custom/wl-sock"},
+    )
+    check = _by_name(run_checks(probe))["Wayland session"]
+    assert check.ok is True
+    assert "/tmp/custom/wl-sock" in check.detail
 
 
 # ---- summarize / format ----------------------------------------------------
@@ -316,7 +327,8 @@ def test_disk_check_survives_backend_error() -> None:
         raise BackendError("cannot read free space")
 
     check = _by_name(run_checks(make_probe(free=boom)))["free disk"]
-    assert check.ok is False and check.tier == "warning"
+    # #292: not knowing the lepton prefix's free space blocks the install.
+    assert check.ok is False and check.tier == "blocking"
 
 
 def test_flatpak_reads_modules_and_subids_from_the_host(monkeypatch) -> None:

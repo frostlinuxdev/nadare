@@ -63,12 +63,14 @@ def parse_ldconfig(text: str) -> tuple[set[str], set[str]]:
 def missing_32bit(run=subprocess.run) -> list[str] | None:  # noqa: ANN001
     """Return the required 32-bit sonames absent from this host, in order.
 
-    Runs ``ldconfig -p`` (``ldconfig`` on ``PATH``, then ``/sbin`` and
-    ``/usr/sbin``). Returns ``None`` when ``ldconfig`` cannot be run or its
-    output has neither 32- nor 64-bit entries — i.e. "unknown", never a block.
+    Runs ``ldconfig -p`` from the system locations first (``/usr/sbin``, ``/sbin``,
+    ``/usr/bin``); ``PATH`` is only a last resort, so a look-alike earlier on
+    ``PATH`` is not run when the real one exists. Returns ``None`` when ``ldconfig``
+    cannot be run or its output has neither 32- nor 64-bit entries — i.e.
+    "unknown", never a block.
     Never raises.
     """
-    for candidate in ("ldconfig", "/sbin/ldconfig", "/usr/sbin/ldconfig"):
+    for candidate in ("/usr/sbin/ldconfig", "/sbin/ldconfig", "/usr/bin/ldconfig", "ldconfig"):
         try:
             result = run([candidate, "-p"], capture_output=True, text=True, check=False)
         except (OSError, subprocess.SubprocessError):
@@ -178,18 +180,21 @@ def hint(missing: list[str], os_release: str | None = None) -> str:
     otherwise it falls back to example package names.
     """
     head = f"Missing 32-bit libraries: {', '.join(missing)}."
+    why = (
+        "Nadare needs these 32-bit libraries to start the game's Windows environment."
+    )
     family = distro_family(os_release)
     command = install_command(missing, family)
     if command:
         note = _FAMILY_NOTE.get(family or "", "")
         return (
-            f"{head}\nInstall them with:\n    {command}\n"
+            f"{head}\n{why}\nInstall them with:\n    {command}\n"
             + (f"{note}\n" if note else "")
             + "Or install umu-launcher (umu-run), which brings its own runtime."
         )
     return (
-        f"{head} Install umu-launcher (umu-run) or your distro's 32-bit libraries "
-        f"({_DISTRO_HINT})."
+        f"{head}\n{why}\nInstall umu-launcher (umu-run) or your distro's 32-bit "
+        f"libraries ({_DISTRO_HINT})."
     )
 
 

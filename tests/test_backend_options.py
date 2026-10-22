@@ -47,7 +47,6 @@ def test_expected_backends_are_covered() -> None:
         "wine",
         "steam",
         "script",
-        "waydroid",
     ):
         assert get(kind).options
 

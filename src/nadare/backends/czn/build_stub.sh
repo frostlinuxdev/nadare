@@ -31,6 +31,9 @@ if [ "${1:-}" = "--container" ]; then
     shift
     engine="$(command -v podman || command -v docker)" || { echo "need podman or docker" >&2; exit 1; }
     out="${1:-${CZN_STUB_OUT:-$default_out}}"
+    # Create the destination first: mounting (or cd-ing into) a missing parent
+    # must not fail before the host build would have made it.
+    mkdir -p "$(dirname "$out")"
     outdir="$(cd "$(dirname "$out")" && pwd)"
     exec "$engine" run --rm -v "$pkg:/src:ro,Z" -v "$outdir:/out:Z" -w /src -e SNAPSHOT="$SNAPSHOT" \
         -e CZN_STUB_OUT="/out/$(basename "$out")" "$IMAGE" bash -c '

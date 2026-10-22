@@ -89,8 +89,8 @@ Homepage: https://example.invalid/nadare
 Description: open-source Linux launcher for anime gacha games
  Nadare is a profile-based desktop launcher for anime gacha games. It currently
  ships first-class backends for Chaos Zero Nightmare (native STOVE login under
- Proton) and Fate/Grand Order NA (via lepton-fgo), plus generic Wine, Steam,
- script and Waydroid backends.
+ Proton) and Fate/Grand Order NA (via lepton-fgo), plus generic Wine, Steam
+ and script backends.
  .
  This package bundles Python and PyQt6; the host must provide the graphics,
  audio and (for Chaos Zero Nightmare) Wine/umu runtime stack.

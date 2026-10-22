@@ -11,6 +11,7 @@ testing; ``--latest`` (untested) falls back to the published ``.sha512sum``.
 
 from __future__ import annotations
 
+import fcntl
 import os
 import re
 import shutil
@@ -75,7 +76,7 @@ RUNNERS: dict[str, RunnerSpec] = {
         "DW-Proton",
         "dawn-winery/dwproton-mirror",
         r"dwproton-[A-Za-z0-9._-]+-x86_64\.tar\.xz",
-        ("dwproton-11.0-14", "c563cc99d464fb19a767a0eb90dc723746bfcdd402a4fdaa0737b12af081f99a"),
+        ("dwproton-11.0-15", "8066dec3d7f532d55e5b6d697a61d6d4a3091f859a1ef9b2943895aa1b947afd"),
     ),
     "ge": RunnerSpec(
         "ge",
@@ -215,6 +216,13 @@ def resolve_runner(value: str | os.PathLike[str] | None) -> Path | None:
     text = str(value).strip()
     if not text:
         return None
+    if text in RUNNERS:
+        # A family id means that family's tested, pinned build.
+        pinned = installed_pinned(text)
+        if pinned is not None:
+            return pinned
+        tag = pinned_tag(text) or text
+        raise RunnerError(f"the tested {RUNNERS[text].name} ({tag}) is not installed yet")
     if text in ("latest", "auto"):
         candidates = all_runners()
         if not candidates:
@@ -258,7 +266,10 @@ def _release(spec: RunnerSpec, tag: str | None, *, timeout: int = 30) -> dict[st
         )
     except Exception as exc:  # noqa: BLE001
         raise RunnerError(f"cannot query {spec.repo}: {exc}") from exc
-    assets = {a.get("name"): a for a in rel.get("assets", [])}
+    raw_assets = rel.get("assets", []) if isinstance(rel, dict) else None
+    if not isinstance(raw_assets, list):
+        raise RunnerError(f"unexpected release data from {spec.repo}")
+    assets = {a.get("name"): a for a in raw_assets if isinstance(a, dict)}
     tar = next((a for name, a in assets.items() if name and re.fullmatch(spec.asset, name)), None)
     if tar is None:
         raise RunnerError(f"{spec.name} {rel.get('tag_name')} has no x86_64 tarball")
@@ -327,7 +338,9 @@ _FAMILY_NEEDLES: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 def runner_family(runner: str | os.PathLike[str]) -> str | None:
     """Map an installed runner path/name to a :data:`RUNNERS` id."""
-    text = str(runner).lower()
+    # A path is judged by its folder name: a parent called "ge-proton-tests" must not
+    # make an unrelated runner look like GE-Proton.
+    text = (Path(str(runner)).name if os.sep in str(runner) else str(runner)).lower()
     for runner_id, needles in _FAMILY_NEEDLES:
         if any(needle in text for needle in needles):
             return runner_id
@@ -384,6 +397,11 @@ def runner_info(
             stale = is_stale(latest_published, now=now)
             if latest_tag_value:
                 outdated = tag.strip() != latest_tag_value.strip()
+    recommended = is_recommended(path)
+    if recommended:
+        # The tested pin is the one to use; a newer upstream build is untested,
+        # so the pin is not "outdated" just because something newer exists.
+        outdated = False
     return {
         "name": path.name,
         "path": str(path),
@@ -394,6 +412,8 @@ def runner_info(
         "latest_published": latest_published,
         "stale": stale,
         "outdated": outdated,
+        "recommended": recommended,
+        "pinned_tag": pinned_tag(family) if family else None,
     }
 
 
@@ -418,6 +438,60 @@ def _spec(runner_id: str) -> RunnerSpec:
     if runner_id not in RUNNERS:
         raise RunnerError(f"unknown runner {runner_id!r}; have: {', '.join(RUNNERS)}")
     return RUNNERS[runner_id]
+
+
+# ---------------------------------------------------------------------------
+# the recommended (tested, pinned) runner
+# ---------------------------------------------------------------------------
+#: The runner family a profile uses when it names none.
+DEFAULT_FAMILY = "dwproton"
+
+
+def pinned_tag(family: str) -> str | None:
+    """The tested release tag for ``family`` (its sha256 is pinned), if any."""
+    spec = RUNNERS.get(family)
+    return spec.tested[0] if spec is not None and spec.tested is not None else None
+
+
+def matches_tag(name: str, tag: str) -> bool:
+    """True when ``name`` is that exact release (not ``-14`` inside ``-140``/``-14.1``)."""
+    pattern = r"(?<![0-9A-Za-z])" + re.escape(tag) + r"(?![0-9A-Za-z.])"
+    return re.search(pattern, name, re.IGNORECASE) is not None
+
+
+def is_recommended(runner: str | os.PathLike[str]) -> bool:
+    """True when ``runner`` is the tested pinned release of its family."""
+    family = runner_family(runner)
+    tag = pinned_tag(family) if family else None
+    return bool(tag) and matches_tag(Path(str(runner)).name, str(tag))
+
+
+def installed_pinned(family: str = DEFAULT_FAMILY) -> Path | None:
+    """The already-installed pinned release of ``family``, or ``None``.
+
+    Looks in Nadare's own folder first, then Steam's tool dirs, so a pinned build
+    someone already has is reused and never downloaded again.
+    """
+    tag = pinned_tag(family)
+    if not tag:
+        return None
+    for path in all_runners():
+        if runner_family(path) == family and matches_tag(path.name, tag):
+            return path
+    return None
+
+
+def ensure_pinned(
+    family: str = DEFAULT_FAMILY,
+    *,
+    emit: Emitter | None = None,
+    cancel: Cancel | None = None,
+) -> Path:
+    """The pinned release of ``family``: reuse an installed copy, else download it once."""
+    found = installed_pinned(family)
+    if found is not None:
+        return found
+    return install(family, latest=False, emit=emit, cancel=cancel)
 
 
 def _github_asset_host_allowed(url: str) -> bool:
@@ -513,25 +587,33 @@ def install(
     if not _github_asset_host_allowed(tar_url):
         raise RunnerError(f"refusing runner tarball from untrusted host: {tar_url}")
 
-    result = download.download(
-        tar_url,
-        tar_path,
-        expected_sha256=pinned or expected_sha256,
-        expected_sha512=expected_sha512,
-        expected_size=size or None,
-        headers={"Accept": "application/octet-stream"},
-        emit=say,
-        cancel=cancel,
-        redirect_allowed=_github_asset_host_allowed,
-    )
+    # Two installs of the same runner must not share (and unlink) one cache file:
+    # serialise them on a per-asset lock. The loser then finds the runner installed.
+    with _asset_lock(cache, str(tar["name"])):
+        if installed_pinned(runner_id) is not None and not latest:
+            found = installed_pinned(runner_id)
+            assert found is not None
+            say(Event("done", f"installed {found.name}", data={"path": str(found)}))
+            return found
+        result = download.download(
+            tar_url,
+            tar_path,
+            expected_sha256=pinned or expected_sha256,
+            expected_sha512=expected_sha512,
+            expected_size=size or None,
+            headers={"Accept": "application/octet-stream"},
+            emit=say,
+            cancel=cancel,
+            redirect_allowed=_github_asset_host_allowed,
+        )
 
-    try:
-        dest = _extract(result.path, cancel=cancel, emit=say)
-    finally:
         try:
-            result.path.unlink(missing_ok=True)
-        except OSError:
-            pass
+            dest = _extract(result.path, cancel=cancel, emit=say)
+        finally:
+            try:
+                result.path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     source = "pinned sha256" if pinned else ("asset digest" if expected_sha256 else "sha512")
     say(Event("log", f"checksum ok ({source})"))
@@ -583,6 +665,31 @@ def _prune_stale(root: Path) -> None:
             shutil.rmtree(leftover, ignore_errors=True)
 
 
+#: A runner tarball unpacks to ~1.6 GB in a few tens of thousands of files; these
+#: caps stop a malicious or corrupt archive from filling the disk.
+_MAX_UNPACKED_BYTES = 16 * 1024**3
+_MAX_MEMBERS = 300_000
+
+
+class _asset_lock:  # noqa: N801 - used like a context manager function
+    """An exclusive file lock for one cached asset (blocks until it is free)."""
+
+    def __init__(self, cache: Path, name: str) -> None:
+        self._path = cache / f".{name}.lock"
+        self._handle: Any = None
+
+    def __enter__(self) -> _asset_lock:
+        self._handle = open(self._path, "w")  # noqa: SIM115 - held until __exit__
+        fcntl.flock(self._handle, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        try:
+            fcntl.flock(self._handle, fcntl.LOCK_UN)
+        finally:
+            self._handle.close()
+
+
 def _extract(tar_path: Path, *, cancel: Cancel | None, emit: Emitter) -> Path:
     root = paths.runners_dir()
     root.mkdir(parents=True, exist_ok=True)
@@ -599,9 +706,13 @@ def _extract(tar_path: Path, *, cancel: Cancel | None, emit: Emitter) -> Path:
                 # mid-way (L7); filter="data" rejects absolute paths, escaping
                 # links, devices and setuid bits (Python 3.12+).
                 expected: list[str] = []
+                unpacked = 0
                 for member in archive:
                     if cancel is not None:
                         cancel.raise_if_cancelled()
+                    unpacked += max(member.size, 0)
+                    if len(expected) >= _MAX_MEMBERS or unpacked > _MAX_UNPACKED_BYTES:
+                        raise RunnerError("unpack refused: the archive is far larger than a runner")
                     archive.extract(member, tmp, filter="data")
                     expected.append(member.name)
         except tarfile.TarError as exc:
@@ -616,6 +727,8 @@ def _extract(tar_path: Path, *, cancel: Cancel | None, emit: Emitter) -> Path:
         tops = [d for d in tmp.iterdir() if d.is_dir()]
         if len(tops) != 1 or not _looks_like_runner(tops[0]):
             raise RunnerError("unexpected tarball layout (no <dir>/proton)")
+        if cancel is not None:
+            cancel.raise_if_cancelled()  # a cancel during unpacking must not still install
         dest = root / tops[0].name
         # Never delete the working install before the replacement is in place
         # (M4): move the old tree aside, swap the new one in, and only then
@@ -647,17 +760,123 @@ def _extract(tar_path: Path, *, cancel: Cancel | None, emit: Emitter) -> Path:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+#: Backends whose profiles use :data:`DEFAULT_FAMILY` when they name no runner.
+PROTON_DEFAULT_BACKENDS = frozenset({"stove-czn", "arknights-yostar", "stellasora-yostar"})
+
+
+def runner_size(runner: str | os.PathLike[str]) -> int:
+    """Bytes a runner folder occupies (symlinks are not followed)."""
+    total = 0
+    stack = [str(runner)]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        else:
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total
+
+
+def runner_usage(profiles: Mapping[str, Mapping[str, Any]]) -> dict[str, list[str]]:
+    """Which profiles use which Nadare-installed runner (path -> profile names).
+
+    A profile uses a runner when it names it by path or folder, by family id
+    (``dwproton`` means that family's pinned build), by ``latest``/``auto``, or
+    names nothing on a backend that defaults to the pinned DW-Proton.
+    """
+    # Several entries can resolve to one folder (a symlink and its target): a game
+    # that uses it uses every alias, so none of them may be offered for deletion.
+    installed: dict[str, Path] = {}
+    by_resolved: dict[str, list[str]] = {}
+    for p in nadare_runners():
+        key = str(p.resolve())
+        installed.setdefault(key, p)
+        by_resolved.setdefault(key, []).append(str(p))
+    usage: dict[str, list[str]] = {
+        alias: [] for aliases in by_resolved.values() for alias in aliases
+    }
+
+    for name, profile in profiles.items():
+        value = str(profile.get("proton_runner") or profile.get("runner") or "").strip()
+        targets: list[Path | None] = []
+        if not value:
+            if profile.get("backend") in PROTON_DEFAULT_BACKENDS:
+                targets.append(installed_pinned(DEFAULT_FAMILY))
+        elif value in RUNNERS:
+            targets.append(installed_pinned(value))
+        elif value in ("latest", "auto"):
+            try:
+                targets.append(resolve_runner(value))
+            except RunnerError:
+                pass
+        elif value.lower() not in ("wine", "system", "none"):
+            candidate = Path(value).expanduser()
+            if not candidate.is_absolute():
+                candidate = paths.runners_dir() / value
+            targets.append(candidate)
+            # Some backends match a tag by substring ("GE-Proton11-7" finds
+            # "GE-Proton11-7-x86_64"). Count every installed runner that matches, so
+            # a runner that is really in use is never offered for deletion.
+            wanted = value.lower()
+            if not candidate.exists() and os.sep not in value:
+                targets.extend(p for p in installed.values() if wanted in p.name.lower())
+        for target in targets:
+            if target is None:
+                continue
+            try:
+                key = str(target.resolve())
+            except OSError:
+                continue
+            for alias in by_resolved.get(key, []):
+                usage[alias].append(str(name))
+    return usage
+
+
+def unused_old_runners(profiles: Mapping[str, Mapping[str, Any]]) -> list[Path]:
+    """Nadare-installed runners no profile uses, leaving the recommended builds alone.
+
+    These are safe to delete: nothing needs them, and the recommended (tested)
+    build is kept so no game has to download it again.
+    """
+    usage = runner_usage(profiles)
+    return sorted(
+        Path(key) for key, users in usage.items() if not users and not is_recommended(key)
+    )
+
+
 def remove(runner_id_or_path: str | os.PathLike[str]) -> bool:
     """Remove an Nadare-installed runner by id or path. Returns True if removed."""
     root = paths.runners_dir().resolve()
     candidate = Path(runner_id_or_path).expanduser()
     if not candidate.is_absolute():
         candidate = root / str(runner_id_or_path)
+    # Judge the entry by where it lives, not by where it points: resolve only its
+    # parent, so a symlink inside the runners folder is removed as a link and never
+    # takes its target (possibly the recommended build) with it.
     try:
-        resolved = candidate.resolve()
+        parent = candidate.parent.resolve()
     except OSError:
         return False
-    if root not in resolved.parents or not resolved.is_dir():
+    if parent != root and root not in parent.parents:
         return False
-    shutil.rmtree(resolved)
+    entry = parent / candidate.name
+    if entry.is_symlink():
+        try:
+            entry.unlink()
+        except OSError:
+            return False
+        return True
+    if not entry.is_dir():
+        return False
+    shutil.rmtree(entry)
     return True

@@ -14,6 +14,7 @@ install command so the user knows what to run.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -41,9 +42,9 @@ __all__ = [
 ]
 
 
-#: Records which pinned tarball produced an extracted copy (and the hash of its
-#: ``install.sh``). Reuse verifies both, so a mutated extraction is re-downloaded
-#: instead of being executed.
+#: Records which pinned tarball produced an extracted copy and a digest over
+#: every file in that copy. Reuse verifies both, so a mutated extraction is
+#: re-downloaded instead of being executed.
 _STAMP = ".nadare-installer.json"
 
 
@@ -74,11 +75,31 @@ def installer_url(pin: InstallerPin = PIN) -> str:
     return lepton_url(pin.file)
 
 
-def _install_sh_sha256(dest: Path) -> str | None:
+def _tree_sha256(dest: Path) -> str | None:
+    """Digest every file under ``dest`` (sorted relative path + file sha256).
+
+    The stamp itself is excluded so writing it does not invalidate the digest.
+    Returns ``None`` when a file cannot be read, which callers treat as a
+    mismatch (forcing a re-extract).
+    """
+    digest = hashlib.sha256()
     try:
-        return hash_file(dest / "install.sh", ("sha256",))["sha256"]
+        files = sorted(
+            path.relative_to(dest).as_posix()
+            for path in dest.rglob("*")
+            if path.is_file()
+            and path.relative_to(dest).as_posix() != _STAMP
+            and "__pycache__" not in path.parts
+        )
+        for rel in files:
+            file_hash = hash_file(dest / rel, ("sha256",))["sha256"]
+            digest.update(rel.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(file_hash.encode("ascii"))
+            digest.update(b"\0")
     except OSError:
         return None
+    return digest.hexdigest()
 
 
 def _stamp_matches(dest: Path, pin: InstallerPin) -> bool:
@@ -89,13 +110,15 @@ def _stamp_matches(dest: Path, pin: InstallerPin) -> bool:
         return False
     if not isinstance(stamp, dict) or stamp.get("tarball_sha256") != pin.sha256:
         return False
-    actual = _install_sh_sha256(dest)
-    return actual is not None and stamp.get("install_sh_sha256") == actual
+    # Old stamps only carried ``install_sh_sha256``; they never match, which is
+    # intentional: the next reuse re-extracts once and writes a tree digest.
+    actual = _tree_sha256(dest)
+    return actual is not None and stamp.get("tree_sha256") == actual
 
 
 def _write_stamp(dest: Path, pin: InstallerPin) -> None:
     """Record the pin so reuse can verify it; best-effort (worst case: redownload)."""
-    stamp = {"tarball_sha256": pin.sha256, "install_sh_sha256": _install_sh_sha256(dest)}
+    stamp = {"tarball_sha256": pin.sha256, "tree_sha256": _tree_sha256(dest)}
     try:
         (dest / _STAMP).write_text(json.dumps(stamp) + "\n", encoding="utf-8")
     except OSError:
@@ -125,10 +148,11 @@ def ensure_installer(
     install_sh = dest / "install.sh"
     release_file = dest / "RELEASE"
     if install_sh.is_file() and release_file.is_file():
-        if (
-            release_file.read_text(encoding="utf-8").strip() == f"lepton-fgo {pin.version}"
-            and _stamp_matches(dest, pin)
-        ):
+        try:
+            cached = release_file.read_text(encoding="utf-8").strip()
+        except (OSError, ValueError):
+            cached = ""  # unreadable marker: treat the cache as absent and re-fetch
+        if cached == f"lepton-fgo {pin.version}" and _stamp_matches(dest, pin):
             return dest
 
     url = installer_url(pin)
@@ -271,6 +295,7 @@ def install_hint(missing: list[str], release: dict[str, str]) -> str:
     """Turn host-check ``MISSING`` lines into a distro install command."""
     family = _family(release)
     packages: list[str] = []
+    unmapped: list[str] = []
     binderfs = False
     for line in missing:
         text = str(line)
@@ -289,10 +314,14 @@ def install_hint(missing: list[str], release: dict[str, str]) -> str:
                 package = "python"
         if package and package not in packages:
             packages.append(package)
+        elif not package and word not in unmapped:
+            unmapped.append(word)
 
     lines: list[str] = []
     if packages:
         lines.append(_command(family, release, packages))
+    if unmapped:
+        lines.append("Also needed (install with your package manager): " + ", ".join(unmapped))
     if binderfs:
         lines.append(_BINDERFS_HINT)
     return "\n".join(lines)

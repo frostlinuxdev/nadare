@@ -27,7 +27,7 @@ def test_bare_cli_flag_runs_cli_not_gui(monkeypatch: pytest.MonkeyPatch) -> None
     assert seen == [[]]
 
 
-def test_gui_path_ensures_ca_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gui_path_sets_up_tls_trust(monkeypatch: pytest.MonkeyPatch) -> None:
     import nadare.gui as gui
     from nadare.core import tls
 
@@ -39,7 +39,7 @@ def test_gui_path_ensures_ca_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
     def stop():
         raise Stop
 
-    monkeypatch.setattr(tls, "ensure_ca_bundle", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(tls, "setup", lambda *a, **k: calls.append(1))
     monkeypatch.setattr(gui, "_application", stop)
     entry = _load()
     with pytest.raises(Stop):
@@ -47,12 +47,12 @@ def test_gui_path_ensures_ca_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == [1]
 
 
-def test_cli_path_ensures_ca_bundle(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_cli_path_sets_up_tls_trust(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     from nadare import app
     from nadare.core import tls
 
     calls: list = []
-    monkeypatch.setattr(tls, "ensure_ca_bundle", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(tls, "setup", lambda *a, **k: calls.append(1))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "c"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "d"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "s"))

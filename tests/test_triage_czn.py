@@ -54,9 +54,12 @@ def test_parse_rejects_a_non_object_json_body():
 
 
 def test_login_qr_tolerates_a_non_object_status_value(monkeypatch, tmp_path):
+    import base64
+
     class _Auth:
         def qr_create(self):
-            return {"session": "s", "url": "u"}
+            image = base64.b64encode(b"PNG").decode()
+            return {"session": "s", "url": "u", "image": image}
 
         def qr_status(self, session):
             return {"code": 0, "value": "not-a-dict"}

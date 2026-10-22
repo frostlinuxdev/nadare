@@ -166,15 +166,16 @@ def test_int_options_use_a_bounded_spin_box(tmp_path, qapp):
 
 
 def test_choice_option_renders_a_combo(tmp_path, qapp):
-    config = _config(tmp_path, "waydroid")
+    config = _config(tmp_path, "wine")
     page = SettingsPage()
     try:
         page.load(config, "sample")
-        combo = page.option_widget("gamescope_backend")
-        assert combo.findData("sdl") >= 0
-        combo.setCurrentIndex(combo.findData("wayland"))
+        combo = page.option_widget("renderer")
+        assert combo.findData("auto") >= 0
+        target = next(i for i in range(combo.count()) if combo.itemData(i) != "auto")
+        combo.setCurrentIndex(target)
         page.save()
-        assert config.profile("sample")["gamescope_backend"] == "wayland"
+        assert config.profile("sample")["renderer"] == combo.itemData(target)
     finally:
         page.deleteLater()
         qapp.processEvents()
@@ -190,8 +191,7 @@ def test_loading_another_backend_rebuilds_the_option_editors(tmp_path, qapp):
     try:
         page.load(_config(tmp_path / "a.json", "wine"), "sample")
         assert page.option_widget("launch_args") is not None
-        page.load(_config(tmp_path / "b.json", "waydroid"), "sample")
-        assert page.option_widget("waydroid_package") is not None
+        page.load(_config(tmp_path / "b.json", "steam"), "sample")
         assert page.option_widget("launch_args") is None
     finally:
         page.deleteLater()
@@ -265,6 +265,71 @@ def test_czn_has_no_visual_cpp_runtime_toggle(tmp_path, qapp):
         assert page.option_widget("vcredist") is None
         page.save()
         assert "vcredist" not in config.profile("sample")
+    finally:
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_settings_diet_options_are_gone_from_the_shipped_backends(qapp):
+    """Review 2026-10-21: no VC++ box for Arknights/Stella Sora, no MangoHud box for CZN."""
+    from nadare.core import backends as core_backends
+
+    def keys(kind):
+        return {option.key for option in core_backends.get(kind).options}
+
+    assert "vcredist" not in keys("arknights-yostar")
+    assert "vcredist" not in keys("stellasora-yostar")
+    assert "vcredist" not in keys("stove-czn")
+    assert "mangohud" not in keys("stove-czn")
+    assert "vcredist" in keys("wine"), "the generic wine backend keeps its opt-in"
+
+
+def test_czn_display_help_does_not_recommend_x11(qapp):
+    from nadare.core import backends as core_backends
+
+    display = next(o for o in core_backends.get("stove-czn").options if o.key == "display")
+    assert "tested" in display.help.lower() and "experimental" in display.help.lower()
+    assert "try it if" not in display.help
+
+
+def test_unmatched_quote_in_launch_args_is_warned_about(tmp_path, qapp, monkeypatch):
+    shown = []
+    monkeypatch.setattr(
+        "nadare.gui.settings.QMessageBox.open", lambda self, *a: shown.append(self.text())
+    )
+    config = _config(tmp_path, "wine")
+    page = SettingsPage()
+    try:
+        page.load(config, "sample")
+        page.option_widget("launch_args").setText('--flag "oops')
+        page.save()
+        assert shown and "no closing quote" in shown[0]
+        assert config.profile("sample")["launch_args"] == '--flag "oops'
+    finally:
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_legacy_runner_and_prefix_show_and_save_under_canonical_keys(tmp_path, qapp):
+    """Old beta aliases must not leave Runner/Wine prefix blank or shadow a save."""
+    config = _config(tmp_path, "wine")
+    profile = config.profile("sample")
+    profile.pop("runner", None)
+    profile["proton_runner"] = "/old/runner"
+    profile["wineprefix"] = "/old/prefix"
+    page = SettingsPage()
+    try:
+        page.load(config, "sample")
+        assert page.runner.currentData() == "/old/runner"
+        assert page.option_widget("prefix").text() == "/old/prefix"
+
+        page.save()
+
+        profile = config.profile("sample")
+        assert profile["runner"] == "/old/runner"
+        assert profile["prefix"] == "/old/prefix"
+        assert "proton_runner" not in profile
+        assert "wineprefix" not in profile
     finally:
         page.deleteLater()
         qapp.processEvents()

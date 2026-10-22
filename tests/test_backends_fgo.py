@@ -361,13 +361,13 @@ def test_run_wraps_non_executable_tool(tmp_path) -> None:
     tool = tmp_path / "tool.sh"
     tool.write_text("#!/bin/sh\n")
     tool.chmod(0o644)
-    with pytest.raises(lepton.LeptonError, match="could not run"):
+    with pytest.raises(lepton.LeptonError, match="missing or not executable"):
         adapter.run([str(tool)])
 
 
 def test_run_wraps_a_directory(tmp_path) -> None:
     adapter = lepton.LeptonFgo(prefix=tmp_path / "p", config_dir=tmp_path / "c")
-    with pytest.raises(lepton.LeptonError, match="could not run"):
+    with pytest.raises(lepton.LeptonError, match="missing or not executable"):
         adapter.run([str(tmp_path)])
 
 

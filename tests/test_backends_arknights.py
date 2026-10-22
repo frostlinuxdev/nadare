@@ -199,12 +199,13 @@ class TestBuildLaunch:
         monkeypatch.setattr(
             ak.shutil, "which", lambda name: "/opt/umu-run" if name == "umu-run" else None
         )
-        backend = _backend(tmp_path, {"prefix": str(prefix), "runner": "cachyos"})
+        backend = _backend(tmp_path, {"prefix": str(prefix), "runner": "MyProton"})
         argv, env, target = backend.build_launch()
         assert argv == ["/opt/umu-run", str(exe)]
         assert env["PROTONPATH"] == str(proton)
         assert env["STEAM_COMPAT_DATA_PATH"] == str(prefix)
-        assert env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] == str(prefix)
+        # #36: this names the Steam client install, never the game prefix.
+        assert "STEAM_COMPAT_CLIENT_INSTALL_PATH" not in env
         assert target == exe
 
     def test_flatpak_without_umu_runs_proton_directly(self, tmp_path, monkeypatch):
@@ -216,21 +217,46 @@ class TestBuildLaunch:
         monkeypatch.setattr(ak.runners, "resolve_runner", lambda value: proton)
         monkeypatch.setattr(ak.shutil, "which", lambda name: None)
         monkeypatch.setattr(ak.sandbox, "in_flatpak", lambda: True)
-        backend = _backend(tmp_path, {"prefix": str(prefix), "runner": "cachyos"})
+        backend = _backend(tmp_path, {"prefix": str(prefix), "runner": "MyProton"})
         argv, env, target = backend.build_launch()
         assert argv == [str(proton / "proton"), "run", str(exe)]
         assert env["STEAM_COMPAT_DATA_PATH"] == str(prefix)
         assert (prefix / "pfx").is_symlink()
         assert target == exe
 
-    def test_proton_runner_without_umu_raises(self, tmp_path, monkeypatch):
+    def _proton_without_umu(self, tmp_path, monkeypatch):
         prefix = tmp_path / "prefix"
         _install_launcher(prefix)
-        monkeypatch.setattr(ak.runners, "resolve_runner", lambda value: tmp_path / "proton")
+        proton = tmp_path / "Proton"
+        proton.mkdir()
+        (proton / "proton").write_text("")
+        monkeypatch.setattr(ak.runners, "resolve_runner", lambda value: proton)
         monkeypatch.setattr(ak.shutil, "which", lambda name: None)
-        backend = _backend(tmp_path, {"prefix": str(prefix), "runner": "cachyos"})
+        monkeypatch.setattr(ak.sandbox, "in_flatpak", lambda: False)
+        return _backend(tmp_path, {"prefix": str(prefix), "runner": "MyProton"}), proton
+
+    def test_proton_runner_without_umu_runs_proton_directly(self, tmp_path, monkeypatch):
+        backend, proton = self._proton_without_umu(tmp_path, monkeypatch)
+        monkeypatch.setattr(ak.hostlibs, "missing_32bit", lambda: [])
+        argv, env, _target = backend.build_launch()
+        assert argv[:2] == [str(proton / "proton"), "run"]
+        assert env["STEAM_COMPAT_DATA_PATH"] == str(tmp_path / "prefix")
+
+    def test_proton_without_umu_and_without_host_libs_explains_what_to_install(
+        self, tmp_path, monkeypatch
+    ):
+        backend, _proton = self._proton_without_umu(tmp_path, monkeypatch)
+        monkeypatch.setattr(ak.hostlibs, "missing_32bit", lambda: ["libfreetype.so.6"])
         with pytest.raises(BackendError):
             backend.build_launch()
+
+    def test_plain_wine_suppresses_the_mono_and_gecko_prompts(self, tmp_path, monkeypatch):
+        prefix = tmp_path / "prefix"
+        _install_launcher(prefix)
+        wine = write_exe(tmp_path / "wine", "")
+        backend = _backend(tmp_path, {"prefix": str(prefix), "wine_binary": str(wine)})
+        _argv, env, _target = backend.build_launch()
+        assert "mscoree,mshtml=" in env["WINEDLLOVERRIDES"]
 
     def test_extra_env_is_merged(self, tmp_path):
         prefix = tmp_path / "prefix"
@@ -511,10 +537,13 @@ class TestVerifyAndLogin:
         # The relocated tree is only purgeable when the install recorded it.
         backend.ctx.set("installed_prefix", str(backend.prefix()))
 
+        (other_disk / "unrelated.txt").write_text("keep me")
+
         backend.uninstall(purge=True)
 
+        # The link goes, but the folder it pointed at may hold other data.
         assert not data_dir.exists()
-        assert not other_disk.exists()
+        assert (other_disk / "unrelated.txt").read_text() == "keep me"
 
     def test_purge_refuses_profile_dir_symlinked_to_an_arbitrary_directory(self, tmp_path):
         """N3: a profile dir symlinked to an arbitrary directory (here ``/opt``'s
@@ -598,6 +627,26 @@ class TestVerifyAndLogin:
 # ---------------------------------------------------------------------------
 # Visual C++ runtime wiring (shared nadare.core.vcredist)
 # ---------------------------------------------------------------------------
+_REAL_VCREDIST_ENSURE = ak.vcredist.ensure
+
+
+@pytest.fixture(autouse=True)
+def _no_real_vcredist(monkeypatch):
+    """The VC++ step always runs now; keep it out of tests about other things."""
+    monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_runners(monkeypatch):
+    """No test may read the developer's real runners or download one."""
+    monkeypatch.setattr(ak.runners, "installed_pinned", lambda family="dwproton": None)
+
+    def offline(*_a, **_k):
+        raise ak.runners.RunnerError("offline (no downloads in tests)")
+
+    monkeypatch.setattr(ak.runners, "ensure_pinned", offline)
+
+
 def _offline(*_a, **_k):
     raise OSError("offline")
 
@@ -618,12 +667,12 @@ class TestArknightsVcredist:
         assert len(calls) == 1
         assert callable(calls[0]["run_in_prefix"])
 
-    def test_not_run_on_an_existing_prefix_by_default(self, tmp_path, monkeypatch):
+    def test_runs_on_an_existing_prefix_too(self, tmp_path, monkeypatch):
         backend = _backend(tmp_path, {})
         calls: list = []
         monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: calls.append(1))
         backend._run_vcredist(created=False)
-        assert calls == []
+        assert calls == [1]
 
     def test_runs_with_vcredist_true(self, tmp_path, monkeypatch):
         backend = _backend(tmp_path, {"vcredist": True})
@@ -632,13 +681,13 @@ class TestArknightsVcredist:
         backend._run_vcredist(created=False)
         assert calls == [1]
 
-    def test_never_runs_with_vcredist_false(self, tmp_path, monkeypatch):
+    def test_a_leftover_vcredist_false_is_ignored(self, tmp_path, monkeypatch):
         backend = _backend(tmp_path, {"vcredist": False})
         calls: list = []
         monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: calls.append(1))
         backend._run_vcredist(created=True)
         backend._run_vcredist(created=False)
-        assert calls == []
+        assert calls == [1, 1]
 
     def test_direct_install_creates_no_prefix_without_a_runtime(self, tmp_path, monkeypatch):
         manifest = write_exe(tmp_path / "manifest.exe", "MZ")
@@ -655,13 +704,13 @@ class TestArknightsVcredist:
         monkeypatch.setattr(ArknightsBackend, "_download_installer", lambda self, url: installer)
         monkeypatch.setattr(ak, "stream", lambda *a, **k: 0)
         monkeypatch.setattr("urllib.request.urlopen", _offline)
+        monkeypatch.setattr(ak.vcredist, "ensure", _REAL_VCREDIST_ENSURE)
         backend = _backend(
             tmp_path,
             {
                 "prefix": str(prefix),
                 "wine_binary": "/usr/bin/wine",
                 "installer_url": "https://launcher-pkg-ark-en.yo-star.com/Arknights-setup.exe",
-                "vcredist": True,
             },
         )
         _install_launcher(prefix)
@@ -706,7 +755,7 @@ class TestStellaSoraVcredist:
         backend._run_vcredist(created=False)
         assert calls == [1]
 
-    def test_never_runs_with_vcredist_false(self, tmp_path, monkeypatch):
+    def test_a_leftover_vcredist_false_is_ignored(self, tmp_path, monkeypatch):
         from nadare.backends.stellasora import StellaSoraBackend
 
         backend = StellaSoraBackend(
@@ -716,7 +765,7 @@ class TestStellaSoraVcredist:
         monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: calls.append(1))
         backend._run_vcredist(created=True)
         backend._run_vcredist(created=False)
-        assert calls == []
+        assert calls == [1, 1]
 
 
 # ---------------------------------------------------------------------------
@@ -768,3 +817,200 @@ class TestDxvkConfigDefault:
 
         backend = StellaSoraBackend(make_context(tmp_path, StellaSoraBackend.kind, {}, "stella"))
         assert "DXVK_CONFIG" not in self._env(backend, monkeypatch, tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# default runner: the pinned DW-Proton, reused when installed, never re-downloaded
+# ---------------------------------------------------------------------------
+class TestDefaultRunner:
+    @pytest.fixture(autouse=True)
+    def _no_system_wine(self, monkeypatch):
+        monkeypatch.setattr(ak.shutil, "which", lambda name: None)
+
+    def _installed(self, monkeypatch, tmp_path):
+        pinned = tmp_path / "runners" / "dwproton-11.0-15-x86_64"
+        pinned.mkdir(parents=True)
+        (pinned / "proton").write_text("")
+        monkeypatch.setattr(ak.runners, "installed_pinned", lambda family="dwproton": pinned)
+        return pinned
+
+    def test_an_unset_runner_uses_the_installed_pinned_build(self, tmp_path, monkeypatch):
+        pinned = self._installed(monkeypatch, tmp_path)
+        backend = _backend(tmp_path, {})
+        assert backend.resolve_runner() == (str(pinned), "proton")
+        assert backend._runtime_available() is True
+
+    def test_status_style_lookups_never_download(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ak.runners, "installed_pinned", lambda family="dwproton": None)
+        monkeypatch.setattr(ak.runners, "ensure_pinned", lambda *a, **k: pytest.fail("downloaded"))
+        backend = _backend(tmp_path, {})
+        assert backend.resolve_runner() == (None, "wine")
+        assert backend._runtime_available() is False
+
+    def test_install_downloads_the_pinned_build_once_when_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ak.runners, "installed_pinned", lambda family="dwproton": None)
+        calls: list = []
+        monkeypatch.setattr(
+            ak.runners, "ensure_pinned", lambda *a, **k: calls.append(1) or tmp_path / "x"
+        )
+        backend = _backend(tmp_path, {})
+        backend._ensure_default_runner(strict=False)
+        assert calls == [1]
+
+    def test_an_installed_pinned_build_is_not_downloaded_again(self, tmp_path, monkeypatch):
+        self._installed(monkeypatch, tmp_path)
+        monkeypatch.setattr(ak.runners, "ensure_pinned", lambda *a, **k: pytest.fail("downloaded"))
+        backend = _backend(tmp_path, {})
+        backend._ensure_default_runner(strict=True)
+        backend._ensure_default_runner(strict=False)
+
+    def test_an_explicit_runner_or_wine_binary_is_left_alone(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ak.runners, "installed_pinned", lambda family="dwproton": None)
+        monkeypatch.setattr(ak.runners, "ensure_pinned", lambda *a, **k: pytest.fail("downloaded"))
+        _backend(tmp_path, {"runner": "MyProton"})._ensure_default_runner(strict=True)
+        _backend(tmp_path, {"wine_binary": "/usr/bin/wine"})._ensure_default_runner(strict=True)
+
+    @pytest.mark.parametrize("value", ["system", "wine", "none", "System"])
+    def test_a_system_wine_runner_value_means_the_default_proton(
+        self, tmp_path, monkeypatch, value
+    ):
+        pinned = self._installed(monkeypatch, tmp_path)
+        backend = _backend(tmp_path, {"runner": value})
+        assert backend.resolve_runner() == (str(pinned), "proton")
+        monkeypatch.setattr(ak.runners, "installed_pinned", lambda family="dwproton": None)
+        calls: list = []
+        monkeypatch.setattr(
+            ak.runners, "ensure_pinned", lambda *a, **k: calls.append(1) or tmp_path / "x"
+        )
+        backend._ensure_default_runner(strict=True)
+        assert calls == [1]
+
+    def test_an_existing_prefix_with_system_wine_still_gets_the_pinned_proton(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(ak.shutil, "which", lambda name: "/usr/bin/wine")
+        pinned = self._installed(monkeypatch, tmp_path)
+        prefix = tmp_path / "prefix"
+        (prefix / "drive_c").mkdir(parents=True)
+        backend = _backend(tmp_path, {"prefix": str(prefix)})
+        assert backend.resolve_runner() == (str(pinned), "proton")
+        monkeypatch.setattr(ak.runners, "installed_pinned", lambda family="dwproton": None)
+        calls: list = []
+        monkeypatch.setattr(
+            ak.runners, "ensure_pinned", lambda *a, **k: calls.append(1) or tmp_path / "x"
+        )
+        backend._ensure_default_runner(strict=True)
+        assert calls == [1]
+
+    def test_a_new_prefix_prefers_the_pinned_build_even_with_system_wine(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(ak.shutil, "which", lambda name: "/usr/bin/wine")
+        pinned = self._installed(monkeypatch, tmp_path)
+        backend = _backend(tmp_path, {"prefix": str(tmp_path / "fresh")})
+        assert backend.resolve_runner() == (str(pinned), "proton")
+
+    def test_launch_fails_clearly_when_the_runner_cannot_be_set_up(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ak.runners, "installed_pinned", lambda family="dwproton": None)
+
+        def offline(*_a, **_k):
+            raise ak.runners.RunnerError("offline")
+
+        monkeypatch.setattr(ak.runners, "ensure_pinned", offline)
+        backend = _backend(tmp_path, {})
+        with pytest.raises(BackendError, match="Proton runner"):
+            backend._ensure_default_runner(strict=True)
+        events: list = []
+        backend.ctx.emit = events.append
+        backend._ensure_default_runner(strict=False)  # install carries on
+        assert any(e.kind == "status" and "tried again" in e.message for e in events)
+
+
+class TestFamilyIdsAndErrors:
+    """Audit blockers: family ids must resolve outside CZN, and any download
+    failure must stay a clean message (non-strict) or a BackendError (strict)."""
+
+    @pytest.fixture(autouse=True)
+    def _no_system_wine(self, monkeypatch):
+        monkeypatch.setattr(ak.shutil, "which", lambda name: None)
+
+    def _pinned(self, monkeypatch, tmp_path, family="dwproton", installed=True):
+        d = tmp_path / "runners" / f"{family}-pinned-x86_64"
+        d.mkdir(parents=True)
+        (d / "proton").write_text("")
+        monkeypatch.setattr(
+            ak.runners,
+            "installed_pinned",
+            lambda fam="dwproton": d if installed and fam == family else None,
+        )
+        return d
+
+    @pytest.mark.parametrize("family", ["dwproton", "ge", "cachyos"])
+    def test_a_family_id_resolves_to_that_familys_pinned_build(self, tmp_path, monkeypatch, family):
+        pinned = self._pinned(monkeypatch, tmp_path, family)
+        backend = _backend(tmp_path, {"runner": family})
+        assert backend.resolve_runner() == (str(pinned), "proton")
+        assert backend._runtime_available() is True
+
+    def test_a_family_id_that_is_not_installed_downloads_that_family_once(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(ak.runners, "installed_pinned", lambda fam="dwproton": None)
+        calls: list = []
+        monkeypatch.setattr(
+            ak.runners, "ensure_pinned", lambda fam="dwproton", **k: calls.append(fam) or tmp_path
+        )
+        backend = _backend(tmp_path, {"runner": "ge"})
+        assert backend.resolve_runner() == (None, "wine")  # lookups never download
+        backend._ensure_default_runner(strict=True)
+        assert calls == ["ge"]
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            ak.download.DownloadError("network down"),
+            ak.download.IntegrityError("checksum mismatch"),
+            OSError("disk full"),
+            BackendError("not enough free disk space"),
+        ],
+    )
+    def test_download_failures_are_clean_not_raw(self, tmp_path, monkeypatch, error):
+        monkeypatch.setattr(ak.runners, "installed_pinned", lambda fam="dwproton": None)
+
+        def fail(*_a, **_k):
+            raise error
+
+        monkeypatch.setattr(ak.runners, "ensure_pinned", fail)
+        backend = _backend(tmp_path, {})
+        events: list = []
+        backend.ctx.emit = events.append
+        backend._ensure_default_runner(strict=False)  # install carries on
+        assert any(e.kind == "status" and "tried again" in e.message for e in events)
+        with pytest.raises(BackendError):
+            backend._ensure_default_runner(strict=True)  # launch gets a BackendError
+
+    def test_a_cancel_during_the_download_is_not_swallowed(self, tmp_path, monkeypatch):
+        from nadare.core.events import Cancelled
+
+        monkeypatch.setattr(ak.runners, "installed_pinned", lambda fam="dwproton": None)
+
+        def cancelled(*_a, **_k):
+            raise Cancelled()
+
+        monkeypatch.setattr(ak.runners, "ensure_pinned", cancelled)
+        backend = _backend(tmp_path, {})
+        with pytest.raises(Cancelled):
+            backend._ensure_default_runner(strict=False)
+        with pytest.raises(Cancelled):
+            backend._ensure_default_runner(strict=True)
+
+    def test_launching_an_uninstalled_game_does_not_download_a_runner(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ak.runners, "installed_pinned", lambda fam="dwproton": None)
+        monkeypatch.setattr(ak.runners, "ensure_pinned", lambda *a, **k: pytest.fail("downloaded"))
+        manifest = write_exe(tmp_path / "manifest.exe", "MZ")
+        direct = _backend(tmp_path, {"manifest_file": str(manifest)})
+        with pytest.raises(BackendError, match="not found"):
+            direct.launch()
+        launcher = _backend(tmp_path / "other", {})
+        with pytest.raises(BackendError, match="not installed"):
+            launcher.launch()

@@ -38,6 +38,7 @@ WINE_SCRIPT_SUFFIXES = (".bat", ".cmd")
 
 class ScriptBackend(GameBackend):
     kind = "script"
+    supports_update = False  # a script profile updates itself
 
     options = (
         Option(
@@ -99,15 +100,26 @@ class ScriptBackend(GameBackend):
 
     # ---- contract ----------------------------------------------------------
     def status(self) -> Status:
+        data: dict[str, object] = {"can_install": False, "can_update": False}
+        configured = (
+            profile_setting(self.ctx.profile, "launch_exe")
+            or profile_setting(self.ctx.profile, "script")
+            or profile_setting(self.ctx.profile, "exe_name")
+        )
+        if not configured:
+            return Status(
+                state="error", message="script profile has no launch_exe", data=data
+            )
         try:
             script = self._script()
         except BackendError as exc:
-            return Status(state="not_installed", message=str(exc))
+            return Status(state="not_installed", message=str(exc), data=data)
         pids = scan_pids(self._patterns(script))
+        data.update({"script": str(script), "batch": self._is_batch(), "pids": pids})
         return Status(
             state="running" if pids else "installed",
             running=bool(pids),
-            data={"script": str(script), "batch": self._is_batch(), "pids": pids},
+            data=data,
         )
 
     def install(self) -> None:

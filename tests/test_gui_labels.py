@@ -51,7 +51,7 @@ def test_saving_remember_me_reads_as_words(tmp_path, qapp):
     window.controller.start = lambda profile, op, payload=None: True
     window.open_game("czn")
     window._on_busy("czn", "set_remember", True)
-    assert window.side_status.text() == "Saving · czn"
+    assert window.side_status.text() == "Saving · CZN"
     window._on_busy("czn", "verify", True)
-    assert window.side_status.text() == "Verify · czn"
+    assert window.side_status.text() == "Verify · CZN"
     window.close()

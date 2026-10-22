@@ -53,7 +53,7 @@ src/nadare/
   core/               # paths, config, events, backends+registry, runners, download,
                       # journal, secrets, process, hosting, graphics, yostar, …
   backends/           # czn/, fgo/ packages; arknights.py, stellasora.py;
-                      # generic wine/steam/script/waydroid
+                      # generic wine/steam/script
   gui/                # PyQt6 umbrella UI
 packaging/            # PyInstaller spec, .desktop, Flatpak manifest, systemd
 scripts/              # dev + build helpers

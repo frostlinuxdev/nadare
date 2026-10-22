@@ -129,7 +129,10 @@ def test_profile_name_defaults_to_title_and_is_unique(tmp_path, qapp):
         dialog.set_backend("arknights-yostar")
         assert dialog.name.text() == "arknights-2"
         dialog.set_mode(True)
-        dialog.set_install_dir(tmp_path / "somewhere")
+        existing = tmp_path / "somewhere"
+        existing.mkdir()
+        (existing / "Arknights.exe").write_text("MZ")
+        dialog.set_install_dir(existing)
         assert dialog.create_profile() == "arknights-2"
         assert "arknights-2" in config.profiles
     finally:
@@ -145,7 +148,7 @@ def test_duplicate_explicit_name_is_rejected(tmp_path, qapp):
         dialog.set_backend("wine")
         dialog.set_profile_name("mine")
         assert dialog.create_profile() is None
-        assert "already exists" in dialog.error_label.text()
+        assert "already used" in dialog.error_label.text()
     finally:
         dialog.deleteLater()
         qapp.processEvents()
@@ -234,3 +237,50 @@ def test_fgo_is_marked_experimental() -> None:
     assert fgo.title == "Fate/Grand Order"  # the profile title stays clean
     assert fgo.badge == "Experimental"
     assert "binder" in fgo.badge_help
+
+
+def test_only_an_import_is_marked_as_imported(tmp_path, qapp):
+    prefix = tmp_path / "prefix"
+    _yostar_layout(prefix, "StellaSora_EN", "StellaSora.exe")
+    config = Config.load(tmp_path / "config.json")
+    fresh = AddGameDialog(config, data_root=tmp_path / "data")
+    try:
+        fresh.set_backend("arknights-yostar")
+        assert fresh.create_profile() == "arknights"
+        assert fresh.created_by_import is False  # nothing installed yet: no verify prompt
+    finally:
+        fresh.deleteLater()
+    imported = AddGameDialog(config, data_root=tmp_path / "data")
+    try:
+        imported.set_backend("stellasora-yostar")
+        imported.set_mode(True)
+        imported.set_install_dir(prefix)
+        imported.set_prefix(prefix)
+        assert imported.create_profile() == "stella-sora"
+        assert imported.created_by_import is True
+    finally:
+        imported.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_fresh_install_hides_folder_and_prefix_until_asked(tmp_path, qapp):
+    config = Config.load(tmp_path / "config.json")
+    dialog = AddGameDialog(config, data_root=tmp_path / "data")
+    try:
+        dialog.show()
+        qapp.processEvents()
+        dialog.set_backend("arknights-yostar")
+        assert not dialog.folder.isVisible() and not dialog.prefix.isVisible()
+        assert dialog.location_toggle.isVisible()
+        dialog.location_toggle.click()
+        assert dialog.folder.isVisible()
+        dialog.location_toggle.click()
+        assert not dialog.folder.isVisible()
+        dialog.set_mode(True)  # an import needs real paths
+        assert dialog.folder.isVisible() and not dialog.location_toggle.isVisible()
+        dialog.set_mode(False)
+        result = dialog.create_profile()  # the hidden defaults still apply
+        assert result == "arknights", (result, dialog.error_label.text())
+    finally:
+        dialog.close()
+        qapp.processEvents()

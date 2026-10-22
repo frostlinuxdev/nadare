@@ -47,6 +47,16 @@ def make_backend_context(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _no_runner_downloads(monkeypatch):
+    """No CZN test may download a runner (resolving the default one would)."""
+
+    def offline(self, rid, latest):
+        raise BackendError("offline (no runner downloads in tests)")
+
+    monkeypatch.setattr(CznBackend, "_download_runner", offline)
+
+
+@pytest.fixture(autouse=True)
 def _no_webview2_index(monkeypatch):
     """Never hit the network for the published WebView2 hashes in unit tests."""
     monkeypatch.setattr(CznBackend, "_webview2_index_pins", staticmethod(lambda: set()))
@@ -273,7 +283,8 @@ class TestWebView2Integrity:
             backend.install()
         assert excinfo.value.code == czn_backend.EXIT_WEBVIEW2_UNVERIFIED
         assert "webview2" in excinfo.value.message.lower()
-        assert "NADARE_WEBVIEW2_SHA256" in excinfo.value.message
+        assert "NADARE_WEBVIEW2_SHA256" not in excinfo.value.message
+        assert "Install again" in excinfo.value.message
 
     def test_env_pin_is_honoured(self, make_backend_context, tmp_path, monkeypatch):
         backend = self._backend(make_backend_context, tmp_path)
@@ -535,6 +546,7 @@ class TestResolveRunner:
 
         backend = _make_backend(make_backend_context, tmp_path / "prefix")
         backend.ctx.profile["runner"] = "cachyos"
+        # Not the tested pin, and the pin cannot be downloaded: the installed build stands in.
         assert backend.resolve_runner() == (str(found), "proton")
 
     def test_unknown_runner_raises(self, make_backend_context, tmp_path):
@@ -543,16 +555,27 @@ class TestResolveRunner:
         with pytest.raises(BackendError):
             backend.resolve_runner()
 
+    @pytest.fixture(autouse=True)
+    def _hermetic_runner_dirs(self, monkeypatch):
+        """Never read the developer's real Steam/Heroic runner folders."""
+        from nadare.core import runners as core_runners
+
+        monkeypatch.setattr(core_runners, "steam_runners", lambda: [])
+
+    def _runner_dir(self, root, name):
+        d = root / name
+        d.mkdir(parents=True)
+        (d / "proton").write_text("#!/bin/sh\n")
+        return d
+
     def test_tested_runner_auto_downloads_the_pinned_release(
         self, make_backend_context, tmp_path, monkeypatch
     ):
         backend = _make_backend(make_backend_context, tmp_path / "prefix")
         backend.ctx.profile["runner"] = "cachyos"
-        found = tmp_path / "runners/Proton-CachyOS-cachyos-11.0"
-        found.mkdir(parents=True)
-        (found / "proton").write_text("#!/bin/sh\n")
+        monkeypatch.setattr(czn_backend.paths, "runners_dir", lambda: tmp_path / "runners")
+        found = tmp_path / "dl/proton-cachyos-11.0-20260703-slr-x86_64"
         calls: list[tuple[str, bool]] = []
-        monkeypatch.setattr(backend, "_installed_runner", lambda rid: None)
         monkeypatch.setattr(
             backend, "_download_runner", lambda rid, latest: calls.append((rid, latest)) or found
         )
@@ -564,37 +587,107 @@ class TestResolveRunner:
     ):
         backend = _make_backend(make_backend_context, tmp_path / "prefix")
         backend.ctx.profile["runner"] = "dwproton"
-        found = tmp_path / "runners/dwproton-11.0-14-x86_64"
-        found.mkdir(parents=True)
+        monkeypatch.setattr(czn_backend.paths, "runners_dir", lambda: tmp_path / "runners")
+        found = tmp_path / "dl/dwproton-11.0-15-x86_64"
         calls: list[tuple[str, bool]] = []
-        monkeypatch.setattr(backend, "_installed_runner", lambda rid: None)
         monkeypatch.setattr(
             backend, "_download_runner", lambda rid, latest: calls.append((rid, latest)) or found
         )
         assert backend.resolve_runner() == (str(found), "proton")
         assert calls == [("dwproton", False)]  # the tested pin, never --latest
 
-    def test_default_runner_is_dwproton(self, make_backend_context, tmp_path, monkeypatch):
+    def test_default_runner_is_the_pinned_dwproton(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
         backend = _make_backend(make_backend_context, tmp_path / "prefix")
         backend.ctx.profile.pop("runner", None)
-        found = tmp_path / "runners/dwproton-11.0-14-x86_64"
-        found.mkdir(parents=True)
-        seen: list[str] = []
+        root = tmp_path / "runners"
+        monkeypatch.setattr(czn_backend.paths, "runners_dir", lambda: root)
+        pinned = self._runner_dir(root, "dwproton-11.0-15-x86_64")
+        monkeypatch.setattr(backend, "_download_runner", lambda *a, **k: pytest.fail("downloaded"))
+        assert backend.resolve_runner() == (str(pinned), "proton")
+
+    def test_an_installed_pinned_runner_is_never_downloaded_again(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        backend.ctx.profile["runner"] = "dwproton"
+        root = tmp_path / "runners"
+        monkeypatch.setattr(czn_backend.paths, "runners_dir", lambda: root)
+        pinned = self._runner_dir(root, "dwproton-11.0-15-x86_64")
+        monkeypatch.setattr(backend, "_download_runner", lambda *a, **k: pytest.fail("downloaded"))
+        for _ in range(3):
+            assert backend.resolve_runner() == (str(pinned), "proton")
+
+    def test_a_newer_untested_build_does_not_replace_the_pin(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        backend.ctx.profile["runner"] = "dwproton"
+        root = tmp_path / "runners"
+        monkeypatch.setattr(czn_backend.paths, "runners_dir", lambda: root)
+        self._runner_dir(root, "dwproton-11.0-13-x86_64")
+        pinned = self._runner_dir(root, "dwproton-11.0-15-x86_64")
+        self._runner_dir(root, "dwproton-11.0-16-x86_64")
+        monkeypatch.setattr(backend, "_download_runner", lambda *a, **k: pytest.fail("downloaded"))
+        assert backend.resolve_runner() == (str(pinned), "proton")
+
+    def test_only_untested_builds_installed_downloads_the_pin(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        backend.ctx.profile["runner"] = "dwproton"
+        root = tmp_path / "runners"
+        monkeypatch.setattr(czn_backend.paths, "runners_dir", lambda: root)
+        self._runner_dir(root, "dwproton-11.0-16-x86_64")
+        got = tmp_path / "dl/dwproton-11.0-15-x86_64"
+        calls: list[tuple[str, bool]] = []
         monkeypatch.setattr(
-            backend, "_installed_runner", lambda rid: seen.append(rid) or found
+            backend, "_download_runner", lambda rid, latest: calls.append((rid, latest)) or got
         )
-        assert backend.resolve_runner() == (str(found), "proton")
-        assert seen == ["dwproton"]
+        assert backend.resolve_runner() == (str(got), "proton")
+        assert calls == [("dwproton", False)]
+
+    def test_offline_falls_back_to_an_installed_untested_build_with_a_notice(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        backend.ctx.profile["runner"] = "dwproton"
+        root = tmp_path / "runners"
+        monkeypatch.setattr(czn_backend.paths, "runners_dir", lambda: root)
+        other = self._runner_dir(root, "dwproton-11.0-16-x86_64")
+
+        def offline(*_a, **_k):
+            raise BackendError("offline")
+
+        monkeypatch.setattr(backend, "_download_runner", offline)
+        events: list = []
+        backend.ctx.emit = events.append
+        assert backend.resolve_runner() == (str(other), "proton")
+        assert any(e.kind == "status" and "untested" in e.message for e in events)
+
+    def test_offline_with_nothing_installed_still_fails(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        backend.ctx.profile["runner"] = "dwproton"
+        monkeypatch.setattr(czn_backend.paths, "runners_dir", lambda: tmp_path / "runners")
+
+        def offline(*_a, **_k):
+            raise BackendError("offline")
+
+        monkeypatch.setattr(backend, "_download_runner", offline)
+        with pytest.raises(BackendError):
+            backend.resolve_runner()
 
     def test_dwproton_uses_an_already_installed_copy(
         self, make_backend_context, tmp_path, monkeypatch
     ):
         backend = _make_backend(make_backend_context, tmp_path / "prefix")
         backend.ctx.profile["runner"] = "dwproton"
-        found = tmp_path / "runners/dwproton-1.0"
-        found.mkdir(parents=True)
-        (found / "proton").write_text("#!/bin/sh\n")
-        monkeypatch.setattr(backend, "_installed_runner", lambda rid: found)
+        root = tmp_path / "runners"
+        monkeypatch.setattr(czn_backend.paths, "runners_dir", lambda: root)
+        found = self._runner_dir(root, "dwproton-11.0-15-x86_64")
         assert backend.resolve_runner() == (str(found), "proton")
 
 
@@ -734,7 +827,7 @@ class TestUpdateMain:
         monkeypatch.setattr(czn_update, "GAME_DIR", tmp_path / "missing")
         monkeypatch.setattr(czn_update, "PREFIX", tmp_path / "prefix")
         code = czn_update.main(["check"])
-        assert code == 2
+        assert code == 5
         assert "game dir not found" in capsys.readouterr().out
 
     def test_dry_run_up_to_date(self, monkeypatch, tmp_path, capsys):
@@ -2073,8 +2166,13 @@ class TestCancelAndOverlayOptions:
         backend = _make_backend(make_backend_context, tmp_path / "prefix")
         env: dict[str, str] = {}
         assert backend._mangohud_wrap(["g"], env) == ["g"]
+        # A legacy profile toggle must not keep MangoHud on after upgrade.
         backend.ctx.profile["mangohud"] = True
         monkeypatch.setattr(czn_backend.shutil, "which", lambda n, *a, **k: "/usr/bin/mangohud")
+        assert backend._mangohud_wrap(["g"], env) == ["g"]
+        assert "MANGOHUD" not in env
+        # The environment override still works.
+        monkeypatch.setenv("NADARE_MANGOHUD", "1")
         assert backend._mangohud_wrap(["g"], env) == ["/usr/bin/mangohud", "--dlsym", "g"]
         assert env["MANGOHUD"] == "1" and "fps" in env["MANGOHUD_CONFIG"]
         monkeypatch.setattr(czn_backend.shutil, "which", lambda n, *a, **k: None)
@@ -2692,7 +2790,8 @@ class TestVcredist:
         assert ran == []
         assert not (cache / "vc_redist.x64.exe").exists()
         assert any(
-            e.kind == "status" and "not installed" in e.message for e in events
+            e.kind == "status" and "Could not verify the Microsoft Visual C++ download" in e.message
+            for e in events
         ), events
 
     def _installable(self, make_backend_context, tmp_path, monkeypatch, payload, code):
@@ -2880,9 +2979,18 @@ class TestRound1AuditFixes:
 
     def test_verify_reads_session_info_once(self, make_backend_context, tmp_path, monkeypatch):
         backend = _make_backend(make_backend_context, tmp_path / "prefix")
-        answers = iter([{"valid": True}, None])
-        monkeypatch.setattr(backend, "_session_info", lambda: next(answers))
+        calls: list[int] = []
+
+        def session_info():
+            calls.append(1)
+            return {"valid": True}
+
+        monkeypatch.setattr(backend, "_session_info", session_info)
         backend.verify()
+        # verify() reads it once for the ``session`` check, and status() reads it
+        # once more for the reported state; that is the intended count.  A
+        # dropped read (0/1) or a duplicated one (3+) fails here.
+        assert len(calls) == 2
 
     def test_installed_runner_prefers_numerically_newest(
         self, make_backend_context, tmp_path, monkeypatch
@@ -3066,6 +3174,23 @@ class TestInstallersAvoidNativeWayland:
 class TestSilentPhaseHeartbeat:
     """#131: a silent installer must visibly be alive."""
 
+    @staticmethod
+    def _deterministic_clock(monkeypatch, *, step: float, silent_reads: int) -> None:
+        """Drive the heartbeat off injected time instead of the wall clock."""
+        clock = {"now": 0.0}
+        monkeypatch.setattr(czn_backend.time, "monotonic", lambda: clock["now"])
+        real_select = czn_backend.select.select
+        state = {"calls": 0}
+
+        def fake_select(rlist, wlist, xlist, timeout=None):
+            if state["calls"] < silent_reads:
+                state["calls"] += 1
+                clock["now"] += step
+                return [], [], []
+            return real_select(rlist, wlist, xlist, timeout)
+
+        monkeypatch.setattr(czn_backend.select, "select", fake_select)
+
     def _backend(self, make_backend_context, tmp_path):
         backend = _make_backend(make_backend_context, tmp_path / "prefix")
         events: list = []
@@ -3076,13 +3201,14 @@ class TestSilentPhaseHeartbeat:
         self, make_backend_context, tmp_path, monkeypatch
     ):
         monkeypatch.setattr(czn_backend, "HEARTBEAT_SECONDS", 0.3)
+        self._deterministic_clock(monkeypatch, step=0.5, silent_reads=2)
         backend, events = self._backend(make_backend_context, tmp_path)
         cmd = [sys.executable, "-c", "import time; time.sleep(1.4)"]
         with backend._activity_label("Installing the WebView2 Runtime"):
             code = backend._stream(cmd, dict(os.environ))
         assert code == 0
         beats = [e for e in events if e.kind == "progress"]
-        assert len(beats) >= 3  # the start line plus at least two heartbeats
+        assert len(beats) == 3  # the start line plus two deterministic heartbeats
         assert all((e.data or {}).get("indeterminate") for e in beats)
         assert beats[0].message.startswith("Installing the WebView2 Runtime")
         assert any(" s " in e.message for e in beats[1:])
@@ -3095,6 +3221,7 @@ class TestSilentPhaseHeartbeat:
 
     def test_output_resets_the_heartbeat(self, make_backend_context, tmp_path, monkeypatch):
         monkeypatch.setattr(czn_backend, "HEARTBEAT_SECONDS", 0.6)
+        self._deterministic_clock(monkeypatch, step=0.1, silent_reads=3)
         backend, events = self._backend(make_backend_context, tmp_path)
         script = (
             "import sys,time\n"
@@ -3237,3 +3364,156 @@ class TestGameWorkingDirectoryOnC:
         assert stub_args[2] == "--launch"
         assert stub_args[3].startswith("Z:")  # the shield executable keeps its Unix-style path
         assert stub_args[4] == "C:\\ProgramData\\Smilegate\\Games\\ChaosZeroNightmare"
+
+
+class TestRunnerIntegrity:
+    """A failed checksum is not an offline problem: never fall back to another build."""
+
+    @pytest.fixture(autouse=True)
+    def _hermetic(self, monkeypatch):
+        from nadare.core import runners as core_runners
+
+        monkeypatch.setattr(core_runners, "steam_runners", lambda: [])
+
+    def _setup(self, make_backend_context, tmp_path, monkeypatch):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        backend.ctx.profile["runner"] = "dwproton"
+        root = tmp_path / "runners"
+        other = root / "dwproton-11.0-99-x86_64"
+        other.mkdir(parents=True)
+        (other / "proton").write_text("#!/bin/sh\n")
+        monkeypatch.setattr(czn_backend.paths, "runners_dir", lambda: root)
+        return backend, other
+
+    def test_a_checksum_mismatch_does_not_fall_back(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend, _other = self._setup(make_backend_context, tmp_path, monkeypatch)
+
+        def tampered(*_a, **_k):
+            raise BackendError("checksum mismatch", 9)
+
+        monkeypatch.setattr(backend, "_download_runner", tampered)
+        with pytest.raises(BackendError):
+            backend.resolve_runner()
+
+    def test_a_network_failure_still_falls_back_with_a_notice(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend, other = self._setup(make_backend_context, tmp_path, monkeypatch)
+
+        def offline(*_a, **_k):
+            raise BackendError("cannot reach github", 4)
+
+        monkeypatch.setattr(backend, "_download_runner", offline)
+        events: list = []
+        backend.ctx.emit = events.append
+        assert backend.resolve_runner() == (str(other), "proton")
+        assert any(e.kind == "status" and "untested" in e.message for e in events)
+
+
+# ---------------------------------------------------------------------------
+# impl2-czn: launch/restore, remember-me, verify and auth-error wording
+# ---------------------------------------------------------------------------
+class TestImpl2CznFixes:
+    def test_offline_restore_explains_no_internet_instead_of_log_in_first(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        _install_game(backend.prefix())
+        (backend.prefix() / "drive_c").mkdir(parents=True, exist_ok=True)
+        stub = backend._stub()
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_bytes(b"MZ")
+        monkeypatch.setenv("CZN_SKIP_UPDATE", "1")
+        # A remembered-but-not-yet-restored login whose refresh needs the network.
+        backend._refresh_token = "saved-token"
+        backend._member_no = "42"
+        monkeypatch.setattr(backend, "_mint_session", lambda: 4)
+
+        with pytest.raises(BackendError) as exc:
+            backend.launch()
+
+        assert exc.value.code == 4
+        assert "no internet connection" in exc.value.message.lower()
+        assert "log in first" not in exc.value.message
+        assert backend._refresh_token is None  # keyring is untouched for next time
+
+    def test_expired_saved_login_says_log_in_again(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        _install_game(backend.prefix())
+        (backend.prefix() / "drive_c").mkdir(parents=True, exist_ok=True)
+        stub = backend._stub()
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_bytes(b"MZ")
+        monkeypatch.setenv("CZN_SKIP_UPDATE", "1")
+        backend._refresh_token = "saved-token"
+        monkeypatch.setattr(backend, "_mint_session", lambda: 3)
+
+        with pytest.raises(BackendError) as exc:
+            backend.launch()
+
+        assert exc.value.code == 3
+        assert "expired or was used elsewhere" in exc.value.message
+        assert "log in first" not in exc.value.message
+
+    def test_enabling_remember_without_a_live_login_reports_the_keyring(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("NADARE_NO_KEYRING", "1")
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        events = []
+        backend.ctx.emit = events.append
+
+        backend.set_remember(True, persist_flag=False)
+
+        assert any(
+            e.kind == "status"
+            and e.message == czn_backend.REMEMBER_NOTICE
+            and e.data.get("remember_unavailable")
+            for e in events
+        )
+
+    def test_verify_after_login_does_not_ask_the_user_to_log_in_again(
+        self, make_backend_context, tmp_path
+    ):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        prefix = backend.prefix()
+        (prefix / "drive_c").mkdir(parents=True, exist_ok=True)
+        _install_game(prefix)
+        stub = backend._stub()
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_bytes(b"MZ")
+        webview = prefix / "drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application/1.0.0"
+        webview.mkdir(parents=True, exist_ok=True)
+        (webview / "msedgewebview2.exe").write_bytes(b"MZ")
+        backend._refresh_token = "saved-token"
+
+        report = backend.verify()
+
+        assert "game token is created at launch" in report["message"]
+        assert "log in to launch" not in report["message"]
+
+        backend._refresh_token = None
+        report = backend.verify()
+        assert "not logged in; log in before launching" in report["message"]
+
+    def test_auth_worker_error_message_reaches_the_dialog(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+
+        def rate_limited(module, args, **kwargs):
+            backend._emit_json_event(
+                {"event": "error", "message": "[qr_status] code=429 msg=rate limited"}
+            )
+            return 2
+
+        monkeypatch.setattr(backend, "_run_module", rate_limited)
+        with pytest.raises(BackendError) as exc:
+            backend.login()
+
+        assert "429" in exc.value.message
+        assert "QR code expired" not in exc.value.message

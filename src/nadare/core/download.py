@@ -12,6 +12,7 @@ a server that supports ``Range`` lets an interrupted download resume with
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import http.client
 import json
@@ -26,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
+from . import tls
 from .events import Cancel, Emitter, Event, emitter
 
 DEFAULT_CHUNK = 1 << 20  # 1 MiB
@@ -39,6 +41,17 @@ REDIRECT_DRAIN_BYTES = 64 << 10
 MAX_TEXT_BYTES = 16 << 20
 MAX_DOWNLOAD_BYTES = 8 << 30
 USER_AGENT = "nadare-launcher/0.1 (+https://github.com/frostlinuxdev/nadare)"
+
+#: Write errors that a retry can never fix: the disk or the destination is the
+#: problem, not the network.
+_FATAL_WRITE_ERRNOS = frozenset(
+    {
+        errno.ENOSPC,
+        errno.EACCES,
+        errno.EROFS,
+        getattr(errno, "EDQUOT", errno.ENOSPC),
+    }
+)
 
 #: Headers carrying credentials that must never follow a redirect off-origin.
 CREDENTIAL_HEADERS = frozenset({"authorization", "cookie", "proxy-authorization"})
@@ -120,6 +133,18 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         return new
 
 
+def _build_opener(redirect_allowed: Callable[[str], bool] | None) -> Any:
+    """An opener with the safe redirect guard and Nadare's pinned CA context."""
+    guard = _SafeRedirectHandler(redirect_allowed)
+    handler = urllib.request.HTTPSHandler(context=tls.ssl_context())
+    try:
+        return urllib.request.build_opener(guard, handler)
+    except TypeError as exc:  # a one-handler stub in older tests
+        if "argument" not in str(exc):
+            raise
+    return urllib.request.build_opener(guard)
+
+
 def http_open(
     url: str,
     *,
@@ -133,7 +158,7 @@ def http_open(
     follow a cross-origin hop, ``https``→``http`` is refused, and a supplied
     ``redirect_allowed`` allow-list is enforced per hop.
     """
-    opener = urllib.request.build_opener(_SafeRedirectHandler(redirect_allowed))
+    opener = _build_opener(redirect_allowed)
     try:
         return opener.open(_request(url, headers), timeout=timeout)  # noqa: S310
     except DownloadError:
@@ -161,12 +186,23 @@ def http_get(
 
 
 def fetch_json(
-    url: str, *, headers: Mapping[str, str] | None = None, timeout: int = DEFAULT_TIMEOUT
+    url: str,
+    *,
+    headers: Mapping[str, str] | None = None,
+    timeout: int = DEFAULT_TIMEOUT,
+    redirect_allowed: Callable[[str], bool] | None = None,
 ) -> Any:
     hdrs = {"Accept": "application/json"}
     if headers:
         hdrs.update(headers)
-    return json.loads(http_get(url, headers=hdrs, timeout=timeout).decode("utf-8"))
+    return json.loads(
+        http_get(
+            url,
+            headers=hdrs,
+            timeout=timeout,
+            redirect_allowed=redirect_allowed,
+        ).decode("utf-8")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +341,9 @@ def _download_once(
             if start != offset:
                 raise DownloadError(f"server resumed at {start}, expected {offset}")
             mode, done, resumed = "ab", offset, True
+        elif status == 206:
+            # We sent no Range, so a partial body is a fragment, not the file.
+            raise DownloadError(f"unexpected 206 Partial Content for {url}")
         else:
             # No resume support (200): start over from zero.
             offset, mode, done, resumed = 0, "wb", 0, False
@@ -443,8 +482,19 @@ def download(
             raise
         except Exception as exc:  # noqa: BLE001 - retry everything transient
             if _is_cancelled(exc):
-                _remove(part)
+                # Keep the partial bytes: the next call resumes from them and
+                # the final hash check still guards the finished file.
+                _remove_if_empty(part)
                 raise
+            if isinstance(exc, OSError) and exc.errno in _FATAL_WRITE_ERRNOS:
+                # A full/read-only/unwritable destination will fail the same way
+                # on every retry; tell the user what to fix instead.
+                _remove_if_empty(part)
+                if exc.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", -1)):
+                    raise DownloadError(
+                        f"not enough disk space to download {destination.name}"
+                    ) from exc
+                raise DownloadError(f"cannot write to {destination}") from exc
             last_error = exc
             attempt += 1
             if attempt >= attempts:
@@ -459,7 +509,7 @@ def download(
             )
             _sleep(delay, cancel)
 
-    _remove(part)
+    _remove_if_empty(part)  # a network failure keeps what arrived, so a retry resumes
     raise DownloadError(f"download failed for {url}: {last_error}") from last_error
 
 
@@ -481,7 +531,7 @@ def remote_size(
     """
     request = _request(url, headers)
     request.method = "HEAD"
-    opener = urllib.request.build_opener(_SafeRedirectHandler(redirect_allowed))
+    opener = _build_opener(redirect_allowed)
     try:
         with opener.open(request, timeout=timeout) as response:
             length = response.headers.get("Content-Length")
@@ -506,6 +556,14 @@ def download_bytes(
 def _remove(path: Path) -> None:
     try:
         path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _remove_if_empty(path: Path) -> None:
+    try:
+        if path.stat().st_size == 0:
+            path.unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -610,7 +668,9 @@ class HttpClientPool:
         if conn is not None:
             return conn
         if scheme == "https":
-            conn = http.client.HTTPSConnection(host, port, timeout=timeout)
+            conn = http.client.HTTPSConnection(
+                host, port, timeout=timeout, context=tls.ssl_context()
+            )
         else:
             conn = http.client.HTTPConnection(host, port, timeout=timeout)
         store[key] = conn
@@ -820,6 +880,9 @@ def stream_download(
                         if not block:
                             break
                         hasher.update(block)
+        elif response.status == 206:
+            # We sent no Range, so a partial body is a fragment, not the file.
+            raise DownloadError(f"unexpected 206 Partial Content for {url}")
         elif 200 <= response.status < 300:
             offset, mode, done, resumed = 0, "wb", 0, False
             total = known_total

@@ -91,6 +91,7 @@ def test_remove_profile_public_api(tmp_path: Path) -> None:
     cfg = Config.load(tmp_path / "config.json")
     cfg.add_profile("alpha")
     cfg.remove_profile("alpha")  # type: ignore[attr-defined]
+    assert "alpha" not in cfg.profiles
 
 
 def test_save_is_atomic_and_reloads(tmp_path: Path) -> None:
@@ -190,6 +191,8 @@ def test_valid_profile_name_accepts_safe_names(name: str) -> None:
         "a\x00b",
         "sneaky\nnewline",
         "Fate/Grand Order (NA)",
+        "-demo",
+        "--help",
     ],
 )
 def test_valid_profile_name_rejects_unsafe_names(name: str) -> None:

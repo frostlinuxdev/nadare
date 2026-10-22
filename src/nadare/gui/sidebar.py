@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.backends import Status
-from .library import profile_art_candidates
+from .library import display_title, profile_art_candidates
 from .theme import cover_pixmap, load_card_pixmap, repolish
 
 ICON_SIZE = 28
@@ -150,6 +150,9 @@ class GameRow(QFrame):
         self.dot.setProperty("kind", kind)
         repolish(self.dot)
         self.dot.setVisible(bool(kind))
+        label = {"running": "Running", "update": "Update available"}.get(kind, "")
+        self.dot.setAccessibleName(label)
+        self.dot.setToolTip(label)
 
     def set_active(self, active: bool) -> None:
         value = "true" if active else "false"
@@ -196,6 +199,7 @@ class SidebarGames(QWidget):
 
         self.scroll = QScrollArea()
         self.scroll.setObjectName("SidebarScroll")
+        self.scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Tab goes to the items, not the frame
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -212,6 +216,12 @@ class SidebarGames(QWidget):
         self._profiles = profiles
         if statuses is not None:
             self._statuses = dict(statuses)
+        # A removed profile's status must not survive into a later profile that
+        # happens to reuse the same name.
+        known = set(profiles)
+        self._statuses = {
+            name: status for name, status in self._statuses.items() if name in known
+        }
         self._rebuild()
 
     def set_status(self, profile: str, status: Status) -> None:
@@ -235,11 +245,11 @@ class SidebarGames(QWidget):
     # ---- rendering ---------------------------------------------------------
     def _ordered(self) -> list[str]:
         entries: list[tuple[int, str, str]] = []
-        for name, profile in self._profiles.items():
+        for name in self._profiles:
             status = self._statuses.get(name)
             if not is_installed(status):
                 continue
-            title = str(profile.get("title") or name)
+            title = display_title(name, self._profiles)
             entries.append((0 if _running(status) else 1, title.lower(), name))
         entries.sort()
         return [name for _rank, _title, name in entries]
@@ -257,7 +267,7 @@ class SidebarGames(QWidget):
 
         for index, name in enumerate(order):
             profile = self._profiles[name]
-            title = str(profile.get("title") or name)
+            title = display_title(name, self._profiles)
             row = self._rows.get(name)
             if row is None:
                 row = GameRow(

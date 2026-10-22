@@ -54,8 +54,8 @@ def test_main_window_first_run_takes_half_the_screen(tmp_path, qapp):
     try:
         area = window.screen().availableGeometry()
         # The minimum size wins on tiny screens (the offscreen test screen).
-        assert window.width() == max(960, min(area.width() // 2, area.width()))
-        assert window.height() == max(640, area.height())
+        assert window.width() == max(880, min(area.width() // 2, area.width()))
+        assert window.height() == max(560, area.height() - 48)
     finally:
         window.close()
         window.deleteLater()
@@ -780,7 +780,7 @@ def test_add_game_dialog_rejects_unsafe_profile_name(tmp_path, qapp):
         dialog.name.setText("../escape")
         assert dialog.create_profile() is None
         assert config.profiles == {}
-        assert "separators" in dialog.error_label.text()
+        assert "not allowed" in dialog.error_label.text()
 
         dialog.name.setText("My Game")
         assert dialog.create_profile() == "My Game"
@@ -908,9 +908,13 @@ def test_news_media_workers_do_not_mutate_the_live_config(tmp_path, qapp, monkey
         artwork, "record_official", lambda *args, **kwargs: recorded.append(args) or True
     )
     monkeypatch.setattr(yostar, "configured_media", lambda profile: "https://example.invalid/m")
-    monkeypatch.setattr(yostar, "load_media", lambda source, game_tag=None: object())
     monkeypatch.setattr(
-        yostar, "cache_media", lambda media, slug: {"hero": "/cache/hero.png", "banners": []}
+        yostar, "load_media", lambda source, game_tag=None, **kwargs: object()
+    )
+    monkeypatch.setattr(
+        yostar,
+        "cache_media",
+        lambda media, slug, **kwargs: {"hero": "/cache/hero.png", "banners": []},
     )
 
     class FakeBackend:
@@ -1970,3 +1974,210 @@ def test_game_view_shows_login_state(tmp_path, qapp):
         assert view.account_label.isHidden()
     finally:
         view.deleteLater()
+
+
+def test_failed_removal_clears_the_removing_status(tmp_path, qapp, monkeypatch):
+    from nadare.core import removal
+
+    cfg = _empty_config(tmp_path)
+    cfg.add_profile("g", backend="wine", title="G")
+    cfg.save()
+    window = MainWindow(cfg)
+    shown = []
+
+    def boom(*_a, **_k):
+        raise OSError("disk on fire")
+
+    monkeypatch.setattr(removal, "remove_game", boom)
+    monkeypatch.setattr(
+        "nadare.gui.main_window.QMessageBox.critical", lambda *a, **k: shown.append(a[2])
+    )
+    try:
+        window._remove_game("g", False)
+        assert _wait_for(qapp, lambda: bool(shown))
+        assert "Removing" not in window.side_status.text()
+        assert "g" in cfg.profiles and "g" not in window._busy
+    finally:
+        window.close()
+
+
+def test_enter_in_the_add_game_form_adds_the_game_not_browse(tmp_path, qapp):
+    from PyQt6.QtWidgets import QPushButton
+
+    from nadare.gui.add_game import AddGameDialog
+
+    dialog = AddGameDialog(_empty_config(tmp_path))
+    try:
+        buttons = {b.text(): b for b in dialog.findChildren(QPushButton)}
+        assert buttons["Add game"].isDefault()
+        assert not buttons["Browse"].autoDefault()
+        assert not buttons["Cancel"].autoDefault()
+    finally:
+        dialog.deleteLater()
+
+
+def _notice_window(tmp_path, monkeypatch, kind, **profile):
+    monkeypatch.delenv("NADARE_ASSUME_NOTICES", raising=False)
+    cfg = _empty_config(tmp_path)
+    cfg.add_profile("g", backend=kind, title="G", **profile)
+    cfg.save()
+    window = MainWindow(cfg)
+    started = []
+    monkeypatch.setattr(window, "_start", lambda p, op, *a, **k: started.append(op) or True)
+    window._current_profile = "g"
+    return window, cfg, started
+
+
+def test_unofficial_notice_is_asked_once_per_game_type(tmp_path, qapp, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    window, cfg, started = _notice_window(tmp_path, monkeypatch, "stove-czn")
+    answers = []
+    monkeypatch.setattr(
+        QMessageBox, "exec", lambda self: answers.append(self.informativeText()) or 1024
+    )
+    try:
+        window._on_game_action("launch")
+        window._on_game_action("launch")
+        assert started == ["launch", "launch"]
+        assert len(answers) == 1 and "publisher" in answers[0].lower()
+        assert cfg.data["unofficial_notice_ack"] == ["stove-czn"]
+        assert Config.load(tmp_path / "config.json").data["unofficial_notice_ack"] == ["stove-czn"]
+    finally:
+        window.close()
+
+
+def test_declining_the_unofficial_notice_blocks_the_operation(tmp_path, qapp, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    window, cfg, started = _notice_window(tmp_path, monkeypatch, "stove-czn")
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 4194304)  # Cancel
+    try:
+        window._on_game_action("install")
+        assert started == [] and "unofficial_notice_ack" not in cfg.data
+    finally:
+        window.close()
+
+
+def test_big_fresh_install_asks_for_confirmation_with_the_size(tmp_path, qapp, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    window, cfg, started = _notice_window(tmp_path, monkeypatch, "stellasora-yostar")
+    cfg.data["unofficial_notice_ack"] = ["stellasora-yostar"]
+    asked = []
+    answer = [QMessageBox.StandardButton.Cancel]
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: asked.append(self.text()) or answer[0])
+    try:
+        window._on_game_action("install")
+        assert started == [] and "21 GiB" in asked[0]
+        answer[0] = QMessageBox.StandardButton.Yes
+        window._on_game_action("install")
+        assert started == ["install"]
+    finally:
+        window.close()
+
+
+def test_small_or_unknown_installs_do_not_ask(tmp_path, qapp, monkeypatch):
+    from PyQt6.QtWidgets import QMessageBox
+
+    window, cfg, started = _notice_window(tmp_path, monkeypatch, "wine")
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: pytest.fail("should not ask"))
+    try:
+        window._on_game_action("install")
+        assert started == ["install"]
+    finally:
+        window.close()
+
+
+def test_add_game_buttons_stay_visible_on_a_short_screen(tmp_path, qapp):
+    from PyQt6.QtWidgets import QPushButton
+
+    from nadare.gui.add_game import AddGameDialog
+
+    dialog = AddGameDialog(_empty_config(tmp_path))
+    try:
+        dialog.resize(560, 380)  # far shorter than the form
+        dialog.show()
+        qapp.processEvents()
+        for button in dialog.findChildren(QPushButton):
+            if button.text() in ("Add game", "Cancel"):
+                top_left = button.mapTo(dialog, button.rect().topLeft())
+                assert dialog.rect().contains(button.rect().translated(top_left))
+    finally:
+        dialog.close()
+
+
+def test_enter_presses_a_focused_main_window_button(qapp):
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QMainWindow, QPushButton
+
+    from nadare.gui import EnterActivatesButtons
+
+    keyfilter = EnterActivatesButtons.install(qapp)
+    window = QMainWindow()
+    button = QPushButton("Go")
+    window.setCentralWidget(button)
+    clicks = []
+    button.clicked.connect(lambda: clicks.append(1))
+    try:
+        window.show()
+        window.activateWindow()
+        button.setFocus()
+        qapp.processEvents()
+        QTest.keyClick(button, Qt.Key.Key_Return)
+        assert clicks == [1]
+        QTest.keyClick(button, Qt.Key.Key_Space)  # Qt's own handling still works
+        assert clicks == [1, 1]
+    finally:
+        qapp.removeEventFilter(keyfilter)
+        window.close()
+
+
+def test_tab_skips_scroll_frames_and_reaches_the_add_game_card(tmp_path, qapp):
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+
+    window = MainWindow(_empty_config(tmp_path))
+    try:
+        window.show()
+        qapp.processEvents()
+        window.activateWindow()
+        window.library_button.setFocus()
+        reached = []
+        for _ in range(4):
+            QTest.keyClick(window, Qt.Key.Key_Tab)
+            qapp.processEvents()
+            focus = qapp.focusWidget()
+            reached.append(focus.objectName() if focus else "")
+        assert "AddGameCard" in reached[:2]
+        assert not any("Scroll" in name for name in reached)
+    finally:
+        window.close()
+
+
+def test_close_warning_during_login_does_not_mention_game_files(tmp_path, qapp, monkeypatch):
+    """#367: a QR login in flight is not a file write; the wording must say so."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    from nadare.gui import main_window as mw
+
+    window = MainWindow(_empty_config(tmp_path))
+    try:
+        seen: list[str] = []
+        monkeypatch.setattr(
+            mw.QMessageBox,
+            "warning",
+            lambda *args, **kwargs: seen.append(args[2]) or QMessageBox.StandardButton.Close,
+        )
+        monkeypatch.setattr(window.controller, "launching_profiles", lambda: [])
+        monkeypatch.setattr(window.controller, "mutating_profiles", lambda: ["czn"])
+        monkeypatch.setattr(window.controller, "running_operation", lambda name: "login")
+        assert window._confirm_close() is True
+        assert "game files" not in seen[0]
+        monkeypatch.setattr(window.controller, "running_operation", lambda name: "install")
+        window._confirm_close()
+        assert "game files" in seen[1]
+    finally:
+        window.close()
+        window.deleteLater()

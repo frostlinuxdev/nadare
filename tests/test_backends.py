@@ -276,7 +276,6 @@ def test_kinds_are_sorted_and_unique() -> None:
         "wine",
         "steam",
         "script",
-        "waydroid",
         "arknights-yostar",
         "stellasora-yostar",
     ):

@@ -313,8 +313,8 @@ def test_install_without_launcher_is_an_error(tmp_path, monkeypatch):
         backend.install()
 
     message = str(excinfo.value)
-    assert "was not installed" in message
-    assert "exit code 0" in message
+    assert "did not finish" in message
+    assert "exit code" not in message
     assert not any(e.kind == "done" for e in events)
 
 

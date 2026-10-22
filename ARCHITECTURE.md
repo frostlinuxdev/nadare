@@ -13,7 +13,7 @@ stacks (Wine/Proton, native Steam, Android-in-a-container, shell scripts).
 | Arknights (EN) | `arknights-yostar` | Proton/Wine + Yostar's own launcher/installer |
 | Stella Sora (EN) | `stellasora-yostar` | Proton/Wine + a CI-signed Yostar manifest (direct download) |
 | Fate/Grand Order (NA) | `fgo-lepton` | lepton-x86 Android context + Venus/virgl, via the `lepton-fgo` CLI |
-| Wine / Steam / script / Waydroid | generic | scaffolding; you supply the prefix, exe or app |
+| Wine / Steam / script | generic | scaffolding; you supply the prefix, exe or app |
 
 `stellasora-yostar` subclasses `arknights-yostar` (`backends/arknights.py`) so the
 Yostar/Wine machinery lives in one place; it adds the manifest requirement and
@@ -55,7 +55,7 @@ src/nadare/
     fgo/                # fgo-lepton: backend.py, installer.py, lepton.py,
                         # news.py, readiness.py
     arknights.py  arknights_news.py  stellasora.py   # Yostar backends
-    wine.py  steam.py  script.py  waydroid.py         # generic backends
+    wine.py  steam.py  script.py         # generic backends
   gui/                  # PyQt6: main_window, library, game_view, settings,
                         # sidebar, add_game, notice, theme, workers, single_instance
 packaging/              # PyInstaller spec, .desktop, Flatpak manifest, systemd

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nadare-launcher"
-version = "0.1.0b3"
+version = "0.1.0b4"
 description = "An open-source Linux launcher for anime gacha games (Fate/Grand Order, Chaos Zero Nightmare, and more)"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -14,6 +14,9 @@ dependencies = [
   # STOVE's CDN filters by TLS/JA3; Chrome impersonation needs curl_cffi, whose
   # API moves between 0.x minors (requirements.txt pins the tested release).
   "curl_cffi>=0.7,<0.17",
+  # curl_cffi verifies TLS against certifi's bundle. 2026.10.19 drops the
+  # eMudhra "emSign ECC Root CA - G3" root after the October 2026 incident.
+  "certifi>=2026.10.19",
   # "Remember me" keeps account tokens in the OS keyring only; without these the
   # feature is silently unavailable after a plain `pip install`.
   "keyring>=24",
@@ -38,4 +41,4 @@ addopts = "-q"
 filterwarnings = ["error::DeprecationWarning:nadare"]
 
 [tool.setuptools.package-data]
-nadare = ["assets/*", "assets/fonts/*", "assets/icons/*", "backends/**/*.c", "backends/**/*.desktop", "backends/czn/build_stub.sh"]
+nadare = ["assets/*", "assets/fonts/*", "assets/icons/*", "assets/locales/*.json", "backends/**/*.c", "backends/**/*.desktop", "backends/czn/build_stub.sh"]

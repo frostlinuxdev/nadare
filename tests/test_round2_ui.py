@@ -53,10 +53,11 @@ def test_cancellable_op_keeps_cancel(qapp):
     assert view.primary.text() == "CANCEL"
 
 
-def test_error_state_disables_launch_and_verify(qapp):
+def test_error_state_offers_retry_and_disables_verify(qapp):
     view = GameView()
     view.set_status(Status("error", message="boom"))
-    assert not view.primary.isEnabled()
+    assert view.primary.isEnabled()
+    assert view.primary.text() == "RETRY"
     assert not view.verify.isEnabled()
 
 
@@ -64,7 +65,8 @@ def test_not_installable_wine_shows_settings_hint(qapp):
     view = GameView()
     view.set_status(Status("not_installed", data={"can_install": False}))
     assert "SETTINGS" in view.primary.text().upper()
-    assert not view.primary.isEnabled()
+    # #335 F-09: this is a real action now, so it must be clickable.
+    assert view.primary.isEnabled()
 
 
 def test_wine_missing_exe_reports_cannot_install(tmp_path):
@@ -74,7 +76,8 @@ def test_wine_missing_exe_reports_cannot_install(tmp_path):
     config = Config.load(tmp_path / "config.json")
     config.add_profile("w", backend="wine", title="W")
     status = create_backend("w", config).status()
-    assert status.state == "not_installed"
+    # A missing required key is a configuration error, not a healthy "not installed".
+    assert status.state == "error"
     assert status.data.get("can_install") is False
 
 

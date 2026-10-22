@@ -16,6 +16,8 @@ PyQt6==6.11.0
 # STOVE's CDN filters by TLS/JA3. curl_cffi's Chrome impersonation is required
 # for the CZN auth and updater paths; plain `requests` gets reset.
 curl_cffi==0.16.3
+# The CA bundle curl_cffi trusts; 2026.10.19 removed the compromised eMudhra root.
+certifi==2026.10.19
 
 # --- OS keyring ---------------------------------------------------------------
 # Tokens live in the system keyring (Secret Service / KWallet). Required for

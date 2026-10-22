@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
 )
 
 #: Exact wording of the acknowledgement checkbox.
-NOTICE_ACK_TEXT = "I have secured my account (linked it or saved my transfer number)"
+NOTICE_ACK_TEXT = "I have read this notice and understand the risks"
 
 
 class AccountNoticeDialog(QDialog):

@@ -382,7 +382,8 @@ def run(
     line_q: queue.Queue[str | None] = queue.Queue()
 
     def _reader() -> None:
-        assert proc.stdout is not None
+        if proc.stdout is None:
+            raise RuntimeError("child process has no stdout pipe")
         try:
             for line in proc.stdout:
                 line_q.put(line.rstrip("\n"))

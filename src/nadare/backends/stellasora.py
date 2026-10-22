@@ -38,6 +38,8 @@ LAUNCHER_NAMES = ("StellaSora.exe",)
 
 
 class StellaSoraBackend(ArknightsBackend):
+    install_size_hint = 21 * 1024**3
+
     kind = KIND
     game_tag = "StellaSora_EN"
     display_name = "Stella Sora"
@@ -54,7 +56,12 @@ class StellaSoraBackend(ArknightsBackend):
         Option("prefix", "Wine prefix", "path_dir", "WINEPREFIX used for this game."),
         Option("install_dir", "Game folder", "path_dir", "Where the game lives."),
         Option("exe_name", "Game executable", "text", advanced=True),
-        Option("runner", "Runner", "runner", "Proton build/tag; empty uses system Wine."),
+        Option(
+            "runner",
+            "Runner",
+            "runner",
+            "Proton build/tag; empty uses the tested DW-Proton (downloaded once).",
+        ),
         Option(
             "renderer",
             "Renderer",
@@ -62,6 +69,20 @@ class StellaSoraBackend(ArknightsBackend):
             graphics.RENDERER_HELP,
             default="auto",
             choices=graphics.RENDERER_CHOICES,
+        ),
+        Option(
+            "display",
+            "Display backend",
+            "choice",
+            "X11 (XWayland) is the default because the game's swipe works there. "
+            "Wayland can be chosen if the display glitches. On NVIDIA with KDE "
+            "Plasma 6.8 X11 can show only a flat colour.",
+            default="auto",
+            choices=(
+                ("Auto (X11)", "auto"),
+                ("Wayland", "wayland"),
+                ("X11 (XWayland)", "x11"),
+            ),
         ),
         Option(
             "manifest_index",
@@ -84,15 +105,6 @@ class StellaSoraBackend(ArknightsBackend):
         Option("umu_binary", "umu-run binary", "path_file", advanced=True),
         Option("extra_env", "Environment", "env", "One KEY=VALUE per line.", advanced=True),
         Option("process_match", "Process match", "text", advanced=True),
-        Option(
-            "vcredist",
-            "Visual C++ runtime",
-            "bool",
-            "Install the Microsoft Visual C++ runtime into the prefix (recommended; "
-            "fixes stutter in some games). A newly created prefix always installs it; "
-            "off by default for an existing prefix.",
-            default=False,
-        ),
     )
 
     #: Official stellasora.global news (same Yostar CMS as Arknights).
@@ -129,6 +141,8 @@ class StellaSoraBackend(ArknightsBackend):
         # explicitly configured external prefix (and only that one), exactly as
         # ArknightsBackend.install does; this override replaced that base method.
         self.ctx.set(INSTALLED_PREFIX_KEY, str(self.prefix()))
+        # This override replaced the base install(), so it must set the runner up too.
+        self._ensure_default_runner(strict=False)
         self._ensure_direct_prefix()
         self._sync_direct()
 
@@ -143,6 +157,10 @@ class StellaSoraBackend(ArknightsBackend):
     def launch(self) -> int:
         self.ctx.cancel.raise_if_cancelled()
         self._require_manifest()
+        target = self.direct_target()
+        if target is None or not target.is_file():
+            raise BackendError(f"game executable not found: {target}")
+        self._ensure_default_runner(strict=True)
         return self._launch_direct()
 
 

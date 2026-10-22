@@ -1,18 +1,20 @@
 # Nadare roadmap
 
-Where Nadare stands at the 0.1.0b3 beta, what is limited, and what comes next.
+Where Nadare stands at the 0.1.0b4 beta, what is limited, and what comes next.
 
-## What works in 0.1.0b3
+## What works in 0.1.0b4
 
 - **Chaos Zero Nightmare:** install, update, QR login, launch on Proton, with an
   optional *Remember me* in your OS keyring. Tested on NVIDIA and AMD.
 - **Arknights (EN) and Stella Sora (EN):** direct, verified installs from the
   publisher's servers, updates and launch through Proton.
 - **The app:** a PyQt6 window with a library, per-game pages with news,
-  settings, and crash-safe, resumable downloads and updates. The AppImage is
+  settings, resumable downloads, an UPDATE badge for direct-download games,
+  *Repair files* (re-check and re-download damaged game files) and *Rebuild Wine
+  prefix* (a fresh prefix with your game files kept). The AppImage is
   the supported way to run it.
 - **Experimental:** Fate/Grand Order (NA) through the lepton-fgo Android
-  container. It does not install in 0.1.0b3.
+  container. It does not install in 0.1.0b4.
 - **Scaffolding only:** generic `wine`, `steam`, `script` and `waydroid`
   backends. They work, but are not a supported product.
 

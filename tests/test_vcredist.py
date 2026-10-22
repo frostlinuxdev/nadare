@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Hermetic tests for the shared Visual C++ runtime helper.
 
-Nothing here may open a socket: ``urllib.request.urlopen`` is replaced in every
+Nothing here may open a socket: ``download.http_open`` is replaced in every
 test (an autouse fixture makes it raise ``OSError`` by default, and tests that
 exercise the download path substitute their own byte server).
 """
@@ -26,7 +26,7 @@ def _no_network(monkeypatch):
     def _offline(*_a, **_k):
         raise OSError("offline")
 
-    monkeypatch.setattr(vcredist.urllib.request, "urlopen", _offline)
+    monkeypatch.setattr(vcredist._net, "http_open", _offline)
 
 
 def _write_dlls(prefix: Path, *, native: bool = True) -> None:
@@ -132,27 +132,27 @@ class TestPins:
         )
         good = [hashlib.sha256(str(i).encode()).hexdigest() for i in range(12)]
         payload = json.dumps({"sha256": [*good, "not-a-hash"]}).encode()
-        monkeypatch.setattr(vcredist.urllib.request, "urlopen", _serve(payload))
+        monkeypatch.setattr(vcredist._net, "http_open", _serve(payload))
         pins = vcredist.index_pins()
         assert pins == set(good[: vcredist.VCREDIST_INDEX_MAX_HASHES])
 
     def test_index_pins_empty_on_bad_payload(self, monkeypatch):
         monkeypatch.setattr(hosting, "vcredist_index_url", lambda: "https://idx.example/x")
-        monkeypatch.setattr(vcredist.urllib.request, "urlopen", _serve(b"{}"))
+        monkeypatch.setattr(vcredist._net, "http_open", _serve(b"{}"))
         assert vcredist.index_pins() == set()
 
     def test_index_source_accepts_a_microsoft_url(self, monkeypatch):
         monkeypatch.setattr(hosting, "vcredist_index_url", lambda: "https://idx.example/x")
         url = "https://download.visualstudio.microsoft.com/download/x/vc_redist.x64.exe"
         payload = json.dumps({"url": url}).encode()
-        monkeypatch.setattr(vcredist.urllib.request, "urlopen", _serve(payload))
+        monkeypatch.setattr(vcredist._net, "http_open", _serve(payload))
         assert vcredist.index_source() == url
 
     def test_index_source_rejects_an_off_microsoft_url(self, monkeypatch):
         monkeypatch.setattr(hosting, "vcredist_index_url", lambda: "https://idx.example/x")
         monkeypatch.setattr(
-            vcredist.urllib.request,
-            "urlopen",
+            vcredist._net,
+            "http_open",
             _serve(json.dumps({"url": "https://evil.example/vc_redist.x64.exe"}).encode()),
         )
         assert vcredist.index_source() == ""
@@ -208,8 +208,8 @@ class TestDownload:
 
     def test_off_microsoft_redirect_is_refused(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            vcredist.urllib.request,
-            "urlopen",
+            vcredist._net,
+            "http_open",
             _serve(b"MZ", final="https://evil.example/vc.exe"),
         )
         with pytest.raises(BackendError):
@@ -228,7 +228,7 @@ class TestDownload:
 # ---------------------------------------------------------------------------
 class TestEnsure:
     def _ensure(self, tmp_path, monkeypatch, payload, code, *, constant=None, cancel=None):
-        monkeypatch.setattr(vcredist.urllib.request, "urlopen", _serve(payload))
+        monkeypatch.setattr(vcredist._net, "http_open", _serve(payload))
         ran: list[list[str]] = []
         events: list = []
         prefix = tmp_path / "prefix"
@@ -247,7 +247,7 @@ class TestEnsure:
         prefix = tmp_path / "prefix"
         _write_dlls(prefix, native=True)
         called: list = []
-        monkeypatch.setattr(vcredist.urllib.request, "urlopen", lambda *a, **k: called.append(1))
+        monkeypatch.setattr(vcredist._net, "http_open", lambda *a, **k: called.append(1))
         vcredist.ensure(
             prefix,
             profile={},
@@ -279,7 +279,10 @@ class TestEnsure:
         )
         assert ran == []
         assert not (tmp_path / "cache" / "vc_redist.x64.exe").exists()
-        assert any(e.kind == "status" and "not installed" in e.message for e in events)
+        assert any(
+            e.kind == "status" and "Could not verify the Microsoft Visual C++ download" in e.message
+            for e in events
+        )
 
     def test_unexpected_exit_code_is_just_a_warning(self, tmp_path, monkeypatch):
         ran, events = self._ensure(tmp_path, monkeypatch, b"MZ-code5", 5)
@@ -325,12 +328,38 @@ def test_index_source_host_suffix_is_label_bounded(monkeypatch):
     ok = ["https://aka.ms/vs/17/release/vc_redist.x64.exe", "https://www.aka.ms/x.exe"]
     for url in ok:
         monkeypatch.setattr(
-            vcredist.urllib.request, "urlopen", _serve(json.dumps({"url": url}).encode())
+            vcredist._net, "http_open", _serve(json.dumps({"url": url}).encode())
         )
         assert vcredist.index_source() == url
     monkeypatch.setattr(
-        vcredist.urllib.request,
-        "urlopen",
+        vcredist._net,
+        "http_open",
         _serve(json.dumps({"url": "https://evilaka.ms/x.exe"}).encode()),
     )
     assert vcredist.index_source() == ""
+
+
+def test_index_lookup_only_follows_https_redirects_on_the_same_host(monkeypatch):
+    """#244: the index is a trust anchor; no downgrade and no hop to another host."""
+    seen = {}
+
+    def _open(url, *, timeout, redirect_allowed):
+        seen["allowed"] = redirect_allowed
+        return _BytesResp(b"{}")
+
+    monkeypatch.setattr(vcredist._net, "http_open", _open)
+    vcredist._index_payload("https://idx.example/v.json")
+
+    allowed = seen["allowed"]
+    assert allowed("https://idx.example/other.json") is True
+    assert allowed("http://idx.example/v.json") is False
+    assert allowed("https://evil.example/v.json") is False
+
+
+def test_index_pins_junk_up_front_does_not_hide_real_hashes(monkeypatch):
+    """#97: the cap applies to valid hashes, not to the raw list."""
+    monkeypatch.setattr(hosting, "vcredist_index_url", lambda: "https://idx.example/x")
+    good = hashlib.sha256(b"real").hexdigest()
+    payload = json.dumps({"sha256": ["junk"] * 20 + [good]}).encode()
+    monkeypatch.setattr(vcredist._net, "http_open", _serve(payload))
+    assert vcredist.index_pins() == {good}

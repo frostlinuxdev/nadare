@@ -110,7 +110,7 @@ button) fetches **cover**, **hero** and **logo** and records each on the profile
 Use **Settings → Appearance → Fetch art**, or:
 
 ```sh
-nadare fetch-art -p Arknights      # one profile
+nadare fetch-art -p arknights      # one profile (the generated profile name)
 nadare fetch-art --all             # every profile
 ```
 

@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import fcntl
 import hashlib
 import json
+import logging
 import os
 import posixpath
 import re
@@ -38,14 +40,28 @@ import threading
 import time
 import urllib.parse
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import diskspace, download, hosting
+from . import diskspace, download, hosting, paths
 from .events import Cancel, Cancelled, Emitter, Event, emitter
+
+log = logging.getLogger(__name__)
+
+#: DownloadError text that describes a refused URL/host rather than a network fault.
+_SECURITY_DOWNLOAD_MARKERS = (
+    "refusing",
+    "disallowed",
+    "untrusted",
+    "redirect",
+    "invalid url",
+    "unsupported url",
+    "no host",
+)
 
 __all__ = [
     "GAME_TAGS",
@@ -645,7 +661,9 @@ def _media_host(url: str) -> tuple[str, ...]:
     return (host,) if host else ()
 
 
-def cache_media(media: Media, slug: str) -> dict[str, Any]:
+def cache_media(
+    media: Media, slug: str, *, deadline: float | None = None, cancel=None
+) -> dict[str, Any]:
     """Download a media document's background/banners into the art cache.
 
     The hero lands at ``{slug}-official-hero.{ext}`` and the banners at
@@ -653,22 +671,38 @@ def cache_media(media: Media, slug: str) -> dict[str, Any]:
     carry a source-URL sidecar so a changed launcher URL forces a re-download
     and the old third-party ``{slug}-hero`` cache can never shadow them.  Only
     ``*.yo-star.com`` https URLs are fetched; every failure is swallowed.
+    ``deadline`` (an absolute ``time.monotonic()`` value) and ``cancel`` stop a
+    slow launcher host from keeping the startup page waiting.
     """
     from . import artwork
 
     result: dict[str, Any] = {"hero": None, "banners": []}
-    if media.background and media_url_allowed(media.background):
-        path = artwork.download(
-            media.background, slug, "official-hero", _media_host(media.background)
+
+    def stopped() -> bool:
+        return bool(cancel is not None and cancel.cancelled) or (
+            deadline is not None and time.monotonic() >= deadline
         )
+
+    def fetch(url: str, kind: str) -> Path | None:
+        if stopped():
+            return None
+        timeout = artwork.DOWNLOAD_TIMEOUT
+        if deadline is not None:
+            timeout = max(1, min(timeout, int(deadline - time.monotonic())))
+        return artwork.download_compat(
+            url, slug, kind, _media_host(url), timeout=timeout, cancel=cancel
+        )
+
+    if media.background and media_url_allowed(media.background):
+        path = fetch(media.background, "official-hero")
         if path is not None:
             result["hero"] = str(path)
     for index, banner in enumerate(media.banners):
+        if stopped():
+            break
         if not media_url_allowed(banner.image):
             continue
-        path = artwork.download(
-            banner.image, slug, f"official-banner-{index}", _media_host(banner.image)
-        )
+        path = fetch(banner.image, f"official-banner-{index}")
         if path is not None:
             result["banners"].append({"image_path": str(path), "url": banner.url})
     return result
@@ -904,6 +938,16 @@ def _refuse_symlinked_parent(root: Path, destination: Path, label: str) -> None:
         raise ManifestError(f"path escapes the install dir: {label}")
 
 
+def _is_network_download_error(exc: Exception) -> bool:
+    """True for a failed transfer, but not for a refused host/URL or bad bytes."""
+    if isinstance(exc, download.IntegrityError):
+        return False
+    if not isinstance(exc, download.DownloadError):
+        return False
+    text = str(exc).lower()
+    return not any(marker in text for marker in _SECURITY_DOWNLOAD_MARKERS)
+
+
 def _sync_entry(
     entry: ManifestFile,
     *,
@@ -959,6 +1003,12 @@ def _sync_entry(
             last_error = str(exc)
             if attempt == attempts - 1:
                 part.unlink(missing_ok=True)
+                if _is_network_download_error(exc):
+                    log.info("download failed for %s: %s", url, exc)
+                    raise ManifestError(
+                        "Could not download the game files. Check your internet "
+                        "connection and try again."
+                    ) from exc
                 raise ManifestError(f"download failed for {entry.path}: {exc}") from exc
             continue
 
@@ -970,14 +1020,61 @@ def _sync_entry(
                 raise ManifestError(last_error)
             continue
 
-        os.replace(part, destination)
+        try:
+            os.replace(part, destination)
+        except OSError as exc:
+            raise ManifestError(f"could not finalise {entry.path}: {exc}") from exc
         progress.set(key, entry.size)
         return
 
     raise ManifestError(last_error)
 
 
+@contextmanager
+def _install_lock(install_dir: Path) -> Iterator[None]:
+    """Refuse to run two syncs into one install tree (they share ``.part`` files)."""
+    key = hashlib.sha256(str(install_dir.resolve()).encode()).hexdigest()[:16]
+    lock_path = paths.state_dir() / "locks" / f"sync-{key}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise ManifestError(
+                f"another install or update is already running for {install_dir}"
+            ) from None
+        yield
+    finally:
+        os.close(fd)
+
+
 def sync(
+    manifest: Manifest,
+    install_dir: str | os.PathLike[str],
+    emit: Emitter | None = None,
+    cancel: Cancel | None = None,
+    *,
+    retries: int = 2,
+    allowed_hosts: set[str] | None = None,
+    workers: int = 6,
+    chunk: int = download.DEFAULT_CHUNK,
+) -> dict[str, Any]:
+    """Serialise :func:`_sync` per install directory."""
+    with _install_lock(Path(install_dir).expanduser()):
+        return _sync(
+            manifest,
+            install_dir,
+            emit,
+            cancel,
+            retries=retries,
+            allowed_hosts=allowed_hosts,
+            workers=workers,
+            chunk=chunk,
+        )
+
+
+def _sync(
     manifest: Manifest,
     install_dir: str | os.PathLike[str],
     emit: Emitter | None = None,

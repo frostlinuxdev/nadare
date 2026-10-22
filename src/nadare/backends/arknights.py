@@ -50,13 +50,32 @@ TODO: Yostar rotates both the installer URL and its filename; the download API
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import shlex
 import shutil
+import tempfile
+import time
 import urllib.parse
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..core import diskspace, download, graphics, paths, process, runners, sandbox, vcredist, yostar
+from ..core import (
+    diskspace,
+    download,
+    graphics,
+    hostlibs,
+    paths,
+    prefixmove,
+    process,
+    runners,
+    sandbox,
+    umu,
+    vcredist,
+    yostar,
+)
 from ..core.backends import BackendError, BackendUnsupported, GameBackend, Option, Status
 from ..core.events import Event, mask
 from .arknights_news import IMAGE_HOSTS, fetch_arknights_news
@@ -72,6 +91,8 @@ from .wine import (
 )
 
 KIND = "arknights-yostar"
+
+log = logging.getLogger(__name__)
 
 #: Official endpoint returning the current Windows client download link.
 INSTALLER_API = "https://www.arknights.global/api/resource/game-download-link?index=1&size=999"
@@ -106,6 +127,36 @@ _SEARCH_MAX_DIRS = 2000
 #: removes a prefix inside the profile data dir or one that matches this record,
 #: so a crafted/imported ``prefix`` cannot delete an unrelated tree.
 INSTALLED_PREFIX_KEY = "installed_prefix"
+
+#: Present in ``install_dir`` while a direct sync runs and left behind when it is
+#: interrupted. Status and verify treat it as "incomplete", so a cancelled or
+#: failed install/update is not mistaken for a finished one just because the main
+#: executable is already on disk. Installs from before this existed have no
+#: marker and still count as installed.
+INSTALL_MARKER = ".nadare-install-incomplete"
+
+#: Written after a successful direct sync: the manifest version actually installed.
+VERSION_FILE = ".nadare-version.json"
+
+#: How long a fetched published version stays fresh (6 hours).
+UPDATE_CHECK_INTERVAL = 6 * 60 * 60
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """Write ``payload`` to ``path`` atomically (temporary file + replace)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _dangerous_removal_reason(
@@ -144,8 +195,12 @@ def _dangerous_removal_reason(
     return "not a prefix this profile installed"
 
 
-def _purge_target(data_dir: Path, recorded_prefix: str | None = None) -> Path:
+def _purge_target(data_dir: Path, recorded_prefix: str | None = None) -> Path | None:
     """The resolved directory a ``purge`` may remove, or raise ``BackendError``.
+
+    ``None`` means the profile dir is a symlink to a directory that merely
+    *contains* the recorded prefix: that directory may hold unrelated data, so
+    the caller drops the link and leaves the target alone.
 
     ``data_dir`` may be a symlink (a profile relocated to another disk), which
     ``shutil.rmtree`` refuses; the resolved target is returned instead. The same
@@ -173,14 +228,18 @@ def _purge_target(data_dir: Path, recorded_prefix: str | None = None) -> Path:
             prefix_resolved = Path(recorded_prefix).expanduser().resolve()
         except OSError:
             prefix_resolved = None
-        if prefix_resolved is not None and (
-            prefix_resolved == resolved or resolved in prefix_resolved.parents
-        ):
-            return resolved
+        if prefix_resolved is not None:
+            if prefix_resolved == resolved:
+                return resolved
+            if resolved in prefix_resolved.parents:
+                return None
     raise BackendError(f"refusing to purge {data_dir}: it resolves outside the profile directory")
 
 
 class ArknightsBackend(GameBackend):
+    unofficial_notice = True
+    install_size_hint = int(3.5 * 1024**3)
+
     #: Display driver when the profile says ``auto``: ``wayland`` or ``x11``.
     default_display = "wayland"
     #: Default ``DXVK_CONFIG``. DXVK 3.1.1's VK_EXT_present_timing path makes
@@ -193,7 +252,12 @@ class ArknightsBackend(GameBackend):
         Option("prefix", "Wine prefix", "path_dir", "WINEPREFIX used for this game."),
         Option("install_dir", "Game folder", "path_dir", "Where the launcher/game lives."),
         Option("exe_name", "Launcher executable", "text", advanced=True),
-        Option("runner", "Runner", "runner", "Proton build/tag; empty uses system Wine."),
+        Option(
+            "runner",
+            "Runner",
+            "runner",
+            "Proton build/tag; empty uses the tested DW-Proton (downloaded once).",
+        ),
         Option(
             "renderer",
             "Renderer",
@@ -201,6 +265,19 @@ class ArknightsBackend(GameBackend):
             graphics.RENDERER_HELP,
             default="auto",
             choices=graphics.RENDERER_CHOICES,
+        ),
+        Option(
+            "display",
+            "Display backend",
+            "choice",
+            "Wayland is the tested mode. X11 (XWayland) is experimental: on NVIDIA with "
+            "KDE Plasma 6.8 the game window shows only a flat colour.",
+            default="auto",
+            choices=(
+                ("Auto (Wayland)", "auto"),
+                ("Wayland", "wayland"),
+                ("X11 (XWayland)", "x11"),
+            ),
         ),
         Option(
             "manifest_index",
@@ -239,15 +316,6 @@ class ArknightsBackend(GameBackend):
         Option("umu_binary", "umu-run binary", "path_file", advanced=True),
         Option("extra_env", "Environment", "env", "One KEY=VALUE per line.", advanced=True),
         Option("process_match", "Process match", "text", advanced=True),
-        Option(
-            "vcredist",
-            "Visual C++ runtime",
-            "bool",
-            "Install the Microsoft Visual C++ runtime into the prefix (recommended; "
-            "fixes stutter in some games). A newly created prefix always installs it; "
-            "off by default for an existing prefix.",
-            default=False,
-        ),
     )
 
     #: Game tag used for signed Yostar API calls / manifests.
@@ -259,6 +327,10 @@ class ArknightsBackend(GameBackend):
     install_subdir: Path = DEFAULT_INSTALL_SUBDIR
     launcher_names: tuple[str, ...] = LAUNCHER_NAMES
     direct_exe: str = "Arknights.exe"
+
+    #: A non-strict runner setup failure, kept so a new prefix never falls back
+    #: to a bare ``wine`` that is not installed (or not wanted).
+    _runner_setup_error: Exception | None = None
 
     #: Official Arknights Global news (Yostar's own public API); images come
     #: from the publisher's CDN only.
@@ -292,12 +364,72 @@ class ArknightsBackend(GameBackend):
         raw = profile_setting(self.ctx.profile, "proton_runner") or profile_setting(
             self.ctx.profile, "runner"
         )
-        return str(raw).strip() if raw else ""
+        if not raw:
+            return ""
+        rid = str(raw).strip()
+        return "" if rid.lower() in ("wine", "system", "none") else rid
+
+    def _default_runner_applies(self) -> bool:
+        """True when this profile should use the pinned DW-Proton by default.
+
+        Whenever it names no runner (``wine``/``system``/``none`` count as unset)
+        and no ``wine_binary``. An explicit ``wine_binary`` is still honoured.
+        """
+        if self.runner_id() or profile_setting(self.ctx.profile, "wine_binary"):
+            return False
+        return True
+
+    def _wanted_family(self) -> str | None:
+        """The runner family this profile gets from Nadare: a named family id
+        (``dwproton``/``ge``/``cachyos``), or the default one; ``None`` otherwise."""
+        rid = self.runner_id()
+        if rid in runners.RUNNERS:
+            return rid
+        if not rid and self._default_runner_applies():
+            return runners.DEFAULT_FAMILY
+        return None
+
+    def _ensure_default_runner(self, *, strict: bool) -> None:
+        """Reuse the pinned build of the wanted family, or download it once.
+
+        ``strict`` raises when it cannot be set up (launch needs it); otherwise a
+        status notice is emitted and the caller carries on (a direct install only
+        syncs files and needs no runtime until launch). A cancel passes through.
+        """
+        family = self._wanted_family()
+        if family is None or runners.installed_pinned(family) is not None:
+            self._runner_setup_error = None
+            return
+        self.ctx.emit(Event("step", "Setting up the Proton runner (one-time download)"))
+        try:
+            runners.ensure_pinned(family, emit=self.ctx.emit, cancel=self.ctx.cancel)
+        except (runners.RunnerError, download.DownloadError, BackendError, OSError) as exc:
+            self._runner_setup_error = exc
+            if strict:
+                if isinstance(exc, BackendError):
+                    raise
+                raise BackendError(f"could not set up the Proton runner: {exc}") from exc
+            self.ctx.emit(
+                Event(
+                    "status",
+                    f"Proton runner not set up yet ({exc}); it will be tried again at launch",
+                )
+            )
+        else:
+            self._runner_setup_error = None
 
     def resolve_runner(self) -> tuple[str | None, str]:
-        """Return ``(path, kind)`` with kind ``proton`` or ``wine``."""
+        """Return ``(path, kind)`` with kind ``proton`` or ``wine``.
+
+        Never downloads (status polls call this): an unset runner resolves to the
+        pinned DW-Proton only when it is already installed.
+        """
         rid = self.runner_id()
-        if not rid or rid.lower() in ("wine", "system", "none"):
+        family = self._wanted_family()
+        if family is not None:
+            pinned = runners.installed_pinned(family)
+            return (str(pinned), "proton") if pinned is not None else (None, "wine")
+        if not rid:
             return None, "wine"
         try:
             found = runners.resolve_runner(rid)
@@ -423,15 +555,123 @@ class ArknightsBackend(GameBackend):
             return path_option(raw, base=self.install_dir())
         return self.install_dir() / self.direct_exe
 
+    def _manifest_error(self, exc: yostar.ManifestError) -> BackendError:
+        log.warning("invalid %s manifest: %s", self.display_name, exc)
+        return BackendError(
+            f"{self.display_name}'s download information is invalid or incomplete. "
+            "Nothing was changed. Try again later or update Nadare."
+        )
+
     def _load_manifest(self) -> yostar.Manifest:
         try:
             return yostar.load_manifest(self.manifest_source(), game_tag=self.game_tag)
         except yostar.ManifestError as exc:
-            raise BackendError(str(exc)) from exc
+            raise self._manifest_error(exc) from exc
+
+    def _install_marker_path(self) -> Path:
+        return self.install_dir() / INSTALL_MARKER
+
+    def _install_incomplete(self) -> bool:
+        return self._install_marker_path().is_file()
+
+    # ---- recorded / published versions ------------------------------------
+    def _version_path(self) -> Path:
+        return self.install_dir() / VERSION_FILE
+
+    def _read_version_file(self) -> dict[str, Any] | None:
+        """The version record from the last successful sync, or ``None``.
+
+        Missing, unreadable or malformed files are treated as "not recorded"
+        (installs from before this existed have no file).
+        """
+        try:
+            payload = json.loads(self._version_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        version = payload.get("version")
+        if not isinstance(version, str) or not version:
+            return None
+        return payload
+
+    def _write_version_file(self, version: str, game_tag: str) -> None:
+        _atomic_write_json(
+            self._version_path(),
+            {
+                "version": str(version),
+                "game_tag": str(game_tag),
+                "synced_at": datetime.now(UTC).isoformat(),
+            },
+        )
+
+    def _latest_path(self) -> Path:
+        return paths.cache_dir() / "yostar-latest" / f"{self.game_tag}.json"
+
+    def _read_latest(self) -> dict[str, Any] | None:
+        """The cached published version, or ``None`` when absent/corrupt."""
+        try:
+            payload = json.loads(self._latest_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        version = payload.get("version")
+        if not isinstance(version, str) or not version:
+            return None
+        return payload
+
+    def _write_latest(self, version: str) -> None:
+        _atomic_write_json(
+            self._latest_path(),
+            {"version": str(version), "checked_at": int(time.time())},
+        )
+
+    def _record_synced_version(self, manifest: yostar.Manifest) -> None:
+        """Remember what a finished sync installed and publish it as latest."""
+        try:
+            self._write_version_file(manifest.version, manifest.game_tag)
+            self._write_latest(manifest.version)
+        except OSError as exc:
+            # A read-only install tree must not turn a finished update into a failure.
+            log.debug("%s: could not record the synced version: %s", self.display_name, exc)
+
+    def check_update(self) -> None:
+        """Refresh the cached published version (direct mode only, offline-safe).
+
+        Never raises: a manifest/network failure only leaves the cache untouched.
+        """
+        if not self.direct_mode():
+            return
+        try:
+            if not self.ctx.config.data.get("check_updates", True):
+                return
+        except AttributeError:
+            pass
+        cached = self._read_latest()
+        if cached is not None:
+            try:
+                age = time.time() - float(cached.get("checked_at", 0))
+            except (TypeError, ValueError):
+                age = UPDATE_CHECK_INTERVAL
+            if 0 <= age < UPDATE_CHECK_INTERVAL:
+                return
+        try:
+            manifest = self._load_manifest()
+        except (BackendError, RuntimeError, OSError) as exc:
+            log.debug("%s: update check failed: %s", self.display_name, exc)
+            return
+        try:
+            self._write_latest(manifest.version)
+        except OSError as exc:
+            log.debug("%s: could not cache the published version: %s", self.display_name, exc)
 
     def _sync_direct(self) -> dict[str, Any]:
         manifest = self._load_manifest()
         workers = profile_setting(self.ctx.profile, "download_workers", 6)
+        marker = self._install_marker_path()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("sync in progress\n", encoding="utf-8")
         self.ctx.emit(Event("step", f"{self.display_name}: syncing {manifest.version} directly"))
         try:
             summary = yostar.sync(
@@ -442,7 +682,9 @@ class ArknightsBackend(GameBackend):
                 workers=workers,
             )
         except yostar.ManifestError as exc:
-            raise BackendError(str(exc)) from exc
+            raise self._manifest_error(exc) from exc
+        marker.unlink(missing_ok=True)
+        self._record_synced_version(manifest)
         self.info(
             f"{self.display_name}: synced {summary.get('downloaded', 0)} file(s), "
             f"{summary.get('skipped', 0)} already up to date"
@@ -563,21 +805,51 @@ class ArknightsBackend(GameBackend):
         env = process.build_env(None, extra={"WINEPREFIX": str(prefix)})
         proton, kind = self.resolve_runner()
         if kind == "proton":
-            umu = shutil.which(str(profile_setting(self.ctx.profile, "umu_binary", "umu-run")))
+            configured = str(profile_setting(self.ctx.profile, "umu_binary", "umu-run"))
+            umu_run = shutil.which(configured)
+            missing = None
+            if umu_run is None and not sandbox.in_flatpak():
+                missing = hostlibs.missing_32bit()
+                if missing:
+                    umu_run = umu.resolve(
+                        configured,
+                        allow_download=True,
+                        emit=self.ctx.emit,
+                        cancel=self.ctx.cancel,
+                    )
             env["PROTONPATH"] = str(proton)
             env["STEAM_COMPAT_DATA_PATH"] = str(prefix)
-            env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = str(prefix)
             env.setdefault("PROTON_ENABLE_WAYLAND", self._wayland_default())
-            if umu:
-                argv = [umu, *args]
-            elif sandbox.in_flatpak():
+            if umu_run:
+                argv = [umu_run, *args]
+            else:
+                # No umu-run: run the Proton tree directly (like CZN), which needs the
+                # host's 32-bit libraries unless we are inside the Flatpak runtime.
+                if not sandbox.in_flatpak():
+                    if missing is None:
+                        missing = hostlibs.missing_32bit()
+                    if missing:
+                        raise BackendError(hostlibs.hint(missing))
                 argv, env_updates = sandbox.proton_direct(proton, prefix, args)
                 env.update(env_updates)
-            else:
-                raise BackendError("the selected runner needs umu-run on PATH")
         else:
+            # Plain Wine would otherwise ask to download wine-mono / wine-gecko.
+            overrides = [p for p in str(env.get("WINEDLLOVERRIDES") or "").split(";") if p.strip()]
+            if "mscoree,mshtml=" not in overrides:
+                overrides.append("mscoree,mshtml=")
+            env["WINEDLLOVERRIDES"] = ";".join(overrides)
             wine = profile_setting(self.ctx.profile, "wine_binary")
             resolved_wine = path_option(wine)
+            if (
+                resolved_wine is None
+                and self._runner_setup_error is not None
+                and not (prefix / "drive_c").is_dir()
+            ):
+                self.info(f"Proton runner setup failed: {self._runner_setup_error}")
+                raise BackendError(
+                    "The Proton runner could not be downloaded. Check your internet "
+                    "connection and press Install again."
+                ) from self._runner_setup_error
             argv = [
                 str(resolved_wine) if resolved_wine is not None else str(first_wine()),
                 *args,
@@ -607,20 +879,18 @@ class ArknightsBackend(GameBackend):
         """
         if self.runner_id():
             return True
-        return bool(profile_setting(self.ctx.profile, "wine_binary"))
+        if profile_setting(self.ctx.profile, "wine_binary"):
+            return True
+        family = self._wanted_family()
+        return family is not None and runners.installed_pinned(family) is not None
 
     def _run_vcredist(self, *, created: bool = False) -> None:
         """Best-effort VC++ runtime step (see :func:`nadare.core.vcredist.ensure`).
 
-        Runs on a newly created prefix, or on an existing one only when the
-        profile has ``"vcredist": true``. ``"vcredist": false`` disables it
-        everywhere.
+        Always attempted, on new and existing prefixes alike (it is not a user
+        setting; a leftover ``"vcredist": false`` in a profile is ignored). It is
+        a no-op once the real runtime is present and never aborts the caller.
         """
-        setting = profile_setting(self.ctx.profile, "vcredist")
-        if setting is False:
-            return
-        if not created and setting is not True:
-            return
         vcredist.ensure(
             self.prefix(),
             profile=self.ctx.profile,
@@ -647,28 +917,70 @@ class ArknightsBackend(GameBackend):
     # ---- contract ----------------------------------------------------------
     def status(self) -> Status:
         prefix = self.prefix()
-        target = self.find_launcher()
+        direct = self.direct_mode()
+        target = self.direct_target() if direct else self.find_launcher()
+        incomplete = direct and self._install_incomplete()
         pids = scan_pids(self._patterns(target))
         data = {
             "prefix": str(prefix),
             "exe": str(target) if target else "",
             "runner": self.runner_id(),
             "pids": pids,
-            "mode": "direct" if self.direct_mode() else "official",
+            "mode": "direct" if direct else "official",
+            "can_repair": direct and self.install_dir().is_dir(),
             "renderer": getattr(self, "_renderer", None) or "",
         }
-        if target is None:
+        version: str | None = None
+        if direct:
+            record = self._read_version_file()
+            version = str(record["version"]) if record else None
+            if version:
+                data["version"] = version
+            latest = self._read_latest()
+            published = str(latest["version"]) if latest else None
+            # Purely local: the published version is refreshed by check_update().
+            data["update_available"] = bool(version and published and published != version)
+        if direct and (target is None or not target.is_file() or incomplete):
+            # Files may already be on disk from a cancelled/failed install, but
+            # only a finished sync counts as installed.
+            message = (
+                "installation incomplete — click INSTALL to finish"
+                if incomplete
+                else f"{self.display_name} is not installed yet"
+            )
+            return Status(state="not_installed", version=version, message=message, data=data)
+        if not direct and target is None:
             return Status(
                 state="not_installed",
-                message=f"{self.display_name} not found",
+                version=version,
+                message=f"{self.display_name} is not installed yet",
                 data=data,
             )
+        rid = self.runner_id()
+        if rid and rid not in runners.RUNNERS:
+            # An explicit runner that no longer resolves (e.g. its folder was
+            # deleted) means the game cannot launch; the default-family runner
+            # is downloaded on first launch, so it is never an error here.
+            try:
+                self.resolve_runner()
+            except (BackendError, runners.RunnerError):
+                return Status(
+                    state="error",
+                    version=version,
+                    running=False,
+                    message=(
+                        "Game files are present but the Proton runner is missing: "
+                        "choose or install a runner in Settings."
+                    ),
+                    data=data,
+                )
         message = ""
         note = graphics.vulkan_note()
         if note:
             message = note
         return Status(
             state="running" if pids else "installed",
+            version=version,
             running=bool(pids),
             message=message,
             data=data,
@@ -686,22 +998,35 @@ class ArknightsBackend(GameBackend):
             match=str(extra) if extra else "",
         )
 
-    def _ensure_prefix(self) -> None:
+    def _ensure_prefix(self) -> bool:
+        """Create the prefix; return True when the VC++ step already ran."""
         prefix = self.prefix()
         if (prefix / "drive_c").is_dir():
-            return
+            return False
+        # Only clean up a tree this call creates: an existing prefix (even a
+        # half-built one the user pointed us at) is never deleted on failure.
+        created = not prefix.exists()
         prefix.mkdir(parents=True, exist_ok=True)
         self.ctx.emit(Event("step", f"Creating the Wine prefix at {prefix}"))
         argv, env = self._prefix_command(["wineboot", "-u"])
-        code = stream(
-            argv, env, on_line=lambda line: self.info(mask(line)), cancel=self.ctx.cancel
-        )
-        if code != 0 or not (prefix / "drive_c").is_dir():
-            raise BackendError(f"prefix creation failed (exit {code})")
+        try:
+            code = stream(
+                argv, env, on_line=lambda line: self.info(mask(line)), cancel=self.ctx.cancel
+            )
+            if code != 0 or not (prefix / "drive_c").is_dir():
+                raise BackendError(f"prefix creation failed (exit {code})")
+        except BaseException:
+            # A cancelled/failed wineboot can leave drive_c behind, which would
+            # make the next install treat the broken prefix as complete.
+            if created:
+                shutil.rmtree(prefix, ignore_errors=True)
+            raise
         self._run_vcredist(created=True)
+        return True
 
     def install(self) -> None:
         self.ctx.cancel.raise_if_cancelled()
+        self._ensure_default_runner(strict=False)
         # Record the prefix the install uses so uninstall may later remove an
         # explicitly configured external prefix (and only that one).
         self.ctx.set(INSTALLED_PREFIX_KEY, str(self.prefix()))
@@ -711,8 +1036,8 @@ class ArknightsBackend(GameBackend):
             return
         url = self.require_installer_url(resolve=True)
         self.ctx.set("prefix", str(self.prefix()))
-        self._ensure_prefix()
-        self._run_vcredist(created=False)
+        if not self._ensure_prefix():
+            self._run_vcredist(created=False)
         installer = self._download_installer(url)
         argv, env = self._prefix_command([str(installer), *self._extra_args("installer_args")])
         self.ctx.emit(Event("step", f"Running the Arknights installer in {self.prefix()}"))
@@ -727,10 +1052,10 @@ class ArknightsBackend(GameBackend):
             argv, env, on_line=lambda line: self.info(mask(line)), cancel=self.ctx.cancel
         )
         if self.find_launcher() is None:
+            self.info(f"Arknights installer exited with code {code} and left no launcher")
             raise BackendError(
-                f"the Arknights launcher was not installed (installer exit code {code}). "
-                "If the installer showed a network error, try the Proton-CachyOS "
-                "runner, or use direct download."
+                "The Arknights installer did not finish. Try Install again. If it still "
+                "fails, open Settings → Runner and choose Proton-CachyOS."
             )
         self.ctx.emit(Event("done", "Arknights installer finished"))
 
@@ -749,8 +1074,68 @@ class ArknightsBackend(GameBackend):
         if code != 0:
             raise BackendError(f"the Arknights launcher exited with code {code}")
 
+    def repair(self) -> None:
+        if not self.direct_mode():
+            raise BackendUnsupported(
+                "Repair is only available when Nadare manages the game files"
+            )
+        if not self.install_dir().is_dir():
+            raise BackendError(f"{self.display_name} is not installed")
+        self._sync_direct()
+        try:
+            missing = yostar.plan(self._load_manifest(), self.install_dir())
+        except (BackendError, yostar.ManifestError) as exc:
+            if isinstance(exc, BackendError):
+                raise
+            raise self._manifest_error(exc) from exc
+        if missing:
+            names = ", ".join(entry.path for entry in missing[:5])
+            if len(missing) > 5:
+                names += f" (+{len(missing) - 5} more)"
+            raise BackendError(
+                f"{len(missing)} game file(s) are still damaged: {names}. "
+                "Try again, or reinstall the game."
+            )
+        self.ctx.emit(Event("done", "All game files check out"))
+
+    def remake_prefix(self) -> None:
+        """Move the corrupted prefix aside and rebuild it, keeping the game files."""
+        if scan_pids(self._patterns()):
+            raise BackendError("Stop the game before rebuilding its Wine prefix", 8)
+        # Make sure a runner exists BEFORE anything is moved: wineboot needs it.
+        self._ensure_default_runner(strict=True)
+        self.ctx.emit(Event("step", "Moving the old Wine prefix aside"))
+        backup = prefixmove.move_aside(self.prefix())
+        moved: list[Path] = []
+        try:
+            # _ensure_prefix creates the new prefix and runs wineboot; when it
+            # returns False the VC++ step still has to run.
+            if not self._ensure_prefix():
+                self._run_vcredist(created=False)
+            # An install_dir outside the prefix is left alone: nothing matches
+            # ``relative_to(prefix)`` and restore_inside simply moves nothing.
+            moved = prefixmove.restore_inside(backup, self.prefix(), [self.install_dir()])
+        except BaseException:
+            prefixmove.roll_back(backup, self.prefix(), moved)
+            raise
+        self.ctx.emit(
+            Event(
+                "done",
+                f"The Wine prefix was rebuilt. The old one was kept at {backup}; "
+                "delete it when you are sure everything works.",
+            )
+        )
+
     def launch(self) -> int:
         self.ctx.cancel.raise_if_cancelled()
+        # Fail "not installed" before spending a 320 MB download on a runner.
+        if self.direct_mode():
+            target = self.direct_target()
+            if target is None or not target.is_file():
+                raise BackendError(f"game executable not found: {target}")
+        elif self.find_launcher() is None:
+            raise BackendError("the game is not installed")
+        self._ensure_default_runner(strict=True)
         if self.direct_mode():
             return self._launch_direct()
         self._run_vcredist(created=False)
@@ -792,15 +1177,43 @@ class ArknightsBackend(GameBackend):
         )
 
     def verify(self) -> dict[str, Any]:
-        target = self.find_launcher()
+        direct = self.direct_mode()
+        target = self.direct_target() if direct else self.find_launcher()
         checks = {
             "prefix": (self.prefix() / "drive_c").is_dir(),
-            "launcher": target is not None,
+            "launcher": target is not None and target.is_file()
+            if direct
+            else target is not None,
         }
+        missing: list[yostar.ManifestFile] = []
+        manifest_note = ""
+        if direct:
+            checks["installation"] = not self._install_incomplete()
+            if checks["installation"] and checks["launcher"]:
+                try:
+                    missing = yostar.plan(self._load_manifest(), self.install_dir())
+                except (BackendError, yostar.ManifestError) as exc:
+                    # Offline or a broken manifest: do not call the files bad.
+                    manifest_note = f" (could not compare with the game's file list: {exc})"
+                else:
+                    checks["files"] = not missing
         failed = [name for name, ok in checks.items() if not ok]
-        message = (
-            "all checks passed" if not failed else "integrity check failed: " + ", ".join(failed)
-        )
+        if not failed:
+            message = "all checks passed" + manifest_note
+        elif direct and missing:
+            names = ", ".join(entry.path for entry in missing[:5])
+            if len(missing) > 5:
+                names += f" (+{len(missing) - 5} more)"
+            message = (
+                f"integrity check failed: {len(missing)} game file(s) missing or changed "
+                f"({names}); click INSTALL or UPDATE, or Repair files, to finish"
+            )
+        elif direct and checks.get("installation") is False:
+            message = "integrity check failed: installation incomplete — click INSTALL to finish"
+        else:
+            message = "integrity check failed: " + ", ".join(failed)
+        if not checks["prefix"]:
+            message += " Rebuild the Wine prefix in Settings."
         return {
             "verified": not failed,
             "message": message,
@@ -809,6 +1222,14 @@ class ArknightsBackend(GameBackend):
             "prefix": str(self.prefix()),
             "exe": str(target) if target else "",
         }
+
+    def _refuse_if_shared(self, tree: Path) -> None:
+        """Never delete a tree another profile's install dir or prefix overlaps."""
+        from ..core.removal import _shared_with
+
+        other = _shared_with(self.ctx.config.profiles, self.ctx.name, tree.resolve())
+        if other:
+            raise BackendError(f"refusing to remove {tree}: it is shared with profile {other!r}")
 
     def uninstall(self, purge: bool = False) -> None:
         prefix = self.prefix()
@@ -825,6 +1246,7 @@ class ArknightsBackend(GameBackend):
                 "(reinstall to record it, or set 'prefix' under the profile's data dir)"
             )
         if (prefix / "drive_c").is_dir():
+            self._refuse_if_shared(prefix)
             self.ctx.emit(Event("step", f"Removing the game prefix {prefix}"))
             # ``prefix`` may be a symlink, which rmtree refuses: remove the
             # resolved tree, then drop the (now dangling) link.
@@ -836,7 +1258,17 @@ class ArknightsBackend(GameBackend):
             target = _purge_target(
                 data_dir, str(recorded) if recorded not in (None, "") else None
             )
-            shutil.rmtree(target)
+            if target is None:
+                self.ctx.emit(
+                    Event(
+                        "step",
+                        f"{data_dir} links to {data_dir.resolve()}, which may hold other "
+                        "files: removing the link and leaving that folder in place",
+                    )
+                )
+            else:
+                self._refuse_if_shared(target)
+                shutil.rmtree(target)
             if data_dir.is_symlink():
                 data_dir.unlink(missing_ok=True)
         self.ctx.emit(Event("done", "Uninstalled"))
@@ -847,6 +1279,7 @@ __all__ = [
     "INSTALLER_API",
     "DEFAULT_INSTALLER_URL",
     "DEFAULT_INSTALL_SUBDIR",
+    "INSTALL_MARKER",
     "LAUNCHER_NAMES",
     "ArknightsBackend",
 ]

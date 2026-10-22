@@ -255,7 +255,35 @@ def test_download_cancellation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         dl.download("http://example.invalid/game", dest, cancel=cancel, retries=1)
 
     assert not dest.exists()
-    assert not (tmp_path / "game.bin.part").exists()
+    # the partial bytes stay so the next install resumes instead of restarting
+    assert (tmp_path / "game.bin.part").exists()
+
+
+def test_download_network_failure_keeps_resumable_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = b"y" * 100
+
+    class DyingResponse(FakeResponse):
+        def read(self, n: int = -1) -> bytes:
+            if self._pos >= 40:
+                raise OSError("connection reset")
+            return super().read(min(n, 40) if n > 0 else 40)
+
+    monkeypatch.setattr(
+        dl,
+        "http_open",
+        lambda url, *, headers=None, timeout=dl.DEFAULT_TIMEOUT: DyingResponse(
+            body, headers={"Content-Length": str(len(body))}
+        ),
+    )
+    monkeypatch.setattr(dl, "_sleep", lambda *a, **k: None)
+    dest = tmp_path / "game.bin"
+    with pytest.raises(dl.DownloadError):
+        dl.download("http://example.invalid/game", dest, retries=2)
+
+    assert not dest.exists()
+    assert (tmp_path / "game.bin.part").exists()
 
 
 def test_download_without_content_length(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -825,7 +853,7 @@ def test_download_rejects_server_resuming_at_wrong_offset(
         )
 
     assert not dest.exists()
-    assert not part.exists()
+    assert part.read_bytes() == body[:half]  # the bad response added nothing
 
 
 def test_stream_download_rejects_server_resuming_at_wrong_offset(tmp_path: Path) -> None:

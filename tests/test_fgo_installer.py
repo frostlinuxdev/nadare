@@ -130,6 +130,20 @@ def test_second_call_reuses_the_extracted_installer(tmp_path: Path) -> None:
 
 
 @needs_zstd
+def test_unreadable_release_marker_refetches_instead_of_raising(tmp_path: Path) -> None:
+    tar = _good(tmp_path)
+    fetch = FakeFetch(tar)
+    first = installer.ensure_installer(_adapter(tmp_path), pin=_pin(tar), fetch=fetch)
+    (first / "RELEASE").write_bytes(b"\xff\xfe not utf-8")
+
+    again = installer.ensure_installer(_adapter(tmp_path), pin=_pin(tar), fetch=fetch)
+
+    assert again == first
+    assert len(fetch.calls) == 2
+    assert (again / "RELEASE").read_text().strip() == f"lepton-fgo {VERSION}"
+
+
+@needs_zstd
 def test_extraction_without_a_stamp_is_not_trusted(tmp_path: Path) -> None:
     """L2: the version stamp alone must not authorise executing a reused copy."""
     tar = _good(tmp_path)
@@ -388,3 +402,8 @@ def test_hint_covers_the_slim_requirements() -> None:
 def test_hint_arch_maps_python3_to_python() -> None:
     hint = installer.install_hint(["python3 not found in PATH"], {"ID": "arch"})
     assert hint.endswith("--needed python")
+
+
+def test_install_hint_names_tools_it_has_no_package_for() -> None:
+    hint = installer.install_hint(["frobnicate not found"], {"ID": "ubuntu"})
+    assert "frobnicate" in hint

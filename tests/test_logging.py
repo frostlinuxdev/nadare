@@ -120,3 +120,18 @@ def test_the_secret_key_pattern_does_not_match_look_alike_words(text: str) -> No
 
     assert events._TOKEN_VALUE_RE.search(text) is None
     assert events.is_secret_key(text.split("=")[0].split(":")[0].strip()) is False
+
+
+def test_later_setup_with_level_applies_it(tmp_path):
+    import logging
+
+    from nadare.core import logging as nl
+
+    nl.reset()
+    nl.setup(filename=tmp_path / "n.log")
+    assert nl.get_logger("x").getEffectiveLevel() == logging.INFO
+    nl.setup(level=logging.DEBUG)
+    assert nl.get_logger("x").isEnabledFor(logging.DEBUG)
+    nl.setup()
+    assert nl.get_logger("x").isEnabledFor(logging.DEBUG)
+    nl.reset()

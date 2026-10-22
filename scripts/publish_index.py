@@ -200,6 +200,12 @@ WEBVIEW2_HOSTS = (".microsoft.com",)
 WEBVIEW2_KEEP = 4  # current + three previous hashes stay accepted
 
 
+def _url_identity(url: str) -> tuple[str, str, str]:
+    """Scheme, host and path of ``url``: a CDN may vary the query between requests."""
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme, (parts.hostname or "").lower(), parts.path
+
+
 def publish_webview2(out: Path, env: dict[str, str], opener: Any = None) -> bool:
     """Record the SHA-256 of Microsoft's current WebView2 installer.
 
@@ -235,9 +241,18 @@ def publish_webview2(out: Path, env: dict[str, str], opener: Any = None) -> bool
             host = (urllib.parse.urlparse(r.geturl()).hostname or "").lower()
             if not host.endswith(WEBVIEW2_HOSTS):
                 raise RuntimeError(f"redirected off Microsoft: {r.geturl()}")
+            get_final_url = r.geturl()
             while chunk := r.read(1 << 20):
                 digest.update(chunk)
                 got += len(chunk)
+        get_final = urllib.parse.urlparse(get_final_url)
+        if get_final.scheme != "https":
+            raise RuntimeError(f"non-https download URL: {get_final_url}")
+        if _url_identity(get_final_url) != _url_identity(final_url):
+            raise RuntimeError(
+                "download URL changed between HEAD and GET: "
+                f"{final_url} -> {get_final_url}"
+            )
         if got < 50_000_000 or (size and got != size):
             raise RuntimeError(f"unexpected download size {got} (expected {size})")
     except Exception as exc:  # keep the last-good file on any failure
@@ -304,9 +319,18 @@ def publish_vcredist(out: Path, env: dict[str, str], opener: Any = None) -> bool
         with opener(VCREDIST_URL, timeout=120) as r:
             if not _vcredist_host_ok(r.geturl()):
                 raise RuntimeError(f"redirected off Microsoft: {r.geturl()}")
+            get_final_url = r.geturl()
             while chunk := r.read(1 << 20):
                 digest.update(chunk)
                 got += len(chunk)
+        get_final = urllib.parse.urlparse(get_final_url)
+        if get_final.scheme != "https":
+            raise RuntimeError(f"non-https download URL: {get_final_url}")
+        if _url_identity(get_final_url) != _url_identity(final_url):
+            raise RuntimeError(
+                "download URL changed between HEAD and GET: "
+                f"{final_url} -> {get_final_url}"
+            )
         if got < VCREDIST_MIN_SIZE or (size and got != size):
             raise RuntimeError(f"unexpected download size {got} (expected {size})")
     except Exception as exc:  # keep the last-good file on any failure

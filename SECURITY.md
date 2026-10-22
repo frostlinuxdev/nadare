@@ -61,7 +61,7 @@ In scope:
 Out of scope (report upstream):
 
 - Vulnerabilities in the games, in STOVE, in `lepton-fgo`, in Wine/Proton, umu,
-  Waydroid, or in the NVIDIA/Venus stack.
+  or in the NVIDIA/Venus stack.
 - Account bans or Terms of Service enforcement. Running these games this way may
   violate their ToS; that is a risk you accept, not a vulnerability.
 - Anti-cheat behaviour. Nadare does not modify anti-cheat.

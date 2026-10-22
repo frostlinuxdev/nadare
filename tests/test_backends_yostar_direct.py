@@ -18,6 +18,24 @@ from nadare.backends.arknights import ArknightsBackend
 from nadare.backends.stellasora import StellaSoraBackend
 from nadare.core import yostar
 from nadare.core.backends import BackendError, get, kinds
+from nadare.core.events import Cancelled
+
+
+@pytest.fixture(autouse=True)
+def _no_real_vcredist(monkeypatch):
+    """The VC++ step always runs now; keep it out of tests about other things."""
+    monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_runners(monkeypatch):
+    """No test may read the developer's real runners or download one."""
+    monkeypatch.setattr(ak.runners, "installed_pinned", lambda family="dwproton": None)
+
+    def offline(*_a, **_k):
+        raise ak.runners.RunnerError("offline (no downloads in tests)")
+
+    monkeypatch.setattr(ak.runners, "ensure_pinned", offline)
 
 
 def _manifest_file(tmp_path: Path, tag: str, exe: str = "Arknights.exe") -> Path:
@@ -212,6 +230,43 @@ class TestStellaSora:
         assert backend.launch() == 0
         assert captured[0] == ["/usr/bin/wine", str(exe)]
 
+    def test_install_sets_up_the_default_runner_without_failing_on_it(self, tmp_path, monkeypatch):
+        """The audit's blocker 1: this override replaced the base install()."""
+        manifest = _manifest_file(tmp_path, "StellaSora_EN", exe="StellaSora.exe")
+        backend = _stella(tmp_path, {"manifest_file": str(manifest)})
+        monkeypatch.setattr(ak.shutil, "which", lambda name: None)
+        calls: list = []
+        monkeypatch.setattr(
+            ak.runners, "ensure_pinned", lambda *a, **k: calls.append(1) or tmp_path
+        )
+        monkeypatch.setattr(ak.yostar, "sync", lambda *a, **k: {"downloaded": 0, "skipped": 0})
+        backend.install()
+        assert calls == [1]
+
+        def offline(*_a, **_k):
+            raise ak.download.DownloadError("offline")
+
+        monkeypatch.setattr(ak.runners, "ensure_pinned", offline)
+        backend.install()  # a failed runner download does not abort the file sync
+
+    def test_launch_sets_up_the_runner_only_for_an_installed_game(self, tmp_path, monkeypatch):
+        manifest = _manifest_file(tmp_path, "StellaSora_EN", exe="StellaSora.exe")
+        backend = _stella(tmp_path, {"manifest_file": str(manifest)})
+        monkeypatch.setattr(ak.shutil, "which", lambda name: None)
+        monkeypatch.setattr(ak.runners, "ensure_pinned", lambda *a, **k: pytest.fail("downloaded"))
+        with pytest.raises(BackendError, match="not found"):
+            backend.launch()  # not installed: no 320 MB download first
+
+        write_exe(backend.install_dir() / "StellaSora.exe", "MZ")
+        calls: list = []
+        monkeypatch.setattr(
+            ak.runners, "ensure_pinned", lambda *a, **k: calls.append(1) or tmp_path
+        )
+        monkeypatch.setattr(ak, "stream", lambda *a, **k: 0)
+        monkeypatch.setattr(ak.hostlibs, "missing_32bit", lambda: [])
+        backend.launch()
+        assert calls == [1]
+
     def test_exe_name_override(self, tmp_path, monkeypatch):
         manifest = _manifest_file(tmp_path, "StellaSora_EN")
         backend = _stella(
@@ -269,3 +324,164 @@ class TestDisplayDefault:
         profile = {"display": display} if display else {}
         backend = ArknightsBackend(make_context(tmp_path, ArknightsBackend.kind, profile, "ak"))
         assert self._env(backend, monkeypatch, tmp_path) == expected
+
+
+# ---------------------------------------------------------------------------
+# direct install completion / status / verify
+# ---------------------------------------------------------------------------
+def _multi_manifest(tmp_path: Path, tag: str, files: dict[str, bytes]) -> Path:
+    payload = {
+        "game_tag": tag,
+        "version": "2.0.0",
+        "base_url": "https://cdn.yo-star.com/assets",
+        "generated_at": "2026-01-01T00:00:00Z",
+        "files": [
+            {"path": path, "size": len(data), "crc64": yostar.crc64(data)}
+            for path, data in files.items()
+        ],
+    }
+    p = tmp_path / f"{tag}-multi.json"
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    return p
+
+
+def _write_files(root: Path, files: dict[str, bytes], stop_after: str | None = None) -> None:
+    for path, data in files.items():
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        if path == stop_after:
+            raise Cancelled("cancelled")
+
+
+class TestDirectInstallCompletion:
+    GAME_FILES = {"Arknights.exe": b"MZ", "data/big.pak": b"BIG"}
+
+    def _backend(self, tmp_path: Path) -> tuple[ArknightsBackend, Path]:
+        manifest = _multi_manifest(tmp_path, "Arknights_EN", self.GAME_FILES)
+        return _ak(tmp_path, {"manifest_file": str(manifest)}), manifest
+
+    def test_interrupted_install_is_not_reported_installed(self, tmp_path, monkeypatch):
+        backend, _manifest = self._backend(tmp_path)
+
+        def interrupted(man, d, emit=None, cancel=None, **kw):
+            _write_files(Path(d), self.GAME_FILES, stop_after="Arknights.exe")
+            return {"downloaded": 1, "skipped": 0}
+
+        monkeypatch.setattr(ak.yostar, "sync", interrupted)
+        with pytest.raises(Cancelled):
+            backend.install()
+
+        status = backend.status()
+        assert status.state == "not_installed"
+        assert "incomplete" in status.message.lower()
+        report = backend.verify()
+        assert report["verified"] is False
+        assert "all checks passed" not in report["message"].lower()
+
+    def test_interrupted_update_is_not_reported_installed(self, tmp_path, monkeypatch):
+        backend, _manifest = self._backend(tmp_path)
+        monkeypatch.setattr(
+            ak.yostar,
+            "sync",
+            lambda man, d, emit=None, cancel=None, **kw: (
+                _write_files(Path(d), self.GAME_FILES)
+                or {"downloaded": 2, "skipped": 0}
+            ),
+        )
+        backend.install()
+        assert backend.status().state == "installed"
+
+        def interrupted(man, d, emit=None, cancel=None, **kw):
+            _write_files(Path(d), {"Arknights.exe": b"MZ2"}, stop_after="Arknights.exe")
+            return {"downloaded": 1, "skipped": 0}
+
+        monkeypatch.setattr(ak.yostar, "sync", interrupted)
+        with pytest.raises(Cancelled):
+            backend.update()
+
+        status = backend.status()
+        assert status.state == "not_installed"
+        assert "incomplete" in status.message.lower()
+
+    def test_completed_install_clears_the_marker_and_status_uses_the_launch_target(
+        self, tmp_path, monkeypatch
+    ):
+        backend, _manifest = self._backend(tmp_path)
+        monkeypatch.setattr(
+            ak.yostar,
+            "sync",
+            lambda man, d, emit=None, cancel=None, **kw: (
+                _write_files(Path(d), self.GAME_FILES)
+                or {"downloaded": 2, "skipped": 0}
+            ),
+        )
+        backend.install()
+
+        assert not (backend.install_dir() / ak.INSTALL_MARKER).exists()
+        status = backend.status()
+        assert status.state == "installed"
+        assert status.data["exe"] == str(backend.direct_target())
+        assert backend.verify()["verified"] is True
+
+    def test_verify_names_a_missing_game_file(self, tmp_path, monkeypatch):
+        backend, _manifest = self._backend(tmp_path)
+        monkeypatch.setattr(
+            ak.yostar,
+            "sync",
+            lambda man, d, emit=None, cancel=None, **kw: (
+                _write_files(Path(d), self.GAME_FILES)
+                or {"downloaded": 2, "skipped": 0}
+            ),
+        )
+        backend.install()
+        (backend.install_dir() / "data" / "big.pak").unlink()
+
+        report = backend.verify()
+        assert report["verified"] is False
+        assert report["checks"]["files"] is False
+        assert "big.pak" in report["message"]
+
+    def test_status_ignores_an_old_launcher_elsewhere_in_the_prefix(self, tmp_path):
+        manifest = _manifest_file(tmp_path, "Arknights_EN")
+        new_dir = tmp_path / "new-install"
+        backend = _ak(
+            tmp_path,
+            {
+                "manifest_file": str(manifest),
+                "install_dir": str(new_dir),
+            },
+        )
+        write_exe(
+            backend.prefix() / ak.DEFAULT_INSTALL_SUBDIR / "Arknights.exe",
+            "MZ",
+        )
+
+        status = backend.status()
+        assert status.state == "not_installed"
+        assert status.data["exe"] == str(backend.direct_target())
+
+        write_exe(backend.direct_target(), "MZ")
+        assert backend.status().state == "installed"
+        (backend.install_dir() / ak.INSTALL_MARKER).write_text("x")
+        status = backend.status()
+        assert status.state == "not_installed"
+        assert "incomplete" in status.message.lower()
+
+
+class TestLegacyDirectInstall:
+    def test_install_from_before_the_marker_still_counts_as_installed(self, tmp_path):
+        manifest = _multi_manifest(tmp_path, "Arknights_EN", {"Arknights.exe": b"MZ"})
+        backend = _ak(tmp_path, {"manifest_file": str(manifest)})
+        _write_files(backend.install_dir(), {"Arknights.exe": b"MZ"})
+
+        assert backend.status().state == "installed"
+        assert backend.verify()["verified"] is True
+
+    def test_verify_offline_does_not_blame_the_files(self, tmp_path):
+        backend = _ak(tmp_path, {"manifest_file": str(tmp_path / "missing.json")})
+        _write_files(backend.install_dir(), {"Arknights.exe": b"MZ"})
+
+        report = backend.verify()
+        assert report["verified"] is True
+        assert "could not compare" in report["message"]

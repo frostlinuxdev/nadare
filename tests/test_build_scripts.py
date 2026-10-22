@@ -9,6 +9,7 @@ flagged; each one fails if the corresponding bug is reintroduced.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -34,14 +35,23 @@ def _maintainer_doc(rel: str) -> str:
 # 07-3 — CI exists for the Nadare repo itself
 # ---------------------------------------------------------------------------
 class TestCIWorkflow:
-    def test_workflow_runs_pytest_and_ruff_on_both_interpreters(self):
-        workflow = _REPO_ROOT / ".forgejo" / "workflows" / "ci.yml"
+    @pytest.mark.parametrize(
+        "rel",
+        [".forgejo/workflows/ci.yml", ".github/workflows/ci.yml"],
+    )
+    def test_workflow_runs_pytest_and_ruff_on_both_interpreters(self, rel):
+        workflow = _REPO_ROOT / rel
         assert workflow.is_file(), "no CI workflow for the repository itself"
         text = workflow.read_text(encoding="utf-8")
         assert "python -m pytest tests -q" in text
         assert "ruff check src tests packaging scripts" in text
         assert '"3.12"' in text and '"3.13"' in text
         assert "QT_QPA_PLATFORM: offscreen" in text
+
+    def test_forgejo_and_github_workflows_are_byte_identical(self):
+        forgejo = (_REPO_ROOT / ".forgejo" / "workflows" / "ci.yml").read_bytes()
+        github = (_REPO_ROOT / ".github" / "workflows" / "ci.yml").read_bytes()
+        assert forgejo == github, "update both workflow files together"
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +252,70 @@ class TestAppimageSmokeScript:
 
 
 # ---------------------------------------------------------------------------
+# #310 — the AppImage bundles the Qt xcb platform stack
+# ---------------------------------------------------------------------------
+def _copy_system_libs_calls() -> list[str]:
+    """Every top-level ``copy_system_libs`` invocation, continuations joined."""
+    calls: list[str] = []
+    current: list[str] | None = None
+    for line in _text("scripts/build_appimage.sh").splitlines():
+        if line.startswith("copy_system_libs "):
+            current = [line]
+        elif current is not None:
+            current.append(line)
+        if current is not None and not line.rstrip().endswith("\\"):
+            calls.append(" ".join(current))
+            current = None
+    return calls
+
+
+class TestBundledXcbPlatform:
+    """PyInstaller already bundles the xcb stack; guard that it stays bundled."""
+
+    REQUIRED = (
+        "libxkbcommon-x11.so.0",
+        "libxcb-cursor.so.0",
+        "libxcb-icccm.so.4",
+        "libxcb-util.so.1",
+        "libxcb-image.so.0",
+        "libxcb-keysyms.so.1",
+        "libxcb-render-util.so.0",
+        "libxcb-xkb.so.1",
+        "libxcb-shape.so.0",
+        "libxcb-sync.so.1",
+        "libxcb-xfixes.so.0",
+        "libxcb-randr.so.0",
+        "libxcb-shm.so.0",
+        "libxcb-render.so.0",
+    )
+
+    def test_copy_system_libs_does_not_sigpipe_ldconfig(self):
+        """awk exiting at the first match SIGPIPEs ldconfig; with pipefail that is exit 141."""
+        script = _text("scripts/build_appimage.sh")
+        assert "set -euo pipefail" in script or "pipefail" in script
+        assert "{ print $NF; exit }" not in script
+        assert "!done" in script
+
+    def test_smoke_script_runs_the_gui_on_xcb_under_xvfb(self):
+        script = _text("scripts/test_appimage.sh")
+        assert "command -v Xvfb" in script
+        assert "xvfb-run -a" in script
+        assert "QT_QPA_PLATFORM=xcb" in script
+        assert "NADARE_SMOKE_EXIT_MS=2000" in script
+
+    def test_smoke_script_checks_the_bundled_xcb_libraries_statically(self):
+        script = _text("scripts/test_appimage.sh")
+        for lib in self.REQUIRED:
+            assert lib in script, f"{lib} must be checked inside the AppImage"
+
+    def test_readme_no_longer_says_the_xcb_libraries_are_not_bundled(self):
+        readme = _text("README.md")
+        assert "does **not** bundle" not in readme
+        assert "bundles the GL loader" in readme
+
+
+
+# ---------------------------------------------------------------------------
 # 07-9 — dev.sh setup uses the committed lock
 # ---------------------------------------------------------------------------
 class TestReleaseNaming:
@@ -337,3 +411,11 @@ class TestDocsMatchReality:
     def test_contributing_does_not_call_the_recipe_current(self):
         contributing = _text("CONTRIBUTING.md")
         assert "AppImageBuilder" not in contributing
+
+
+def test_certifi_is_pinned_past_the_emsign_incident():
+    """curl_cffi trusts certifi's bundle; 2026.10.19 dropped the compromised eMudhra root."""
+    pin = re.search(r"^certifi==([\d.]+)$", _text("requirements.txt"), re.M)
+    assert pin is not None, "requirements.txt must pin certifi"
+    assert tuple(int(p) for p in pin.group(1).split(".")) >= (2026, 10, 19)
+    assert "certifi>=2026.10.19" in _text("pyproject.toml")

@@ -145,7 +145,8 @@ def _clear_release_cache() -> None:
 def test_runner_info_flags_stale_and_outdated(
     fake_runners_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runner = _make_runner(fake_runners_dir, "GE-Proton11-7", version="GE-Proton11-7")
+    # An untested older build (not the pinned GE-Proton11-7).
+    runner = _make_runner(fake_runners_dir, "GE-Proton11-6", version="GE-Proton11-6")
     monkeypatch.setattr(
         runners.download,
         "fetch_json",
@@ -156,6 +157,7 @@ def test_runner_info_flags_stale_and_outdated(
     assert info["latest_tag"] == "GE-Proton11-9"
     assert info["stale"] is True
     assert info["outdated"] is True
+    assert info["recommended"] is False
 
 
 def test_runner_info_fresh_runner_is_not_stale(
@@ -579,3 +581,13 @@ def test_install_checks_runners_dir_space_with_multiplier(
     )
     runners.install("ge", latest=True)
     assert (paths.runners_dir(), 3 * 1024) in calls
+
+
+@pytest.mark.parametrize("payload", [[], {"assets": "nope"}, {"assets": [1, "x", None]}, "str"])
+def test_malformed_release_json_is_a_runner_error_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch, payload
+) -> None:
+    """#246: odd GitHub JSON must not abort callers (doctor) with AttributeError."""
+    monkeypatch.setattr(runners.download, "fetch_json", lambda *a, **k: payload)
+    with pytest.raises(runners.RunnerError):
+        runners._release(runners._spec("ge"), None)

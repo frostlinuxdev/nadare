@@ -409,6 +409,16 @@ QCheckBox::indicator {{
 }}
 QCheckBox::indicator:hover {{ border-color: {BORDER_HI}; }}
 QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; {_CHECK_IMAGE} }}
+QTableWidget {{
+    background: {FIELD_BG}; color: {TEXT}; gridline-color: {BORDER};
+    border: 1px solid {BORDER}; border-radius: 10px;
+}}
+QTableWidget::item {{ padding: 6px 8px; }}
+QHeaderView::section {{
+    background: {FIELD_BG}; color: {TEXT_SOFT}; border: none;
+    border-bottom: 1px solid {BORDER}; padding: 6px 8px;
+}}
+QTableCornerButton::section {{ background: {FIELD_BG}; border: none; }}
 QRadioButton {{ spacing: 9px; color: {TEXT_SOFT}; }}
 QRadioButton:checked {{ color: {TEXT}; }}
 QRadioButton:disabled {{ color: {TEXT_SOFT}; }}
@@ -503,6 +513,18 @@ def apply_theme(app) -> None:
     except Exception:  # noqa: BLE001 - a missing font must never block startup
         pass
     app.setStyleSheet(STYLESHEET)
+    try:
+        from PyQt6.QtGui import QPalette
+        from PyQt6.QtWidgets import QApplication
+
+        if isinstance(app, QApplication):
+            # Links in rich-text labels default to dark blue: unreadable on this theme.
+            palette = app.palette()
+            palette.setColor(QPalette.ColorRole.Link, QColor(ACCENT_HI))
+            palette.setColor(QPalette.ColorRole.LinkVisited, QColor(ACCENT_HI))
+            app.setPalette(palette)
+    except Exception:  # noqa: BLE001 - cosmetic only
+        pass
 
 
 def repolish(widget) -> None:
@@ -706,6 +728,7 @@ BADGE_STATES = {
     "login": ("info", "LOGIN"),
     "verifying": ("info", "VERIFY"),
     "not_installed": ("muted", "NOT INSTALLED"),
+    "checking": ("muted", "CHECKING…"),
     "error": ("bad", "ERROR"),
 }
 

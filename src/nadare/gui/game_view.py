@@ -41,11 +41,11 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core import paths
-from ..core.backends import Status, page_notice
+from ..core.backends import Status, page_notice, supports_news, supports_update
 from ..core.events import Event
 from ..core.news import CREDIT
 from .images import ImageLoader
-from .library import profile_art_candidates, profile_title
+from .library import backend_label, profile_art_candidates, profile_title
 from .theme import badge_style, cover_pixmap, set_state_property
 
 
@@ -67,12 +67,33 @@ PRIMARY_LABELS = {
     "launch": "LAUNCH",
     "stop": "STOP",
     "settings": "SET GAME EXE IN SETTINGS",
+    "retry": "RETRY",
 }
+
+#: User-facing operation names used in dialogs (never the raw operation id).
+OPERATION_TITLES = {
+    "install": "Installing",
+    "update": "Updating",
+    "repair": "Repairing",
+    "remake_prefix": "Rebuilding the Wine prefix",
+    "launch": "Launching",
+    "verify": "Checking files",
+    "login": "Signing in",
+    "status": "Checking",
+    "remove": "Removing",
+}
+
+
+def operation_title(operation: str) -> str:
+    """Friendly title for ``operation``; unknown ids degrade readably."""
+    return OPERATION_TITLES.get(operation, operation.capitalize())
 
 #: Busy operation -> pill state shown while it runs.
 _BUSY_STATES = {
     "install": "installing",
     "update": "updating",
+    "repair": "repairing",
+    "remake_prefix": "rebuilding",
     "launch": "launching",
     "login": "login",
     "verify": "verifying",
@@ -97,6 +118,16 @@ _NEWS_THUMB_MAX_H = 240
 
 #: Operation banner height (px).
 _BANNER_H = 110
+
+#: A second click right after a button turns into CANCEL must not cancel the new job.
+_CANCEL_GRACE_S = 0.5
+
+
+#: Under the login QR: what to do, and the one safety rule for QR logins.
+_QR_SCAN_HINT = (
+    "Scan this QR code with the STOVE mobile app. "
+    "Only scan a code shown here, in your own Nadare window."
+)
 
 
 class HeroCard(QFrame):
@@ -474,11 +505,20 @@ class _QrPanel(QFrame):
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setMinimumSize(self.QR_SIZE + 8, self.QR_SIZE + 8)
         layout.addWidget(self.label)
-        self.hint = QLabel("Scan this QR code with the STOVE mobile app.")
+        self.hint = QLabel(_QR_SCAN_HINT)
         self.hint.setObjectName("Hint")
         self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.hint.setWordWrap(True)
         layout.addWidget(self.hint)
+        # Fallback when STOVE sends a login link but no QR image: the URL is
+        # selectable so it can still be opened in the phone app.
+        self.link = QLabel()
+        self.link.setObjectName("Hint")
+        self.link.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.link.setWordWrap(True)
+        self.link.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.link.hide()
+        layout.addWidget(self.link)
         # Where the decision is made: tick it before approving the scan.
         self.remember = QCheckBox(_REMEMBER_TEXT)
         self.remember.setToolTip(_REMEMBER_TIP)
@@ -514,7 +554,7 @@ class GameView(QWidget):
 
     #: Text shown under the login QR for each coarse auth state.
     _QR_HINTS = {
-        "scan": "Scan this QR code with the STOVE mobile app.",
+        "scan": _QR_SCAN_HINT,
         "waiting": "Waiting for you to approve the scan in the STOVE app…",
         "approved": "Approved — finishing login…",
         "expired": "QR code expired. Press Log in again to get a new one.",
@@ -528,6 +568,7 @@ class GameView(QWidget):
         self._profile_data: dict[str, Any] = {}
         self._status: Status | None = None
         self._busy_op: str | None = None
+        self._primary_grace_until = 0.0
         self._news_shown = False  # intended news visibility (hidden while busy)
         self._started_at = 0.0
         self._console_expanded = True
@@ -583,9 +624,9 @@ class GameView(QWidget):
 
         copy = QVBoxLayout()
         copy.setSpacing(9)
-        kicker = QLabel("NOW PLAYING")
-        kicker.setObjectName("HeroKicker")
-        copy.addWidget(kicker)
+        self.kicker = QLabel("NOT PLAYED YET")
+        self.kicker.setObjectName("HeroKicker")
+        copy.addWidget(self.kicker)
 
         self.title = QLabel("")
         self.title.setObjectName("HeroTitle")
@@ -647,13 +688,30 @@ class GameView(QWidget):
         self.update_btn = QPushButton("Update")
         self.update_btn.setObjectName("GhostButton")
         self.update_btn.clicked.connect(lambda: self.action_requested.emit("update"))
-        self.verify = QPushButton("Verify")
+        self.verify = QPushButton("Check game files")
         self.verify.setObjectName("GhostButton")
+        self.verify.setToolTip(
+            "Compares the installed game files with the official list. "
+            "Does not change or download anything."
+        )
         self.verify.clicked.connect(lambda: self.action_requested.emit("verify"))
+        self.repair_btn = QPushButton("Repair files")
+        self.repair_btn.setObjectName("GhostButton")
+        self.repair_btn.setToolTip(
+            "Re-check every game file and re-download the ones that are missing or damaged"
+        )
+        self.repair_btn.clicked.connect(lambda: self.action_requested.emit("repair"))
         self.logs = QPushButton("Open logs")
         self.logs.setObjectName("GhostButton")
         self.logs.clicked.connect(self._open_logs)
-        for button in (self.login, self.logout, self.update_btn, self.verify, self.logs):
+        for button in (
+            self.login,
+            self.logout,
+            self.update_btn,
+            self.verify,
+            self.repair_btn,
+            self.logs,
+        ):
             secondary.addWidget(button)
         secondary.addStretch(1)
         copy.addLayout(secondary)
@@ -697,7 +755,17 @@ class GameView(QWidget):
         self.news_hint = QLabel("News unavailable")
         self.news_hint.setObjectName("Muted")
         news_head.addWidget(self.news_hint, 0, Qt.AlignmentFlag.AlignRight)
+        self.news_retry = QPushButton("Retry")
+        self.news_retry.setObjectName("GhostButton")
+        self.news_retry.setVisible(False)
+        self.news_retry.clicked.connect(lambda: self.action_requested.emit("news"))
+        news_head.addWidget(self.news_retry, 0, Qt.AlignmentFlag.AlignRight)
         news_layout.addLayout(news_head)
+        self.news_reason = QLabel("")
+        self.news_reason.setObjectName("Muted")
+        self.news_reason.setWordWrap(True)
+        self.news_reason.setVisible(False)
+        news_layout.addWidget(self.news_reason)
         self.news_grid = QGridLayout()
         self.news_grid.setContentsMargins(0, 0, 0, 0)
         self.news_grid.setHorizontalSpacing(10)
@@ -803,10 +871,17 @@ class GameView(QWidget):
         self._profile_seq += 1
         self._media_seq += 1
         self._status = None
+        # Switching games ends the previous game's operation on this page. The
+        # timer/elapsed clock belonged to that page state; MainWindow restores
+        # set_busy below when the *new* profile is itself running an operation.
+        self._timer.stop()
+        self._started_at = 0.0
         self._busy_op = None
+        self._primary_grace_until = 0.0
         title = profile_title(name, profile)
         self.title.setText(title)
-        self.backend_label.setText(str(profile.get("backend") or "").upper())
+        self.kicker.setText("NOT PLAYED YET")
+        self.backend_label.setText(backend_label(str(profile.get("backend") or "")))
         self._set_page_notice(str(profile.get("backend") or ""))
         self.version_label.setText("")
         self.hero.set_source(None)
@@ -816,7 +891,7 @@ class GameView(QWidget):
         self.elapsed_label.setText("")
         self.progress.setVisible(False)
         self.progress.setValue(0)
-        self._set_badge("unknown", "")
+        self._set_badge("checking", "")
         self._set_detail("")
         self._hide_qr()
         self._clear_news()
@@ -891,6 +966,12 @@ class GameView(QWidget):
 
     def _apply_status(self, status: Status) -> None:
         self._status = status
+        if status.running or status.state == "running":
+            self.kicker.setText("NOW PLAYING")
+        elif status.state == "not_installed":
+            self.kicker.setText("NOT PLAYED YET")
+        else:
+            self.kicker.setText("GAME")
         self._set_badge(status.state, status.message)
         self.version_label.setText(_version_text(status.version))
         self._set_account(status)
@@ -923,7 +1004,7 @@ class GameView(QWidget):
         if status.running or status.state == "running":
             return "stop"
         if status.state == "error":
-            return None
+            return "retry"
         if status.state == "not_installed":
             if (status.data or {}).get("can_install") is False:
                 return "settings"
@@ -944,7 +1025,13 @@ class GameView(QWidget):
             self.primary.setObjectName("Danger")
             self.primary.setEnabled(True)
             self._polish(self.primary)
-            for button in (self.login, self.logout, self.update_btn, self.verify):
+            for button in (
+                self.login,
+                self.logout,
+                self.update_btn,
+                self.verify,
+                self.repair_btn,
+            ):
                 button.setEnabled(False)
             return
 
@@ -957,7 +1044,8 @@ class GameView(QWidget):
             self.primary.setEnabled(False)
         else:
             self.primary.setText(PRIMARY_LABELS.get(op, op.upper()))
-            self.primary.setEnabled(op != "settings")
+            # Even "SET GAME EXE IN SETTINGS" is a real action: it opens Settings.
+            self.primary.setEnabled(True)
 
         status = self._status
         installed = bool(status and status.state == "installed")
@@ -966,10 +1054,20 @@ class GameView(QWidget):
         # Log out only needs an idle account: it must be reachable even when the
         # game is not installed (e.g. to drop a saved login).
         self.logout.setEnabled(bool(status) and not running)
-        self.update_btn.setEnabled(installed and not running)
+        can_update = supports_update(str(self._profile_data.get("backend") or ""))
+        if ((status.data if status else {}) or {}).get("can_update") is False:
+            can_update = False
+        self.update_btn.setEnabled(installed and not running and can_update)
+        self.update_btn.setToolTip(
+            ""
+            if can_update
+            else "Nadare cannot update this game; update it in Steam or its own launcher."
+        )
         self.verify.setEnabled(
             bool(status) and not running and status.state not in ("error", "not_installed")
         )
+        can_repair = bool(((status.data if status else {}) or {}).get("can_repair"))
+        self.repair_btn.setEnabled(self.verify.isEnabled() and can_repair)
 
     def set_account_controls(self, supported: bool) -> None:
         """Show account controls only for backends that log in."""
@@ -1004,17 +1102,28 @@ class GameView(QWidget):
                 # The button reads STOP: run the backend's stop operation rather
                 # than the generic cancel path (which is not backend-specific).
                 self.action_requested.emit("stop")
+            elif time.monotonic() < self._primary_grace_until:
+                # The first click of a double-click already started the job; the
+                # button turned into CANCEL under the user's finger.
+                return
             else:
                 self.cancel_requested.emit()
             return
         op = self._primary_op()
-        if op:
+        if op == "retry":
+            self.action_requested.emit("status")
+        elif op == "settings":
+            self.settings_requested.emit()
+        elif op:
             self.action_requested.emit(op)
 
     # ---- lifecycle ---------------------------------------------------------
     def set_busy(self, operation: str) -> None:
         """Mark ``operation`` as running and start the elapsed clock."""
         self._busy_op = operation
+        self._primary_grace_until = (
+            time.monotonic() + _CANCEL_GRACE_S if operation != "launch" else 0.0
+        )
         self.news_frame.setVisible(False)
         self._started_at = time.time()
         self.progress.setRange(0, 100)
@@ -1030,10 +1139,19 @@ class GameView(QWidget):
         self._set_console_expanded(True)
         self._refresh_actions()
 
+    def _clear_busy_progress(self) -> None:
+        """Return the progress area to its idle shape when an operation ends."""
+        self.progress.setRange(0, 100)  # never leave the busy animation running
+        self.progress.setValue(0)
+        self.progress.setVisible(False)
+        self.step_label.setText("")
+        self.elapsed_label.setText("")
+        self._started_at = 0.0
+
     def finish(self, operation: str, exit_code: int) -> None:
         """Stop the clock and report the result."""
         self._busy_op = None
-        self.progress.setRange(0, 100)  # never leave the busy animation running
+        self._clear_busy_progress()
         self.news_frame.setVisible(self._news_shown)
         self._timer.stop()
         self._hide_qr()
@@ -1046,12 +1164,13 @@ class GameView(QWidget):
         if exit_code != 0:
             self.show_error(
                 "Operation failed",
-                f"{operation} finished with exit code {exit_code}.\n"
-                "See the output above or Open logs for details.",
+                f"{operation_title(operation)} did not finish (exit code {exit_code}). "
+                "Open the logs for details.",
             )
 
     def fail(self, message: str) -> None:
         self._busy_op = None
+        self._clear_busy_progress()
         self.news_frame.setVisible(self._news_shown)
         self._timer.stop()
         self._hide_qr()
@@ -1061,6 +1180,7 @@ class GameView(QWidget):
 
     def cancelled(self) -> None:
         self._busy_op = None
+        self._clear_busy_progress()
         self.news_frame.setVisible(self._news_shown)
         self._timer.stop()
         self._hide_qr()
@@ -1073,7 +1193,7 @@ class GameView(QWidget):
         if self._status is not None:
             self._set_badge(self._status.state, self._status.message)
         else:
-            self._set_badge("unknown", "")
+            self._set_badge("checking", "")
 
     def _tick(self) -> None:
         if not self._started_at:
@@ -1088,8 +1208,10 @@ class GameView(QWidget):
         if kind == "step":
             self.step_label.setText(event.message or "")
             data = event.data or {}
-            if data.get("png"):
-                self._show_qr(data.get("png"))
+            png = data.get("png")
+            url = data.get("url")
+            if not self._show_qr(png) and url:
+                self._show_qr_link(str(url))
             if data.get("qr_state"):
                 self._set_qr_state(str(data["qr_state"]))
             if event.progress is not None:
@@ -1123,13 +1245,13 @@ class GameView(QWidget):
         self.progress.setVisible(True)
         self.progress.setValue(max(0, min(100, int(round(value * 100)))))
 
-    def _show_qr(self, path: str | None) -> None:
+    def _show_qr(self, path: str | None) -> bool:
         """Render the STOVE login QR from ``event.data['png']`` (host path)."""
         if not path:
-            return
+            return False
         pixmap = QPixmap(str(path))
         if pixmap.isNull():
-            return
+            return False
         size = _QrPanel.QR_SIZE
         if pixmap.width() != size:
             # Nearest-neighbour keeps the modules crisp, which scanners prefer.
@@ -1139,8 +1261,23 @@ class GameView(QWidget):
                 else Qt.TransformationMode.SmoothTransformation
             )
             pixmap = pixmap.scaledToWidth(size, mode)
+        self.qr_frame.link.hide()
+        self.qr_label.show()
         self.qr_label.setPixmap(pixmap)
         self.qr_hint.setText(self._QR_HINTS["scan"])
+        self.qr_frame.show()
+        self.qr_frame.raise_()
+        self.qr_frame.reposition()
+        return True
+
+    def _show_qr_link(self, url: str) -> None:
+        """Show the login link when the QR image is missing or unreadable."""
+        self.qr_label.hide()
+        self.qr_hint.setText(
+            "Could not display the QR code. Open this link in the STOVE app on your phone:"
+        )
+        self.qr_frame.link.setText(url)
+        self.qr_frame.link.show()
         self.qr_frame.show()
         self.qr_frame.raise_()
         self.qr_frame.reposition()
@@ -1160,6 +1297,8 @@ class GameView(QWidget):
     def _hide_qr(self) -> None:
         self.qr_frame.hide()
         self.qr_label.clear()
+        self.qr_frame.link.clear()
+        self.qr_frame.link.hide()
 
     # ---- news ---------------------------------------------------------------
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
@@ -1228,16 +1367,27 @@ class GameView(QWidget):
             self.news_rows.append(card)
         if self.news_rows:
             self.news_hint.setVisible(False)
+            self.news_reason.setVisible(False)
+            self.news_retry.setVisible(False)
             self._set_news_visible(True)
             self._relayout_news()
             if self._busy_op is None:
                 self._set_console_expanded(False)
         else:
+            has_feed = supports_news(str(self._profile_data.get("backend") or ""))
             self.news_hint.setText("News unavailable")
             self.news_hint.setVisible(True)
+            self.news_reason.setText(
+                "There is no news to show right now."
+                if available
+                else "Nadare could not reach the publisher's news feed. "
+                "Check your connection, then try again."
+            )
+            self.news_reason.setVisible(True)
+            self.news_retry.setVisible(has_feed)
             # Nothing to show: hide the section entirely only when the backend
-            # has no feed at all; otherwise keep the muted line and the log.
-            self._set_news_visible(available)
+            # has no feed at all; otherwise keep the reason and Retry, plus the log.
+            self._set_news_visible(available or has_feed)
             self._set_console_expanded(True)
 
     def _set_news_visible(self, shown: bool) -> None:
@@ -1256,6 +1406,9 @@ class GameView(QWidget):
             while self.news_grid.count():
                 self.news_grid.takeAt(0)
         self.news_hint.setVisible(True)
+        self.news_reason.clear()
+        self.news_reason.setVisible(False)
+        self.news_retry.setVisible(False)
         self._set_news_visible(False)
 
     def _set_console_expanded(self, expanded: bool) -> None:

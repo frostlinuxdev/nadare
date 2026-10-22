@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
+import pytest
+
 from nadare.backends.fgo import news
 
 SAMPLE_ARTICLE = "/iframe/2026/1004_sugoroku_qbpu/"
@@ -277,3 +279,22 @@ def test_load_uses_the_hero_key(monkeypatch) -> None:
     assert result.hero == "/tmp/fgo-test-official-hero"
     assert calls[-1] == newest["image"]
 
+
+
+@pytest.mark.parametrize(
+    "article",
+    ["@evil.example/x", "//evil.example/x", "/ok/../../etc", "/a\\@b", "no-leading-slash"],
+)
+def test_feed_article_that_could_leave_the_publisher_host_is_dropped(article):
+    fetched: list[str] = []
+
+    def get(url: str):
+        fetched.append(url)
+        if url == news.FEED_URL:
+            return _feed([_entry("T", "2026-10-04T00:00:00Z", "NEWS", article)])
+        return b"<html></html>"
+
+    result = news.fetch_fgo_news(get)
+
+    assert result.items == []
+    assert fetched == [news.FEED_URL]

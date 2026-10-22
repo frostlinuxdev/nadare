@@ -17,10 +17,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
+import shutil
+import signal
+import tempfile
+import threading
+import time
 import urllib.parse
 import urllib.request
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -53,6 +60,14 @@ _ACCEPTED_EXIT_CODES = frozenset({0, 1638, 3010})
 
 #: The installer's on-disk name inside a backend's cache directory.
 _INSTALLER_NAME = "vc_redist.x64.exe"
+
+log = logging.getLogger(__name__)
+
+#: One plain-language line for any failed verification; the hash details go to
+#: the log so the dialog stays actionable.
+_VERIFY_FAILED = (
+    "Could not verify the Microsoft Visual C++ download. Check your connection and try again."
+)
 
 
 def _microsoft_host(host: str) -> bool:
@@ -126,6 +141,22 @@ def overridden(
     return False
 
 
+def _index_payload(url: str) -> Any:
+    """Fetch the small index JSON; redirects must stay https on the same host.
+
+    The index is the trust anchor for extra installer hashes, so it goes through
+    the shared safe opener (no https->http downgrade, no hop to another host).
+    """
+    origin = (urllib.parse.urlparse(url).hostname or "").lower()
+
+    def _hop_ok(target: str) -> bool:
+        hop = urllib.parse.urlparse(target)
+        return hop.scheme == "https" and (hop.hostname or "").lower() == origin
+
+    with _net.http_open(url, timeout=10, redirect_allowed=_hop_ok) as r:
+        return json.loads(r.read(65536).decode("utf-8"))
+
+
 def index_pins() -> set[str]:
     """Installer hashes published in the Nadare index (empty on any error).
 
@@ -136,19 +167,20 @@ def index_pins() -> set[str]:
     if not url.startswith("https://"):
         return set()
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "nadare"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            payload = json.loads(r.read(65536).decode("utf-8"))
+        payload = _index_payload(url)
         hashes = payload["sha256"]
     except Exception:
         return set()
     if not isinstance(hashes, list):
         return set()
-    return {
+    # Validate first, cap after: junk entries at the front must not crowd out
+    # the real hashes behind them.
+    valid = [
         h.strip().lower()
-        for h in hashes[:VCREDIST_INDEX_MAX_HASHES]
+        for h in hashes
         if isinstance(h, str) and _SHA256_RE.fullmatch(h.strip().lower())
-    }
+    ]
+    return set(valid[:VCREDIST_INDEX_MAX_HASHES])
 
 
 def index_source() -> str:
@@ -161,9 +193,7 @@ def index_source() -> str:
     if not url.startswith("https://"):
         return ""
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "nadare"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            payload = json.loads(r.read(65536).decode("utf-8"))
+        payload = _index_payload(url)
         source = payload["url"]
     except Exception:
         return ""
@@ -189,9 +219,8 @@ def verify(
     """Refuse an installer that matches no accepted pin (deletes it)."""
     pin = resolve_pin(profile, constant)
     if not pin or not _SHA256_RE.fullmatch(pin):
-        raise BackendError(
-            "the configured Visual C++ SHA-256 is missing or malformed; refusing"
-        )
+        log.warning("Visual C++ installer pin is missing or malformed: %r", pin)
+        raise BackendError(_VERIFY_FAILED)
     digest = _sha256_file(path)
     if digest == pin:
         return
@@ -204,8 +233,16 @@ def verify(
             raise Cancelled()
         if digest in pins:
             return
+    log.warning(
+        "Visual C++ installer did not match any accepted hash "
+        "(got sha256=%s, pinned sha256=%s, index hashes=%s, overridden=%s)",
+        digest,
+        pin,
+        sorted(pins) if not is_overridden else [],
+        is_overridden,
+    )
     path.unlink(missing_ok=True)
-    raise BackendError(f"vc_redist.x64.exe failed its SHA-256 check: {path.name}")
+    raise BackendError(_VERIFY_FAILED)
 
 
 def download(
@@ -234,7 +271,11 @@ def download(
         response = _net.http_open(url, timeout=60, redirect_allowed=_hop_ok)
     except _net.DownloadError as exc:
         raise BackendError(f"Visual C++ download failed: {exc}") from exc
-    with response as r, open(tmp, "wb") as f:
+    # The .part file may be pre-planted in a writable cache: never follow a symlink or
+    # reuse someone else's file; create it fresh with O_EXCL and mode 0600.
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with response as r, os.fdopen(fd, "wb") as f:
         final = urllib.parse.urlparse(r.geturl())
         host = (final.hostname or "").lower()
         if final.scheme != "https" or not _microsoft_host(host):
@@ -309,7 +350,9 @@ def install(
         except BackendError:
             _unlink_quietly(inst)
     if not (inst.is_file() and inst.stat().st_size):
-        tmp = inst.with_suffix(".part")
+        # A unique sibling name: two concurrent ``ensure``/``install`` calls in
+        # one process (or two processes) must never share/clobber one .part.
+        tmp = inst.with_name(f".{inst.name}.{os.getpid()}.{uuid.uuid4().hex}.part")
         urls = [VCREDIST_URL]
         if not over_fn():
             if cancel.cancelled:
@@ -334,9 +377,142 @@ def install(
         if failure is not None:
             raise failure
     emit(Event("step", "Installing the Visual C++ runtime into the prefix…"))
-    code = run_in_prefix([str(inst), "/install", "/quiet", "/norestart"])
+    # Run a private copy: the cache is writable by anything running as this user, so
+    # the file that was verified must not be the one that is executed later.
+    # (Under the cache, not /tmp: a Proton container may not share /tmp.)
+    private = Path(tempfile.mkdtemp(prefix=".run-", dir=cache_dir))
+    try:
+        runnable = private / _INSTALLER_NAME
+        shutil.copyfile(inst, runnable)
+        runnable.chmod(0o500)
+        _verify(runnable)
+        code, timed_out = _run_with_timeout(
+            run_in_prefix, [str(runnable), "/install", "/quiet", "/norestart"]
+        )
+    finally:
+        shutil.rmtree(private, ignore_errors=True)
+    if timed_out:
+        minutes = int(_install_timeout() // 60) or 1
+        raise BackendError(
+            f"the Visual C++ installer did not finish within {minutes} minute(s) and was "
+            "stopped; it will be tried again at the next launch"
+        )
     if code not in _ACCEPTED_EXIT_CODES:
         raise BackendError(f"the Visual C++ installer exited {code}")
+
+
+#: How long the redistributable may run before it is stopped (it normally takes
+#: seconds; it can sit idle forever when Wine has no display to draw on).
+INSTALL_TIMEOUT_SECONDS = 600.0
+
+
+def _install_timeout() -> float:
+    """The installer time limit; ``NADARE_VCREDIST_TIMEOUT`` (seconds) overrides it."""
+    try:
+        value = float(os.environ.get("NADARE_VCREDIST_TIMEOUT", ""))
+    except ValueError:
+        return INSTALL_TIMEOUT_SECONDS
+    return value if value > 0 else INSTALL_TIMEOUT_SECONDS
+
+
+def _proc_stat_fields(proc_root: str, pid: int) -> tuple[int, int] | None:
+    """``(ppid, pgrp)`` for ``pid`` from ``/proc/<pid>/stat``, or ``None``."""
+    try:
+        with open(f"{proc_root}/{pid}/stat", encoding="utf-8") as handle:
+            data = handle.read()
+    except OSError:
+        return None
+    try:
+        # The comm (field 2) may contain spaces/parens; fields start after the
+        # last ')': state=(index 0), ppid=(1), pgrp=(2).
+        fields = data.rsplit(")", 1)[1].split()
+        return int(fields[1]), int(fields[2])
+    except (IndexError, ValueError):
+        return None
+
+
+def _descends_from(proc_root: str, pid: int, root: int) -> bool:
+    """True when ``pid`` is ``root`` or one of its descendants."""
+    seen: set[int] = set()
+    current = pid
+    while current > 0 and current not in seen:
+        if current == root:
+            return True
+        seen.add(current)
+        stat = _proc_stat_fields(proc_root, current)
+        if stat is None:
+            return False
+        current = stat[0]
+    return False
+
+
+def _stop_installer(proc_root: str = "/proc", *, root_pid: int | None = None) -> int:
+    """Stop only this launcher's redistributable processes (term, then kill).
+
+    ``run_in_prefix`` starts the installer in its own session, so signalling the
+    matching descendant's process group also stops the Wine helpers it spawned.
+    Merely matching the command line is not enough: another profile (or another
+    user's launcher) may be running the same redistributable at the same time.
+    """
+    own = os.getpid()
+    root = own if root_pid is None else root_pid
+    own_group = os.getpgrp()
+    pids: list[int] = []
+    groups: set[int] = set()
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return 0
+    for entry in entries:
+        if not entry.isdigit() or int(entry) == own:
+            continue
+        pid = int(entry)
+        try:
+            with open(f"{proc_root}/{entry}/cmdline", "rb") as handle:
+                cmdline = handle.read().replace(b"\0", b" ").lower()
+        except OSError:
+            continue
+        if _INSTALLER_NAME.lower().encode() not in cmdline or b"/quiet" not in cmdline:
+            continue
+        if not _descends_from(proc_root, pid, root):
+            continue
+        stat = _proc_stat_fields(proc_root, pid)
+        group = stat[1] if stat is not None else pid
+        if group <= 0 or group == own_group:
+            group = pid
+        if group == own_group:
+            continue  # never signal our own process group
+        pids.append(pid)
+        groups.add(group)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for group in groups:
+            try:
+                os.killpg(group, sig)
+            except OSError:
+                pass
+        if sig == signal.SIGTERM:
+            time.sleep(2.0)
+    return len(pids)
+
+
+def _run_with_timeout(
+    run_in_prefix: Callable[[list[str]], int], argv: list[str]
+) -> tuple[int, bool]:
+    """Run the installer; a watchdog stops it if it outlives the time limit."""
+    expired = threading.Event()
+
+    def _expire() -> None:
+        expired.set()
+        _stop_installer()
+
+    timer = threading.Timer(_install_timeout(), _expire)
+    timer.daemon = True
+    timer.start()
+    try:
+        code = run_in_prefix(argv)
+    finally:
+        timer.cancel()
+    return code, expired.is_set()
 
 
 def ensure(
@@ -396,7 +572,9 @@ def ensure(
     emit(
         Event(
             "status",
-            f"Visual C++ runtime not installed ({reason}): the game may stutter",
+            reason
+            if reason == _VERIFY_FAILED
+            else f"Visual C++ runtime not installed ({reason}): the game may stutter",
         )
     )
 

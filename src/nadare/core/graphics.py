@@ -262,7 +262,10 @@ def vulkan_note() -> str:
     """One-line warning for game status when DXVK cannot work here."""
     if dxvk_ok():
         return ""
-    return "Old Vulkan: try Renderer = OpenGL or the Proton-CachyOS runner"
+    return (
+        "Your graphics driver looks old for Vulkan games. If the game will not "
+        "start, open Settings and try the OpenGL renderer."
+    )
 
 
 # ---------------------------------------------------------------------------

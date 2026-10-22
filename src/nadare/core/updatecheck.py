@@ -10,14 +10,16 @@ by injecting ``fetch``, so the whole check is testable without a network.
 
 from __future__ import annotations
 
+import inspect
 import logging
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
-from . import download, hosting
+from . import download, hosting, sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +40,14 @@ _RELEASE_SITE_ALIASES = {"api.github.com": "github.com"}
 #: :func:`version_key` tuple: ``1`` for a final release, ``0`` for a pre-release.
 _PLAIN_TAIL_INDEX = -3
 
-__all__ = ["UpdateInfo", "check_latest", "is_prerelease", "newer", "version_key"]
+__all__ = [
+    "UpdateInfo",
+    "check_latest",
+    "is_prerelease",
+    "managed_updates",
+    "newer",
+    "version_key",
+]
 
 
 @dataclass(frozen=True)
@@ -142,8 +151,38 @@ def _release_link_allowed(html_url: Any, api_url: str) -> bool:
     return host == api_host or host == _RELEASE_SITE_ALIASES.get(api_host)
 
 
+def _same_host_redirect(original: str) -> Callable[[str], bool]:
+    """Refuse a redirect that leaves the original update host (M2)."""
+    host = _host_of(original)
+
+    def allowed(target: str) -> bool:
+        return bool(host) and _host_of(target) == host
+
+    return allowed
+
+
 def _default_fetch(url: str, timeout: int) -> Any:
+    # ``download.fetch_json`` accepts the redirect policy; a caller-injected
+    # replacement (tests, embedders) may still have the old two-keyword shape.
+    try:
+        params = inspect.signature(download.fetch_json).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callable
+        params = {}
+    if "redirect_allowed" in params:
+        return download.fetch_json(
+            url, timeout=timeout, redirect_allowed=_same_host_redirect(url)
+        )
     return download.fetch_json(url, timeout=timeout)
+
+
+def managed_updates() -> bool:
+    """True when a package manager (AUR, Flatpak) installs and updates Nadare.
+
+    Those builds must never send the user to a release page: updating means
+    ``pacman -Syu`` or ``flatpak update``. The packaging recipe sets the
+    environment marker; Flatpak is recognised by its sandbox as well.
+    """
+    return os.environ.get("NADARE_MANAGED_UPDATES") == "1" or sandbox.in_flatpak()
 
 
 def check_latest(

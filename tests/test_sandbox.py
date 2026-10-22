@@ -23,8 +23,8 @@ def test_in_flatpak_detection(monkeypatch, tmp_path):
 
 def test_host_argv_is_a_passthrough_outside_flatpak(monkeypatch):
     monkeypatch.setattr(sandbox, "in_flatpak", lambda: False)
-    argv = sandbox.host_argv(["waydroid", "status"], env={"A": "1"}, cwd="/x")
-    assert argv == ["waydroid", "status"]
+    argv = sandbox.host_argv(["mytool", "status"], env={"A": "1"}, cwd="/x")
+    assert argv == ["mytool", "status"]
 
 
 def test_host_argv_wraps_with_env_delta_and_cwd(monkeypatch):
@@ -47,27 +47,27 @@ def test_host_argv_wraps_with_env_delta_and_cwd(monkeypatch):
 
 def test_host_argv_without_env_or_cwd(monkeypatch):
     monkeypatch.setattr(sandbox, "in_flatpak", lambda: True)
-    assert sandbox.host_argv(["waydroid"]) == ["flatpak-spawn", "--host", "waydroid"]
+    assert sandbox.host_argv(["mytool"]) == ["flatpak-spawn", "--host", "mytool"]
 
 
 def test_host_argv_refuses_secret_env(monkeypatch):
     monkeypatch.setattr(sandbox, "in_flatpak", lambda: True)
     monkeypatch.delenv("MY_TOKEN", raising=False)
     with pytest.raises(ValueError):
-        sandbox.host_argv(["waydroid"], env={"MY_TOKEN": "shh"})
+        sandbox.host_argv(["mytool"], env={"MY_TOKEN": "shh"})
 
 
 def test_host_argv_allows_non_secret_env(monkeypatch):
     monkeypatch.setattr(sandbox, "in_flatpak", lambda: True)
     monkeypatch.delenv("NADARE_DISPLAY", raising=False)
-    argv = sandbox.host_argv(["waydroid"], env={"NADARE_DISPLAY": ":0"})
-    assert argv == ["flatpak-spawn", "--host", "--env=NADARE_DISPLAY=:0", "waydroid"]
+    argv = sandbox.host_argv(["mytool"], env={"NADARE_DISPLAY": ":0"})
+    assert argv == ["flatpak-spawn", "--host", "--env=NADARE_DISPLAY=:0", "mytool"]
 
 
 def test_host_which_outside_flatpak_uses_shutil(monkeypatch):
     monkeypatch.setattr(sandbox, "in_flatpak", lambda: False)
     monkeypatch.setattr(sandbox.shutil, "which", lambda name: "/usr/bin/" + name)
-    assert sandbox.host_which("waydroid") == "/usr/bin/waydroid"
+    assert sandbox.host_which("mytool") == "/usr/bin/mytool"
 
 
 def test_host_which_in_flatpak_asks_the_host(monkeypatch):
@@ -76,14 +76,14 @@ def test_host_which_in_flatpak_asks_the_host(monkeypatch):
 
     def fake_run(argv, **kwargs):
         calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0, stdout="/usr/bin/waydroid\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="/usr/bin/mytool\n", stderr="")
 
     monkeypatch.setattr(sandbox.subprocess, "run", fake_run)
-    assert sandbox.host_which("waydroid") == "/usr/bin/waydroid"
+    assert sandbox.host_which("mytool") == "/usr/bin/mytool"
     assert calls[0][:2] == ["flatpak-spawn", "--host"]
     # The name is passed as an argument, never interpolated into the script.
-    assert calls[0][-1] == "waydroid"
-    assert all("waydroid" not in part for part in calls[0][2:-1])
+    assert calls[0][-1] == "mytool"
+    assert all("mytool" not in part for part in calls[0][2:-1])
 
 
 def test_host_which_missing_or_failing_is_none(monkeypatch):
@@ -111,7 +111,8 @@ def test_proton_direct_links_pfx_to_a_plain_wine_prefix(tmp_path):
     argv, env = sandbox.proton_direct(proton, prefix, ["C:\\game.exe", "-x"])
     assert argv == [str(proton / "proton"), "run", "C:\\game.exe", "-x"]
     assert env["STEAM_COMPAT_DATA_PATH"] == str(prefix)
-    assert env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] == str(prefix)
+    # #36: the Steam client path is not the game prefix (umu/Proton set it).
+    assert "STEAM_COMPAT_CLIENT_INSTALL_PATH" not in env
     assert (prefix / "pfx").is_symlink()
     assert (prefix / "pfx").resolve() == prefix.resolve()
 

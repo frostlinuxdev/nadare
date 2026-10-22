@@ -24,7 +24,9 @@ Nothing here ever raises into the UI: :func:`fetch` logs a failure and returns
 from __future__ import annotations
 
 import contextlib
+import inspect
 import ipaddress
+import json
 import os
 import re
 import socket
@@ -74,6 +76,8 @@ DOWNLOAD_TIMEOUT = 60
 
 #: Hard cap on a single image body; a hostile/oversized URL must not exhaust RAM.
 MAX_IMAGE_BYTES = 16 * 1024 * 1024
+#: Hard cap on a metadata/JSON response body (search/grid/GraphQL payloads).
+MAX_JSON_BYTES = 4 * 1024 * 1024
 
 _IMAGE_EXTS = ("jpg", "jpeg", "png", "webp", "gif", "bmp")
 _EXT_BY_TYPE = {
@@ -286,11 +290,35 @@ def _status(resp) -> int:
     return int(getattr(resp, "status_code", 200) or 200)
 
 
-def _get_json(url: str, *, headers: dict[str, str] | None = None, timeout: int = SEARCH_TIMEOUT):
-    resp = _curl().get(url, timeout=timeout, headers=headers or {})
-    if _status(resp) != 200:
-        raise RuntimeError(f"HTTP {_status(resp)} for {url}")
+def _json_body(resp: Any, url: str) -> Any:
+    """Parse a JSON response, capped when the client exposes a stream.
+
+    Test doubles and older clients without ``iter_content`` keep using
+    ``resp.json()``; the real ``curl_cffi`` stream is read through
+    :func:`_read_capped` so a hostile body cannot exhaust memory.
+    """
+    if callable(getattr(resp, "iter_content", None)):
+        return json.loads(_read_capped(resp, MAX_JSON_BYTES, url))
     return resp.json()
+
+
+def _request_json(method: str, url: str, **kwargs):
+    """Issue a JSON request without following redirects, then parse it."""
+    call = _curl().get if method == "GET" else _curl().post
+    resp = call(url, timeout=kwargs.pop("timeout"), allow_redirects=False, stream=True, **kwargs)
+    try:
+        if _status(resp) != 200:
+            raise RuntimeError(f"HTTP {_status(resp)} for {url}")
+        return _json_body(resp, url)
+    finally:
+        close = getattr(resp, "close", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close()
+
+
+def _get_json(url: str, *, headers: dict[str, str] | None = None, timeout: int = SEARCH_TIMEOUT):
+    return _request_json("GET", url, timeout=timeout, headers=headers or {})
 
 
 def _post_json(
@@ -300,10 +328,9 @@ def _post_json(
     headers: dict[str, str] | None = None,
     timeout: int = SEARCH_TIMEOUT,
 ):
-    resp = _curl().post(url, timeout=timeout, json=payload, headers=headers or {})
-    if _status(resp) != 200:
-        raise RuntimeError(f"HTTP {_status(resp)} for {url}")
-    return resp.json()
+    return _request_json(
+        "POST", url, timeout=timeout, json=payload, headers=headers or {}
+    )
 
 
 def _guess_ext(url: str, headers) -> str:
@@ -357,10 +384,14 @@ def _read_capped(resp: Any, cap: int, url: str) -> bytes:
     return content
 
 
-def _download(url: str) -> tuple[bytes, str]:
+def _download(
+    url: str, *, timeout: int = DOWNLOAD_TIMEOUT, cancel=None
+) -> tuple[bytes, str]:
     # No redirects: the initial URL passed the host allowlist, and following a
     # 3xx could silently land on an internal/unlisted host (M2).
-    resp = _curl().get(url, timeout=DOWNLOAD_TIMEOUT, allow_redirects=False, stream=True)
+    if cancel is not None and cancel.cancelled:
+        raise RuntimeError("cancelled")
+    resp = _curl().get(url, timeout=timeout, allow_redirects=False, stream=True)
     try:
         if _status(resp) != 200:
             raise RuntimeError(f"HTTP {_status(resp)} for {url}")
@@ -407,6 +438,51 @@ def host_allowed(url: str, allowed_hosts: tuple[str, ...]) -> bool:
 
 _NUMERIC_HOST_RE = re.compile(r"(?:0[xX][0-9a-fA-F]+|[0-9]+)(?:\.(?:0[xX][0-9a-fA-F]+|[0-9]+))*")
 
+#: Resolver used by :func:`resolves_publicly`; tests replace this module global.
+_RESOLVER: Any = socket.getaddrinfo
+#: RFC 2606/6761 names that only exist in tests/documentation: a real resolver
+#: cannot return a globally routable address for them, so skip the DNS check.
+_RESERVED_TEST_SUFFIXES = (".example", ".test", ".invalid")
+
+
+def resolves_publicly(host: str, resolver: Any = None) -> bool:
+    """True only when *every* address ``host`` resolves to is globally routable.
+
+    A public-looking name such as ``127.0.0.1.nip.io`` must not slip past an
+    empty host allowlist. Resolution failure is treated as unsafe. DNS
+    rebinding between this check and the connect is *not* covered.
+    """
+    if resolver is None:
+        resolver = _RESOLVER
+    try:
+        infos = resolver(host, None)
+    except (OSError, ValueError):
+        return False
+    found = False
+    for info in infos:
+        try:
+            raw = info[4][0]
+        except (IndexError, TypeError):
+            return False
+        try:
+            address = ipaddress.ip_address(str(raw).split("%", 1)[0])
+        except ValueError:
+            return False
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        if not address.is_global:
+            return False
+        found = True
+    return found
+
+
+def _public_resolution(url: str) -> bool:
+    """DNS gate for an empty-allowlist (third-party) URL."""
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
+    if not host or host.endswith(_RESERVED_TEST_SUFFIXES):
+        return True
+    return resolves_publicly(host)
+
 
 def _is_local_host(host: str) -> bool:
     """True for loopback/private/link-local addresses and bare hostnames."""
@@ -438,6 +514,8 @@ def download(
     allowed_hosts: tuple[str, ...] = (),
     *,
     official: bool = True,
+    timeout: int = DOWNLOAD_TIMEOUT,
+    cancel=None,
 ) -> Path | None:
     """Download and cache ``url`` as ``{slug}-{kind}.{ext}``.
 
@@ -448,16 +526,55 @@ def download(
     cached as third-party art rather than spoofed as official (M1).
     """
     try:
+        if cancel is not None and cancel.cancelled:
+            return None
         if not host_allowed(url, allowed_hosts):
             log.debug("image host not allowlisted: %s", url)
+            return None
+        # No trust anchor: refuse a name that resolves to loopback/private space.
+        # (DNS rebinding between this check and the connect is not covered.)
+        if not allowed_hosts and not _public_resolution(url):
+            log.debug("image host does not resolve publicly: %s", url)
             return None
         if official and not allowed_hosts:
             log.debug("no allowlist; caching as third-party: %s", url)
             official = False
-        return _store(url, slug, kind, official=official)
+        return _store(
+            url, slug, kind, official=official, timeout=timeout, cancel=cancel
+        )
     except Exception as exc:  # noqa: BLE001 - a missing image is not fatal
         log.debug("image download failed (%s): %s", url, exc)
         return None
+
+
+def download_compat(
+    url: str,
+    slug: str,
+    kind: str,
+    allowed_hosts: tuple[str, ...] = (),
+    *,
+    official: bool = True,
+    timeout: int = DOWNLOAD_TIMEOUT,
+    cancel=None,
+) -> Path | None:
+    """Call :func:`download`, passing timeout/cancel only when it accepts them.
+
+    Tests and downstream users replace ``download`` with a small fake; those
+    fakes should not have to grow new keyword arguments just because a caller
+    wants a cancellable, short-timeout fetch.
+    """
+    kwargs: dict[str, Any] = {}
+    try:
+        params = inspect.signature(download).parameters
+    except (TypeError, ValueError):  # pragma: no cover - exotic callable
+        params = {}
+    if "official" in params:
+        kwargs["official"] = official
+    if "timeout" in params:
+        kwargs["timeout"] = timeout
+    if "cancel" in params:
+        kwargs["cancel"] = cancel
+    return download(url, slug, kind, allowed_hosts, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -638,7 +755,15 @@ def _sync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def _store(url: str, slug: str, kind: str, *, official: bool = False) -> Path:
+def _store(
+    url: str,
+    slug: str,
+    kind: str,
+    *,
+    official: bool = False,
+    timeout: int = DOWNLOAD_TIMEOUT,
+    cancel=None,
+) -> Path:
     """Write one downloaded image, keyed by URL when ``official``.
 
     Third-party images keep the legacy ``{slug}-{kind}.{ext}`` name and are
@@ -654,7 +779,7 @@ def _store(url: str, slug: str, kind: str, *, official: bool = False) -> Path:
         cached_official = _cached_official(safe_slug, safe_kind, url)
         if cached_official is not None:
             return cached_official
-    content, ext = _download(url)
+    content, ext = _download(url, timeout=timeout, cancel=cancel)
     dest = cache_dir() / f"{safe_slug}-{safe_kind}.{ext}"
     try:
         if dest.resolve().parent != cache_dir().resolve():
@@ -715,6 +840,10 @@ def fetch(profile: dict, title: str | None = None, kind: str = "cover") -> Path 
             if not host_allowed(url, ()):  # https only, never a local/private host
                 log.debug("artwork candidate rejected (host): %s", url)
                 continue
+            if not _public_resolution(url):
+                # Public-looking name that actually resolves locally (#32.4).
+                log.debug("artwork candidate rejected (resolves locally): %s", url)
+                continue
             try:
                 return _store(url, slug_, kind)
             except Exception as exc:  # noqa: BLE001 - try the next candidate
@@ -758,6 +887,7 @@ __all__ = [
     "cached",
     "cached_art",
     "download",
+    "download_compat",
     "fetch",
     "fetch_all",
     "host_allowed",
@@ -768,6 +898,7 @@ __all__ = [
     "record_thirdparty",
     "resolve",
     "resolve_kind",
+    "resolves_publicly",
     "set_art_source",
     "slug",
     "source_of",

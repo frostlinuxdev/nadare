@@ -8,10 +8,15 @@ suite also runs without ``PYTHONPATH=src``.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+# Force, not setdefault: a desktop session exports QT_QPA_PLATFORM and the GUI
+# tests would otherwise open real windows (and behave differently).
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SRC = _REPO_ROOT / "src"
@@ -41,6 +46,10 @@ def _isolated_environment(
 
     # Never talk to a real keyring during tests; use the documented fallback.
     monkeypatch.setenv("NADARE_NO_KEYRING", "1")
+
+    # The one-time "unofficial launcher" notice and the big-download question are
+    # modal; tests opt in to them explicitly.
+    monkeypatch.setenv("NADARE_ASSUME_NOTICES", "1")
 
     # No test may reach Nadare's real index or release page by default.
     monkeypatch.setenv("NADARE_INDEX_BASE", "")

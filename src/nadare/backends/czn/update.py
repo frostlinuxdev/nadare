@@ -52,9 +52,10 @@ import urllib.request
 from pathlib import Path
 
 try:
-    from nadare.core import diskspace
+    from nadare.core import diskspace, tls
 except Exception:  # pragma: no cover - standalone script use
     diskspace = None  # type: ignore[assignment]
+    tls = None  # type: ignore[assignment]
 
 from nadare.core import hosting
 from nadare.core.yostar import ManifestError, safe_relative_path
@@ -75,6 +76,17 @@ import time
 SERVICE = os.environ.get("CZN_SERVICE", "STOVE_CHAOSZERO")
 CDN = os.environ.get("CZN_DL_CDN", "https://chaoszero-dl.game.onstove.com")
 BASE = f"{CDN}/game/dpms_{SERVICE}"
+
+
+def _xdg_fallback(env: str, default: str) -> Path:
+    """XDG base used only when ``nadare.core.paths`` cannot be imported.
+
+    Mirrors core.paths so a direct-script run honours ``XDG_DATA_HOME`` rather
+    than hard-coding ``~/.local/share``.
+    """
+    return Path(os.environ.get(env) or os.path.expanduser(default)) / "nadare"
+
+
 # Identify like the official launcher does on these requests: its version string
 # and this install's caller-detail (the one czn_auth.py keeps), not a fresh id per run.
 try:
@@ -82,7 +94,10 @@ try:
 except ImportError:  # pragma: no cover - direct-script use
     CALLER_ID, STATE_FILE = (
         "STOVE_LAUNCHER_VER.3.2.30.737",
-        Path(os.environ.get("CZN_STATE_DIR", "") or Path.home() / ".local/share/nadare/czn")
+        Path(
+            os.environ.get("CZN_STATE_DIR", "")
+            or _xdg_fallback("XDG_DATA_HOME", "~/.local/share") / "czn"
+        )
         / "czn_auth.json",
     )
 try:
@@ -111,7 +126,7 @@ def _default_prefix() -> Path:
 
         return paths.data_dir() / "czn" / "prefix"
     except Exception:
-        return Path.home() / ".local/share/nadare/czn/prefix"
+        return _xdg_fallback("XDG_DATA_HOME", "~/.local/share") / "czn" / "prefix"
 
 
 PREFIX = Path(os.environ.get("CZN_PREFIX", str(_default_prefix())))
@@ -151,7 +166,11 @@ def _get(url: str, timeout: int = 60, max_bytes: int = MAX_TEXT_BYTES) -> bytes:
             raise ValueError(f"response too large for {url}")
         return r.content
     req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+    with (
+        tls.urlopen(req, timeout=timeout, context=tls.ssl_context())
+        if tls is not None
+        else urllib.request.urlopen(req, timeout=timeout)
+    ) as resp:  # noqa: S310
         body = resp.read(max_bytes + 1)
     if len(body) > max_bytes:
         raise ValueError(f"response too large for {url}")
@@ -208,7 +227,11 @@ def indexed_version() -> int | None:
             r = _SESS.get(url, timeout=10)
             body = r.content if r.status_code == 200 else b""
         else:
-            with urllib.request.urlopen(url, timeout=10) as resp:  # noqa: S310
+            with (
+                tls.urlopen(url, timeout=10, context=tls.ssl_context())
+                if tls is not None
+                else urllib.request.urlopen(url, timeout=10)
+            ) as resp:  # noqa: S310
                 body = resp.read(MAX_TEXT_BYTES + 1)[:MAX_TEXT_BYTES]
         d = json.loads(body)
         n = d.get("latest")
@@ -473,9 +496,10 @@ def main(argv=None) -> int:
         else:
             print(
                 f"[!] game dir not found: {GAME_DIR}\n"
-                f"    set CZN_PREFIX to your Wine prefix; `update --apply` installs into it"
+                "    the game files are missing or incomplete; press Install in Nadare "
+                "to repair them"
             )
-            return 2
+            return 5
 
     inst = local_version()
     try:

@@ -18,8 +18,9 @@ import platform
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
-from ...core import diskspace, paths, sandbox
+from ...core import diskspace, sandbox
 from ...core.backends import BackendError
+from .lepton import default_prefix as _lepton_prefix
 
 __all__ = [
     "Check",
@@ -101,6 +102,11 @@ def _writable(path: str) -> bool:
     return os.access(path, os.R_OK | os.W_OK)
 
 
+def _free_bytes_in_lepton_prefix() -> int:
+    """Free space where the lepton prefix lives (not Nadare's data dir)."""
+    return diskspace.free_bytes(_lepton_prefix())
+
+
 @dataclass(frozen=True)
 class Probe:
     """Every host read the checks perform, injectable for hermetic tests."""
@@ -114,7 +120,7 @@ class Probe:
     os_release: Callable[[], str] = _host_os_release_text
     environ: Mapping[str, str] = field(default_factory=lambda: dict(os.environ))
     getuser: Callable[[], str] = getpass.getuser
-    free_bytes: Callable[[], int] = lambda: diskspace.free_bytes(paths.data_dir())
+    free_bytes: Callable[[], int] = _free_bytes_in_lepton_prefix
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +230,7 @@ def install_command(missing_tools: list[str], family: str) -> str:
     if not packages:
         return ""
     if family in _INSTALL_COMMAND:
-        return f"{_INSTALL_COMMAND[family]} {' '.join(packages)}"
+        return f"sudo {_INSTALL_COMMAND[family]} {' '.join(packages)}"
     return "Install these packages: " + " ".join(packages)
 
 
@@ -246,12 +252,13 @@ EOF
 sudo udevadm control --reload-rules && sudo udevadm trigger"""
 
 _BINDER_KERNEL_FIX = (
-    "This kernel has no binder support. Use a kernel built with "
-    "CONFIG_ANDROID_BINDERFS (stock CachyOS, Arch, Fedora and Ubuntu kernels all "
-    "have it) and reboot."
+    "A kernel with Rust Binder built in (mainline 6.18+) has no module to load, "
+    "so there is nothing to modprobe here. Use a kernel/distro that provides "
+    "binder (an entry in /proc/filesystems or /dev/binder* nodes) and reboot; "
+    "stock CachyOS, Arch, Fedora and Ubuntu kernels all have it."
 )
 
-_FREE_DISK_MIN = 15 * (1 << 30)
+_FREE_DISK_MIN = 30 * (1 << 30)
 
 
 def _tool_checks(probe: Probe, family: str) -> list[Check]:
@@ -303,7 +310,10 @@ def _binder_check(probe: Probe) -> Check:
         "kernel binder",
         "blocking",
         False,
-        f"no binder support: no binder_linux module under /lib/modules/{release}/",
+        (
+            "no binder support: no binder in /proc/filesystems, no /dev/binder* "
+            f"nodes, and no binder_linux module under /lib/modules/{release}/"
+        ),
         _BINDER_KERNEL_FIX,
     )
 
@@ -409,7 +419,8 @@ def _wayland_check(probe: Probe) -> Check:
     runtime = probe.environ.get("XDG_RUNTIME_DIR", "")
     display = probe.environ.get("WAYLAND_DISPLAY", "")
     if runtime and display:
-        socket = f"{runtime.rstrip('/')}/{display}"
+        # An absolute WAYLAND_DISPLAY is the socket path itself.
+        socket = display if display.startswith("/") else f"{runtime.rstrip('/')}/{display}"
         if probe.exists(socket):
             return Check("Wayland session", "blocking", True, f"socket {socket}", "")
         detail = f"WAYLAND_DISPLAY={display} socket not found under {runtime}"
@@ -461,25 +472,34 @@ def _selinux_check(probe: Probe) -> Check:
 
 
 def _disk_check(probe: Probe) -> Check:
+    prefix = _lepton_prefix()
     try:
         free = probe.free_bytes()
     except (OSError, BackendError):
         return Check(
             "free disk",
-            "warning",
+            "blocking",
             False,
-            "could not determine free space on the data dir",
-            "Make sure the data directory is on a writable filesystem.",
+            f"could not determine free space where the lepton prefix lives ({prefix})",
+            "Make sure the filesystem holding the lepton prefix is readable.",
         )
     gib = free / (1 << 30)
+    required = _FREE_DISK_MIN / (1 << 30)
     if free >= _FREE_DISK_MIN:
-        return Check("free disk", "warning", True, f"{gib:.1f} GiB free on the data dir", "")
+        return Check(
+            "free disk",
+            "blocking",
+            True,
+            f"{gib:.1f} GiB free where the lepton prefix lives ({prefix})",
+            "",
+        )
     return Check(
         "free disk",
-        "warning",
+        "blocking",
         False,
-        f"only {gib:.1f} GiB free on the data dir (< 15 GiB)",
-        "Free at least 15 GiB on the data directory filesystem.",
+        f"{required:.0f} GiB required, only {gib:.1f} GiB available "
+        f"where the lepton prefix lives ({prefix})",
+        f"Free at least {required:.0f} GiB on the filesystem holding {prefix}.",
     )
 
 

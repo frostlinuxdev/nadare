@@ -217,7 +217,9 @@ copy_system_libs() {
     for lib in "$@"; do
         # Only entries tagged x86-64: a multiarch build host also lists the
         # i386 copy, and a 32-bit loader in the x86_64 AppDir fails at load.
-        src="$(ldconfig -p 2>/dev/null | awk -v l="$lib" '$1 == l && /x86-64/ { print $NF; exit }')"
+        # awk must read to EOF: exiting at the first match SIGPIPEs ldconfig, which
+        # under `set -o pipefail` aborts the whole build (exit 141).
+        src="$(ldconfig -p 2>/dev/null | awk -v l="$lib" '$1 == l && /x86-64/ && !done { print $NF; done = 1 }')"
         if [[ -z "$src" ]]; then
             src="$(find /usr/lib64 /usr/lib/x86_64-linux-gnu /usr/lib /lib64 /lib -name "$lib" 2>/dev/null \
                 | while read -r cand; do is_elf64 "$cand" && echo "$cand" && break; done | head -1)"

@@ -40,6 +40,10 @@ chmod +x Nadare-*-x86_64.AppImage
 No FUSE (containers, some hardened systems)? Run it with
 `./Nadare-*-x86_64.AppImage --appimage-extract-and-run`.
 
+The AppImage bundles the GL loader and the Qt X11 platform libraries it needs, so it
+starts on a minimal X11 desktop; only the base X11/xcb libraries every X11 or Wayland
+desktop already has come from your system.
+
 **3. Add a game.** Click **Add game**, pick *Chaos Zero Nightmare* and accept the
 defaults. Log in by scanning the QR code **shown by your own Nadare window** with
 the STOVE mobile app, click **Install**, then **Launch**.
@@ -64,7 +68,7 @@ feeds.*
 | **Chaos Zero Nightmare** | `stove-czn` | First-class: install, update, QR login, launch on Proton. Tested on NVIDIA and AMD. |
 | **Arknights** (EN, Yostar) | `arknights-yostar` | Install/update/launch through Proton; official launcher downloads are direct and verified. |
 | **Stella Sora** (EN, Yostar) | `stellasora-yostar` | Install/update/launch through Proton. |
-| **Fate/Grand Order (NA)** | `fgo-lepton` | **Experimental**: Android container (lepton-fgo); needs podman, a kernel with binderfs and an NVIDIA GPU. **Not installable in 0.1.0b3** (its lepton-fgo release is not in the public index yet); planned for a later beta. |
+| **Fate/Grand Order (NA)** | `fgo-lepton` | **Experimental**: Android container (lepton-fgo); needs podman, a kernel with binderfs and an NVIDIA GPU. **Not installable in 0.1.0b4** (its lepton-fgo release is not in the public index yet); planned for a later beta. |
 | Wine / Steam / script / Waydroid | generic | Scaffolding: you supply the prefix, exe or app. Not a supported product yet. |
 
 Nadare is a beta: the first three are the tested paths (FGO is experimental,
@@ -123,6 +127,7 @@ Commands like `nadare doctor` or `nadare login -p <profile>` run as
 
 | Symptom | What to do |
 |---|---|
+| HTTPS certificate errors (company proxy) | Nadare verifies its own downloads against a bundled CA list. Set `NADARE_CA_BUNDLE=/path/to/ca.pem` (or `SSL_CERT_FILE`) to use your own. `nadare doctor --tls` checks whether your system trusts known-forged certificate chains. |
 | CZN `exit 2` / "cannot reach the update server" | Network or STOVE CDN issue. Retry; check DNS/proxy. Proxies come from the standard `HTTPS_PROXY`/`HTTP_PROXY` environment variables (there is no `proxy_url` setting). |
 | CZN `exit 3` / "login expired" | Run `nadare login -p <profile>` and scan the QR again. |
 | CZN `exit 6` / "no-connect" | The PCSDK handshake changed or the runner can't run the game. Try another runner (`"runner": "ge"`), or update Nadare. |
@@ -159,7 +164,9 @@ tokens or QR codes.
 - When it creates or launches a game prefix, Nadare replaces Wine's builtin
   Visual C++ runtime with Microsoft's official 2015-2022 x64 redistributable
   (downloaded from Microsoft and SHA-256-verified); this fixes stutter in some
-  games and can be turned off per profile.
+  games. It is always installed for Chaos Zero Nightmare, Arknights and Stella
+  Sora (there is no setting for it); the step is best-effort, never blocks an
+  install, and is stopped after 10 minutes and retried at the next launch.
 - **Only scan a QR code that your own Nadare window shows you.** Scanning
   someone else's QR code logs *them* into *your* account.
 - **Get Nadare only from its official repository.** A modified copy could send
@@ -219,24 +226,27 @@ from a checkout. You do not need it to use the AppImage.
 **For Chaos Zero Nightmare** you also need:
 
 - A working Vulkan driver (NVIDIA, or Mesa for AMD/Intel) plus its 32-bit
-  libraries, and a Secret Service keyring (GNOME Keyring or KWallet).
+  libraries. A Secret Service keyring (GNOME Keyring or KWallet) is optional:
+  without it *Remember me* is unavailable and you log in again each session.
 - Nothing else: Nadare downloads its own Proton runner, ships the PCSDK stub
   prebuilt, and runs Proton directly. `umu-launcher` is optional (used if
-  found) and `mingw-w64` is only needed to rebuild the stub from source.
+  found); when it is absent and the host lacks the 32-bit libraries Proton needs,
+  Nadare downloads a pinned, verified copy of umu for you. `mingw-w64` is only
+  needed to rebuild the stub from source.
 
 **For Fate/Grand Order (NA)** the heavy lifting is in **lepton-fgo**;
 its `lepton/check-host.sh`
 reports the exact list. In short: a live Wayland session, `podman` with the
-`crun` runtime, binderfs, `~30 GiB` free, and an NVIDIA (proprietary/Vulkan) or
+`crun` runtime, `zstd`, binderfs, `~30 GiB` free, and an NVIDIA (proprietary/Vulkan) or
 Mesa GPU. Nadare downloads a pinned, sha256-checked `lepton-fgo` release on the
 first install, unless you point the profile (or `$LEPTON_FGO_REPO`) at your own
 checkout. FGO support is **experimental** (tested on NVIDIA + CachyOS only) and the
-install step does not work in 0.1.0b3: the public index does not carry the
+install step does not work in 0.1.0b4: the public index does not carry the
 `lepton-fgo` release yet. It is planned for a later beta.
 
 ### Install system packages (source installs)
 
-The AppImage and Flatpak need none of this for CZN. These packages are for
+The AppImage needs none of this for CZN. These packages are for
 running Nadare from source; `umu-launcher` is optional (used when present) and
 `mingw-w64` is only needed to rebuild the PCSDK stub.
 
@@ -248,8 +258,11 @@ sudo pacman -S --needed python git curl umu-launcher mingw-w64-gcc
 
 **Fedora**
 ```sh
-sudo dnf install python3 git curl umu-launcher mingw64-gcc
+sudo dnf install python3 git curl mingw64-gcc
 ```
+`umu-launcher` is not in the main Fedora repositories: install it from its
+[releases page](https://github.com/Open-Wine-Components/umu-launcher/releases)
+or a COPR that packages it.
 
 **Debian / Ubuntu**
 ```sh
@@ -276,15 +289,9 @@ flatpak run io.github.frostlinuxdev.Nadare        # or use the menu entry
 
 Notes for the beta:
 
-- Proton runs **inside** the sandbox with the Flatpak runtime's GPU drivers. On
-  NVIDIA the `org.freedesktop.Platform.GL.nvidia-<version>` extension must match
-  your host driver; `flatpak update` installs it. `nadare doctor` (run it with
-  `flatpak run io.github.frostlinuxdev.Nadare doctor`) shows the Vulkan device
-  it sees.
-- The bundle has no auto-update yet: install the new `.flatpak` to update.
-- Use the GUI to stop a game. A separate `flatpak run … stop` cannot see a game
-  started by another `flatpak run` (each run gets its own process namespace).
-- FGO (Experimental) inside the Flatpak is untested.
+There is no Flatpak release yet. `packaging/flatpak/` and
+`scripts/build_flatpak.sh` can build a local single-file bundle for testing,
+but it is not shipped, and a Flatpak build would be made without FGO.
 
 A `.deb` is not published yet; use the AppImage or build from source.
 
@@ -314,7 +321,7 @@ library). For the CLI there is no profile editor yet, so create
 `~/.config/nadare/config.json` by hand once:
 
 **Chaos Zero Nightmare** (installs under Nadare's own data directory; the
-`dwproton` runner, the tested DW-Proton 11.0-14 release, is downloaded and
+`dwproton` runner, the tested DW-Proton 11.0-15 release, is downloaded and
 checksum-verified on first install; `"cachyos"` and `"ge"` are alternatives):
 ```json
 {
@@ -330,8 +337,9 @@ checksum-verified on first install; `"cachyos"` and `"ge"` are alternatives):
 }
 ```
 
-**Fate/Grand Order (NA)** (point `repo` at your `lepton-fgo` checkout; see its
-README to install the stack first):
+**Fate/Grand Order (NA)** (source checkouts only; the beta AppImage is built
+without FGO. Point `repo` at your `lepton-fgo` checkout; see its README to
+install the stack first):
 ```json
 {
   "schema": 1,
@@ -366,6 +374,8 @@ diagnostics (`nadare doctor` is the first thing to run when something is off):
 .venv/bin/nadare launch  -p czn        # renew token + update + play
 .venv/bin/nadare stop    -p czn
 .venv/bin/nadare verify  -p czn
+.venv/bin/nadare repair  -p czn        # re-check and re-download damaged files
+.venv/bin/nadare remake-prefix -p czn --yes  # rebuild a broken Wine prefix (game files kept)
 ```
 
 > **CLI note:** `login` and `launch` are separate processes, so the in-memory
@@ -375,7 +385,8 @@ diagnostics (`nadare doctor` is the first thing to run when something is off):
 > with `log in first, or enable remember_me`. The GUI keeps the session for
 > the lifetime of the window, so remember-me is optional there.
 
-Add `-q` to suppress log lines and keep progress, or `-v` for debug logging.
+Add `-q` to suppress log lines and keep progress, or `-v` for debug logging. Both
+work before or after the command, for example `nadare -v status -p czn`.
 
 From a source checkout the GUI starts with:
 
@@ -402,9 +413,10 @@ git pull
 The CZN PCSDK stub is rebuilt automatically when missing; force a rebuild with
 `rm -rf ~/.local/share/nadare/profiles/*/stub` before the next install/launch.
 
-**Downloaded package** (AppImage / `.deb`): download the new artifact and
-replace the old one. Nadare's update journal makes game updates crash-safe, but
-it does not update Nadare itself.
+**Downloaded package** (AppImage): download the new artifact and
+replace the old one. Nadare does not update itself. (A crash-safe update journal
+exists in the code but game updaters do not use it yet.)
+Direct-mode games (Arknights with a manifest source, always Stella Sora) show an UPDATE button when the published manifest version differs from the version last synced; this check honours the *Check for launcher and game updates* setting.
 
 FGO's runtime stack is updated by `lepton-fgo update`; Nadare calls it as part of
 the backend's `update`.
@@ -412,7 +424,7 @@ the backend's `update`.
 ### Uninstall
 
 **From source:** delete the checkout and its venv. Then remove Nadare's data
-(nadare never writes outside XDG directories):
+(its own data lives only under XDG directories; shortcuts are listed below):
 
 ```sh
 rm -rf ~/.local/share/nadare \
@@ -421,8 +433,12 @@ rm -rf ~/.local/share/nadare \
        ~/.cache/nadare
 ```
 
-**Downloaded package:** remove the AppImage, or `sudo apt remove nadare` for the
-`.deb`, then run the data removal above.
+**Downloaded package:** remove the AppImage, then run the data removal above.
+
+**Shortcuts:** shortcuts you asked Nadare to create live outside XDG data:
+`~/Desktop/*.desktop` and, for Steam, entries in
+`~/.steam/steam/userdata/*/config/shortcuts.vdf`. Remove them with
+`nadare shortcut remove`, or delete them by hand.
 
 **Stored tokens:** account (CZN) logins live only in the keyring. Remove the
 `nadare-launcher` service entries:

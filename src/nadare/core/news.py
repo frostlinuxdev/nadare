@@ -23,7 +23,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import re
+import threading
 import time
 import uuid
 from collections.abc import Callable
@@ -45,6 +47,11 @@ TIMEOUT = 12
 MAX_BODY = 2 * 1024 * 1024
 USER_AGENT = f"Nadare/{__version__}"
 MAX_NEWS_IMAGES = 8
+
+#: Overall budget for a background news load (feed + images), in seconds.
+NEWS_DEADLINE = 15
+#: Per-image timeout, so one stuck CDN cannot eat the whole budget.
+IMAGE_TIMEOUT = 3
 
 
 class NewsError(Exception):
@@ -292,14 +299,101 @@ def _item_slug(item_id: str) -> str:
     return hashlib.sha256(raw).hexdigest()[:16]
 
 
-def _download_image(url: str, slug: str, kind: str, hosts: tuple[str, ...]):
+def _download_image(
+    url: str,
+    slug: str,
+    kind: str,
+    hosts: tuple[str, ...],
+    *,
+    timeout: int = IMAGE_TIMEOUT,
+    cancel=None,
+):
     from . import artwork
 
     try:
-        return artwork.download(url, slug, kind, hosts)
+        return artwork.download_compat(
+            url, slug, kind, hosts, timeout=timeout, cancel=cancel
+        )
     except Exception as exc:  # noqa: BLE001 - a missing thumbnail is not fatal
         log.debug("news image failed (%s): %s", url, exc)
         return None
+
+
+class _Stopped(Exception):
+    """The overall deadline expired or the user cancelled the fetch."""
+
+
+def _cancelled(cancel) -> bool:
+    return bool(cancel is not None and cancel.cancelled)
+
+
+def _await(call, *, cancel, deadline):
+    """Run ``call`` on a daemon thread, returning within ``deadline``.
+
+    The network call itself cannot be interrupted, so a worker that outlives the
+    deadline is left detached instead of blocking the GUI (or process shutdown).
+    """
+    box: queue.Queue = queue.Queue(maxsize=1)
+
+    def run() -> None:
+        try:
+            box.put((True, call()))
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+            box.put((False, exc))
+
+    threading.Thread(target=run, name="nadare-news-fetch", daemon=True).start()
+    while True:
+        if _cancelled(cancel):
+            raise _Stopped
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _Stopped
+        try:
+            ok, value = box.get(timeout=min(0.05, remaining))
+        except queue.Empty:
+            continue
+        if not ok:
+            raise value
+        return value
+
+
+def _download_images(tasks, *, hosts, cancel, deadline) -> dict[tuple, str]:
+    """Download ``tasks`` concurrently, keeping whatever finishes by ``deadline``."""
+    results: dict[tuple, str] = {}
+    if not tasks:
+        return results
+    box: queue.Queue = queue.Queue()
+
+    def run(token, url, slug, kind) -> None:
+        if _cancelled(cancel) or time.monotonic() >= deadline:
+            box.put((token, None))
+            return
+        path = _download_image(url, slug, kind, hosts, cancel=cancel)
+        box.put((token, path))
+
+    for token, url, slug, kind in tasks:
+        threading.Thread(
+            target=run,
+            args=(token, url, slug, kind),
+            name="nadare-news-image",
+            daemon=True,
+        ).start()
+
+    remaining = len(tasks)
+    while remaining:
+        if _cancelled(cancel):
+            break
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        try:
+            token, path = box.get(timeout=min(0.05, left))
+        except queue.Empty:
+            continue
+        remaining -= 1
+        if path is not None:
+            results[token] = str(path)
+    return results
 
 
 def _hero_index(
@@ -349,6 +443,8 @@ def load(
     now_ms: int | None = None,
     hero_categories: tuple[str, ...] = (),
     hero_key: Callable[[dict[str, Any]], Any] | None = None,
+    deadline: float = NEWS_DEADLINE,
+    cancel=None,
 ) -> NewsResult:
     """Return a UI-ready feed with local thumbnail/hero paths.
 
@@ -359,8 +455,16 @@ def load(
     both: the item with the greatest non-``None`` key wins. It is cached under
     ``{slug}-hero`` so the library/game page picks it up like any other art.
     """
+    end = time.monotonic() + max(0.1, float(deadline))
     try:
-        result = fetch(source, key=key, ttl=ttl, now_ms=now_ms)
+        result = _await(
+            lambda: fetch(source, key=key, ttl=ttl, now_ms=now_ms),
+            cancel=cancel,
+            deadline=end,
+        )
+    except _Stopped:
+        log.debug("news load stopped for %s", key)
+        return NewsResult(items=[], available=False)
     except Exception as exc:  # noqa: BLE001 - degrade to the muted UI line
         log.debug("news unavailable for %s: %s", key, exc)
         return NewsResult(items=[], available=False)
@@ -370,22 +474,25 @@ def load(
     hero: str | None = None
     try:
         if hosts:
+            tasks: list[tuple[tuple, str, str, str]] = []
             for index, item in enumerate(items):
                 image = item.get("image")
-                if not image:
-                    continue
-                if index < MAX_NEWS_IMAGES:
-                    path = _download_image(
-                        image, f"{base_slug}-news-{_item_slug(item['id'])}", "thumb", hosts
-                    )
-                    if path is not None:
-                        item["image_path"] = str(path)
+                if image and index < MAX_NEWS_IMAGES:
+                    slug_ = f"{base_slug}-news-{_item_slug(item['id'])}"
+                    tasks.append((("thumb", index), image, slug_, "thumb"))
             chosen = _hero_index(items, hero_categories, hero_key)
             if chosen is not None:
                 image = items[chosen].get("image")
-                hero_path = _download_image(image, base_slug, "official-hero", hosts)
-                if hero_path is not None:
-                    hero = str(hero_path)
+                tasks.append((("hero", chosen), image, base_slug, "official-hero"))
+            paths = _download_images(
+                tasks, hosts=hosts, cancel=cancel, deadline=end
+            )
+            for index, item in enumerate(items):
+                path = paths.get(("thumb", index))
+                if path is not None:
+                    item["image_path"] = path
+            if chosen is not None:
+                hero = paths.get(("hero", chosen))
     except Exception as exc:  # noqa: BLE001 - localisation must never raise
         log.debug("news image localisation failed for %s: %s", key, exc)
         hero = None
@@ -402,6 +509,8 @@ def load(
 __all__ = [
     "CREDIT",
     "CACHE_TTL",
+    "IMAGE_TIMEOUT",
+    "NEWS_DEADLINE",
     "MAX_BODY",
     "NewsError",
     "NewsResult",

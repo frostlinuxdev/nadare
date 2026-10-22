@@ -25,6 +25,7 @@ import atexit
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import select
@@ -39,7 +40,9 @@ from pathlib import Path
 from typing import Any
 
 from ...core import download as net
-from ...core import graphics, hosting, hostlibs, paths, process, sandbox, vcredist
+from ...core import graphics, hosting, hostlibs, paths, prefixmove, process, sandbox, tls, vcredist
+from ...core import runners as core_runners
+from ...core import umu as umu_mod
 from ...core.backends import (
     BackendError,
     GameBackend,
@@ -48,10 +51,12 @@ from ...core.backends import (
 )
 from ...core.events import Cancelled, Event, mask
 from ...core.removal import tree_safety
-from ...core.secrets import SecretStore, SecretStoreError
+from ...core.secrets import SecretStore, SecretStoreError, default_collection_exists
 from .news import IMAGE_HOSTS, fetch_czn_news
 
 KIND = "stove-czn"
+
+log = logging.getLogger(__name__)
 
 AUTH_MODULE = "nadare.backends.czn.auth"
 UPDATE_MODULE = "nadare.backends.czn.update"
@@ -128,9 +133,10 @@ EXIT_MESSAGES: dict[int, str] = {
 #: worker's 2 does not mean the updater's 2, so reusing ``EXIT_MESSAGES`` told
 #: the user "cannot reach the update server" for an expired QR / rejected signin.
 AUTH_EXIT_MESSAGES: dict[int, str] = {
-    2: "STOVE login failed (the QR code expired or sign-in was rejected)",
-    3: "the STOVE login expired — log in again",
-    4: "cannot reach STOVE (network)",
+    2: "STOVE login returned an unexpected error; try again in a minute "
+    "(if it keeps happening, open the logs)",
+    3: "STOVE rejected or expired the sign-in. Scan a fresh QR code and try again.",
+    4: "Could not reach STOVE. Check your internet connection and try again.",
 }
 
 #: ``czn_update.py`` exit codes -> a user-safe message. Its own table: 1 is a
@@ -139,14 +145,25 @@ AUTH_EXIT_MESSAGES: dict[int, str] = {
 UPDATE_EXIT_MESSAGES: dict[int, str] = {
     1: "the game update failed (a download failed)",
     2: "cannot reach the update server",
+    5: "the game files are missing or incomplete — press Install to repair them",
+}
+
+#: ``czn_runners.py`` exit codes -> a user-safe message. Its 4 means the GitHub
+#: runner download failed, not that the game's STOVE server is unreachable.
+RUNNER_EXIT_MESSAGES: dict[int, str] = {
+    1: "Nadare could not install the required Proton runner. Try Install again, or "
+    "choose a runner in Settings → Manage runners.",
+    4: "Could not download the required Proton runner from GitHub. Check your internet "
+    "connection and try again, or choose a runner in Settings → Manage runners.",
+    9: "The downloaded Proton runner was damaged or changed. Try Install again.",
 }
 
 #: Backend-side (not czn-linux) exit codes for WebView2 failures.
 WEBVIEW2_MESSAGES: dict[int, str] = {
-    EXIT_WEBVIEW2_UNVERIFIED: "the WebView2 installer cannot be verified: no pinned "
-    "hash is configured (set NADARE_WEBVIEW2_SHA256 or the webview2_sha256 "
-    "setting from a trusted source)",
-    EXIT_WEBVIEW2_FAILED: "the WebView2 Runtime installer failed its integrity check",
+    EXIT_WEBVIEW2_UNVERIFIED: "Nadare could not verify Microsoft's WebView2 installer. "
+    "Try Install again; if it keeps failing, update Nadare and try again.",
+    EXIT_WEBVIEW2_FAILED: "Microsoft's WebView2 installer did not pass a safety check. "
+    "Try Install again; if it keeps failing, update Nadare and try again.",
 }
 
 #: auth.py ``qr_status`` states grouped into the coarse state the GUI renders.
@@ -166,6 +183,8 @@ _QR_MESSAGE = {
     "expired": "QR code expired — log in again for a fresh code.",
 }
 
+#: Exit code the runner downloader uses for a checksum mismatch.
+_RUNNER_INTEGRITY_EXIT = 9
 _RUNNER_MATCH = {"cachyos": "cachyos", "ge": "GE-Proton", "dwproton": "dwproton"}
 _FILE_PROGRESS = re.compile(r"^\s*\[(\d+)/(\d+)\]\s*(.*)$")
 _RESULT = re.compile(r"RESULT\s+([a-z-]+)")
@@ -377,6 +396,8 @@ def _write_private(path: Path, text: str) -> None:
 
 
 class CznBackend(GameBackend):
+    unofficial_notice = True
+
     kind = KIND
     supports_remember_me = True
     supports_login = True
@@ -405,23 +426,15 @@ class CznBackend(GameBackend):
             "display",
             "Display backend",
             "choice",
-            "Wayland is native; X11 runs the game through XWayland (try it if "
-            "frame pacing is poor on NVIDIA).",
+            "Wayland is the tested mode; X11 (XWayland) is experimental. "
+            "X11 (XWayland) shows a blank window with NVIDIA on some systems; "
+            "leave on Auto unless Wayland misbehaves.",
             default="auto",
             choices=(
                 ("Auto (Wayland)", "auto"),
                 ("Wayland", "wayland"),
                 ("X11 (XWayland)", "x11"),
             ),
-        ),
-        Option(
-            "mangohud",
-            "FPS overlay (MangoHud)",
-            "bool",
-            "Show MangoHud's FPS/frametime overlay (MangoHud must be installed). "
-            "Known issue: under umu-run it can stop the game from starting; "
-            "turn it off if the game hangs on the logo.",
-            default=False,
         ),
     )
 
@@ -439,6 +452,9 @@ class CznBackend(GameBackend):
         self._member_no: str | None = None
         self._restore_attempted = False
         self._restored = False
+        #: Exit code from the last restore attempt, so launch can explain *why*
+        #: a saved login could not be refreshed (offline, expired, ...).
+        self._restore_code = 0
         self._remember_notice_shown = False
         self._renderer: str | None = None
         # Cached host 32-bit library preflight (see _missing_hostlibs). ``None``
@@ -449,6 +465,8 @@ class CznBackend(GameBackend):
         #: What a silent child is doing, for the progress heartbeat (None = no beat).
         self._activity: str | None = None
         self._hostlibs_result: list[str] | None = None
+        #: Message from the auth worker's last ``error`` event, if any.
+        self._last_auth_error: str | None = None
         # Adopt a login performed by an earlier backend object in this process
         # (the GUI builds a fresh backend per operation).
         live = _live_get(self.ctx.name)
@@ -524,6 +542,10 @@ class CznBackend(GameBackend):
             self._save_credential(live["refresh_token"], live.get("member_no"))
         elif self._refresh_token:
             self._save_credential(self._refresh_token, self._member_no)
+        elif not self._store().secure:
+            # Nothing can be saved until the keyring works; do not leave the
+            # box ticked without telling the user why the login will not last.
+            self._notify_remember_unavailable()
 
     def _load_credential(self) -> dict[str, str] | None:
         """Read the persisted credential, at most once per process.
@@ -573,10 +595,14 @@ class CznBackend(GameBackend):
         silently reported as a successful removal.
         """
         deleted = True
-        try:
-            self._store().delete(self.ctx.name)
-        except SecretStoreError:
-            deleted = False
+        # No default collection means nothing was ever stored; deleting would
+        # create the collection and pop the "Choose password for new keyring"
+        # dialog. Only False proves that, so None/True keep deleting as before.
+        if default_collection_exists() is not False:
+            try:
+                self._store().delete(self.ctx.name)
+            except SecretStoreError:
+                deleted = False
         _cache_keyring(self.ctx.name, None)
         return deleted
 
@@ -597,7 +623,9 @@ class CznBackend(GameBackend):
         if self._remember_notice_shown:
             return
         self._remember_notice_shown = True
-        self.ctx.emit(Event("status", REMEMBER_NOTICE))
+        self.ctx.emit(
+            Event("status", REMEMBER_NOTICE, data={"remember_unavailable": True})
+        )
 
     def _notify_mismatch(self) -> None:
         self.ctx.emit(Event("status", MISMATCH_NOTICE))
@@ -759,6 +787,16 @@ class CznBackend(GameBackend):
         table = EXIT_MESSAGES if messages is None else messages
         raise BackendError(table.get(code, f"{what} failed (exit {code})"), code)
 
+    def _fail_auth(self, what: str, code: int) -> None:
+        """Report an auth-worker failure, keeping its real message when useful."""
+        if code == 2 and self._last_auth_error:
+            raise BackendError(
+                f"STOVE returned an unexpected error: {self._last_auth_error}. "
+                "Try again in a minute; if it keeps happening, open the logs.",
+                code,
+            )
+        self._fail(what, code, AUTH_EXIT_MESSAGES)
+
     # ---- event plumbing ----------------------------------------------------
     def _emit_json_event(self, obj: dict[str, Any]) -> None:
         name = obj.get("event")
@@ -828,9 +866,11 @@ class CznBackend(GameBackend):
                 )
             )
         elif name == "error":
-            self.ctx.emit(
-                Event("error", mask(str(obj.get("message", ""))), data={"kind": obj.get("kind")})
-            )
+            message = mask(str(obj.get("message", "")))
+            # ``_run_auth`` uses this to tell an expired QR / rejected sign-in
+            # (exit 3) from a STOVE/API error (exit 2) in the final dialog.
+            self._last_auth_error = message
+            self.ctx.emit(Event("error", message, data={"kind": obj.get("kind")}))
         else:
             self.info(mask(str(obj)))
 
@@ -888,7 +928,8 @@ class CznBackend(GameBackend):
             )
         except OSError as e:
             raise BackendError(f"cannot start {cmd[0]!r}: {e}") from e
-        assert proc.stdout is not None
+        if proc.stdout is None:
+            raise BackendError("child process has no stdout pipe")
         fd = proc.stdout.fileno()
         pending = b""
         label = self._activity
@@ -1045,6 +1086,49 @@ class CznBackend(GameBackend):
 
         return max(cands, key=lambda d: (_key(d), d.name)) if cands else None
 
+    def _installed_pinned(self, rid: str) -> Path | None:
+        """The already-installed *tested* release of ``rid``, if there is one."""
+        tag = core_runners.pinned_tag(rid)
+        root = self._runners_dir()
+        if not tag or not root.is_dir():
+            return None
+        for d in sorted(root.iterdir()):
+            if (
+                d.is_dir()
+                and not d.name.startswith(".")
+                and (d / "proton").is_file()
+                and core_runners.matches_tag(d.name, tag)
+            ):
+                return d
+        return core_runners.installed_pinned(rid)
+
+    def _pinned_runner(self, rid: str) -> Path:
+        """The tested release of ``rid``: reuse it when installed, else download it once.
+
+        A newer or older untested build that happens to be installed is not used
+        in its place. Only when the pinned release cannot be downloaded (offline)
+        does an installed build of the same family stand in, with a notice.
+        """
+        pinned = self._installed_pinned(rid)
+        if pinned is not None:
+            return pinned
+        try:
+            return self._download_runner(rid, latest=False)
+        except BackendError as exc:
+            if exc.code == _RUNNER_INTEGRITY_EXIT:
+                raise  # a tampered or corrupt download must not fall back quietly
+            fallback = self._installed_runner(rid)
+            if fallback is None:
+                raise
+            self.ctx.emit(
+                Event(
+                    "status",
+                    f"could not download the tested {rid} runner; using the installed "
+                    f"{fallback.name} (untested)",
+                )
+            )
+            return fallback
+
     def _download_runner(self, rid: str, latest: bool) -> Path:
         self.ctx.emit(Event("step", f"Downloading runner {rid}…"))
         got: list[dict[str, Any]] = []
@@ -1052,7 +1136,7 @@ class CznBackend(GameBackend):
         code = self._run_module(RUNNERS_MODULE, args, parse_json=True, collect=got)
         dest = next((e.get("path") for e in got if e.get("event") == "installed"), None)
         if code != 0 or not dest:
-            self._fail(f"runner {rid}", code or 1)
+            self._fail(f"runner {rid}", code or 1, RUNNER_EXIT_MESSAGES)
         return Path(dest)
 
     def resolve_runner(self) -> tuple[str, str]:
@@ -1066,10 +1150,7 @@ class CznBackend(GameBackend):
         if rid in ("wine", "system", "none"):
             return "", "wine"
         if rid in ("dwproton", "cachyos", "ge"):
-            dest = self._installed_runner(rid)
-            if dest is None:
-                dest = self._download_runner(rid, latest=False)  # pinned tested release
-            return str(dest), "proton"
+            return str(self._pinned_runner(rid)), "proton"
         if rid.upper().startswith("GE-PROTON"):
             found = self._installed_runner(rid)
             return (str(found) if found is not None else rid), "proton"
@@ -1135,7 +1216,7 @@ class CznBackend(GameBackend):
         else:
             state, message = "not_installed", "Not installed"
         note = graphics.vulkan_note()
-        if note:
+        if note and state in ("installed", "running"):
             message = f"{message} — {note}" if message else note
         return Status(
             state=state,
@@ -1148,6 +1229,7 @@ class CznBackend(GameBackend):
                 "session": session,
                 "prefix": str(self.prefix()),
                 "installed": installed,
+                "can_repair": installed,
                 "renderer": self._renderer or "",
             },
         )
@@ -1251,7 +1333,9 @@ class CznBackend(GameBackend):
             return set()
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "nadare"})
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with tls.urlopen(
+                req, timeout=10, context=tls.ssl_context()
+            ) as r:  # noqa: S310
                 payload = json.loads(r.read(65536).decode("utf-8"))
             hashes = payload["sha256"]
         except Exception:
@@ -1282,7 +1366,9 @@ class CznBackend(GameBackend):
             return ""
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "nadare"})
-            with urllib.request.urlopen(req, timeout=10) as r:
+            with tls.urlopen(
+                req, timeout=10, context=tls.ssl_context()
+            ) as r:  # noqa: S310
                 payload = json.loads(r.read(65536).decode("utf-8"))
             source = payload["url"]
         except Exception:
@@ -1304,6 +1390,7 @@ class CznBackend(GameBackend):
         """
         pin = self._webview2_pin()
         if not pin:
+            log.debug("WebView2 installer has no pinned SHA-256")
             raise BackendError(
                 WEBVIEW2_MESSAGES[EXIT_WEBVIEW2_UNVERIFIED], EXIT_WEBVIEW2_UNVERIFIED
             )
@@ -1316,10 +1403,16 @@ class CznBackend(GameBackend):
                 f"cannot read the WebView2 installer: {e}", EXIT_WEBVIEW2_FAILED
             ) from e
         if digest != pin:
+            log.debug(
+                "WebView2 installer digest mismatch for %s: got %s, expected %s",
+                path,
+                digest,
+                pin,
+            )
             if self._webview2_overridden():
                 path.unlink(missing_ok=True)
                 raise BackendError(
-                    f"WebView2 installer failed its SHA-256 check: {path.name}",
+                    WEBVIEW2_MESSAGES[EXIT_WEBVIEW2_FAILED],
                     EXIT_WEBVIEW2_FAILED,
                 )
             if self.ctx.cancel.cancelled:
@@ -1331,9 +1424,7 @@ class CznBackend(GameBackend):
                 return
             path.unlink(missing_ok=True)
             raise BackendError(
-                f"WebView2 installer failed its SHA-256 check: {path.name} "
-                "(Microsoft may have just released a new build; retry later or set "
-                "NADARE_WEBVIEW2_SHA256)",
+                WEBVIEW2_MESSAGES[EXIT_WEBVIEW2_FAILED],
                 EXIT_WEBVIEW2_FAILED,
             )
 
@@ -1624,6 +1715,44 @@ class CznBackend(GameBackend):
             self._fail("update", code, UPDATE_EXIT_MESSAGES)
         self.ctx.emit(Event("done", "Game is up to date"))
 
+    def repair(self) -> None:
+        if self._game_running():
+            self._fail("repair", 8)
+        self.ctx.emit(Event("step", "Checking every game file"))
+        self.update()
+        bad = self._differing_files()
+        if bad:
+            shown = ", ".join(bad[:5])
+            raise BackendError(
+                f"{len(bad)} game file(s) are still damaged: {shown}. "
+                "Try again, or reinstall the game."
+            )
+        self.ctx.emit(Event("done", "All game files check out"))
+
+    def remake_prefix(self) -> None:
+        """Move the corrupted prefix aside and rebuild it, keeping the game files."""
+        if self._game_running():
+            self._fail("remake_prefix", 8)
+        self.ctx.emit(Event("step", "Moving the old Wine prefix aside"))
+        backup = prefixmove.move_aside(self.prefix())
+        moved: list[Path] = []
+        try:
+            # _ensure_prefix only runs wineboot when drive_c is missing, so the
+            # game files must not be restored before it has built the new prefix.
+            self._ensure_prefix()
+            moved = prefixmove.restore_inside(backup, self.prefix(), [self.game_dir()])
+            self.install()
+        except BaseException:
+            prefixmove.roll_back(backup, self.prefix(), moved)
+            raise
+        self.ctx.emit(
+            Event(
+                "done",
+                f"The Wine prefix was rebuilt. The old one was kept at {backup}; "
+                "delete it when you are sure everything works.",
+            )
+        )
+
     # ---- login -------------------------------------------------------------
     def login(self) -> None:
         with self._rotation_lock(wait=10):
@@ -1653,11 +1782,12 @@ class CznBackend(GameBackend):
             png.unlink(missing_ok=True)
             _unlink_quietly(session)
         if code != 0:
-            self._fail("login", code, AUTH_EXIT_MESSAGES)
+            self._fail_auth("login", code)
         self.ctx.emit(Event("done", "Logged in to STOVE"))
 
     def _run_auth(self, args: list[str]) -> tuple[int, dict[str, str] | None]:
         """Run the auth worker and read its 0600 credential handoff."""
+        self._last_auth_error = None
         handoff = self._handoff_path()
         # ``credential.json.tmp`` is the worker's write-then-replace staging
         # file and holds the same rotating token: sweep it with the handoff.
@@ -1782,13 +1912,32 @@ class CznBackend(GameBackend):
                 self._member_no = cred["member_no"] or None
                 _live_set(self.ctx.name, cred["refresh_token"], cred["member_no"])
         if not self._refresh_token:
+            self._restore_code = 0
             return False
-        if self._mint_session() != 0:
+        self._restore_code = self._mint_session()
+        if self._restore_code != 0:
             # Network failure or an invalid chain: stay logged out, no retry.
+            # Keep the keyring entry (and the worker's exit code) so the next
+            # Launch can explain what happened instead of blaming the login.
             self._refresh_token = None
             return False
         self._restored = True
         return True
+
+    def _raise_login_required(self) -> None:
+        """Explain why a launch has no usable login, without a dead-end message."""
+        if self._restore_code == 4:
+            raise BackendError(
+                "Could not refresh the saved STOVE login because there is no "
+                "internet connection. Reconnect and press Launch again.",
+                4,
+            )
+        if self._restore_code == 3:
+            raise BackendError(
+                "The saved STOVE login expired or was used elsewhere. Log in again.",
+                3,
+            )
+        raise BackendError("log in first, or enable remember_me", 3)
 
     # ---- launch ------------------------------------------------------------
     def _prefix_command(
@@ -1811,6 +1960,15 @@ class CznBackend(GameBackend):
             env.update(extra_env)
         if kind == "proton":
             umu = shutil.which("umu-run")
+            if umu is None and not sandbox.in_flatpak():
+                missing = self._missing_hostlibs()
+                if missing:
+                    umu = umu_mod.resolve(
+                        "umu-run",
+                        allow_download=True,
+                        emit=self.ctx.emit,
+                        cancel=self.ctx.cancel,
+                    )
             # umu treats the prefix as Proton's compat-data dir and expects the
             # Wine prefix at <prefix>/pfx; a symlink pfx -> . lets one dir serve both.
             pfx = prefix / "pfx"
@@ -1875,14 +2033,14 @@ class CznBackend(GameBackend):
         return "0" if choice in ("x11", "xwayland") else "1"
 
     def _mangohud_wrap(self, full: list[str], env: dict[str, str]) -> list[str]:
-        """Prefix the game command with ``mangohud`` when the profile (or
-        ``NADARE_MANGOHUD=1``) asks for the FPS overlay and it is installed."""
-        wanted = _profile_setting(self.ctx.profile, "mangohud")
-        if os.environ.get("NADARE_MANGOHUD") == "1":
-            wanted = True
-        if isinstance(wanted, str):
-            wanted = wanted.strip().lower() in ("1", "true", "yes", "on")
-        if not wanted:
+        """Prefix the game command with ``mangohud`` when ``NADARE_MANGOHUD=1``
+        asks for the FPS overlay and it is installed.
+
+        The old per-profile ``mangohud`` key is deliberately ignored: older
+        betas could leave it on with no Settings control to turn it off, and
+        MangoHud hangs CZN under ``umu-run``.
+        """
+        if os.environ.get("NADARE_MANGOHUD") != "1":
             return full
         binary = shutil.which("mangohud")
         if not binary:
@@ -1945,17 +2103,17 @@ class CznBackend(GameBackend):
         if not self._restore_attempted:
             self._cleanup_stale_session()
             if not self.restore():
-                raise BackendError("log in first, or enable remember_me", 3)
+                self._raise_login_required()
         else:
             # A login in this process set the token, or an earlier launch
             # already restored it; (re-)mint the game session right before
             # every launch, since the previous run deletes session.json on exit.
             self._cleanup_stale_session()
             if not self._refresh_token:
-                raise BackendError("log in first, or enable remember_me", 3)
+                self._raise_login_required()
             auth_code = self._mint_session()
             if auth_code != 0:
-                self._fail("token refresh", auth_code, AUTH_EXIT_MESSAGES)
+                self._fail_auth("token refresh", auth_code)
         session = self._session()
         try:
             stub = self._ensure_stub()
@@ -2065,16 +2223,22 @@ class CznBackend(GameBackend):
         # informational: reported but must not fail an otherwise-healthy install.
         informational = [name for name in ("session", "vcredist") if not checks.get(name)]
         failed = [name for name, ok in checks.items() if not ok and name not in informational]
+        status = self.status()
         if failed:
             message = "integrity check failed: " + ", ".join(failed)
             if bad_files:
                 shown = ", ".join(bad_files[:5])
                 more = f" (+{len(bad_files) - 5} more)" if len(bad_files) > 5 else ""
-                message += f" [{shown}{more}; run update to repair]"
+                message += f" [{shown}{more}; click Repair files]"
         elif informational:
-            message = "all checks passed (no live login session; log in to launch)"
+            if status.data.get("logged_in"):
+                message = "all checks passed (the game token is created at launch)"
+            else:
+                message = "all checks passed (not logged in; log in before launching)"
         else:
             message = "all checks passed"
+        if not checks["prefix"]:
+            message += " Rebuild the Wine prefix in Settings."
         return {
             "verified": not failed,
             "message": message,
@@ -2083,7 +2247,7 @@ class CznBackend(GameBackend):
             "informational": informational,
             "bad_files": bad_files or [],
             "prefix": str(self.prefix()),
-            "version": self.status().version,
+            "version": status.version,
         }
 
     def _differing_files(self) -> list[str] | None:

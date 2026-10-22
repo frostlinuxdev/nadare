@@ -48,6 +48,24 @@ class _RotatingFileHandler(logging.handlers.RotatingFileHandler):
             os.chmod(self.baseFilename, 0o600)
         return stream
 
+    def handleError(self, record: logging.LogRecord) -> None:
+        # The default prints a full "--- Logging error ---" traceback for every
+        # record when the state dir is read-only or full. Switch to stderr once
+        # instead, and leave ``_configured`` unset so a later setup can retry.
+        with contextlib.suppress(Exception):
+            self.close()
+        _switch_to_fallback(self, record)
+
+
+def _parent_writable(path: Path) -> bool:
+    """Best-effort check before handing the path to a delayed file handler."""
+    parent = path.parent
+    while not parent.exists() and parent != parent.parent:
+        parent = parent.parent
+    if path.exists() and not os.access(path, os.W_OK):
+        return False
+    return os.access(parent, os.W_OK)
+
 
 class MaskingFilter(logging.Filter):
     """Mask secret-looking values in the message and its arguments."""
@@ -77,20 +95,70 @@ class MaskingFilter(logging.Filter):
         return True
 
 
+def _fallback_handler(
+    logger: logging.Logger,
+    formatter: logging.Formatter | None,
+    filters: list[logging.Filter],
+) -> logging.Handler:
+    """Return the logger's stderr fallback handler, adding it once if needed."""
+    for handler in logger.handlers:
+        if getattr(handler, "_nadare_fallback", False):
+            return handler
+        if isinstance(handler, logging.StreamHandler) and not isinstance(
+            handler, logging.FileHandler
+        ):
+            return handler
+    stream = logging.StreamHandler()
+    stream.setFormatter(formatter)
+    for masking in filters:
+        stream.addFilter(masking)
+    stream._nadare_fallback = True  # type: ignore[attr-defined]
+    logger.addHandler(stream)
+    return stream
+
+
+def _remove_fallback(logger: logging.Logger) -> None:
+    for handler in list(logger.handlers):
+        if getattr(handler, "_nadare_fallback", False):
+            logger.removeHandler(handler)
+            handler.close()
+
+
+def _switch_to_fallback(broken: _RotatingFileHandler, record: logging.LogRecord) -> None:
+    """Drop a failed file handler and emit this record to stderr instead."""
+    global _configured
+    logger = logging.getLogger(LOGGER_NAME)
+    with _lock:
+        for handler in list(logger.handlers):
+            if handler is broken or isinstance(handler, logging.FileHandler):
+                logger.removeHandler(handler)
+        stream = _fallback_handler(logger, broken.formatter, list(broken.filters))
+        _configured = False
+    stream.handle(record)
+
+
 def setup(
-    level: int | str = logging.INFO,
+    level: int | str | None = None,
     *,
     filename: str | Path | None = None,
     console: bool = False,
     max_bytes: int = MAX_BYTES,
     backup_count: int = BACKUP_COUNT,
 ) -> logging.Logger:
-    """Configure the ``nadare`` root logger once; safe to call repeatedly."""
+    """Configure the ``nadare`` root logger once; safe to call repeatedly.
+
+    A later call that names a ``level`` still applies it (``-v`` runs after the
+    import-time setup), but never reattaches handlers.
+    """
     global _configured
     logger = logging.getLogger(LOGGER_NAME)
     with _lock:
         if _configured:
+            if level is not None:
+                logger.setLevel(level if isinstance(level, int) else logging.getLevelName(level))
             return logger
+        if level is None:
+            level = logging.INFO
         logger.setLevel(level if isinstance(level, int) else logging.getLevelName(level))
         logger.propagate = False
 
@@ -103,7 +171,10 @@ def setup(
         masking = MaskingFilter()
 
         attached = False
+        file_ok = False
         try:
+            if not _parent_writable(path):
+                raise OSError(f"log folder is not writable: {path.parent}")
             file_handler = _RotatingFileHandler(
                 path,
                 maxBytes=max_bytes,
@@ -114,13 +185,20 @@ def setup(
             file_handler.setFormatter(formatter)
             file_handler.addFilter(masking)
             logger.addHandler(file_handler)
-            attached = True
+            file_ok = True
         except OSError:
-            # A read-only state dir must not take the launcher down; leave
-            # ``_configured`` unset so a later call can retry the file handler.
+            # A read-only state dir must not take the launcher down; a stderr
+            # fallback below keeps the record visible without a traceback.
             pass
 
+        if file_ok:
+            _remove_fallback(logger)
+            attached = True
+        elif not console:
+            _fallback_handler(logger, formatter, [masking])
+
         if console:
+            _remove_fallback(logger)
             stream_handler = logging.StreamHandler()
             stream_handler.setFormatter(formatter)
             stream_handler.addFilter(masking)

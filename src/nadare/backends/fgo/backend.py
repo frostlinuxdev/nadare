@@ -28,11 +28,16 @@ Profile keys (all optional):
 
 from __future__ import annotations
 
+import inspect
+import logging
+
 from ...core.backends import BackendError, GameBackend, Option, Status
 from ...core.events import Event, mask
 from . import installer
 from .lepton import FGO_PKG, LeptonError, LeptonFgo
 from .news import IMAGE_HOSTS, fetch_fgo_news, hero_key
+
+log = logging.getLogger(__name__)
 
 #: First-run account-safety notice shown before install/launch.
 ACCOUNT_NOTICE = """\
@@ -102,11 +107,14 @@ class FgoLeptonBackend(GameBackend):
     def __init__(self, ctx) -> None:  # noqa: ANN001 - BackendContext
         super().__init__(ctx)
         profile = ctx.profile
-        self.adapter = LeptonFgo(
-            context=profile.get("context") or "fgo",
-            prefix=profile.get("prefix") or None,
-            repo=profile.get("repo") or profile.get("repo_path") or None,
-        )
+        try:
+            self.adapter = LeptonFgo(
+                context=profile.get("context") or "fgo",
+                prefix=profile.get("prefix") or None,
+                repo=profile.get("repo") or profile.get("repo_path") or None,
+            )
+        except LeptonError as exc:
+            raise BackendError(str(exc)) from exc
 
     # ---- helpers -----------------------------------------------------------
     def _log(self, line: str) -> None:
@@ -160,7 +168,15 @@ class FgoLeptonBackend(GameBackend):
         except LeptonError as exc:
             raise BackendError(str(exc)) from exc
         self.adapter.set_repo(repo)
-        report = self.adapter.check_host()
+        try:
+            # Real adapters accept the cancel token; small test/third-party
+            # adapters may not, so only pass it when the signature supports it.
+            if "cancel" in inspect.signature(self.adapter.check_host).parameters:
+                report = self.adapter.check_host(cancel=self.ctx.cancel)
+            else:
+                report = self.adapter.check_host()
+        except LeptonError as exc:
+            raise BackendError(str(exc)) from exc
         self.ctx.emit(Event("step", "host readiness"))
         for line in str(report.get("output") or "").splitlines():
             self._log(line)
@@ -195,7 +211,12 @@ class FgoLeptonBackend(GameBackend):
         self.ctx.emit(Event("step", f"installing FGO context {self.adapter.context!r}"))
         code = self._stream(cmd)
         if code != 0:
-            raise BackendError(f"install.sh failed (exit {code})", code=code)
+            self._log(f"install.sh exited with code {code}")
+            raise BackendError(
+                "FGO setup did not finish. Check that podman is installed and there is "
+                "enough free disk, then try again. Details are in Open logs.",
+                code=code,
+            )
         self.ctx.emit(Event("done", "install finished"))
 
     def update(self) -> None:
@@ -206,7 +227,12 @@ class FgoLeptonBackend(GameBackend):
         self.ctx.emit(Event("step", "updating FGO"))
         code = self._stream(self.adapter.cmd_update(force=force))
         if code != 0:
-            raise BackendError(f"update failed (exit {code})", code=code)
+            self._log(f"FGO update command exited with code {code}")
+            raise BackendError(
+                "The FGO update did not finish. Check your internet connection and "
+                "free disk space, then try again. Details are in Open logs.",
+                code=code,
+            )
         self.ctx.emit(Event("done", "update finished"))
 
     def launch(self) -> int:
@@ -218,7 +244,10 @@ class FgoLeptonBackend(GameBackend):
         elif self.adapter.lepton_fgo.is_file():
             cmd = self.adapter.cmd_launch()
         else:
-            raise BackendError(f"lepton-fgo is not installed under {self.adapter.prefix}")
+            log.info("FGO is not installed under %s", self.adapter.prefix)
+            raise BackendError(
+                "FGO is not installed for this profile. Press Install to set it up again."
+            )
         self.ctx.emit(Event("step", f"launching {FGO_PKG}"))
         return self._stream(cmd)
 
@@ -226,11 +255,19 @@ class FgoLeptonBackend(GameBackend):
         self.ctx.emit(Event("step", "stopping context"))
         code = self._stream(self.adapter.cmd_stop())
         if code != 0:
-            raise BackendError(f"stop failed (exit {code})", code=code)
+            self._log(f"FGO stop command exited with code {code}")
+            raise BackendError(
+                "FGO could not be stopped. Try again; if it keeps happening, restart "
+                "Nadare. Details are in Open logs.",
+                code=code,
+            )
 
     def verify(self) -> dict:
         try:
-            result = self.adapter.verify(release=self.ctx.profile.get("release") or None)
+            result = self.adapter.verify(
+                release=self.ctx.profile.get("release") or None,
+                cancel=self.ctx.cancel,
+            )
         except LeptonError as exc:
             raise BackendError(str(exc)) from exc
         output = str(result.get("output") or "")
@@ -252,4 +289,9 @@ class FgoLeptonBackend(GameBackend):
         self.ctx.emit(Event("step", "uninstalling context"))
         code = self._stream(cmd)
         if code != 0:
-            raise BackendError(f"uninstall failed (exit {code})", code=code)
+            self._log(f"FGO uninstall command exited with code {code}")
+            raise BackendError(
+                "FGO could not be removed. Close the game, then try again. Details are "
+                "in Open logs.",
+                code=code,
+            )

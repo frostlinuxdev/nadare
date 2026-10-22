@@ -25,16 +25,61 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .theme import badge_style, cover_pixmap, load_card_pixmap, repolish
+from .images import ImageLoader
+from .theme import ACCENT, badge_style, cover_pixmap, repolish
 
 CARD_WIDTH = 238
 CARD_ART_H = 300
 CARD_HEIGHT = CARD_ART_H + 86
 
+#: Focus is drawn on the card itself so keyboard users can see where Tab is.
+_FOCUS_RING = (
+    f"QFrame#GameCard:focus, QFrame#AddGameCard:focus {{"
+    f" border: 2px solid {ACCENT}; }}"
+)
+
 
 def profile_title(name: str, profile: dict[str, Any]) -> str:
     """The display title for a profile (falls back to the profile name)."""
     return str(profile.get("title") or name)
+
+
+def display_title(name: str, profiles: dict[str, dict[str, Any]]) -> str:
+    """Like :func:`profile_title`, plus the profile id when another profile shares it.
+
+    Two profiles of the same game would otherwise be indistinguishable
+    (``"Arknights · arknights-2"``); a unique title is shown unchanged.
+    """
+    title = profile_title(name, profiles.get(name) or {})
+    folded = title.casefold()
+    for other, data in profiles.items():
+        if other != name and profile_title(other, data or {}).casefold() == folded:
+            return f"{title} · {name}"
+    return title
+
+
+#: Friendly descriptions for the internal backend kinds shown on cards and pages.
+_BACKEND_LABELS = {
+    "stove-czn": "Windows game via Proton",
+    "arknights-yostar": "Yostar launcher",
+    "stellasora-yostar": "Yostar launcher",
+    "fgo-lepton": "Android container",
+    "wine": "Wine / Proton game",
+    "steam": "Steam game",
+    "script": "Custom script",
+}
+
+
+def backend_label(kind: str) -> str:
+    """Plain-language text for a backend kind (raw ids belong in logs)."""
+    key = (kind or "").strip().lower()
+    return _BACKEND_LABELS.get(key, (key or "game").replace("-", " ").title())
+
+
+def count_text(count: int, singular: str, plural: str | None = None) -> str:
+    """``1 runner`` / ``3 runners`` instead of the ugly ``runner(s)``."""
+    word = singular if count == 1 else (plural or singular + "s")
+    return f"{count} {word}"
 
 
 def profile_art_candidates(profile: dict[str, Any]) -> list[str]:
@@ -158,6 +203,9 @@ class GameCard(QFrame):
         seed = fallback_seed or profile
         self.setObjectName("GameCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(str(title))
+        self.setStyleSheet(_FOCUS_RING)
         self.setFixedSize(CARD_WIDTH, CARD_HEIGHT)
         self.setToolTip(title)
         self._shadow = _drop_shadow(self, 18, 70)
@@ -190,7 +238,7 @@ class GameCard(QFrame):
         meta_row = QHBoxLayout()
         meta_row.setContentsMargins(0, 0, 0, 0)
         meta_row.setSpacing(6)
-        self.meta_label = QLabel((backend or "game").upper())
+        self.meta_label = QLabel(backend_label(backend))
         self.meta_label.setObjectName("CardMeta")
         self.meta_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         meta_row.addWidget(self.meta_label, 1)
@@ -219,6 +267,17 @@ class GameCard(QFrame):
         self._shadow.setColor(QColor(0, 0, 0, 70))
         super().leaveEvent(event)
 
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if event.key() in (
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Enter,
+            Qt.Key.Key_Space,
+        ):
+            self.clicked.emit(self.profile)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt naming
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(
             event.position().toPoint()
@@ -236,8 +295,11 @@ class AddGameCard(QFrame):
         super().__init__(parent)
         self.setObjectName("AddGameCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("Add game")
+        self.setStyleSheet(_FOCUS_RING)
         self.setFixedSize(CARD_WIDTH, CARD_HEIGHT)
-        self.setToolTip("Create a new profile and configure its backend")
+        self.setToolTip("Add a game to your library")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
@@ -264,12 +326,23 @@ class AddGameCard(QFrame):
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(label)
 
-        hint = QLabel("Create a profile and point it at a backend")
+        hint = QLabel("Add a game to install it")
         hint.setObjectName("CardMeta")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hint.setWordWrap(True)
         layout.addWidget(hint)
         layout.addStretch(1)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        if event.key() in (
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Enter,
+            Qt.Key.Key_Space,
+        ):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt naming
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(
@@ -289,6 +362,8 @@ class LibraryPage(QWidget):
         super().__init__(parent)
         self.setObjectName("Page")
         self._cards: dict[str, GameCard] = {}
+        # Cover art is decoded off the GUI thread; cards show a placeholder first.
+        self._images = ImageLoader(parent=self)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(32, 28, 32, 28)
@@ -308,9 +383,10 @@ class LibraryPage(QWidget):
         self.hint.setObjectName("Muted")
         title_row.addWidget(self.hint, 0, Qt.AlignmentFlag.AlignBottom)
         header.addLayout(title_row)
-        subtitle = QLabel("Pick a game to launch it, or add a new profile.")
-        subtitle.setObjectName("Subtitle")
-        header.addWidget(subtitle)
+        self.subtitle = QLabel("Choose a game to launch it, or add a new one.")
+        self.subtitle.setObjectName("Subtitle")
+        self.subtitle.setWordWrap(True)
+        header.addWidget(self.subtitle)
         root.addLayout(header)
 
         self._container = QWidget()
@@ -320,6 +396,7 @@ class LibraryPage(QWidget):
 
         scroll = QScrollArea()
         scroll.setObjectName("LibraryScroll")
+        scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # Tab goes to the cards, not the frame
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._container)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -330,28 +407,53 @@ class LibraryPage(QWidget):
         """Rebuild the grid from the config's profiles."""
         self._clear()
         for name, profile in profiles.items():
-            art = load_card_pixmap(profile_art_candidates(profile))
-            title = profile_title(name, profile)
+            title = display_title(name, profiles)
             card = GameCard(
                 name,
                 title,
                 str(profile.get("backend") or ""),
-                art,
+                None,
                 fallback_seed=title,
                 parent=self._container,
             )
             card.clicked.connect(self.open_game.emit)
             self._flow.addWidget(card)
             self._cards[name] = card
+            self._request_art(name, card, title, profile_art_candidates(profile))
 
         add = AddGameCard(self._container)
         add.clicked.connect(self.add_game.emit)
         self._flow.addWidget(add)
         count = len(self._cards)
-        self.hint.setText(f"{count} game{'s' if count != 1 else ''}")
+        self.hint.setText(count_text(count, "game"))
+        if count:
+            self.subtitle.setText("Choose a game to launch it, or add a new one.")
+        else:
+            self.subtitle.setText(
+                "No games yet. Click Add game to install your first one. You can add "
+                "Chaos Zero Nightmare, Arknights or Stella Sora."
+            )
         # Not adjustSize(): while the page is hidden (a removal runs from the game
         # page) that shrinks the container to one card wide, and nothing re-flows it.
         self._flow.invalidate()
+
+    def _request_art(self, name: str, card: GameCard, title: str, candidates: list[str]) -> None:
+        """Decode one cover in the background, then update its card if still shown."""
+        width, height = CARD_WIDTH - 2, CARD_ART_H
+
+        def apply(pixmap) -> None:
+            if self._cards.get(name) is not card:
+                return  # the grid was rebuilt while the decode ran
+            try:
+                card.art.setPixmap(cover_pixmap(pixmap, width, height, title, radius=13))
+            except RuntimeError:
+                pass  # the card was deleted before the callback arrived
+
+        self._images.request(candidates, width, height, apply, cover=True)
+
+    def wait_for_images(self, timeout_ms: int = 5000) -> None:
+        """Wait for pending cover decodes (tests and shutdown helpers)."""
+        self._images.wait(timeout_ms)
 
     def _clear(self) -> None:
         self._cards.clear()
@@ -381,6 +483,9 @@ __all__ = [
     "GameCard",
     "AddGameCard",
     "LibraryPage",
+    "backend_label",
+    "count_text",
+    "display_title",
     "profile_title",
     "profile_art_candidates",
 ]

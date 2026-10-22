@@ -143,6 +143,10 @@ class GameBackend(ABC):
     #: uses this to show the Log in / Log out controls.
     supports_login: ClassVar[bool] = False
 
+    #: True when ``update()`` can bring the game up to date. The GUI disables
+    #: the Update button for backends that leave updates to the game/Steam.
+    supports_update: ClassVar[bool] = True
+
     #: Callable returning this backend's official news feed (``NewsResult`` or a
     #: list of items), or ``None`` when the backend has no news source.
     news_source: ClassVar[Any] = None
@@ -167,6 +171,14 @@ class GameBackend(ABC):
     #: ``(text, url, link_label)``, e.g. "also coming to Steam". The label
     #: defaults to "Learn more". Purely informational; never blocks anything.
     page_notice: ClassVar[tuple[str, str] | tuple[str, str, str] | None] = None
+
+    #: True for games Nadare runs without the publisher's blessing: the user is
+    #: told once (per game type) before the first install, login or launch.
+    unofficial_notice: ClassVar[bool] = False
+
+    #: Rough size of a fresh install in bytes, so the GUI can ask before a very
+    #: large download. ``None`` means unknown (no prompt).
+    install_size_hint: ClassVar[int | None] = None
 
     def __init__(self, ctx: BackendContext) -> None:
         self.ctx = ctx
@@ -215,9 +227,26 @@ class GameBackend(ABC):
         """Optional; forget any saved and in-memory login. Default: unsupported."""
         raise BackendUnsupported("this backend has no login to clear")
 
+    @staticmethod  # noqa: B027 - intentional optional hook; default is a no-op
+    def check_update() -> None:
+        """Optional background update check (default: no-op).
+
+        Backends with a published version cache may refresh it here. It must
+        never be required for :meth:`status` and must not raise for an ordinary
+        network failure.
+        """
+
     def verify(self) -> dict[str, Any]:
         """Optional integrity report. Default: nothing to verify."""
         return {"verified": False, "message": "nothing to verify"}
+
+    def repair(self) -> None:
+        """Optional; re-check every game file and download damaged ones."""
+        raise BackendUnsupported("Repair is not available for this game")
+
+    def remake_prefix(self) -> None:
+        """Optional; rebuild the Wine prefix while keeping the game files."""
+        raise BackendUnsupported("Rebuilding the Wine prefix is not available for this game")
 
     def uninstall(self, purge: bool = False) -> None:
         """Remove the game tree / prefix. Keep user data unless purge."""
@@ -242,7 +271,6 @@ _BUILTINS = {
     "wine": "nadare.backends.wine:WineBackend",
     "steam": "nadare.backends.steam:SteamBackend",
     "script": "nadare.backends.script:ScriptBackend",
-    "waydroid": "nadare.backends.waydroid:WaydroidBackend",
     "arknights-yostar": "nadare.backends.arknights:ArknightsBackend",
     "stellasora-yostar": "nadare.backends.stellasora:StellaSoraBackend",
 }
@@ -312,6 +340,39 @@ def supports_login(kind: str) -> bool:
         return False
 
 
+#: Shown once per game type before the first install, login or launch.
+UNOFFICIAL_NOTICE = (
+    "It is not made, supported or approved by the game's publisher, and the "
+    "publisher's terms of service may not allow playing this way. Using it is your "
+    "own choice and your own risk, including the risk to your account.\n\n"
+    "Nadare never asks for your password and does not change the game's files to cheat."
+)
+
+
+def unofficial_notice(kind: str) -> bool:
+    """Whether ``kind`` needs the one-time unofficial-launcher notice (safe for unknown kinds)."""
+    try:
+        return bool(get(kind).unofficial_notice)
+    except BackendError:
+        return False
+
+
+def install_size_hint(kind: str) -> int | None:
+    """Rough fresh-install size of ``kind`` in bytes, or ``None`` when unknown."""
+    try:
+        return get(kind).install_size_hint
+    except BackendError:
+        return None
+
+
+def supports_update(kind: str) -> bool:
+    """Whether ``kind`` can update its game (safe for unknown kinds)."""
+    try:
+        return bool(get(kind).supports_update)
+    except BackendError:
+        return False
+
+
 def supports_news(kind: str) -> bool:
     """Whether ``kind`` has an official news source (safe for unknown kinds)."""
     try:
@@ -372,6 +433,10 @@ __all__ = [
     "load_builtins",
     "supports_remember_me",
     "supports_login",
+    "supports_update",
+    "unofficial_notice",
+    "install_size_hint",
+    "UNOFFICIAL_NOTICE",
     "page_notice",
     "supports_news",
     "supports_media",

@@ -254,6 +254,10 @@ class SecretStore:
     def delete(self, profile: str) -> None:
         accounts = self._accounts(profile)
         if self.secure:
+            # With no default collection there is nothing to delete, and any
+            # keyring call would create it (and pop a password dialog) first.
+            if default_collection_exists() is False:
+                return
             for account in accounts:
                 self._kdel(account)
             return
@@ -344,6 +348,60 @@ def _secret_service_state(backend: object, name: str) -> tuple[bool, str] | None
     if locked:
         return True, f"{name} (default keyring is locked; you will be asked to unlock it)"
     return True, name
+
+
+def _secret_service_collection(backend: object) -> bool | None:
+    """Exactly whether the Secret Service default collection exists, no prompting.
+
+    ``True``/``False`` only when the service answered; ``None`` for anything else
+    (not the Secret Service backend, no ``secretstorage``, bus unreachable, or an
+    unexpected error), because those do not prove that nothing is stored.
+    """
+    members = getattr(backend, "backends", None) or [backend]
+    if not any(
+        type(b).__module__.startswith("keyring.backends.SecretService") for b in members
+    ):
+        return None
+    try:
+        import secretstorage  # type: ignore
+        from secretstorage.exceptions import ItemNotFoundException  # type: ignore
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        bus = secretstorage.dbus_init()
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        try:
+            secretstorage.Collection(bus)
+        except ItemNotFoundException:
+            return False
+        return True
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        try:
+            bus.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def default_collection_exists() -> bool | None:
+    """Whether the Secret Service default collection exists, without prompting.
+
+    ``True`` when it exists (locked or not), ``False`` only when the service is
+    reachable and has no default collection yet, and ``None`` when this cannot
+    be told. Callers must treat ``None`` like "unknown" and keep their old
+    behaviour; only ``False`` proves there is no entry to read or delete.
+    """
+    module = _keyring_module()
+    if module is None:
+        return None
+    try:
+        backend = module.get_keyring()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - unknown, not proof of absence
+        return None
+    return _secret_service_collection(backend)
 
 
 def keyring_diagnosis() -> tuple[bool, str]:

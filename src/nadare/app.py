@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 from collections.abc import Sequence
@@ -28,6 +29,31 @@ from .core.events import Cancel, Cancelled, Event
 
 log = nadare_logging.get_logger("app")
 
+#: Set after the root warning has been shown, so a CLI ``gui`` command does not
+#: print it twice.
+_root_warned = False
+
+
+def warn_if_root() -> None:
+    """Warn once, in plain words, when Nadare runs as root.
+
+    Running the launcher with sudo is a common "fix" that quietly moves every
+    setting, game and Wine prefix under ``/root``, where the desktop user's
+    later launch cannot see them.
+    """
+    global _root_warned
+    if _root_warned or not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return
+    _root_warned = True
+    message = (
+        "Nadare is running as root. Its settings, games and prefixes would be saved "
+        "under /root instead of your own home folder. Run Nadare as your normal "
+        "desktop user instead."
+    )
+    log.warning(message)
+    print(f"[warn] {message}", file=sys.stderr)
+
+
 #: Backend operations the CLI can invoke by name.
 COMMANDS = (
     "gui",
@@ -36,6 +62,8 @@ COMMANDS = (
     "status",
     "install",
     "update",
+    "repair",
+    "remake-prefix",
     "login",
     "launch",
     "stop",
@@ -102,6 +130,9 @@ def build_parser() -> argparse.ArgumentParser:
         "-c", "--config", type=Path, default=None, help="path to config.json (default: XDG config)"
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    parser.add_argument(
+        "-q", "--quiet", action="store_true", help="only show progress, done and errors"
+    )
     sub = parser.add_subparsers(dest="command")
 
     main_help = {
@@ -111,6 +142,8 @@ def build_parser() -> argparse.ArgumentParser:
         "status": "show a profile's status",
         "install": "install the game for a profile",
         "update": "update the game for a profile",
+        "repair": "re-check every game file and re-download damaged or missing ones",
+        "remake-prefix": "move the Wine prefix aside and rebuild it, keeping game files",
         "login": "run the profile's login step",
         "launch": "launch the game and stream its log",
         "stop": "stop a running game",
@@ -118,17 +151,35 @@ def build_parser() -> argparse.ArgumentParser:
     }
     for command in COMMANDS:
         sp = sub.add_parser(command, help=main_help[command])
+        if command not in ("list", "doctor"):
+            sp.add_argument(
+                "-p", "--profile", default=None, help="profile name (default: active profile)"
+            )
         sp.add_argument(
-            "-p", "--profile", default=None, help="profile name (default: active profile)"
+            "-q",
+            "--quiet",
+            action="store_true",
+            default=argparse.SUPPRESS,
+            help="only show progress, done and errors",
         )
         sp.add_argument(
-            "-q", "--quiet", action="store_true", help="only show progress, done and errors"
+            "-v",
+            "--verbose",
+            action="store_true",
+            default=argparse.SUPPRESS,
+            help="debug logging",
         )
-        if command in ("install", "update", "launch"):
+        if command in ("install", "update", "repair", "remake-prefix", "launch"):
             sp.add_argument(
                 "--accept-account-notice",
                 action="store_true",
                 help="acknowledge the account-safety notice and remember it for this profile",
+            )
+        if command == "remake-prefix":
+            sp.add_argument(
+                "--yes",
+                action="store_true",
+                help="confirm rebuilding the prefix (game files are kept)",
             )
         if command == "list":
             sp.add_argument("--json", action="store_true", help="machine-readable output")
@@ -136,13 +187,43 @@ def build_parser() -> argparse.ArgumentParser:
             sp.add_argument(
                 "--fgo", action="store_true", help="also report FGO host readiness"
             )
+            sp.add_argument(
+                "--strict",
+                action="store_true",
+                help="exit non-zero when the host is not ready to run games",
+            )
+            sp.add_argument(
+                "--tls",
+                action="store_true",
+                help="check whether this system's CA store trusts forged certificate chains",
+            )
 
     art = sub.add_parser("fetch-art", help="download cached cover art for a profile")
     art.add_argument("-p", "--profile", default=None, help="profile name (default: active profile)")
     art.add_argument("--all", action="store_true", help="fetch art for every profile")
+    art.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="only show progress, done and errors",
+    )
+    art.add_argument(
+        "-v", "--verbose", action="store_true", default=argparse.SUPPRESS, help="debug logging"
+    )
 
     shortcut = sub.add_parser(
         "shortcut", help="create or manage launcher and Steam shortcuts for a profile"
+    )
+    shortcut.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="only show progress, done and errors",
+    )
+    shortcut.add_argument(
+        "-v", "--verbose", action="store_true", default=argparse.SUPPRESS, help="debug logging"
     )
     actions = shortcut.add_subparsers(dest="shortcut_action")
     add = actions.add_parser("add", help="install a shortcut for a profile")
@@ -153,8 +234,23 @@ def build_parser() -> argparse.ArgumentParser:
     remove.add_argument(
         "-p", "--profile", default=None, help="profile name (default: active profile)"
     )
-    actions.add_parser("list", help="list installed shortcuts")
-    actions.add_parser("refresh", help="rewrite shortcuts for the current profiles")
+    list_cmd = actions.add_parser("list", help="list installed shortcuts")
+    refresh = actions.add_parser("refresh", help="rewrite shortcuts for the current profiles")
+    for action_parser in (add, remove, list_cmd, refresh):
+        action_parser.add_argument(
+            "-q",
+            "--quiet",
+            action="store_true",
+            default=argparse.SUPPRESS,
+            help="only show progress, done and errors",
+        )
+        action_parser.add_argument(
+            "-v",
+            "--verbose",
+            action="store_true",
+            default=argparse.SUPPRESS,
+            help="debug logging",
+        )
 
     remove_cmd = sub.add_parser(
         "remove",
@@ -177,6 +273,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="also delete the game's Wine prefix",
     )
     remove_cmd.add_argument("--yes", action="store_true", help="confirm the removal")
+    remove_cmd.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="only show progress, done and errors",
+    )
+    remove_cmd.add_argument(
+        "-v", "--verbose", action="store_true", default=argparse.SUPPRESS, help="debug logging"
+    )
     return parser
 
 
@@ -265,11 +371,47 @@ def _print_fgo_readiness(config: Config, args: argparse.Namespace | None) -> Non
     print(readiness.format_report(checks, readiness.detect_distro()))
 
 
+def _print_tls_diagnosis() -> None:
+    """Opt-in check that the host CA store rejects known forged chains."""
+    from .core import tls
+
+    accepted = False
+    for host, rejected in tls.check_forged_chain_hosts():
+        if rejected is True:
+            print(f"{host}: rejected (good)")
+        elif rejected is False:
+            print(
+                f"{host}: ACCEPTED: your system trusts a certificate chain it should not"
+            )
+            accepted = True
+        else:
+            print(f"{host}: could not check (network error)")
+    if not accepted:
+        return
+    print("  fix: remove the emSign* roots and Comodo_AAA_Services_root from the host CA store,")
+    print("       then run `update-ca-certificates --fresh`.")
+    print(
+        '       In Chromium-based browsers, add an NSS distrust for the intermediate '
+        '"EM DV TLS CA - G3B".'
+    )
+    print("       For Node, pass --use-openssl-ca so it uses the system CA store.")
+
+
 def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
     """Print GPU/Vulkan capability, DXVK readiness and runner freshness."""
-    from .core import backends, graphics, hostlibs, process, runners, sandbox
+    from .core import backends, graphics, hostlibs, process, runners, sandbox, umu
+
+    reasons: list[str] = []
+
+    def finish() -> int:
+        if bool(getattr(args, "strict", False)) and reasons:
+            print(f"doctor: not ready ({'; '.join(reasons)})")
+            return 1
+        return 0
 
     info = graphics.vulkan_info()
+    if not info.available:
+        reasons.append("Vulkan unavailable")
     if info.available and info.loader_only:
         detail = (
             f"Vulkan loader {info.api_version or '?'} (device version not verified; "
@@ -287,11 +429,29 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
             if info.driver == "software"
             else "Vulkan unavailable"
         )
-    if graphics.dxvk_ok():
+    dxvk_ready = graphics.dxvk_ok()
+    if dxvk_ready:
         ready = "DXVK assumed ready" if info.loader_only else "DXVK-ready"
     else:
         ready = "DXVK needs Vulkan >= 1.3"
     print(f"GPU/Vulkan: {detail} [{ready}]")
+    if not dxvk_ready:
+        family = hostlibs.distro_family()
+        fix = {
+            "debian": (
+                "sudo dpkg --add-architecture i386 && sudo apt update && "
+                "sudo apt install mesa-vulkan-drivers:i386"
+            ),
+            "fedora": "sudo dnf install mesa-vulkan-drivers.i686",
+            "arch": "sudo pacman -S --needed lib32-vulkan-icd-loader lib32-vulkan-radeon",
+        }.get(family or "")
+        if fix:
+            print(f"  fix: {fix}")
+        else:
+            print(
+                "  fix: install your GPU driver's 32-bit Vulkan support "
+                "(see docs/TESTERS.md), then run nadare doctor again"
+            )
     if sandbox.in_flatpak():
         print("umu-run: not needed (Flatpak runs Proton directly)")
     else:
@@ -299,7 +459,13 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
         if found:
             print(f"umu-run: {found}")
         else:
-            print("umu-run: not found (Proton then runs directly and needs 32-bit host libraries)")
+            print(
+                "umu-run: not found (Nadare can set up its own copy at launch "
+                "if 32-bit libraries are missing)"
+            )
+            managed = umu.managed()
+            if managed is not None:
+                print(f"umu-run: managed copy {managed}")
         missing_libs = None if found else hostlibs.missing_32bit()
         if found:
             print("32-bit libs: not needed (umu-run supplies the Steam Linux Runtime)")
@@ -307,6 +473,7 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
             print("32-bit libs: unknown")
         elif missing_libs:
             print(f"32-bit libs: missing {', '.join(missing_libs)}")
+            reasons.append("32-bit libs missing")
             fix = hostlibs.install_command(missing_libs, hostlibs.distro_family())
             print(f"  fix: {fix}" if fix else f"  {hostlibs.hint(missing_libs)}")
         else:
@@ -315,6 +482,7 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
 
     ok, why = _secrets.keyring_diagnosis()
     print(f"keyring: {'OK' if ok else 'unavailable'} ({why})")
+    print(f"tls: CA list = {tls.ca_source()}")
     unavailable = backends.unavailable()
     # A backend a build leaves out on purpose is not a fault; only report the
     # others as MISSING.
@@ -324,6 +492,8 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
     if missing:
         loaded = expected - len(missing)
         print(f"backends: {loaded}/{expected} loaded, MISSING: {', '.join(missing)}")
+        if loaded == 0:
+            reasons.append("no backends loaded")
     else:
         print(f"backends: {expected}/{expected} loaded")
     if optional:
@@ -333,11 +503,18 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
     for line in _disk_space_report(config):
         print(line)
 
+    if bool(getattr(args, "tls", False)):
+        _print_tls_diagnosis()
+
     found = runners.all_runners()
     if not found:
         print("runners: none found")
+        print(
+            "  next: run nadare install -p <profile> (or INSTALL in the GUI); "
+            "it downloads the recommended Proton runner (~320 MB)"
+        )
         _print_fgo_readiness(config, args)
-        return 0
+        return finish()
     print("runners:")
     stale: list[dict[str, Any]] = []
     for path in found:
@@ -350,6 +527,10 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
         flags = []
         if row["stale"]:
             flags.append("STALE")
+        if row.get("recommended"):
+            flags.append("RECOMMENDED")
+        elif row.get("family"):
+            flags.append("untested")
         if row["outdated"]:
             flags.append("OUTDATED")
         suffix = f"  [{', '.join(flags)}]" if flags else ""
@@ -362,7 +543,7 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
         if hint:
             print(f"  suggestion: {hint}")
     _print_fgo_readiness(config, args)
-    return 0
+    return finish()
 
 
 def _run_backend_command(
@@ -370,7 +551,22 @@ def _run_backend_command(
 ) -> int:
     backend = create_backend(name, config, emit=printer, cancel=cancel)
     command = args.command
-    if command in ("install", "update", "launch") and backend.requires_notice_ack():
+    if command == "remake-prefix" and not getattr(args, "yes", False):
+        print(
+            i18n.translate(
+                "would move the current Wine prefix aside, create a fresh one and set "
+                "Windows components up again; your game files are kept and the old "
+                "prefix is not deleted"
+            )
+        )
+        print(
+            i18n.translate("re-run with --yes to rebuild the Wine prefix"),
+            file=sys.stderr,
+        )
+        return 2
+    if command in ("install", "update", "repair", "remake-prefix", "launch") and (
+        backend.requires_notice_ack()
+    ):
         if getattr(args, "accept_account_notice", False):
             config.profile(name)["accept_account_notice"] = True
             config.save()
@@ -393,7 +589,7 @@ def _run_backend_command(
             print(f"  login: {'logged in' if status.data['logged_in'] else 'not logged in'}")
         printer(
             Event(
-                "done",
+                "error" if status.state == "error" else "done",
                 status.message or status.state,
                 data={
                     "state": status.state,
@@ -410,6 +606,12 @@ def _run_backend_command(
     if command == "update":
         backend.update()
         return 0
+    if command == "repair":
+        backend.repair()
+        return 0
+    if command == "remake-prefix":
+        backend.remake_prefix()
+        return 0
     if command == "login":
         backend.login()
         return 0
@@ -422,13 +624,37 @@ def _run_backend_command(
         print(f"{name}: stopped")
         return 0
     if command == "launch":
-        return int(backend.launch() or 0)
+        try:
+            return int(backend.launch() or 0)
+        except BackendError as exc:
+            if "not installed" in exc.message.lower():
+                raise BackendError(
+                    f"Not installed. Run: nadare install -p {name}", exc.code
+                ) from exc
+            raise
     if command == "verify":
-        report = backend.verify()
+        try:
+            report = backend.verify()
+        except BackendError as exc:
+            if "not installed" in exc.message.lower():
+                raise BackendError(
+                    f"Not installed. Run: nadare install -p {name}", exc.code
+                ) from exc
+            raise
+        message = str(report.get("message", ""))
+        if not message:
+            message = i18n.translate(
+                "all checks passed" if report.get("verified", True) else "nothing to verify"
+            )
+        if not report.get("verified", True):
+            if "not installed" in message.lower():
+                message = f"Not installed. Run: nadare install -p {name}"
+            elif "integrity check failed" in message.lower():
+                message = f"{message}; Run: nadare install -p {name}"
         printer(
             Event(
                 "done",
-                str(report.get("message", "")) or i18n.translate("nothing to verify"),
+                message,
                 data=dict(report),
             )
         )
@@ -482,32 +708,52 @@ def _run_shortcut(args: argparse.Namespace, config: Config) -> int:
         return 1
     if action == "list":
         entries = shortcuts.installed_desktop_entries(desktop_dir=_desktop_dir())
-        if not entries:
+        steam_entries = shortcuts.installed_steam_shortcuts()
+        if not entries and not steam_entries:
             print(i18n.translate("no shortcuts installed"))
             return 0
         for path, owner in entries:
             print(f"{owner}\t{path}")
+        for path, owner, title in steam_entries:
+            print(f"{owner}\t{path}\tSteam: {title}")
         return 0
     if action == "refresh":
         result = shortcuts.refresh_desktop_entries(
             config.profiles, desktop_dir=_desktop_dir()
         )
+        steam = shortcuts.refresh_steam_shortcuts(config.profiles)
         for path in result["updated"]:
             print(f"updated {path}")
         for path in result["removed"]:
             print(f"removed {path}")
+        for path in steam["updated"]:
+            print(f"updated {path}")
+        for item in steam["removed"]:
+            print(f"removed {item}")
+        for warning in steam["warnings"]:
+            print(f"[warn] {warning}", file=sys.stderr)
         return 0
 
     name = args.profile or config.active
-    if not name or name not in config.profiles:
+    if not name:
         raise shortcuts.ShortcutError(
-            i18n.translate("no such profile: {name}", name=name or "")
+            i18n.translate("no profile given; use -p <profile>")
         )
+    if name not in config.profiles:
+        known = ", ".join(config.profiles)
+        message = i18n.translate("no such profile: {name}", name=name)
+        if known:
+            message += f"; configured profiles: {known}"
+        raise shortcuts.ShortcutError(message)
     profile = config.profiles[name]
     title = str(profile.get("title") or name)
 
     if action == "remove":
         removed = shortcuts.remove_desktop_entries(name, desktop_dir=_desktop_dir())
+        steam_removed, steam_warnings = shortcuts.remove_steam_shortcuts(name)
+        removed += steam_removed
+        for warning in steam_warnings:
+            print(warning, file=sys.stderr)
         for path in removed:
             print(f"removed {path}")
         if not removed:
@@ -523,7 +769,12 @@ def _run_shortcut(args: argparse.Namespace, config: Config) -> int:
     if args.steam:
         steam_files = shortcuts.find_steam_shortcut_files()
         if not steam_files:
-            print(i18n.translate("no Steam shortcut files found"))
+            print(i18n.translate("no Steam shortcut files found"), file=sys.stderr)
+            print(
+                "[warn] start Steam once so it creates shortcuts.vdf, then retry",
+                file=sys.stderr,
+            )
+            return 1
         for path in steam_files:
             if shortcuts.add_steam_shortcut(path, name, title, argv):
                 print(f"installed {path}")
@@ -589,12 +840,16 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
         args.json = False
 
     nadare_logging.setup(level=logging.DEBUG if args.verbose else logging.INFO)
-    tls.ensure_ca_bundle()
+    warn_if_root()
+    tls.setup()
     try:
         paths.ensure_dirs()
     except OSError as exc:
         print(f"[error] cannot create data directories: {exc}", file=sys.stderr)
         return 1
+    if args.config is not None and not args.config.exists():
+        print(f"[error] config file not found: {args.config}", file=sys.stderr)
+        return 2
     try:
         config = Config.load(args.config)
     except ConfigReadError as exc:
@@ -607,7 +862,14 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     printer = _make_printer(quiet=getattr(args, "quiet", False))
 
     if args.command == "gui":
-        return run_gui(config)
+        profile = getattr(args, "profile", None)
+        if profile and profile not in config.profiles:
+            print(
+                i18n.translate("no such profile: {name}", name=profile),
+                file=sys.stderr,
+            )
+            return 2
+        return run_gui(config, profile=profile)
 
     if args.command == "list":
         try:
@@ -731,7 +993,7 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
 # ---------------------------------------------------------------------------
 # GUI
 # ---------------------------------------------------------------------------
-def run_gui(config: Config | None = None) -> int:
+def run_gui(config: Config | None = None, *, profile: str | None = None) -> int:
     """Start the PyQt6 GUI. Imported lazily so the CLI stays headless."""
     cfg = config or Config.load()
     try:
@@ -741,4 +1003,4 @@ def run_gui(config: Config | None = None) -> int:
             f"Nadare GUI is unavailable ({exc}). Install the GUI extras and retry; "
             f"the CLI is still available via `nadare --help`."
         ) from exc
-    return int(gui_run(cfg) or 0)
+    return int(gui_run(cfg, profile=profile) or 0)

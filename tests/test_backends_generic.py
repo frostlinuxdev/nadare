@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Command-line/argv construction for the generic backends.
 
-These tests assert the exact argv/env a profile produces.  No game, Wine or
-Waydroid is ever started: subprocess entry points are monkeypatched.
+These tests assert the exact argv/env a profile produces.  No game or Wine is ever
+started: subprocess entry points are monkeypatched.
 """
 
 from __future__ import annotations
@@ -14,11 +14,9 @@ from _backend_helpers import make_context, write_exe
 
 from nadare.backends import script as script_mod
 from nadare.backends import steam as steam_mod
-from nadare.backends import waydroid as waydroid_mod
 from nadare.backends import wine as wine_mod
 from nadare.backends.script import ScriptBackend
 from nadare.backends.steam import SteamBackend
-from nadare.backends.waydroid import WaydroidBackend
 from nadare.backends.wine import WineBackend
 from nadare.core.backends import BackendError
 
@@ -46,6 +44,22 @@ class TestWineBuild:
         assert target == exe
         assert prefix == tmp_path / "prefix"
         assert env["WINEPREFIX"] == str(tmp_path / "prefix")
+
+    def test_plain_wine_suppresses_the_mono_and_gecko_prompts(self, tmp_path):
+        game = tmp_path / "game"
+        write_exe(game / "game.exe", "MZ")
+        ctx = make_context(
+            tmp_path,
+            "wine",
+            {
+                "install_dir": str(game),
+                "exe_name": "game.exe",
+                "prefix": str(tmp_path / "prefix"),
+                "wine_binary": "/usr/bin/wine",
+            },
+        )
+        _argv, env, *_ = WineBackend(ctx).build()
+        assert "mscoree,mshtml=" in env["WINEDLLOVERRIDES"]
 
     def test_relative_exe_is_resolved_against_install_dir(self, tmp_path):
         game = tmp_path / "game"
@@ -147,7 +161,8 @@ class TestWineBuild:
             },
         )
         _argv, env, *_ = WineBackend(ctx).build()
-        assert "WINEDLLOVERRIDES" not in env
+        # Only the Mono/Gecko prompt suppression; no renderer (d3d*/dxgi) overrides.
+        assert env["WINEDLLOVERRIDES"] == "mscoree,mshtml="
         assert "PROTON_USE_WINED3D" not in env
 
     def test_proton_runner_uses_umu(self, tmp_path, monkeypatch):
@@ -311,7 +326,9 @@ class TestSteamBuild:
         argv, app_id = SteamBackend(ctx).build()
         assert argv == ["/usr/bin/steam", "steam://rungameid/1"]
         assert app_id == "1"
-        assert SteamBackend(ctx).status().state == "installed"
+        # No appmanifest in a Steam library: launchable, flagged as not found (#291).
+        status = SteamBackend(ctx).status()
+        assert status.state == "installed" and status.data["installed"] is False
 
     def test_patterns_match_the_launch_uri_and_steam_appid_token(self, tmp_path):
         """N1: the real Steam launch forms are matched, not the bare app id."""
@@ -419,98 +436,6 @@ class TestScriptBuild:
         ScriptBackend(ctx).launch()
         assert captured["XDG_DATA_HOME"] == str(paths.data_dir().parent)
         assert captured["XDG_CONFIG_HOME"] == str(paths.config_dir().parent)
-
-
-# ---------------------------------------------------------------------------
-# waydroid
-# ---------------------------------------------------------------------------
-class TestWaydroidBuild:
-    def _patch_binary(self, monkeypatch, binary="/usr/bin/waydroid"):
-        monkeypatch.setattr(
-            waydroid_mod, "_waydroid_binary", lambda: Path(binary) if binary else None
-        )
-
-    def test_show_full_ui(self, tmp_path, monkeypatch):
-        self._patch_binary(monkeypatch)
-        ctx = make_context(tmp_path, "waydroid", {"waydroid_package": "com.x"})
-        argv, env = WaydroidBackend(ctx).build()
-        assert argv == ["/usr/bin/waydroid", "show-full-ui"]
-        assert env["PATH"].startswith("/usr/bin")
-        assert "PYTHONPATH" not in env
-
-    def test_environment_is_sanitized(self, tmp_path, monkeypatch):
-        self._patch_binary(monkeypatch)
-        monkeypatch.setenv("PYTHONPATH", "/leak")
-        monkeypatch.setenv("VIRTUAL_ENV", "/venv")
-        monkeypatch.setenv("PATH", "/leak/bin:/usr/bin:/bin")
-        _argv, env = WaydroidBackend(make_context(tmp_path, "waydroid", {})).build()
-        assert "PYTHONPATH" not in env
-        assert "VIRTUAL_ENV" not in env
-        # /usr/bin is forced to the front, and the old copy is de-duplicated.
-        assert env["PATH"].split(":")[:2] == ["/usr/bin", "/bin"]
-        assert env["PATH"].count("/usr/bin") == 1
-
-    def test_extra_env_is_merged(self, tmp_path, monkeypatch):
-        self._patch_binary(monkeypatch)
-        ctx = make_context(tmp_path, "waydroid", {"extra_env": {"WAYDROID_FOO": "1"}})
-        _argv, env = WaydroidBackend(ctx).build()
-        assert env["WAYDROID_FOO"] == "1"
-
-    def test_gamescope_wrapper(self, tmp_path, monkeypatch):
-        self._patch_binary(monkeypatch)
-        monkeypatch.setattr(
-            waydroid_mod.shutil,
-            "which",
-            lambda name: "/usr/bin/gamescope" if name == "gamescope" else None,
-        )
-        ctx = make_context(
-            tmp_path,
-            "waydroid",
-            {
-                "use_gamescope": True,
-                "gamescope_backend": "sdl",
-                "gamescope_args": ["-W", "1280", "-H", "720"],
-                "gamescope_scaler": "fit",
-            },
-        )
-        argv, _env = WaydroidBackend(ctx).build()
-        assert argv[:9] == [
-            "/usr/bin/gamescope",
-            "--backend",
-            "sdl",
-            "-W",
-            "1280",
-            "-H",
-            "720",
-            "-S",
-            "fit",
-        ]
-        assert argv[9:12] == ["--", "sh", "-c"]
-        assert "exec /usr/bin/waydroid show-full-ui" in argv[12]
-        assert "WAYLAND_DISPLAY" in argv[12]
-
-    def test_gamescope_missing_raises(self, tmp_path, monkeypatch):
-        self._patch_binary(monkeypatch)
-        monkeypatch.setattr(waydroid_mod.shutil, "which", lambda name: None)
-        ctx = make_context(tmp_path, "waydroid", {"use_gamescope": True})
-        with pytest.raises(BackendError):
-            WaydroidBackend(ctx).build()
-
-    def test_status_when_binary_missing(self, tmp_path, monkeypatch):
-        self._patch_binary(monkeypatch, binary=None)
-        status = WaydroidBackend(make_context(tmp_path, "waydroid", {})).status()
-        assert status.state == "not_installed"
-        assert not status.running
-
-    def test_package_in_list_is_an_exact_id_match(self):
-        """05-10: a substring of another installed package must not count."""
-        from nadare.backends.waydroid import package_in_list
-
-        output = "packageName: com.foo.app.pro\nName: Pro\n"
-        assert package_in_list(output, "com.foo.app") is False
-        assert package_in_list(output, "com.foo.app.pro") is True
-        assert package_in_list("com.bar\n", "com.bar") is True
-        assert package_in_list("", "com.bar") is False
 
 
 # ---------------------------------------------------------------------------

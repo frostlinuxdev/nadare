@@ -224,6 +224,15 @@ def _default_gds() -> dict:
 GDS_INFO = _default_gds()
 
 
+def _xdg_fallback(env: str, default: str) -> Path:
+    """XDG base used only when ``nadare.core.paths`` cannot be imported.
+
+    Mirrors core.paths so standalone runs honour ``XDG_DATA_HOME`` rather than
+    hard-coding ``~/.local/share``.
+    """
+    return Path(os.environ.get(env) or os.path.expanduser(default)) / "nadare"
+
+
 def _default_state_dir() -> Path:
     """Nadare's per-user data dir; CZN_STATE_DIR always wins (the backend sets it
     to the active profile's data dir)."""
@@ -232,7 +241,7 @@ def _default_state_dir() -> Path:
 
         return paths.data_dir() / "czn"
     except Exception:
-        return Path.home() / ".local/share/nadare/czn"
+        return _xdg_fallback("XDG_DATA_HOME", "~/.local/share") / "czn"
 
 
 STATE_DIR = Path(os.environ.get("CZN_STATE_DIR", str(_default_state_dir())))
@@ -430,6 +439,12 @@ class StoveAuth:
                 say(f"    {png_path}")
             except Exception:
                 png_path = None
+        else:
+            # No image in the response: do not announce a file that was never
+            # written (the GUI would show nothing and wait for the whole timeout).
+            png_path = None
+        if not png_path and not url:
+            raise RuntimeError("STOVE returned no QR code or login link")
         if url:
             say("Or open this link in the STOVE app:")
             say(f"    {url}")
@@ -460,7 +475,7 @@ class StoveAuth:
                     pass
                 return
             if state in ("expired", "close", "closed", "cancel", "cancelled"):
-                raise RuntimeError(f"QR login ended: {state}")
+                raise ReloginRequired(f"QR login ended: {state}")
             time.sleep(2)
         raise RuntimeError("QR login timed out")
 

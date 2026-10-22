@@ -28,6 +28,7 @@ report the context's NVIDIA/Venus proxy and mDNS adb helper.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import signal
@@ -39,9 +40,29 @@ from pathlib import Path
 from ...core import paths, sandbox
 from ...core.events import Cancel, Cancelled
 
+log = logging.getLogger(__name__)
+
 FGO_PKG = "com.aniplex.fategrandorder.en"
+
+_TOOL_ERROR = (
+    "FGO's launcher tool is missing or not executable. Run Install again to repair it."
+)
 FGO_ACTIVITY = "jp.delightworks.Fgo.player.AndroidPlugin"
 DEFAULT_CONTEXT = "fgo"
+
+
+_IDENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def _ident(value: str, what: str) -> str:
+    """A context/release name safe to pass as a ``lepton-fgo`` argument.
+
+    A leading ``-`` would be parsed as an option (``--all`` makes ``uninstall``
+    remove every context), so names must start with a letter or digit.
+    """
+    if not _IDENT_RE.fullmatch(value):
+        raise LeptonError(f"unsafe {what} name {value!r}: use letters, digits, '.', '_' and '-'")
+    return value
 
 
 class LeptonError(RuntimeError):
@@ -128,7 +149,7 @@ def parse_status(text: str) -> dict[str, str | None]:
 
 def parse_check_host(text: str) -> dict[str, object]:
     """Parse ``check-host.sh`` output into ``{ok, missing, selinux_enforcing}``."""
-    ok = "OK: all required pieces present." in text
+    ok_sentence = "OK: all required pieces present." in text
     missing: list[str] = []
     lines = text.splitlines()
     for i, line in enumerate(lines):
@@ -138,9 +159,8 @@ def parse_check_host(text: str) -> dict[str, object]:
                 if not m:
                     break
                 missing.append(m.group(1))
-            break
     enforcing = bool(re.search(r"getenforce:\s*Enforcing", text))
-    return {"ok": ok, "missing": missing, "selinux_enforcing": enforcing}
+    return {"ok": ok_sentence and not missing, "missing": missing, "selinux_enforcing": enforcing}
 
 
 def parse_check_update(text: str) -> dict[str, object]:
@@ -188,7 +208,7 @@ class LeptonFgo:
         config_dir: str | os.PathLike[str] | None = None,
         env: dict[str, str] | None = None,
     ) -> None:
-        self.context = str(context or DEFAULT_CONTEXT)
+        self.context = _ident(str(context or DEFAULT_CONTEXT), "context")
         self.prefix = Path(os.path.expanduser(str(prefix))) if prefix else default_prefix()
         if config_dir:
             self.config_dir = Path(os.path.expanduser(str(config_dir)))
@@ -288,40 +308,42 @@ class LeptonFgo:
         return f"sudo {self.setup_selinux_sh}"
 
     # ---- command construction ---------------------------------------------
+    def _ctx(self, ctx: str | None) -> str:
+        return _ident(ctx, "context") if ctx else self.context
     def cmd_status(self, ctx: str | None = None) -> list[str]:
-        return [str(self.lepton_fgo), "status", ctx or self.context]
+        return [str(self.lepton_fgo), "status", self._ctx(ctx)]
 
     def cmd_check_update(self, ctx: str | None = None) -> list[str]:
-        return [str(self.lepton_fgo), "check-update", ctx or self.context]
+        return [str(self.lepton_fgo), "check-update", self._ctx(ctx)]
 
     def cmd_stop(self, ctx: str | None = None) -> list[str]:
-        return [str(self.lepton_fgo), "stop", ctx or self.context]
+        return [str(self.lepton_fgo), "stop", self._ctx(ctx)]
 
     def cmd_launch(self, ctx: str | None = None) -> list[str]:
-        return [str(self.lepton_fgo), "launch", ctx or self.context]
+        return [str(self.lepton_fgo), "launch", self._ctx(ctx)]
 
     def cmd_game_launch(self, ctx: str | None = None) -> list[str]:
         """The launcher command the desktop entry installs."""
-        return [str(self.lepton_game), ctx or self.context, FGO_PKG, FGO_ACTIVITY]
+        return [str(self.lepton_game), self._ctx(ctx), FGO_PKG, FGO_ACTIVITY]
 
     def cmd_update(self, ctx: str | None = None, force: bool = False) -> list[str]:
-        cmd = [str(self.lepton_fgo), "update", ctx or self.context]
+        cmd = [str(self.lepton_fgo), "update", self._ctx(ctx)]
         if force:
             cmd.append("--force")
         return cmd
 
     def cmd_config_get(self, ctx: str | None = None) -> list[str]:
-        return [str(self.lepton_fgo), "config", ctx or self.context]
+        return [str(self.lepton_fgo), "config", self._ctx(ctx)]
 
     def cmd_config_set(self, ctx: str | None = None, **kv: object) -> list[str]:
-        cmd = [str(self.lepton_fgo), "config", ctx or self.context, "set"]
+        cmd = [str(self.lepton_fgo), "config", self._ctx(ctx), "set"]
         cmd += [f"{key}={value}" for key, value in kv.items()]
         return cmd
 
     def cmd_verify(self, ctx: str | None = None, release: str | None = None) -> list[str]:
-        cmd = [str(self.lepton_fgo), "verify", ctx or self.context]
+        cmd = [str(self.lepton_fgo), "verify", self._ctx(ctx)]
         if release:
-            cmd += ["--release", str(release)]
+            cmd += ["--release", _ident(str(release), "release")]
         return cmd
 
     def cmd_check_host(self) -> list[str]:
@@ -382,7 +404,7 @@ class LeptonFgo:
         purge_cache: bool = False,
         yes: bool = True,
     ) -> list[str]:
-        cmd = [str(self.lepton_fgo), "uninstall", ctx or self.context]
+        cmd = [str(self.lepton_fgo), "uninstall", self._ctx(ctx)]
         if purge:
             cmd.append("--purge")
         if all_:
@@ -398,25 +420,73 @@ class LeptonFgo:
         self,
         cmd: Iterable[str],
         timeout: float = 60,
+        cancel: Cancel | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        argv = list(cmd)
+        if cancel is None:
+            try:
+                return subprocess.run(
+                    sandbox.host_argv(argv, env=self.env()),
+                    env=self.env(),
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=timeout,
+                    check=False,
+                )
+            except FileNotFoundError as exc:
+                log.debug("lepton-fgo tool not found: %s", argv, exc_info=True)
+                raise LeptonError(_TOOL_ERROR) from exc
+            except OSError as exc:
+                # Not executable, a directory, or another spawn failure: surface the
+                # contract's clean LeptonError instead of a raw OSError.
+                log.debug("could not run lepton-fgo command %s", argv, exc_info=True)
+                raise LeptonError(_TOOL_ERROR) from exc
+            except subprocess.TimeoutExpired as exc:
+                log.debug("lepton-fgo command timed out after %.0fs: %s", timeout, argv)
+                raise LeptonError(
+                    "FGO's launcher tool did not respond in time. Close the game and try "
+                    "again. Details are in Open logs."
+                ) from exc
+
+        # Cancellable variant: the child gets its own session so its whole group
+        # (and any grandchildren) can be stopped, while a watcher polls ``cancel``
+        # even if the tool prints nothing.
         try:
-            return subprocess.run(
-                sandbox.host_argv(list(cmd), env=self.env()),
+            proc = subprocess.Popen(
+                sandbox.host_argv(argv, env=self.env()),
                 env=self.env(),
-                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 errors="replace",
-                timeout=timeout,
-                check=False,
+                start_new_session=True,
             )
-        except FileNotFoundError as exc:
-            raise LeptonError(f"not found: {exc.filename or cmd}") from exc
         except OSError as exc:
-            # Not executable, a directory, or another spawn failure: surface the
-            # contract's clean LeptonError instead of a raw OSError.
-            raise LeptonError(f"could not run {cmd}: {exc}") from exc
+            log.debug("could not start lepton-fgo command %s", argv, exc_info=True)
+            raise LeptonError(_TOOL_ERROR) from exc
+
+        done = threading.Event()
+        threading.Thread(
+            target=self._watch_cancel, args=(proc, cancel, done), daemon=True
+        ).start()
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired as exc:
-            raise LeptonError(f"timed out after {timeout:.0f}s: {cmd}") from exc
+            _terminate(proc)
+            log.debug("lepton-fgo command timed out after %.0fs: %s", timeout, argv)
+            raise LeptonError(
+                "FGO's launcher tool did not respond in time. Close the game and try "
+                "again. Details are in Open logs."
+            ) from exc
+        finally:
+            done.set()
+            if proc.poll() is None:
+                _terminate(proc)
+        if cancel.cancelled:
+            raise Cancelled()
+        return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
 
     def stream(
         self,
@@ -446,7 +516,8 @@ class LeptonFgo:
                 start_new_session=True,
             )
         except OSError as exc:
-            raise LeptonError(f"could not start {argv[0]}: {exc}") from exc
+            log.debug("could not start lepton-fgo command %s", argv, exc_info=True)
+            raise LeptonError(_TOOL_ERROR) from exc
 
         done = threading.Event()
         if cancel is not None:
@@ -454,7 +525,8 @@ class LeptonFgo:
                 target=self._watch_cancel, args=(proc, cancel, done), daemon=True
             ).start()
         try:
-            assert proc.stdout is not None
+            if proc.stdout is None:
+                raise LeptonError("child process has no stdout pipe")
             for raw in proc.stdout:
                 if cancel is not None and cancel.cancelled:
                     raise Cancelled()
@@ -485,7 +557,7 @@ class LeptonFgo:
     def status(self, ctx: str | None = None) -> dict[str, str | None]:
         if not self.lepton_fgo.is_file():
             return {
-                "context": ctx or self.context,
+                "context": self._ctx(ctx),
                 "container": None,
                 "fgo": None,
                 "venus": None,
@@ -493,7 +565,7 @@ class LeptonFgo:
             }
         return parse_status(self.run(self.cmd_status(ctx), timeout=30).stdout)
 
-    def check_host(self) -> dict[str, object]:
+    def check_host(self, cancel: Cancel | None = None) -> dict[str, object]:
         if not self.check_host_sh.is_file():
             return {
                 "ok": False,
@@ -501,7 +573,7 @@ class LeptonFgo:
                 "selinux_enforcing": False,
                 "output": "",
             }
-        result = self.run(self.cmd_check_host(), timeout=120)
+        result = self.run(self.cmd_check_host(), timeout=120, cancel=cancel)
         report = parse_check_host(result.stdout + result.stderr)
         report["output"] = result.stdout
         return report
@@ -513,8 +585,13 @@ class LeptonFgo:
         report["returncode"] = result.returncode
         return report
 
-    def verify(self, ctx: str | None = None, release: str | None = None) -> dict[str, object]:
-        result = self.run(self.cmd_verify(ctx, release), timeout=300)
+    def verify(
+        self,
+        ctx: str | None = None,
+        release: str | None = None,
+        cancel: Cancel | None = None,
+    ) -> dict[str, object]:
+        result = self.run(self.cmd_verify(ctx, release), timeout=300, cancel=cancel)
         return {"returncode": result.returncode, "output": result.stdout + result.stderr}
 
     def config(self, ctx: str | None = None) -> dict[str, str]:

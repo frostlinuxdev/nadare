@@ -23,6 +23,7 @@ Profile keys (top level or under ``extra``):
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -30,7 +31,58 @@ from pathlib import Path
 
 from ..core.backends import BackendError, GameBackend, Option, Status
 from ..core.events import Event, mask
-from .wine import ProcessQuery, cmdline_argv, profile_setting, scan_pids, stop_pids, stream
+from .wine import (
+    ProcessQuery,
+    cmdline_argv,
+    profile_setting,
+    remember_start,
+    scan_pids,
+    stop_pids,
+    stream,
+)
+
+#: Steam's ``steamapps`` folders, native then Flatpak.
+_STEAMAPPS_ROOTS = (
+    Path(".local") / "share" / "Steam" / "steamapps",
+    Path(".steam") / "steam" / "steamapps",
+    Path(".var") / "app" / "com.valvesoftware.Steam" / ".local" / "share" / "Steam" / "steamapps",
+)
+
+_LIBRARY_PATH_RE = re.compile(r'"path"\s+"([^"]+)"')
+
+
+def _steamapps_dirs() -> list[Path]:
+    """Every plausible ``steamapps`` directory, including extra library folders."""
+    home = Path(os.path.expanduser("~"))
+    roots = [home / relative for relative in _STEAMAPPS_ROOTS]
+    for root in list(roots):
+        vdf = root / "libraryfolders.vdf"
+        try:
+            text = vdf.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for match in _LIBRARY_PATH_RE.finditer(text):
+            library = Path(match.group(1).replace("\\\\", "\\")).expanduser()
+            if library.is_absolute():
+                roots.append(library / "steamapps")
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        try:
+            key = root.resolve()
+        except OSError:
+            key = root
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(root)
+    return found
+
+
+def _has_app_manifest(app_id: str) -> bool:
+    """True when Steam has an ``appmanifest_<id>.acf`` in one of its libraries."""
+    name = f"appmanifest_{app_id}.acf"
+    return any((root / name).is_file() for root in _steamapps_dirs())
 
 
 def _applaunch_pids(app_id: str, *, proc_root: str | os.PathLike[str] = "/proc") -> list[int]:
@@ -41,6 +93,7 @@ def _applaunch_pids(app_id: str, *, proc_root: str | os.PathLike[str] = "/proc")
     match on the bare id would also catch an unrelated numeric argument.
     """
     me = os.getpid()
+    uid = os.getuid()
     hits: list[int] = []
     try:
         entries = list(Path(proc_root).iterdir())
@@ -52,16 +105,22 @@ def _applaunch_pids(app_id: str, *, proc_root: str | os.PathLike[str] = "/proc")
         pid = int(entry.name)
         if pid == me:
             continue
+        try:
+            if entry.stat().st_uid != uid:
+                continue  # never signal a Steam running as another user
+        except OSError:
+            continue
         argv = cmdline_argv(entry)
         if argv and any(
             token == "-applaunch" and argv[i + 1] == app_id for i, token in enumerate(argv[:-1])
         ):
             hits.append(pid)
-    return hits
+    return remember_start(hits)
 
 
 class SteamBackend(GameBackend):
     kind = "steam"
+    supports_update = False  # Steam updates its own games
 
     options = (
         Option("steam_app_id", "Steam app id", "text", "Numeric store id, e.g. 4813850."),
@@ -145,19 +204,28 @@ class SteamBackend(GameBackend):
 
     # ---- contract ----------------------------------------------------------
     def status(self) -> Status:
+        data: dict[str, object] = {"can_install": False, "can_update": False}
         try:
             app_id = self._app_id()
         except BackendError as exc:
-            return Status(state="not_installed", message=str(exc))
+            return Status(state="error", message=str(exc), data=data)
         try:
             client = self._client()
         except BackendError:
-            return Status(state="not_installed", message="Steam client not found")
+            return Status(state="not_installed", message="Steam client not found", data=data)
         pids = self._matching_pids(app_id)
+        installed = _has_app_manifest(app_id)
+        data.update({"app_id": app_id, "client": client[0], "pids": pids, "installed": installed})
+        if pids:
+            return Status(state="running", running=True, data=data)
+        if installed:
+            return Status(state="installed", data=data)
+        # Stay launchable: Steam itself opens the store/install page, and a library
+        # in an unusual place must not turn the game into a dead end.
         return Status(
-            state="running" if pids else "installed",
-            running=bool(pids),
-            data={"app_id": app_id, "client": client[0], "pids": pids},
+            state="installed",
+            message="Steam will install or open this game (not found in your Steam library)",
+            data=data,
         )
 
     def install(self) -> None:

@@ -5,7 +5,7 @@
 # scripts/build_flatpak.sh, which stages dist/nadare next to this file.
 #
 # This is a *permissive* bundle, not a real sandbox: games live anywhere on
-# disk (host filesystem), and Lepton (FGO), Waydroid and gamescope run on the
+# disk (host filesystem), and Lepton (FGO) and gamescope run on the
 # host through flatpak-spawn --host. Proton runs inside the sandbox with the
 # 32-bit compat extensions.
 #
@@ -36,9 +36,11 @@ finish-args:
   - --talk-name=org.kde.kwalletd6
   - --talk-name=org.kde.kwalletd5
   - --talk-name=org.freedesktop.Notifications
-  # Lepton / Waydroid / gamescope live on the host.
+  # Lepton / gamescope live on the host.
   - --talk-name=org.freedesktop.Flatpak
   - --env=NADARE_FLATPAK=1
+  # Flatpak itself owns updates: never send the user to a manual download.
+  - --env=NADARE_MANAGED_UPDATES=1
 
 add-extensions:
   org.freedesktop.Platform.Compat.i386:

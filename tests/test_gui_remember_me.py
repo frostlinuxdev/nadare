@@ -155,3 +155,32 @@ def test_a_locked_keyring_keeps_the_choice(tmp_path, qapp, monkeypatch):
     window._show_remember_notice("czn")
     assert window.game.remember.isChecked() and _remembers(tmp_path / "config.json")
     window.close()
+
+
+def test_a_remember_notice_from_login_is_shown_and_undoes_the_box(
+    tmp_path, qapp, monkeypatch
+):
+    """F-03: login can discover the keyring is unusable; do not stay ticked."""
+    from nadare.backends.czn.backend import REMEMBER_NOTICE
+    from nadare.core.events import Event
+
+    window = _window(tmp_path)
+    window.open_game("czn")
+    with window.config.locked():
+        window.config.profiles["czn"]["remember_me"] = True
+        window.config.save()
+    shown: list[str] = []
+    monkeypatch.setattr(
+        "nadare.gui.main_window.QMessageBox.information", lambda *a, **k: shown.append(a[2])
+    )
+    monkeypatch.setattr(window, "_start", lambda *a, **k: True)
+
+    window._on_event(
+        "czn", Event("status", REMEMBER_NOTICE, data={"remember_unavailable": True})
+    )
+    window._on_succeeded("czn", "login", 0)
+
+    assert shown and "turned off" in shown[0]
+    assert not window.game.remember.isChecked()
+    assert not _remembers(tmp_path / "config.json")
+    window.close()

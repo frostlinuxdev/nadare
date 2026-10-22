@@ -272,15 +272,17 @@ Persist anything you resolve (a downloaded runner, a chosen prefix) with
 
 Yostar's launcher API is signed with a per-game salt. That salt cannot ship in
 this GPL client, so a scheduled CI job (see `ci/yostar-manifests/`) signs the
-three launcher calls and publishes plain manifests; the backends download the
-files directly from the public CDN.
+two launcher API calls, fetches the public game-file list, and publishes plain
+manifests; the backends then download the listed files directly from the public
+CDN.
 
 * `arknights-yostar` runs in two modes: **official** (the Yostar installer runs
 the launcher, which then downloads the game) and **direct** (the manifest is
 synced into `install_dir` and `Arknights.exe` is launched). Direct mode is
 selected whenever a manifest is configured.
-* `stellasora-yostar` is **direct only** and errors with an actionable message
-when no manifest is configured.
+* `stellasora-yostar` is **direct only**. It uses Nadare's published manifest
+index by default, and errors with an actionable message when that index is
+disabled and no manifest is configured.
 
 Manifest configuration (environment wins over the profile):
 

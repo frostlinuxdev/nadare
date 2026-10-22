@@ -169,6 +169,23 @@ def _slug(article: str) -> str:
     return path.replace("/", "-")
 
 
+def _safe_article_path(article: str) -> bool:
+    """True when ``WEBVIEW_BASE + article`` stays on the publisher's host.
+
+    The value comes from the feed. Anything that is not a plain absolute path
+    (``@evil.host`` userinfo, ``//host``, backslashes, ``..`` or control
+    characters) is rejected, not repaired.
+    """
+    return (
+        article.startswith("/")
+        and not article.startswith("//")
+        and "@" not in article
+        and "\\" not in article
+        and ".." not in article
+        and all(ch.isprintable() for ch in article)
+    )
+
+
 def _entry(entry: ElementTree.Element) -> tuple[dict[str, Any], str] | None:
     """Map one Atom ``<entry>`` to ``(item, article_path)``, or ``None``."""
     title = (entry.findtext(f"{_ATOM}title") or "").strip()
@@ -186,7 +203,7 @@ def _entry(entry: ElementTree.Element) -> tuple[dict[str, Any], str] | None:
     category = (query.get("category") or [""])[0].strip()
     article = (query.get("article") or [""])[0].strip()
     item_id = _slug(article)
-    if not article or not item_id:
+    if not article or not item_id or not _safe_article_path(article):
         return None
 
     # The feed decodes these from its own query string; re-encode so a value

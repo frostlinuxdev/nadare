@@ -14,6 +14,9 @@ journal with an atomic write. If the process dies mid-update, :meth:`recover`
 re-reads the journal and rolls back (phase ``applying``) or finalises
 (``files_verified``/``committed``). Relative paths are validated so a journal
 can never be tricked into writing outside the game root.
+
+Status: experimental. The module is complete and tested, but no backend calls it
+yet (the CZN and Yostar updaters manage their own writes); see PLAN.md.
 """
 
 from __future__ import annotations

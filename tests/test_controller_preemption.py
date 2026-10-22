@@ -226,3 +226,19 @@ def test_mutating_profiles_lists_only_running_mutations(controller):
     assert workers.is_mutating("install") is True
     assert workers.is_mutating("status") is False
 
+
+
+def test_running_operation_names_what_a_profile_is_doing(controller):
+    class W:
+        def __init__(self, operation: str, running: bool) -> None:
+            self.operation = operation
+            self._running = running
+
+        def isRunning(self) -> bool:  # noqa: N802 - Qt naming
+            return self._running
+
+    controller._workers["a"] = W("login", True)
+    controller._workers["b"] = W("install", False)
+    assert controller.running_operation("a") == "login"
+    assert controller.running_operation("b") == ""
+    assert controller.running_operation("missing") == ""

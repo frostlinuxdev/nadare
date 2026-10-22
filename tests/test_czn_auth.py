@@ -526,3 +526,33 @@ def test_credential_out_flag_is_the_opt_in_sink(authmod, monkeypatch, tmp_path):
     authmod.main(["token", "--credential-out", str(sink), "--out", str(tmp_path / "s.json")])
     assert authmod.os.environ["CZN_CREDENTIAL_OUT"] == str(sink)
     monkeypatch.delenv("CZN_CREDENTIAL_OUT", raising=False)
+
+
+# ---------------------------------------------------------------------------
+# impl2-czn: a missing QR image must not leave the launcher waiting
+# ---------------------------------------------------------------------------
+def test_login_qr_without_image_or_url_fails_immediately(authmod, monkeypatch, tmp_path):
+    stove, _ = _stove(authmod, monkeypatch, [])
+    monkeypatch.setattr(stove, "qr_create", lambda: {"session": "s"})
+
+    with pytest.raises(RuntimeError, match="no QR code or login link"):
+        stove.login_qr(timeout_s=300, png_path=tmp_path / "qr.png")
+
+
+def test_login_qr_without_image_but_with_url_emits_the_fallback(
+    authmod, monkeypatch, tmp_path
+):
+    stove, _ = _stove(authmod, monkeypatch, [])
+    monkeypatch.setattr(
+        stove, "qr_create", lambda: {"session": "s", "url": "https://stove.example/qr"}
+    )
+    monkeypatch.setattr(stove, "qr_status", lambda session: {"value": {"status": "expired"}})
+    events = []
+    monkeypatch.setattr(authmod, "event", lambda name, **fields: events.append((name, fields)))
+
+    with pytest.raises(RuntimeError, match="expired"):
+        stove.login_qr(timeout_s=5, png_path=tmp_path / "qr.png")
+
+    qr = next(fields for name, fields in events if name == "qr")
+    assert qr["png"] is None
+    assert qr["url"] == "https://stove.example/qr"

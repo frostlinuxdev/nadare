@@ -12,6 +12,7 @@ the "one mutating operation per profile" rule from ARCHITECTURE.md.
 from __future__ import annotations
 
 import logging
+import os
 import time
 import traceback
 from datetime import datetime
@@ -30,6 +31,8 @@ OPERATIONS = (
     "status",
     "install",
     "update",
+    "repair",
+    "remake_prefix",
     "login",
     "launch",
     "stop",
@@ -39,11 +42,22 @@ OPERATIONS = (
     "logout",
     "news",
     "media",
+    "check_update",
 )
 
 #: Operations that mutate the installation and therefore take a per-profile lock.
 MUTATING = frozenset(
-    {"install", "update", "login", "launch", "uninstall", "set_remember", "logout"}
+    {
+        "install",
+        "update",
+        "repair",
+        "remake_prefix",
+        "login",
+        "launch",
+        "uninstall",
+        "set_remember",
+        "logout",
+    }
 )
 
 
@@ -140,14 +154,14 @@ class BackendWorker(QThread):
             self.cancelled.emit()
             return
         except BackendUnsupported as exc:
-            self._fail(exc.message)
+            self._fail_exception(exc)
             return
         except BackendError as exc:
-            self._fail(exc.message)
+            self._fail_exception(exc)
             return
         except Exception as exc:  # noqa: BLE001 - surfaced to the user, logged raw
             self._note(traceback.format_exc())
-            self._fail(f"{type(exc).__name__}: {exc}")
+            self._fail_exception(exc)
             return
         finally:
             self._close_log()
@@ -163,6 +177,10 @@ class BackendWorker(QThread):
             backend.install()
         elif op == "update":
             backend.update()
+        elif op == "repair":
+            backend.repair()
+        elif op == "remake_prefix":
+            backend.remake_prefix()
         elif op == "login":
             backend.login()
         elif op == "launch":
@@ -179,6 +197,8 @@ class BackendWorker(QThread):
             self.result.emit(self._load_news(backend))
         elif op == "media":
             self.result.emit(self._load_media(backend))
+        elif op == "check_update":
+            backend.check_update()
         else:  # pragma: no cover - guarded in __init__
             raise BackendError(f"unsupported operation: {op}")
         return 0
@@ -206,7 +226,12 @@ class BackendWorker(QThread):
             slug=artwork.slug(profile, title),
             hero_categories=hero_categories,
             hero_key=hero_key,
+            deadline=news.NEWS_DEADLINE,
+            cancel=self._cancel_token,
         )
+        # A queued Install/Launch must start as soon as the user asked, not
+        # after the feed's daemon download threads finish.
+        self._cancel_token.raise_if_cancelled()
         return result
 
     def _load_media(self, backend):
@@ -215,7 +240,7 @@ class BackendWorker(QThread):
         Never raises: a backend without configured media yields an empty result
         that the UI renders as today's look.
         """
-        from ..core import artwork, yostar
+        from ..core import artwork, news, yostar
 
         profile = backend.ctx.profile
         title = str(profile.get("title") or self._profile)
@@ -230,11 +255,16 @@ class BackendWorker(QThread):
         empty = {"kind": "media", "hero": None, "banners": []}
         if not source:
             return empty
+        deadline = time.monotonic() + news.NEWS_DEADLINE
         try:
-            media = yostar.load_media(source, game_tag=game_tag or None)
+            timeout = max(1, int(deadline - time.monotonic()))
+            media = yostar.load_media(source, game_tag=game_tag or None, timeout=timeout)
         except yostar.MediaError:
             return empty
-        cached = yostar.cache_media(media, artwork.slug(profile, title))
+        cached = yostar.cache_media(
+            media, artwork.slug(profile, title), deadline=deadline, cancel=self._cancel_token
+        )
+        self._cancel_token.raise_if_cancelled()
         hero = cached.get("hero")
         return {"kind": "media", "hero": hero, "banners": cached.get("banners", [])}
 
@@ -248,6 +278,16 @@ class BackendWorker(QThread):
         self.backend_event.emit(Event("error", message))
         self.failed.emit(message)
 
+    def _fail_exception(self, exc: Exception) -> None:
+        """Report an exception's own text; keep the class name in the log only."""
+        log.warning("%s: %s", type(exc).__name__, exc)
+        text = str(exc)
+        if text:
+            self._fail(text)
+            return
+        detail = getattr(exc, "message", "")
+        self._fail(f"{type(exc).__name__}: {detail}")
+
     # ---- raw log -----------------------------------------------------------
     def _open_log(self):
         if self._log is not None:
@@ -255,7 +295,9 @@ class BackendWorker(QThread):
         try:
             paths.logs_dir().mkdir(parents=True, exist_ok=True)
             path = paths.logs_dir() / f"{self._profile}-{self._operation}.log"
-            self._log = open(path, "a", encoding="utf-8")
+            # Owner-only, whatever the umask: logs can quote paths and account state.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            self._log = os.fdopen(fd, "a", encoding="utf-8")
             self._log.write(
                 f"\n===== {datetime.now().isoformat(timespec='seconds')} "
                 f"{self._operation} ({self._profile}) =====\n"
@@ -286,7 +328,7 @@ class BackendWorker(QThread):
 
 #: Background refreshes. They never mark the page busy and can be cancelled when
 #: a user operation needs the profile's slot.
-BACKGROUND = frozenset({"status", "news", "media"})
+BACKGROUND = frozenset({"status", "news", "media", "check_update"})
 
 
 #: Workers still running after their controller shut down (see ``shutdown``).
@@ -385,6 +427,9 @@ class BackendController(QObject):
         self._workers: dict[str, BackendWorker] = {}
         #: Exactly one user operation waiting for a cancellable background refresh.
         self._pending: dict[str, tuple[str, object]] = {}
+        #: Once shutdown starts, no new worker may be spawned (a queued success
+        #: callback used to start a status probe after the window was gone).
+        self._closed = False
 
     # ---- queries -----------------------------------------------------------
     def is_busy(self, profile: str) -> bool:
@@ -410,6 +455,11 @@ class BackendController(QObject):
             if worker.isRunning() and worker.operation in MUTATING
         ]
 
+    def running_operation(self, profile: str) -> str:
+        """The operation currently running for ``profile`` ("" when idle)."""
+        worker = self._workers.get(profile)
+        return worker.operation if worker is not None and worker.isRunning() else ""
+
     # ---- control -----------------------------------------------------------
     def start(self, profile: str, operation: str, payload: object = None) -> bool:
         """Start ``operation`` for ``profile``. Returns False if it cannot run.
@@ -419,6 +469,8 @@ class BackendController(QObject):
         Another user operation, or a second queued user operation, is refused so
         the caller can show the usual Busy dialog.
         """
+        if self._closed:
+            return False
         pending = self._pending.get(profile)
         worker = self._workers.get(profile)
         running = worker is not None and worker.isRunning()
@@ -447,7 +499,9 @@ class BackendController(QObject):
         self._spawn(profile, operation, payload)
         return True
 
-    def _spawn(self, profile: str, operation: str, payload: object = None) -> None:
+    def _spawn(self, profile: str, operation: str, payload: object = None) -> bool:
+        if self._closed:
+            return False
         worker = BackendWorker(self._config, profile, operation, parent=self, payload=payload)
         # Route every callback through a bridge that lives on this (GUI) thread.
         # Connecting to bound methods (not lambdas) means Qt queues the worker's
@@ -466,12 +520,25 @@ class BackendController(QObject):
         self._workers[profile] = worker
         self.busy.emit(profile, operation, True)
         worker.start()
+        return True
+
+    def _detach(self, profile: str, worker: BackendWorker) -> None:
+        """Let a blocked background worker finish without occupying the slot."""
+        if self._workers.get(profile) is worker:
+            self._workers.pop(profile, None)
+        worker.setParent(None)
+        _detached.add(worker)
 
     def cancel(self, profile: str) -> None:
         pending = self._pending.pop(profile, None)
         if pending is not None:
-            # The queued user operation never started; the background refresh
-            # ahead of it is already being cancelled.
+            # The queued user operation never started. Free the profile's slot
+            # too: a news/status fetch may ignore cancellation until the network
+            # returns, and it must not block the next INSTALL/LAUNCH attempt.
+            worker = self._workers.get(profile)
+            if worker is not None and worker.operation in BACKGROUND and worker.isRunning():
+                worker.cancel()
+                self._detach(profile, worker)
             self.busy.emit(profile, pending[0], False)
             self.cancelled.emit(profile, pending[0])
             return
@@ -495,6 +562,7 @@ class BackendController(QObject):
         ``keep_launches`` running games are left alone: closing the window must
         not kill a game.
         """
+        self._closed = True
         for profile, (operation, _payload) in list(self._pending.items()):
             # A queued user operation that will now never start: let the page
             # drop its busy state (the app may stay alive behind a running game).
@@ -529,6 +597,9 @@ class BackendController(QObject):
 
     def _on_worker_finished(self, profile: str, worker: BackendWorker) -> None:
         """Start a queued user operation once the background refresh has ended."""
+        if self._closed:
+            self._pending.pop(profile, None)
+            return
         pending = self._pending.get(profile)
         if pending is None:
             return

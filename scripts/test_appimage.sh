@@ -18,6 +18,8 @@
 # real one). The script copies the AppImage into that HOME, then runs:
 #   * CLI:  --help, list
 #   * GUI:  QT_QPA_PLATFORM=offscreen with NADARE_SMOKE_EXIT_MS auto-quit
+#   * GUI:  QT_QPA_PLATFORM=xcb under xvfb-run (skipped without Xvfb)
+#   * a static check that the bundled Qt xcb platform libraries are present
 #   * a scan of stdout/stderr for ImportError, missing shared objects and
 #     Qt platform-plugin failures
 #   * a check that XDG config/data landed under the throwaway HOME
@@ -136,6 +138,22 @@ if [ "${NADARE_WITHOUT_FGO:-}" = 1 ]; then
 fi
 run_check "all backends bundled" '"./nadare-test.AppImage" doctor | grep -E "^backends: " | tee /dev/stderr | '"$without_fgo"' | grep -v MISSING | grep -q .'
 
+# --- bundled Qt xcb platform libraries --------------------------------------
+# libqxcb.so links these; on a minimal X11 desktop none are present. They must
+# come from the AppImage, so check the extracted tree directly.
+xcb_libs="libxkbcommon-x11.so.0 libxcb-cursor.so.0 libxcb-icccm.so.4 libxcb-util.so.1 libxcb-image.so.0 libxcb-keysyms.so.1 libxcb-render-util.so.0 libxcb-xkb.so.1 libxcb-shape.so.0 libxcb-sync.so.1 libxcb-xfixes.so.0 libxcb-randr.so.0 libxcb-shm.so.0 libxcb-render.so.0"
+static_label="bundled Qt xcb platform libraries"
+static_out="$(inx 'cd "$HOME" && rm -rf squashfs-root && "./nadare-test.AppImage" --appimage-extract >/dev/null 2>&1; for l in '"$xcb_libs"'; do [ -e "squashfs-root/usr/bin/_internal/$l" ] || echo "$l"; done' 2>&1)"
+static_rc=$?
+if [[ $static_rc -ne 0 ]]; then
+    ck FAIL "$static_label" "extract failed (exit $static_rc)"
+    printf '%s\n' "$static_out" | sed 's/^/        /' | tail -20
+elif [[ -n "$static_out" ]]; then
+    ck FAIL "$static_label" "missing: $(printf '%s' "$static_out" | tr '\n' ' ')"
+else
+    ck PASS "$static_label"
+fi
+
 # GUI headless with the packaging auto-quit hook.
 gui_label="GUI headless (offscreen, auto-quit)"
 gui_out="$(inx 'export APPIMAGE_EXTRACT_AND_RUN=1 QT_QPA_PLATFORM=offscreen NADARE_SMOKE_EXIT_MS=3000; cd "$HOME"; timeout 60 "./nadare-test.AppImage"' 2>&1)"
@@ -148,6 +166,16 @@ elif printf '%s' "$gui_out" | grep -qE "ImportError|ModuleNotFoundError|cannot o
     printf '%s\n' "$gui_out" | sed 's/^/        /' | tail -20
 else
     ck PASS "$gui_label"
+fi
+
+# --- GUI on the native xcb platform under a virtual X server ----------------
+# The offscreen platform never loads libqxcb.so, so it cannot catch a missing
+# xcb dependency. Xvfb may not be installed in the test box: skip, not fail.
+xvfb_label="GUI smoke (xcb under Xvfb, auto-quit)"
+if inx 'command -v Xvfb >/dev/null 2>&1 && command -v xvfb-run >/dev/null 2>&1'; then
+    run_check "$xvfb_label" 'QT_QPA_PLATFORM=xcb NADARE_SMOKE_EXIT_MS=2000 timeout 60 xvfb-run -a "./nadare-test.AppImage"'
+else
+    ck INFO "$xvfb_label" "skipped: Xvfb is not installed in the box"
 fi
 
 # --- config under the throwaway HOME, nowhere else --------------------------

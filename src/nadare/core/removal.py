@@ -123,6 +123,20 @@ def tree_safety(config_profiles, name: str, path) -> tuple[bool, str]:
     return True, ""
 
 
+def _rmtree_except(root: Path, keep: list[Path]) -> None:
+    """Delete all of ``root`` except the ``keep`` trees and the folders leading to them."""
+    for entry in root.iterdir():
+        resolved = entry.resolve() if not entry.is_symlink() else entry
+        if any(resolved == k or k in resolved.parents for k in keep):
+            continue  # inside or equal to a kept tree
+        if any(resolved in k.parents for k in keep):
+            _rmtree_except(resolved, keep)  # on the way to a kept tree
+        elif entry.is_symlink() or entry.is_file():
+            entry.unlink()
+        else:
+            shutil.rmtree(entry)
+
+
 def removable_trees(config, name: str) -> list[RemovableTree]:
     """List the install/prefix trees configured for ``name`` and whether each is safe to delete."""
     profile = config.profiles.get(name, {})
@@ -175,6 +189,30 @@ def remove_game(
     if requested:
         by_key = {t.key: t for t in removable_trees(config, name)}
         trees = [by_key[k] for k in requested if k in by_key]
+        alias_requested = {k for k in requested if k in ("prefix", "wineprefix")}
+        alias_found = any(k in by_key for k in alias_requested)
+        missing: list[str] = []
+        for key in requested:
+            if key in by_key:
+                continue
+            if key in ("prefix", "wineprefix") and (
+                alias_found or any(k in missing for k in alias_requested)
+            ):
+                continue  # prefix/wineprefix are two names for the same tree
+            missing.append(key)
+        if missing:
+            labels = {
+                "install_dir": "install folder",
+                "prefix": "Wine prefix",
+                "wineprefix": "Wine prefix",
+            }
+            for key in missing:
+                result.warnings.append(
+                    f"no configured {labels.get(key, key)} was found for {name}; "
+                    "nothing was deleted"
+                )
+            result.profile_kept = True
+            return result
         refused = [t for t in trees if not t.safe]
         if refused:
             for t in refused:
@@ -182,12 +220,27 @@ def remove_game(
             result.profile_kept = True
             return result
 
-    # 2. Desktop/menu shortcuts owned by this profile.
+    # 2. Before deleting anything, prove the config can be persisted. Otherwise a
+    # read-only config directory would leave the files gone but the profile on
+    # disk. A no-op save is the cheapest such preflight.
+    if drop_profile and save:
+        try:
+            config.save()
+        except OSError as exc:
+            result.warnings.append(f"could not save config: {exc}")
+            result.profile_kept = True
+            return result
+
+    # 3. Desktop/menu shortcuts owned by this profile.
     result.shortcuts_removed = shortcuts.remove_desktop_entries(
         name, applications_dir=applications_dir, desktop_dir=desktop_dir
     )
 
-    # 3. Saved login, if the backend supports remembering one.
+    steam_files, steam_warnings = shortcuts.remove_steam_shortcuts(name)
+    result.shortcuts_removed += steam_files
+    result.warnings += steam_warnings
+
+    # 4. Saved login, if the backend supports remembering one.
     kind = config.profiles[name].get("backend", "")
     try:
         cls = backends.get(kind)
@@ -200,7 +253,7 @@ def remove_game(
         except Exception as exc:  # noqa: BLE001 - best effort, never fatal
             result.warnings.append(f"could not forget saved login: {exc}")
 
-    # 4. Profile data folder, strictly inside profiles_dir().
+    # 5. Profile data folder, strictly inside profiles_dir().
     if delete_data:
         target = paths.profiles_dir() / name
         if target.is_symlink():
@@ -218,13 +271,27 @@ def remove_game(
             elif other:
                 result.warnings.append(f"not deleting data dir: shared with {other}")
             else:
+                # "Nadare's data" must not take the game with it: an install dir
+                # or prefix that lives inside the data dir stays unless the user
+                # ticked it (those are removed by step 4b).
+                chosen = set(requested)
+                keep = [
+                    t.path
+                    for t in removable_trees(config, name)
+                    if t.key not in chosen and t.path.resolve().is_relative_to(resolved)
+                ]
                 try:
-                    shutil.rmtree(target)
+                    if keep:
+                        _rmtree_except(resolved, [k.resolve() for k in keep])
+                        for kept in keep:
+                            result.warnings.append(f"kept the game files in {kept}")
+                    else:
+                        shutil.rmtree(target)
                     result.data_dir_removed = target
                 except OSError as exc:
                     result.warnings.append(f"could not remove data dir: {exc}")
 
-    # 4b. Opt-in deletion of the configured install dir / prefix trees.
+    # 5b. Opt-in deletion of the configured install dir / prefix trees.
     keep_profile = False
     done: list[Path] = []
     # Outermost first; a tree already gone with its parent is not an error.
@@ -241,7 +308,7 @@ def remove_game(
             result.warnings.append(f"could not remove {tree.key}: {exc}")
             keep_profile = True
 
-    # 5. Drop the profile and persist.
+    # 6. Drop the profile and persist.
     result.profile_kept = keep_profile
     if drop_profile and not keep_profile:
         config.remove_profile(name)

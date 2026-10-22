@@ -170,3 +170,15 @@ def test_desktop_entry_newlines_cannot_inject_keys():
     text = shortcuts.desktop_entry("p", "T\nExec=evil\r\nX-Nadare-Profile=keep", ["nadare"])
     assert sum(1 for ln in text.splitlines() if ln.startswith("Exec=")) == 1
     assert sum(1 for ln in text.splitlines() if ln.startswith("X-Nadare-Profile=")) == 1
+
+
+def test_steam_launch_options_escape_the_profile() -> None:
+    options = shortcuts._steam_launch_options('My "Game"\\x', ["/usr/bin/nadare"])
+    assert options == 'launch -p "My \\"Game\\"\\\\x"'
+
+
+def test_desktop_entry_newline_in_argv_cannot_inject_keys() -> None:
+    text = shortcuts.desktop_entry("p", "T", ["/opt/na\ndare/run\rX-Evil=1"])
+    lines = text.splitlines()
+    assert sum(1 for ln in lines if ln.startswith("Exec=")) == 1
+    assert not any(ln.startswith("X-Evil=") for ln in lines)

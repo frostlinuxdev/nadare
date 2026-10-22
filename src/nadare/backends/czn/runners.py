@@ -40,6 +40,20 @@ from nadare.core import diskspace, download
 from nadare.core.backends import BackendError
 from nadare.core.runners import RunnerError, _github_asset_host_allowed, _published_sha512
 
+try:
+    from nadare.core import tls
+except Exception:  # pragma: no cover - standalone script use
+    tls = None  # type: ignore[assignment]
+
+
+def _xdg_fallback(env: str, default: str) -> Path:
+    """The XDG base directory used only when ``nadare.core.paths`` is unavailable.
+
+    Kept in step with core.paths so a direct-script/standalone run still honours
+    ``XDG_DATA_HOME`` / ``XDG_CACHE_HOME`` instead of hard-coding ``~``.
+    """
+    return Path(os.environ.get(env) or os.path.expanduser(default)) / "nadare"
+
 
 def _default_runners_dir() -> Path:
     try:
@@ -47,7 +61,7 @@ def _default_runners_dir() -> Path:
 
         return paths.runners_dir()
     except Exception:
-        return Path.home() / ".local/share/nadare/runners"
+        return _xdg_fallback("XDG_DATA_HOME", "~/.local/share") / "runners"
 
 
 def _default_cache_dir() -> Path:
@@ -56,7 +70,7 @@ def _default_cache_dir() -> Path:
 
         return paths.cache_dir() / "czn"
     except Exception:
-        return Path.home() / ".cache/nadare/czn"
+        return _xdg_fallback("XDG_CACHE_HOME", "~/.cache") / "czn"
 
 
 RUNNERS_DIR = Path(os.environ.get("CZN_RUNNERS_DIR", str(_default_runners_dir())))
@@ -79,8 +93,8 @@ RUNNERS = {
         "repo": "dawn-winery/dwproton-mirror",
         "asset": r"dwproton-.+-x86_64\.tar\.xz",
         "tested": (
-            "dwproton-11.0-14",
-            "c563cc99d464fb19a767a0eb90dc723746bfcdd402a4fdaa0737b12af081f99a",
+            "dwproton-11.0-15",
+            "8066dec3d7f532d55e5b6d697a61d6d4a3091f859a1ef9b2943895aa1b947afd",
         ),
     },
     "ge": {
@@ -121,6 +135,10 @@ def _get(url: str, timeout: int = 30) -> urllib.request.addinfourl:
         url, headers={"User-Agent": "czn-linux", "Accept": "application/vnd.github+json"}
     )
     try:
+        if tls is not None:
+            return tls.urlopen(
+                req, timeout=timeout, context=tls.ssl_context()
+            )
         return urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as e:
         code = 4 if e.code >= 500 or e.code == 403 else 1

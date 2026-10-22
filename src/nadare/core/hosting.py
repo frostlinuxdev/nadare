@@ -26,6 +26,12 @@ DEFAULT_INDEX_BASE = "https://raw.githubusercontent.com/frostlinuxdev/nadare-ind
 #: same fields Nadare reads: ``tag_name``, ``html_url``, ``name``.
 DEFAULT_RELEASES_API = "https://api.github.com/repos/frostlinuxdev/nadare/releases/latest"
 
+#: Pinned umu-launcher zipapp (the managed copy used when no system umu-run exists).
+DEFAULT_UMU_ZIPAPP_URL = (
+    "https://github.com/Open-Wine-Components/umu-launcher/releases/download/"
+    "1.4.4/umu-launcher-1.4.4-zipapp.tar"
+)
+
 
 def _env(name: str, default: str) -> str:
     value = os.environ.get(name)
@@ -69,12 +75,19 @@ def releases_api() -> str:
     return _env("NADARE_RELEASES_API", DEFAULT_RELEASES_API)
 
 
+def umu_zipapp_url() -> str:
+    """The pinned umu-launcher zipapp tarball (``""`` disables managed umu)."""
+    return _env("NADARE_UMU_URL", DEFAULT_UMU_ZIPAPP_URL)
+
+
 __all__ = [
     "DEFAULT_INDEX_BASE",
     "DEFAULT_RELEASES_API",
+    "DEFAULT_UMU_ZIPAPP_URL",
     "czn_index_url",
     "index_base",
     "releases_api",
+    "umu_zipapp_url",
     "vcredist_index_url",
     "webview2_index_url",
     "yostar_index_url",

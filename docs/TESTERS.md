@@ -5,8 +5,9 @@ Use an account you can afford to lose (see [Safety and ToS](../README.md#safety-
 
 ## 1. Get it
 
-Download **one** file from the releases page and check its SHA-256 against the
-digest published for that artifact on the releases page:
+Download **one** file from the
+[releases page](https://github.com/frostlinuxdev/nadare/releases) and check its
+SHA-256 against the digest published for that artifact on the releases page:
 
 ```sh
 sha256sum Nadare-*-x86_64.AppImage
@@ -14,13 +15,16 @@ chmod +x Nadare-*-x86_64.AppImage
 ./Nadare-*-x86_64.AppImage
 ```
 
-The beta ships as an AppImage only (no Flatpak yet). AppImages need FUSE 2
-(`libfuse2` / `fuse2`); without it run
+The beta is published as a single x86_64 AppImage (there is no Flatpak or
+`.deb` release yet). Its bundled runtime needs no `libfuse2` package: it uses
+the host's `fusermount3` (or `fusermount`). If FUSE is unavailable, run
 `./Nadare-*.AppImage --appimage-extract-and-run`.
 
-On an X11-only session (or with `QT_QPA_PLATFORM=xcb`) Qt also needs
-`libxcb-cursor` (`apt install libxcb-cursor0`, `dnf install xcb-util-cursor`);
-Wayland sessions do not.
+On an X11-only session (or with `QT_QPA_PLATFORM=xcb`) the AppImage bundles the
+Qt xcb platform libraries itself, so `libxcb-cursor` is no longer needed on the
+host for it. It is still needed when running from source or from the `.deb`
+(`apt install libxcb-cursor0`, `dnf install xcb-util-cursor`); Wayland sessions
+do not need it.
 
 On a minimal install or a container (a stock distrobox image, for example) the
 AppImage also expects a few host packages: `xkeyboard-config` (keyboard layouts),
@@ -143,7 +147,7 @@ Known limits:
   X11 (XWayland) its window showed only a flat colour on NVIDIA + KDE Plasma 6.8 (the
   game runs and connects, it just does not draw). Leave the setting on Auto, and
   tell us if X11 works or fails on yours.
-- FGO (Fate/Grand Order) **does not install in 0.1.0b3**: its lepton-fgo release
+- FGO (Fate/Grand Order) **does not install in 0.1.0b4**: its lepton-fgo release
   is not in the public index yet (planned for a later beta). It is experimental, needs
   podman and a binderfs kernel, and on SELinux
   distros (Fedora) it installs a system policy module that stays after you delete

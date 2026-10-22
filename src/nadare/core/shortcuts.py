@@ -68,7 +68,7 @@ def slug(profile: str) -> str:
 # ---------------------------------------------------------------------------
 def _quote_exec(arg: str) -> str:
     """Quote one ``Exec`` argument per the Desktop Entry spec."""
-    arg = arg.replace("%", "%%")
+    arg = _one_line(arg.replace("%", "%%"))
     if not any(ch in _EXEC_RESERVED for ch in arg):
         return arg
     escaped = (
@@ -103,24 +103,64 @@ def desktop_entry(profile: str, title: str, argv: list[str], icon: str = "nadare
     return "\n".join(lines) + "\n"
 
 
+def _host_home() -> Path:
+    """The desktop user's home, even when HOME points into a Flatpak sandbox."""
+    if not sandbox.in_flatpak():
+        return Path(os.path.expanduser("~"))
+    host_home = os.environ.get("HOST_HOME")
+    if host_home:
+        return Path(host_home)
+    import pwd
+
+    try:
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (KeyError, OSError):
+        return Path("/run/host/home")
+
+
+def _host_path(path: Path) -> Path:
+    """Where a host path appears inside the Flatpak sandbox (usually /run/host)."""
+    if not sandbox.in_flatpak():
+        return path
+    path = Path(path)
+    if not path.is_absolute() or path.is_relative_to("/run/host"):
+        return path
+    root = Path("/run/host")
+    if not root.is_dir():
+        return path
+    try:
+        return root / path.relative_to("/")
+    except ValueError:
+        return path
+
+
 def desktop_dir() -> Path:
     """The user's Desktop directory (XDG when available, else ``~/Desktop``)."""
-    tool = shutil.which("xdg-user-dir")
+    flatpak = sandbox.in_flatpak()
+    tool = sandbox.host_which("xdg-user-dir") if flatpak else shutil.which("xdg-user-dir")
     if tool:
+        argv = sandbox.host_argv([tool, "DESKTOP"]) if flatpak else [tool, "DESKTOP"]
         try:
             result = subprocess.run(
-                [tool, "DESKTOP"], capture_output=True, text=True, timeout=5, check=False
+                argv, capture_output=True, text=True, timeout=5, check=False
             )
             if result.returncode == 0 and result.stdout.strip():
-                return Path(result.stdout.strip())
+                return _host_path(Path(result.stdout.strip()))
         except (OSError, subprocess.SubprocessError):
             pass
+    if flatpak:
+        return _host_path(_host_home() / "Desktop")
     return Path(os.path.expanduser("~/Desktop"))
 
 
 def _applications_dir(applications_dir: str | os.PathLike[str] | None) -> Path:
     if applications_dir is not None:
         return Path(applications_dir)
+    if sandbox.in_flatpak():
+        base = os.environ.get("HOST_XDG_DATA_HOME") or str(
+            _host_home() / ".local" / "share"
+        )
+        return _host_path(Path(base)) / "applications"
     base = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
     return Path(base) / "applications"
 
@@ -377,8 +417,9 @@ def vdf_loads(data: bytes, *, strict: bool = False) -> list[dict[str, Any]]:
             entry, pos = _read_map(raw, pos)
             shortcuts.append(entry)
         return shortcuts
-    except (ValueError, struct.error, IndexError):
-        # A truncated/corrupt file is "unrecognised data": degrade to [].
+    except (ValueError, struct.error, IndexError, RecursionError):
+        # A truncated/corrupt file (including absurdly deep nesting) is
+        # "unrecognised data": degrade to [].
         if strict:
             raise ValueError("corrupt shortcuts.vdf") from None
         return []
@@ -412,7 +453,7 @@ def _steam_quote(value: str) -> str:
 
 def _steam_launch_options(profile: str, argv: list[str]) -> str:
     parts = [str(a) for a in argv[1:]]
-    parts += ["launch", "-p", f'"{profile}"']
+    parts += ["launch", "-p", _steam_quote(profile)]
     return " ".join(parts)
 
 
@@ -466,9 +507,133 @@ def add_steam_shortcut(
     return True
 
 
+def remove_steam_shortcut(shortcuts_vdf: str | os.PathLike[str], profile: str) -> bool:
+    """Drop the non-Steam-game entries ``add_steam_shortcut`` made for ``profile``.
+
+    Returns ``False`` when the file has none. Steam must be closed, as for adding.
+    """
+    path = Path(shortcuts_vdf)
+    if not path.exists():
+        return False
+    try:
+        existing = vdf_loads(path.read_bytes(), strict=True)
+    except (OSError, ValueError, struct.error) as exc:
+        raise ShortcutError(
+            f"{path} is unreadable or corrupt ({exc}); leaving it untouched"
+        ) from exc
+    suffix = f'launch -p "{profile}"'
+    kept = [e for e in existing if not str(e.get("LaunchOptions", "")).endswith(suffix)]
+    if len(kept) == len(existing):
+        return False
+    if steam_running():
+        raise ShortcutError("Steam is running; close it before removing a shortcut")
+    backup = path.with_name(path.name + ".nadare-bak")
+    if not backup.exists():
+        backup.write_bytes(path.read_bytes())
+    _atomic_write_bytes(path, vdf_dumps(kept), 0o644)
+    return True
+
+
+def remove_steam_shortcuts(profile: str) -> tuple[list[Path], list[str]]:
+    """Remove ``profile``'s entry from every Steam ``shortcuts.vdf``.
+
+    Returns the files changed and a warning per file that could not be.
+    """
+    changed: list[Path] = []
+    warnings: list[str] = []
+    for path in find_steam_shortcut_files():
+        try:
+            if remove_steam_shortcut(path, profile):
+                changed.append(path)
+        except ShortcutError as exc:
+            warnings.append(str(exc))
+    return changed, warnings
+
+
+_LAUNCH_PROFILE = re.compile(r'(?:^|\s)launch\s+-p\s+(?:"([^"]*)"|(\S+))\s*$')
+
+
+def _steam_shortcut_profile(entry: Mapping[str, Any]) -> str | None:
+    """The profile a Nadare Steam shortcut launches, or ``None`` for another entry."""
+    match = _LAUNCH_PROFILE.search(str(entry.get("LaunchOptions") or ""))
+    if not match:
+        return None
+    return match.group(1) if match.group(1) is not None else match.group(2)
+
+
+def installed_steam_shortcuts() -> list[tuple[Path, str, str]]:
+    """List ``(file, profile, title)`` for every Nadare Steam non-Steam entry."""
+    found: list[tuple[Path, str, str]] = []
+    for path in find_steam_shortcut_files():
+        try:
+            entries = vdf_loads(path.read_bytes(), strict=True)
+        except (OSError, ValueError, struct.error):
+            continue
+        for entry in entries:
+            profile = _steam_shortcut_profile(entry)
+            if profile is None:
+                continue
+            found.append((path, profile, str(entry.get("AppName") or profile)))
+    return found
+
+
+def refresh_steam_shortcuts(
+    profiles: Mapping[str, Mapping[str, Any]],
+) -> dict[str, list[str] | list[Path]]:
+    """Update Nadare Steam shortcut titles and drop deleted profiles.
+
+    Files that cannot be read or written are reported in ``warnings`` and left
+    untouched, as is every file while Steam is running.
+    """
+    updated: list[Path] = []
+    removed: list[str] = []
+    warnings: list[str] = []
+    for path in find_steam_shortcut_files():
+        try:
+            existing = vdf_loads(path.read_bytes(), strict=True)
+        except (OSError, ValueError, struct.error) as exc:
+            warnings.append(f"could not refresh {path}: {exc}")
+            continue
+        kept: list[dict[str, Any]] = []
+        changed = False
+        gone: list[str] = []
+        for entry in existing:
+            profile = _steam_shortcut_profile(entry)
+            if profile is None:
+                kept.append(entry)
+                continue
+            if profile not in profiles:
+                changed = True
+                gone.append(profile)
+                continue
+            title = str(profiles[profile].get("title") or profile)
+            if entry.get("AppName") != title:
+                entry["AppName"] = title
+                changed = True
+            kept.append(entry)
+        if not changed:
+            continue
+        if steam_running():
+            warnings.append(f"Steam is running; close it to refresh {path}")
+            continue
+        backup = path.with_name(path.name + ".nadare-bak")
+        try:
+            if not backup.exists():
+                backup.write_bytes(path.read_bytes())
+            _atomic_write_bytes(path, vdf_dumps(kept), 0o644)
+        except OSError as exc:
+            warnings.append(f"could not refresh {path}: {exc}")
+            continue
+        updated.append(path)
+        removed.extend(f"{profile} ({path})" for profile in gone)
+    return {"updated": updated, "removed": removed, "warnings": warnings}
+
+
 def find_steam_shortcut_files() -> list[Path]:
     """Every existing Steams ``shortcuts.vdf`` (native and Flatpak), de-duplicated."""
-    home = Path(os.path.expanduser("~"))
+    home = _host_path(_host_home()) if sandbox.in_flatpak() else Path(
+        os.path.expanduser("~")
+    )
     roots = [
         home / ".steam" / "steam" / "userdata",
         home / ".local" / "share" / "Steam" / "userdata",
@@ -506,8 +671,10 @@ __all__ = [
     "find_steam_shortcut_files",
     "install_desktop_entry",
     "installed_desktop_entries",
+    "installed_steam_shortcuts",
     "launcher_argv",
     "refresh_desktop_entries",
+    "refresh_steam_shortcuts",
     "remove_desktop_entries",
     "slug",
     "steam_running",

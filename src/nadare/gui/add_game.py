@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -26,6 +27,7 @@ from PyQt6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -50,6 +52,9 @@ class GameType:
     #: Tooltip explaining the badge.
     badge_help: str = ""
 
+
+#: The wizard group for profiles that need the user's own game files.
+ADVANCED_GROUP = "Advanced (bring your own game files)"
 
 CATALOG: tuple[GameType, ...] = (
     GameType("Chaos Zero Nightmare", "stove-czn"),
@@ -79,10 +84,27 @@ CATALOG: tuple[GameType, ...] = (
         install_subdir="StellaSora_EN",
         exes=("StellaSora.exe",),
     ),
-    GameType("Wine / Proton game", "wine", group="Other"),
-    GameType("Steam game", "steam", group="Other"),
-    GameType("Script", "script", group="Other"),
-    GameType("Waydroid app", "waydroid", group="Other"),
+    GameType(
+        "Wine / Proton game",
+        "wine",
+        group=ADVANCED_GROUP,
+        badge="bring your own files",
+        badge_help="Use a Wine or Proton prefix and game files you already have.",
+    ),
+    GameType(
+        "Steam game",
+        "steam",
+        group=ADVANCED_GROUP,
+        badge="bring your own files",
+        badge_help="Use a game already installed in your Steam library.",
+    ),
+    GameType(
+        "Script",
+        "script",
+        group=ADVANCED_GROUP,
+        badge="bring your own files",
+        badge_help="Run a command or script you already have.",
+    ),
 )
 
 #: Kinds that run through a Wine/Proton prefix (so the wizard offers a prefix).
@@ -132,6 +154,19 @@ def _find_exe(folder: Path, names: tuple[str, ...], *, max_depth: int = 2) -> Pa
     return None
 
 
+def _drive_c_prefix(folder: Path) -> Path | None:
+    """The Wine prefix that contains ``folder``, if it lies under ``drive_c``.
+
+    Users often pick the game's own folder (``.../prefix/drive_c/...``) instead
+    of the prefix itself. Walking up to the directory that holds ``drive_c``
+    recovers the prefix rather than silently dropping it.
+    """
+    for candidate in (folder, *folder.parents):
+        if (candidate / "drive_c").is_dir():
+            return candidate
+    return None
+
+
 def detect_import(kind: str, folder: str | Path | None, prefix: str | Path | None) -> dict:
     """Best-effort, read-only detection of an existing install.
 
@@ -142,14 +177,23 @@ def detect_import(kind: str, folder: str | Path | None, prefix: str | Path | Non
     folder_path = Path(folder) if folder else None
     prefix_path = Path(prefix) if prefix else None
     game = next((g for g in CATALOG if g.kind == kind), None)
+    adopted = (
+        _drive_c_prefix(folder_path)
+        if folder_path and folder_path.is_dir() and not (folder_path / "drive_c").is_dir()
+        else None
+    )
+    if adopted is not None:
+        info["prefix"] = str(adopted)
+        info["notes"].append(f"Found the Wine prefix at {adopted}.")
 
     if game and game.install_subdir:
         subdir = Path("drive_c") / "YostarGames" / game.install_subdir
         # The user may have picked the prefix itself (which holds drive_c/...).
-        if folder_path and (folder_path / "drive_c").is_dir():
-            candidate = folder_path / subdir
+        layout_root = adopted if adopted is not None else folder_path
+        if layout_root and (layout_root / "drive_c").is_dir():
+            candidate = layout_root / subdir
             if candidate.is_dir():
-                info["prefix"] = str(folder_path)
+                info["prefix"] = str(layout_root)
                 info["install_dir"] = str(candidate)
                 info["notes"].append(f"Found the {game.title} prefix layout.")
         if not info["install_dir"] and folder_path and folder_path.is_dir():
@@ -168,14 +212,22 @@ def detect_import(kind: str, folder: str | Path | None, prefix: str | Path | Non
             # Keep the backend's own default so the profile is usable.
             info["install_dir"] = str(Path(info["prefix"]) / subdir)
     else:
-        if folder_path:
-            info["install_dir"] = str(folder_path)
+        if folder_path and folder_path.is_dir():
             if kind in PREFIX_ONLY_KINDS:
-                # The backend reads only ``prefix()``; a picked folder for such
-                # a kind is the existing Wine prefix, not a separate game dir.
-                info["prefix"] = str(folder_path)
-        if prefix_path:
-            info["prefix"] = str(prefix_path)
+                # The backend reads only ``prefix()``; a picked folder (or the
+                # game folder inside drive_c) is the existing Wine prefix.
+                info["prefix"] = str(adopted or folder_path)
+                info["notes"].append("Folder found; Nadare will use it as-is.")
+            else:
+                info["install_dir"] = str(folder_path)
+                info["notes"].append("Folder found; Nadare will use it as-is.")
+                if adopted is not None:
+                    info["notes"].append("Nadare will use the Wine prefix that contains it.")
+        if prefix_path and prefix_path.is_dir():
+            # The game folder inside the prefix is an easy thing to pick: use the
+            # prefix that contains it.
+            info["prefix"] = str(_drive_c_prefix(prefix_path) or prefix_path)
+            info["notes"].append("Prefix folder found.")
     return info
 
 
@@ -192,6 +244,7 @@ class AddGameDialog(QDialog):
         apply_theme(self)
         self.config = config
         self.created_profile = ""
+        self.created_by_import = False
         self._data_root = data_root
         self._name_touched = False
         self._folder_touched = False
@@ -200,15 +253,26 @@ class AddGameDialog(QDialog):
         self.setWindowTitle("Add game")
         self.setMinimumWidth(560)
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(26, 22, 26, 22)
+        # The form scrolls on a small screen; the Cancel / Add game buttons stay put.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 14)
+        outer.setSpacing(8)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        body = QWidget()
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+        root = QVBoxLayout(body)
+        root.setContentsMargins(26, 22, 26, 8)
         root.setSpacing(14)
 
         heading = QLabel("Add a game")
         heading.setObjectName("Title")
         root.addWidget(heading)
         subtitle = QLabel(
-            "Pick a supported game, then install a fresh copy or import one you already have."
+            "Choose your game. Nadare can install the games above; the options under "
+            "Advanced need files you already have."
         )
         subtitle.setObjectName("Subtitle")
         subtitle.setWordWrap(True)
@@ -235,12 +299,17 @@ class AddGameDialog(QDialog):
         mode_row.addStretch(1)
         root.addLayout(mode_row)
 
+        self.size_hint = QLabel("")
+        self.size_hint.setObjectName("Muted")
+        self.size_hint.setWordWrap(True)
+        root.addWidget(self.size_hint)
+
         form = QFormLayout()
         form.setHorizontalSpacing(18)
         form.setVerticalSpacing(10)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
-        self.folder_label = QLabel("Install folder")
+        self.folder_label = QLabel("Game folder")
         self.folder = QLineEdit()
         self.folder.setPlaceholderText("folder the game will live in")
         self.folder.textEdited.connect(lambda _t: setattr(self, "_folder_touched", True))
@@ -255,18 +324,27 @@ class AddGameDialog(QDialog):
         prefix_layout.setContentsMargins(0, 0, 0, 0)
         prefix_layout.setSpacing(8)
         self.prefix = QLineEdit()
-        self.prefix.setPlaceholderText("existing Wine prefix")
+        self.prefix.setPlaceholderText("Created automatically")
         self.prefix.textEdited.connect(lambda _t: setattr(self, "_prefix_touched", True))
         self.prefix.editingFinished.connect(self.detect)
         prefix_layout.addWidget(self.prefix, 1)
         prefix_browse = QPushButton("Browse")
         prefix_browse.setObjectName("GhostButton")
+        prefix_browse.setAutoDefault(False)
         prefix_browse.clicked.connect(self._browse_prefix)
         prefix_layout.addWidget(prefix_browse)
         form.addRow("Wine prefix", self.prefix_row)
         self.prefix_free = QLabel("")
         self.prefix_free.setObjectName("Muted")
         form.addRow("", self.prefix_free)
+
+        self._location_open = False
+        self.location_toggle = QPushButton("Choose where to install…")
+        self.location_toggle.setObjectName("GhostButton")
+        self.location_toggle.setAutoDefault(False)
+        self.location_toggle.clicked.connect(self._toggle_location)
+        self._form = form
+        form.addRow("", self.location_toggle)
 
         self.name = QLineEdit()
         self.name.setPlaceholderText("profile name")
@@ -288,21 +366,34 @@ class AddGameDialog(QDialog):
         footer.addStretch(1)
         cancel = QPushButton("Cancel")
         cancel.setObjectName("GhostButton")
+        cancel.setAutoDefault(False)
         cancel.clicked.connect(self.reject)
         create = QPushButton("Add game")
         create.setObjectName("Primary")
         create.setMinimumHeight(40)
+        create.setDefault(True)  # Enter in a field adds the game, not "Browse"
         create.clicked.connect(self.create_profile)
+        self.create_button = create
         footer.addWidget(cancel)
         footer.addWidget(create)
-        root.addLayout(footer)
+        footer.setContentsMargins(26, 0, 26, 0)
+        outer.addLayout(footer)
 
         self._select_row(self._first_row)
         self._on_game_changed(self._first_row)
+        self._apply_location_visibility()
+        self._fit_to_screen(body)
+
+    def _fit_to_screen(self, body: QWidget) -> None:
+        """Open tall enough to show the whole form, but never taller than the screen."""
+        want = body.sizeHint().height() + 80  # footer buttons and margins
+        screen = self.screen()
+        limit = screen.availableGeometry().height() - 80 if screen is not None else want
+        self.resize(max(self.minimumWidth(), self.sizeHint().width()), max(300, min(want, limit)))
 
     # ---- construction helpers ---------------------------------------------
     def _populate_games(self) -> None:
-        for group in ("Games", "Other"):
+        for group in ("Games", ADVANCED_GROUP):
             header = QListWidgetItem(group.upper())
             header.setFlags(Qt.ItemFlag.NoItemFlags)
             self.game_list.addItem(header)
@@ -326,6 +417,7 @@ class AddGameDialog(QDialog):
         layout.addWidget(line_edit, 1)
         browse = QPushButton("Browse")
         browse.setObjectName("GhostButton")
+        browse.setAutoDefault(False)
         browse.clicked.connect(slot)
         layout.addWidget(browse)
         return row
@@ -353,7 +445,8 @@ class AddGameDialog(QDialog):
                 return
 
     def set_mode(self, import_existing: bool) -> None:
-        self.import_existing.setChecked(bool(import_existing))
+        # The two radios are exclusive: unchecking one needs the other checked.
+        (self.import_existing if import_existing else self.install_new).setChecked(True)
 
     def set_install_dir(self, path: str | Path) -> None:
         self.folder.setText(str(path))
@@ -384,7 +477,9 @@ class AddGameDialog(QDialog):
 
     def _slug(self) -> str:
         game = self._selected_game()
-        return _slugify(game.title if game else "game") or "game"
+        # Use the unique profile name, not the game title, so a second profile
+        # of the same game gets its own install folder and prefix.
+        return self._default_name(game.title if game else "game")
 
     def _root(self) -> Path:
         return self._data_root if self._data_root is not None else paths.profiles_dir()
@@ -393,10 +488,17 @@ class AddGameDialog(QDialog):
         game = self._selected_game()
         if game is None:
             return
+        self.prefix.setPlaceholderText(
+            "Folder of the existing install"
+            if self.import_existing.isChecked()
+            else "Created automatically"
+        )
         if game.kind in PREFIX_KINDS:
             self.prefix_row.setVisible(True)
         else:
             self.prefix_row.setVisible(False)
+        if hasattr(self, "_form"):
+            self._apply_location_visibility()
         if not self._name_touched:
             self.name.setText(self._default_name(game.title))
         if not self._folder_touched and self.install_new.isChecked():
@@ -408,11 +510,57 @@ class AddGameDialog(QDialog):
                 self.prefix.setText(str(self._root() / self._slug() / "prefix"))
             else:
                 self.prefix.clear()
+        self._update_size_hint()
         self.detect()
 
+    def _toggle_location(self) -> None:
+        self._location_open = not self._location_open
+        self._apply_location_visibility()
+
+    def _apply_location_visibility(self) -> None:
+        """A fresh install uses the default folders unless the user asks to choose.
+
+        Folder and Wine-prefix fields are jargon for most people, and the defaults
+        are right for them; an import must show them because it needs real paths.
+        """
+        importing = self.import_existing.isChecked()
+        show = importing or self._location_open
+        game = self._selected_game()
+        uses_prefix = game is not None and game.kind in PREFIX_KINDS
+        prefix_only = game is not None and game.kind in PREFIX_ONLY_KINDS
+        form = self._form
+        # A prefix-only kind has no separate game folder: the prefix *is* the
+        # game location, so the install-folder row is never shown (not even for
+        # an import, which asks for that location in the prefix row instead).
+        form.setRowVisible(0, show and not prefix_only)  # install folder
+        form.setRowVisible(1, show and not prefix_only)
+        form.setRowVisible(2, show and uses_prefix)  # Wine prefix
+        form.setRowVisible(3, show and uses_prefix)
+        form.setRowVisible(self.location_toggle, not importing)
+        self._apply_prefix_label(prefix_only)
+        self.location_toggle.setText(
+            "Use the default location" if self._location_open else "Choose where to install…"
+        )
+
+    def _apply_prefix_label(self, prefix_only: bool) -> None:
+        """Call CZN's prefix what it is to users: the game folder."""
+        label = self._form.labelForField(self.prefix_row)
+        if label is None:
+            return
+        if prefix_only:
+            label.setText("Game folder")
+            for widget in (label, self.prefix, self.prefix_row):
+                widget.setToolTip("Wine prefix")
+        else:
+            label.setText("Wine prefix")
+            for widget in (label, self.prefix, self.prefix_row):
+                widget.setToolTip("")
+
     def _on_mode_changed(self, _checked: bool = False) -> None:
+        self._apply_location_visibility()
         if self.import_existing.isChecked():
-            self.folder_label.setText("Existing install folder")
+            self.folder_label.setText("Existing game folder")
+            self.prefix.setPlaceholderText("Folder of the existing install")
             if not self._folder_touched:
                 self.folder.clear()
             # Drop an untouched default prefix so the import guard can tell a
@@ -420,13 +568,31 @@ class AddGameDialog(QDialog):
             if not self._prefix_touched:
                 self.prefix.clear()
         else:
-            self.folder_label.setText("Install folder")
+            self.folder_label.setText("Game folder")
+            self.prefix.setPlaceholderText("Created automatically")
             if not self._folder_touched:
                 self.folder.setText(str(self._root() / self._slug() / "install"))
             if not self._prefix_touched and self._selected_game() is not None:
                 if self._selected_game().kind in PREFIX_KINDS:
                     self.prefix.setText(str(self._root() / self._slug() / "prefix"))
+        self._update_size_hint()
         self.detect()
+
+    def _update_size_hint(self) -> None:
+        """Explain that Install new downloads later, with the known download size."""
+        game = self._selected_game()
+        if game is None or not self.install_new.isChecked():
+            self.size_hint.clear()
+            self.size_hint.setVisible(False)
+            return
+        text = "Adds the game to your library. Press INSTALL on its page to download it"
+        size = backends.install_size_hint(game.kind)
+        if size:
+            from ..core import diskspace
+
+            text += f" (about {diskspace.human_size(size)})"
+        self.size_hint.setText(text)
+        self.size_hint.setVisible(True)
 
     def _browse_folder(self) -> None:
         start = self.folder.text().strip() or str(Path.home())
@@ -466,14 +632,22 @@ class AddGameDialog(QDialog):
         kind = self.selected_kind()
         if not kind or not self.import_existing.isChecked():
             self.detect_label.setText("")
+            self.create_button.setEnabled(True)
             return {}
         info = detect_import(kind, self.folder.text().strip(), self.prefix.text().strip())
         notes = list(info.get("notes") or [])
         if info.get("install_dir"):
-            notes.append(f"Install folder: {info['install_dir']}")
+            notes.append(f"Game folder: {info['install_dir']}")
         if info.get("prefix"):
             notes.append(f"Prefix: {info['prefix']}")
         self.detect_label.setText("  ".join(notes) if notes else "Nothing detected yet.")
+        # Never offer to import a folder where nothing was found: that profile
+        # could not launch. CZN is fine because its prefix-only detection adds a note.
+        found = bool(notes)
+        self.create_button.setEnabled(found)
+        self.create_button.setToolTip(
+            "" if found else "Pick the folder where the game is already installed."
+        )
         return info
 
     # ---- creation ----------------------------------------------------------
@@ -487,13 +661,11 @@ class AddGameDialog(QDialog):
         name = self.name.text().strip() or self._default_name(game.title)
         if not valid_profile_name(name):
             self.error_label.setText(
-                "Profile names cannot contain path separators (/ or \\) or "
-                "control characters, must not start with a drive letter, and "
-                f"must be at most {MAX_PROFILE_NAME} characters."
+                "Use letters, numbers, spaces, - or _. A / or \\ is not allowed."
             )
             return None
         if name in self.config.profiles:
-            self.error_label.setText(f"A profile named {name!r} already exists.")
+            self.error_label.setText("That name is already used. Choose another name.")
             return None
 
         folder = self.folder.text().strip()
@@ -505,16 +677,32 @@ class AddGameDialog(QDialog):
 
         info = detect_import(kind, folder, prefix) if importing else {}
         if importing:
-            install_dir = info.get("install_dir") or folder or ""
-            prefix_value = prefix or info.get("prefix") or ""
-            if not install_dir:
-                install_dir = prefix_value  # accept the picked folder as-is
+            # Only a real finding may create a profile: a mistyped or empty
+            # folder would otherwise leave the user with a game that cannot launch.
+            if not info.get("notes"):
+                if game.install_subdir:
+                    self.error_label.setText(
+                        f"No {game.title} installation was found there. Pick the folder "
+                        f"that contains {game.exes[0] if game.exes else 'the game'} or its "
+                        "Wine prefix."
+                    )
+                else:
+                    self.error_label.setText(
+                        "That folder does not exist. Pick the folder you already use for "
+                        "this game."
+                    )
+                return None
+            install_dir = info.get("install_dir") or info.get("prefix") or ""
+            prefix_value = info.get("prefix") or prefix or ""
         else:
             install_dir = folder
             prefix_value = prefix
+        if kind in PREFIX_ONLY_KINDS:
+            # The prefix is the whole install; never persist a duplicate path.
+            install_dir = ""
 
         values: dict[str, Any] = {"backend": kind, "title": game.title}
-        if install_dir:
+        if install_dir and kind not in PREFIX_ONLY_KINDS:
             values["install_dir"] = install_dir
         if prefix_value and kind in PREFIX_KINDS:
             values["prefix"] = prefix_value
@@ -530,6 +718,7 @@ class AddGameDialog(QDialog):
         # Detection only ever produced install_dir/prefix on existing dirs; the
         # prefix may be created later by install, but never here.
         self.created_profile = name
+        self.created_by_import = importing
         self.created.emit(name)
         self.accept()
         return name

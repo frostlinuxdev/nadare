@@ -100,7 +100,6 @@ def proton_direct(
     argv = [str(Path(proton_dir) / "proton"), "run", *[str(a) for a in args]]
     env = {
         "STEAM_COMPAT_DATA_PATH": str(prefix),
-        "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(prefix),
     }
     return argv, env
 

@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..core import graphics, paths, process, runners, sandbox, vcredist
+from ..core import graphics, hostlibs, paths, process, runners, sandbox, umu, vcredist
 from ..core.backends import BackendError, GameBackend, Option, Status
 from ..core.events import Cancel, Cancelled, Event, mask
 
@@ -57,7 +57,7 @@ _SIGNAL_TERM = 15
 
 
 # --------------------------------------------------------------------------
-# shared helpers (imported by steam.py / script.py / waydroid.py)
+# shared helpers (imported by steam.py / script.py)
 # --------------------------------------------------------------------------
 def profile_setting(profile: dict[str, Any], key: str, default: Any = None) -> Any:
     """Read a profile key from the top level or from its ``extra`` mapping."""
@@ -260,6 +260,7 @@ def _scan_query(query: ProcessQuery, *, proc_root: str | os.PathLike[str] = "/pr
     if not prefix and not names and not extra and not wanted_args:
         return []
     me = os.getpid()
+    uid = os.getuid()
     hits: list[int] = []
     proc = Path(proc_root)
     try:
@@ -271,6 +272,13 @@ def _scan_query(query: ProcessQuery, *, proc_root: str | os.PathLike[str] = "/pr
             continue
         pid = int(entry.name)
         if pid == me:
+            continue
+        try:
+            # Another user's environ is unreadable, which would make the
+            # basename/argument branches match a process we cannot stop.
+            if entry.stat().st_uid != uid:
+                continue
+        except OSError:
             continue
         argv = cmdline_argv(entry)
         if not argv:
@@ -297,7 +305,7 @@ def _scan_query(query: ProcessQuery, *, proc_root: str | os.PathLike[str] = "/pr
 _SCAN_START: dict[int, str | None] = {}
 
 
-def _remember_start(pids: list[int]) -> list[int]:
+def remember_start(pids: list[int]) -> list[int]:
     for pid in pids:
         _SCAN_START[pid] = process._pid_starttime(pid)
     return pids
@@ -319,12 +327,12 @@ def scan_pids(
     match a bare path.
     """
     if isinstance(patterns, ProcessQuery):
-        return _remember_start(_scan_query(patterns, proc_root=proc_root))
+        return remember_start(_scan_query(patterns, proc_root=proc_root))
     if names is not None:
         query = ProcessQuery(
             prefix=str(patterns), names=tuple(str(n) for n in names), match=process_match
         )
-        return _remember_start(_scan_query(query, proc_root=proc_root))
+        return remember_start(_scan_query(query, proc_root=proc_root))
     wanted = [p for p in patterns if p]
     if not wanted:
         return []
@@ -348,7 +356,7 @@ def scan_pids(
         cmd = raw.replace(b"\0", b" ").decode("utf-8", "replace")
         if any(pattern in cmd for pattern in wanted):
             hits.append(pid)
-    return _remember_start(hits)
+    return remember_start(hits)
 
 
 def stop_pids(pids: Iterable[int], signal_: int = _SIGNAL_TERM) -> None:
@@ -376,6 +384,7 @@ def first_wine() -> Path:
 # --------------------------------------------------------------------------
 class WineBackend(GameBackend):
     kind = "wine"
+    supports_update = False  # the game or its own launcher updates itself
 
     options = (
         Option("install_dir", "Game folder", "path_dir", "Where the game lives."),
@@ -438,7 +447,8 @@ class WineBackend(GameBackend):
     # ---- profile resolution -----------------------------------------------
     def _install_dir(self) -> Path:
         configured = path_option(profile_setting(self.ctx.profile, "install_dir"))
-        return configured if configured is not None else Path.cwd()
+        # Same default as the script backend, so status() and launch() agree.
+        return configured if configured is not None else self.ctx.data_dir()
 
     def _prefix(self) -> Path:
         configured = path_option(
@@ -454,7 +464,10 @@ class WineBackend(GameBackend):
             or profile_setting(self.ctx.profile, "script")
         )
         if not raw:
-            raise BackendError("wine profile has no exe_name/launch_exe")
+            raise BackendError(
+                "No game executable is set for this profile. Open Settings → Game "
+                "options and choose the .exe."
+            )
         target = path_option(raw, base=self._install_dir())
         if target is None or not target.is_file():
             raise BackendError(f"game executable not found: {target}")
@@ -475,6 +488,36 @@ class WineBackend(GameBackend):
         if resolved is None:
             raise BackendError(f"runner {runner!r} not found")
         return Path(resolved)
+
+    def _runtime_error(self) -> str | None:
+        """Why no launch runtime resolves, or ``None`` when one does.
+
+        Mirrors :meth:`_prefix_command` (the launch path) without downloading
+        or creating anything, so ``status()`` cannot report a game as ready
+        when ``build()`` would fail with "wine not found on PATH".
+        """
+        runner = self._runner()
+        if runner:
+            try:
+                self._runner_path(runner)
+            except BackendError as exc:
+                return str(exc)
+            configured = str(profile_setting(self.ctx.profile, "umu_binary", "umu-run"))
+            umu_run = shutil.which(configured) or umu.managed()
+            if not umu_run and not sandbox.in_flatpak():
+                # Missing 32-bit libraries are exactly the case where launch
+                # installs the managed umu; status must not download, and must
+                # not call that launch-ready setup an error.
+                if not hostlibs.missing_32bit():
+                    return "umu-run not found on PATH (needed for a Proton runner)"
+            return None
+        if profile_setting(self.ctx.profile, "wine_binary"):
+            return None
+        try:
+            first_wine()
+        except BackendError:
+            return "Wine is not installed; install Wine or choose a Proton runner"
+        return None
 
     def _patterns(self, target: Path | None = None) -> ProcessQuery:
         """Build the structured process query for this profile's game."""
@@ -500,16 +543,28 @@ class WineBackend(GameBackend):
             runner_path = self._runner_path(runner)
             env["PROTONPATH"] = str(runner_path)
             env["STEAM_COMPAT_DATA_PATH"] = str(prefix)
-            env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = str(prefix)
             # Native Wayland keeps Wine in charge of its own child windows so
             # launcher dialogs/updaters behave (see the stella launcher notes).
             env.setdefault("PROTON_ENABLE_WAYLAND", "1")
-            umu = shutil.which(str(profile_setting(self.ctx.profile, "umu_binary", "umu-run")))
-            if umu:
-                argv = [umu, *args]
+            configured = str(profile_setting(self.ctx.profile, "umu_binary", "umu-run"))
+            umu_run = shutil.which(configured)
+            missing = None
+            if umu_run is None and not sandbox.in_flatpak():
+                missing = hostlibs.missing_32bit()
+                if missing:
+                    umu_run = umu.resolve(
+                        configured,
+                        allow_download=True,
+                        emit=self.ctx.emit,
+                        cancel=self.ctx.cancel,
+                    )
+            if umu_run:
+                argv = [umu_run, *args]
             elif sandbox.in_flatpak():
                 argv, env_updates = sandbox.proton_direct(runner_path, prefix, args)
                 env.update(env_updates)
+            elif missing:
+                raise BackendError(hostlibs.hint(missing))
             else:
                 raise BackendError("umu-run not found on PATH (needed for a Proton runner)")
         else:
@@ -519,6 +574,11 @@ class WineBackend(GameBackend):
                 str(resolved_wine) if resolved_wine is not None else str(first_wine()),
                 *args,
             ]
+            # Plain Wine would otherwise ask to download wine-mono / wine-gecko.
+            overrides = [p for p in str(env.get("WINEDLLOVERRIDES") or "").split(";") if p.strip()]
+            if "mscoree,mshtml=" not in overrides:
+                overrides.append("mscoree,mshtml=")
+            env["WINEDLLOVERRIDES"] = ";".join(overrides)
         kind = "proton" if runner else "wine"
         env.update(graphics.renderer_env(self.ctx.profile, kind=kind, environ=env))
         extra_env = profile_setting(self.ctx.profile, "extra_env")
@@ -563,6 +623,11 @@ class WineBackend(GameBackend):
 
     # ---- contract ----------------------------------------------------------
     def status(self) -> Status:
+        configured = (
+            profile_setting(self.ctx.profile, "exe_name")
+            or profile_setting(self.ctx.profile, "launch_exe")
+            or profile_setting(self.ctx.profile, "script")
+        )
         target: Path | None
         try:
             target = self._target()
@@ -570,17 +635,31 @@ class WineBackend(GameBackend):
             target = None
         pids = scan_pids(self._patterns(target))
         runner = self._runner()
-        note = graphics.vulkan_note()
         data = {
             "exe": str(target) if target else "",
             "prefix": str(self._prefix()),
             "runner": runner or "",
             "pids": pids,
             "renderer": getattr(self, "_renderer", None) or "",
+            "can_update": False,
         }
         if target is None:
             data["can_install"] = False  # wine never installs; set the exe instead
+            if not configured:
+                return Status(
+                    state="error",
+                    message=(
+                        "No game executable is set for this profile. Open Settings → "
+                        "Game options and choose the .exe."
+                    ),
+                    data=data,
+                )
             return Status(state="not_installed", message="game executable not found", data=data)
+        runtime_error = self._runtime_error()
+        if runtime_error is not None and not pids:
+            data["can_install"] = False
+            return Status(state="error", message=runtime_error, data=data)
+        note = graphics.vulkan_note()
         if pids:
             message = "game is running"
         else:
@@ -596,7 +675,8 @@ class WineBackend(GameBackend):
 
     def install(self) -> None:
         raise BackendError(
-            "the wine backend does not install games; point install_dir at an existing prefix"
+            "This profile expects an already-installed game. Add the game's .exe in "
+            "Settings → Game options, or remove this profile."
         )
 
     def update(self) -> None:

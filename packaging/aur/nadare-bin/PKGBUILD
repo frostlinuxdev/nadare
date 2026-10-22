@@ -3,8 +3,8 @@
 #
 # Repackages the upstream AppImage: it is unpacked into /opt/nadare (no FUSE or
 # noexec-/tmp dependency at run time) and /usr/bin/nadare points at it.
-# TODO(#190): pacman owns updates for this package, so the in-app update check
-# should be disabled here once the client supports turning it off.
+# pacman owns updates for this package; the wrapper tells Nadare not to offer a
+# manual release download.
 pkgname=nadare-bin
 _pkgname=nadare
 pkgver=0.1.0b3
@@ -43,7 +43,12 @@ package() {
   cp -a --no-preserve=ownership usr AppRun "${pkgdir}/opt/${_pkgname}/"
 
   install -dm755 "${pkgdir}/usr/bin"
-  ln -s "/opt/${_pkgname}/usr/bin/nadare" "${pkgdir}/usr/bin/nadare"
+  cat > "${pkgdir}/usr/bin/nadare" <<'EOF'
+#!/bin/sh
+export NADARE_MANAGED_UPDATES=1
+exec /opt/nadare/usr/bin/nadare "$@"
+EOF
+  chmod 755 "${pkgdir}/usr/bin/nadare"
 
   install -Dm644 usr/share/applications/nadare.desktop \
     "${pkgdir}/usr/share/applications/nadare.desktop"
