@@ -47,14 +47,21 @@ bundled Python, not a Nadare message.
 | glibc 2.35 or newer | Ubuntu 22.04+, Debian 12+, Fedora 36+, current Arch |
 
 Nadare brings its own Proton runner and the STOVE helper stub. You do **not** need
-Wine or `mingw` installed. **Install `umu-launcher` if you can** (see below): it is the
-path the game was developed and tested on. Either install `umu-launcher` (`umu-run` on your PATH, which
-brings its own runtime), **or** have your distro's 32-bit libraries (FreeType, udev,
-Xext, xkbcommon): on a stock Debian/Ubuntu without them Nadare stops with a message
-naming what to install, and `nadare doctor` shows a `32-bit libs:` line.
+Wine or `mingw` installed, and on most systems you do **not** need any 32-bit
+libraries either: when `umu-run` is not installed, Nadare downloads its own copy of the
+Steam Linux Runtime at launch, which brings the 32-bit libraries with it. **Installing
+`umu-launcher` is still recommended** (see below): it is the path the game was developed
+and tested on.
 
-If Nadare stops with "Missing 32-bit libraries", this is the fix for your distro
-(the message in the app shows the same command):
+The runtime needs a user namespace. Ubuntu 24.04+ and Mint 22 block that by default; if
+the install stops there, use the AppArmor fix in the next section (one command, no
+32-bit libraries). `nadare doctor` shows a `32-bit libs:` line and a
+`user namespaces:` line.
+
+Only if that runtime cannot be used (no network for the download, or you would rather
+not allow the namespace) do you need your distro's 32-bit libraries (FreeType, udev,
+Xext, xkbcommon). Nadare then stops with "Missing 32-bit libraries"; this is the fix
+for your distro (the message in the app shows the same command):
 
 - Debian/Ubuntu/Mint: `sudo dpkg --add-architecture i386 && sudo apt update && sudo apt install libfreetype6:i386 libxext6:i386 libxkbcommon0:i386`
 - Fedora: `sudo dnf install freetype.i686 libXext.i686 libxkbcommon.i686`
@@ -62,6 +69,35 @@ If Nadare stops with "Missing 32-bit libraries", this is the fix for your distro
 - Arch/CachyOS: `sudo pacman -S --needed lib32-freetype2 lib32-libxext lib32-libxkbcommon`
   (needs the `[multilib]` repository enabled)
 - openSUSE: `sudo zypper install libfreetype6-32bit libXext6-32bit libxkbcommon0-32bit`
+
+### Ubuntu 24.04 and newer: "setting up uid map: Permission denied"
+
+Ubuntu 24.04+ (and Mint 22) restrict which programs may create a user namespace
+(`kernel.apparmor_restrict_unprivileged_userns=1`). The game's runtime sandbox (the
+bundled Steam Runtime, run by `umu-run`) needs one, so on a stock install the Wine
+prefix or WebView2 step fails and the install log shows
+`bwrap: setting up uid map: Permission denied`. Steam and Flatpak work because Ubuntu
+ships an AppArmor profile for each of them; Nadare is not covered by those.
+
+`nadare doctor` shows a `user namespaces:` line, and the error in the app names AppArmor
+and prints this fix: a profile that allows the namespace for just Nadare's bundled
+`srt-bwrap` (not for every program):
+
+```
+sudo tee /etc/apparmor.d/nadare-srt-bwrap >/dev/null <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+profile nadare-srt-bwrap @{HOME}/.local/share/umu/*/pressure-vessel/libexec/steam-runtime-tools-0/srt-bwrap flags=(unconfined) {
+  userns,
+}
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/nadare-srt-bwrap
+```
+
+Then press Install again. The blunt alternative,
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, also works but turns
+the restriction off for every program. Having Steam installed does not help: its profile
+is attached to the Steam binaries only.
 
 ### umu-launcher (recommended)
 

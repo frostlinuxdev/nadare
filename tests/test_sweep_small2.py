@@ -10,7 +10,7 @@ from nadare import app
 from nadare.backends import steam as steam_backend
 from nadare.backends import wine
 from nadare.backends.wine import ProcessQuery
-from nadare.core import backends, graphics, hostlibs, process, runners, sandbox, secrets
+from nadare.core import backends, graphics, hostlibs, process, runners, sandbox, secrets, userns
 
 
 def _fake_pid(root: Path, pid: int, argv: list[str], env: dict[str, str] | None = None) -> None:
@@ -105,14 +105,32 @@ def test_doctor_strict_fails_when_no_backend_loaded(monkeypatch, capsys) -> None
     assert "doctor: not ready (no backends loaded)" in out
 
 
-def test_doctor_strict_fails_when_32bit_libs_are_missing_without_umu(
+def test_doctor_strict_fails_when_libs_are_missing_and_the_runtime_is_blocked(
     monkeypatch, capsys
 ) -> None:
     _ready_host(monkeypatch)
     monkeypatch.setattr(process, "which", lambda name, **k: None)
     monkeypatch.setattr(hostlibs, "missing_32bit", lambda: ["libGL.so.1"])
+    monkeypatch.setattr(userns, "restricted", lambda *a, **k: True)
+    monkeypatch.setattr(userns, "profile_installed", lambda *a, **k: False)
 
     assert app.run_cli(["doctor", "--strict"]) == 1
     out = capsys.readouterr().out
     assert "32-bit libs: missing libGL.so.1" in out
-    assert "doctor: not ready (32-bit libs missing)" in out
+    assert "doctor: not ready (32-bit libs missing and the runtime sandbox is blocked)" in out
+
+
+def test_doctor_strict_passes_when_libs_are_missing_but_the_runtime_works(
+    monkeypatch, capsys
+) -> None:
+    # The managed runtime brings its own 32-bit libraries.
+    _ready_host(monkeypatch)
+    monkeypatch.setattr(process, "which", lambda name, **k: None)
+    monkeypatch.setattr(hostlibs, "missing_32bit", lambda: ["libGL.so.1"])
+    monkeypatch.setattr(userns, "restricted", lambda *a, **k: False)
+
+    assert app.run_cli(["doctor", "--strict"]) == 0
+    out = capsys.readouterr().out
+    assert "32-bit libs: missing libGL.so.1" in out
+    assert "not needed while Nadare's own runtime works" in out
+    assert "not ready" not in out

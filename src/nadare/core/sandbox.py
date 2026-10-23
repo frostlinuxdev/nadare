@@ -11,6 +11,8 @@ import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
+from . import paths
+
 FLATPAK_INFO = Path("/.flatpak-info")
 
 #: ``flatpak-spawn --env=K=V`` values land in the *host* process table, which
@@ -88,7 +90,8 @@ def proton_direct(
 
     Proton expects the Wine prefix at ``<STEAM_COMPAT_DATA_PATH>/pfx``; a plain
     Wine prefix kept on disk is bridged with a ``pfx -> .`` symlink so the same
-    directory keeps working.
+    directory keeps working. ``STEAM_COMPAT_CLIENT_INSTALL_PATH`` points at a
+    private, empty directory rather than a game prefix or a real Steam install.
     """
     prefix = Path(prefix)
     pfx = prefix / "pfx"
@@ -98,7 +101,13 @@ def proton_direct(
         except OSError:
             pass
     argv = [str(Path(proton_dir) / "proton"), "run", *[str(a) for a in args]]
+    client = paths.data_dir() / "proton-client"
+    try:
+        client.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
     env = {
+        "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(client),
         "STEAM_COMPAT_DATA_PATH": str(prefix),
     }
     return argv, env

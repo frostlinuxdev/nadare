@@ -71,12 +71,20 @@ from ..core import (
     prefixmove,
     process,
     runners,
+    runtimewatch,
     sandbox,
     umu,
     vcredist,
     yostar,
 )
-from ..core.backends import BackendError, BackendUnsupported, GameBackend, Option, Status
+from ..core.backends import (
+    BackendContext,
+    BackendError,
+    BackendUnsupported,
+    GameBackend,
+    Option,
+    Status,
+)
 from ..core.events import Event, mask
 from .arknights_news import IMAGE_HOSTS, fetch_arknights_news
 from .wine import (
@@ -339,6 +347,14 @@ class ArknightsBackend(GameBackend):
 
     #: The CI media document supplies the launcher hero + operation banners.
     official_media = True
+
+    def __init__(self, ctx: BackendContext) -> None:
+        super().__init__(ctx)
+        self._watch = runtimewatch.RuntimeWatch()
+
+    def _on_line(self, line: str) -> None:
+        self._watch.feed(line)
+        self.info(mask(line))
 
     # ---- paths / profile resolution ---------------------------------------
     def _data_dir(self) -> Path:
@@ -712,7 +728,7 @@ class ArknightsBackend(GameBackend):
         probe = self._renderer_probe().start()
         try:
             return stream(
-                argv, env, on_line=lambda line: self.info(mask(line)), cancel=self.ctx.cancel
+                argv, env, on_line=self._on_line, cancel=self.ctx.cancel
             )
         finally:
             probe.stop()
@@ -869,7 +885,7 @@ class ArknightsBackend(GameBackend):
     def _run_in_prefix(self, argv: list[str]) -> int:
         """Run ``argv`` inside this profile's Wine/Proton prefix."""
         cmd, env = self._prefix_command(list(argv))
-        return stream(cmd, env, on_line=lambda line: self.info(mask(line)), cancel=self.ctx.cancel)
+        return stream(cmd, env, on_line=self._on_line, cancel=self.ctx.cancel)
 
     def _runtime_available(self) -> bool:
         """Whether a Wine/Proton runtime is explicitly configured for direct mode.
@@ -1011,10 +1027,12 @@ class ArknightsBackend(GameBackend):
         argv, env = self._prefix_command(["wineboot", "-u"])
         try:
             code = stream(
-                argv, env, on_line=lambda line: self.info(mask(line)), cancel=self.ctx.cancel
+                argv, env, on_line=self._on_line, cancel=self.ctx.cancel
             )
             if code != 0 or not (prefix / "drive_c").is_dir():
-                raise BackendError(f"prefix creation failed (exit {code})")
+                raise BackendError(
+                    self._watch.explain(f"prefix creation failed (exit {code})")
+                )
         except BaseException:
             # A cancelled/failed wineboot can leave drive_c behind, which would
             # make the next install treat the broken prefix as complete.
@@ -1049,13 +1067,15 @@ class ArknightsBackend(GameBackend):
         )
         self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
         code = stream(
-            argv, env, on_line=lambda line: self.info(mask(line)), cancel=self.ctx.cancel
+            argv, env, on_line=self._on_line, cancel=self.ctx.cancel
         )
         if self.find_launcher() is None:
             self.info(f"Arknights installer exited with code {code} and left no launcher")
             raise BackendError(
-                "The Arknights installer did not finish. Try Install again. If it still "
-                "fails, open Settings → Runner and choose Proton-CachyOS."
+                self._watch.explain(
+                    "The Arknights installer did not finish. Try Install again. If it still "
+                    "fails, open Settings → Runner and choose Proton-CachyOS."
+                )
             )
         self.ctx.emit(Event("done", "Arknights installer finished"))
 
@@ -1072,7 +1092,9 @@ class ArknightsBackend(GameBackend):
         self.ctx.emit(Event("step", "Starting the Arknights launcher (it checks for updates)"))
         code = self.launch()
         if code != 0:
-            raise BackendError(f"the Arknights launcher exited with code {code}")
+            raise BackendError(
+                self._watch.explain(f"the Arknights launcher exited with code {code}")
+            )
 
     def repair(self) -> None:
         if not self.direct_mode():
@@ -1149,7 +1171,7 @@ class ArknightsBackend(GameBackend):
         probe = self._renderer_probe().start()
         try:
             return stream(
-                argv, env, on_line=lambda line: self.info(mask(line)), cancel=self.ctx.cancel
+                argv, env, on_line=self._on_line, cancel=self.ctx.cancel
             )
         finally:
             probe.stop()

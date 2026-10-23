@@ -399,7 +399,7 @@ def _print_tls_diagnosis() -> None:
 
 def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
     """Print GPU/Vulkan capability, DXVK readiness and runner freshness."""
-    from .core import backends, graphics, hostlibs, process, runners, sandbox, umu
+    from .core import backends, graphics, hostlibs, process, runners, sandbox, umu, userns
 
     reasons: list[str] = []
 
@@ -467,17 +467,41 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
             if managed is not None:
                 print(f"umu-run: managed copy {managed}")
         missing_libs = None if found else hostlibs.missing_32bit()
+        # The managed runtime brings its own 32-bit libraries, so missing host
+        # libs only matter when that runtime cannot start (#429).
+        runtime_blocked = userns.restricted() and not userns.profile_installed()
         if found:
             print("32-bit libs: not needed (umu-run supplies the Steam Linux Runtime)")
         elif missing_libs is None:
             print("32-bit libs: unknown")
         elif missing_libs:
             print(f"32-bit libs: missing {', '.join(missing_libs)}")
-            reasons.append("32-bit libs missing")
+            print(
+                "  not needed while Nadare's own runtime works: it downloads one at "
+                "launch and brings its own libraries"
+            )
+            if runtime_blocked:
+                reasons.append("32-bit libs missing and the runtime sandbox is blocked")
             fix = hostlibs.install_command(missing_libs, hostlibs.distro_family())
-            print(f"  fix: {fix}" if fix else f"  {hostlibs.hint(missing_libs)}")
+            print(
+                f"  or install them: {fix}" if fix else f"  {hostlibs.hint(missing_libs)}"
+            )
         else:
             print("32-bit libs: OK")
+        if not userns.restricted():
+            print("user namespaces: OK")
+        elif userns.profile_installed():
+            print(
+                "user namespaces: restricted, Nadare's AppArmor profile is installed"
+            )
+        else:
+            print(
+                "user namespaces: restricted by AppArmor (Ubuntu 24.04+); "
+                "the game's runtime sandbox may fail to start"
+            )
+            print("  fix: run these two commands (this also avoids the 32-bit libraries)")
+            for line in userns.install_command().splitlines():
+                print(f"    {line}")
     from .core import secrets as _secrets
 
     ok, why = _secrets.keyring_diagnosis()

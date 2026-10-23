@@ -181,7 +181,10 @@ def hint(missing: list[str], os_release: str | None = None) -> str:
     """
     head = f"Missing 32-bit libraries: {', '.join(missing)}."
     why = (
-        "Nadare needs these 32-bit libraries to start the game's Windows environment."
+        "Nadare normally downloads its own runtime, which needs none of them, but "
+        "that was not possible here (offline, a blocked download, or Ubuntu's "
+        "AppArmor restriction; `nadare doctor` shows which). Without it, the game's "
+        "Windows environment needs these libraries on your system."
     )
     family = distro_family(os_release)
     command = install_command(missing, family)

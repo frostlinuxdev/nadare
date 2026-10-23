@@ -33,9 +33,30 @@ _MEMBER = "umu/umu-run"
 
 log = logging.getLogger(__name__)
 
+#: umu prints these when it cannot fetch the Steam Runtime, then exits 0.
+_SETUP_FAILURE_LINES = (
+    "umu has not been setup for the user",
+    "an internet connection is required to setup umu",
+)
+
+#: Shown when a prefix step failed because umu could not set itself up.
+SETUP_HINT = (
+    "Nadare could not download the Steam Runtime that umu needs from Valve's server "
+    "(repo.steampowered.com). Check your internet connection, or try again later if "
+    "the server is down."
+)
+
 
 class UmuError(RuntimeError):
     """The managed umu copy could not be set up."""
+
+
+def is_setup_failure_line(line: str) -> bool:
+    """Whether ``line`` is one of umu's own "could not set itself up" messages."""
+    if not line:
+        return False
+    lowered = line.lower()
+    return any(marker in lowered for marker in _SETUP_FAILURE_LINES)
 
 
 def managed_path() -> Path:
@@ -207,10 +228,12 @@ def resolve(
 
 
 __all__ = [
+    "SETUP_HINT",
     "UMU_TAR_SHA256",
     "UMU_VERSION",
     "UmuError",
     "ensure_managed",
+    "is_setup_failure_line",
     "managed",
     "managed_path",
     "resolve",

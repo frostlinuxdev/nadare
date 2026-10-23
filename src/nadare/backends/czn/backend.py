@@ -40,7 +40,18 @@ from pathlib import Path
 from typing import Any
 
 from ...core import download as net
-from ...core import graphics, hosting, hostlibs, paths, prefixmove, process, sandbox, tls, vcredist
+from ...core import (
+    graphics,
+    hosting,
+    hostlibs,
+    paths,
+    prefixmove,
+    process,
+    sandbox,
+    tls,
+    userns,
+    vcredist,
+)
 from ...core import runners as core_runners
 from ...core import umu as umu_mod
 from ...core.backends import (
@@ -460,6 +471,10 @@ class CznBackend(GameBackend):
         # Cached host 32-bit library preflight (see _missing_hostlibs). ``None``
         # means "unknown/not checked yet"; a list means a checked result.
         self._hostlibs_checked = False
+        #: Set once the runtime output shows the AppArmor userns block (#429).
+        self._userns_blocked = False
+        #: Set once umu reports it could not download its Steam Runtime.
+        self._umu_setup_failed = False
         #: Extra env for prefix commands while inside _installer_environment().
         self._run_env: dict[str, str] | None = None
         #: What a silent child is doing, for the progress heartbeat (None = no beat).
@@ -878,6 +893,10 @@ class CznBackend(GameBackend):
         line = line.rstrip()
         if not line.strip():
             return
+        if userns.is_failure_line(line):
+            self._userns_blocked = True
+        if umu_mod.is_setup_failure_line(line):
+            self._umu_setup_failed = True
         m = _FILE_PROGRESS.match(line)
         if m:
             done, total = int(m.group(1)), int(m.group(2))
@@ -893,6 +912,13 @@ class CznBackend(GameBackend):
         tag = line.lstrip()[:3]
         kind = "step" if tag in ("[*]", "[+]") else ("error" if tag == "[!]" else "log")
         self.ctx.emit(Event(kind, mask(line.strip())))
+
+    def _explain(self, message: str) -> str:
+        """Add the userns and/or failed-umu-setup hint to a failure message."""
+        explained = userns.with_hint(message, blocked=self._userns_blocked)
+        if self._umu_setup_failed:
+            explained += "\n" + umu_mod.SETUP_HINT
+        return explained
 
     def _stream(
         self,
@@ -1256,7 +1282,10 @@ class CznBackend(GameBackend):
         with self._activity_label("Creating the Wine prefix"):
             code = self._run_in_prefix(["wineboot", "-u"])
         if code != 0 or not (prefix / "drive_c").is_dir():
-            raise BackendError(f"prefix creation failed (exit {code})", 1)
+            raise BackendError(
+                self._explain(f"prefix creation failed (exit {code})"),
+                1,
+            )
         try:
             (prefix / PREFIX_MARKER).write_text("created by Nadare\n")
             (prefix / "czn-runner").write_text(self.runner_name() + "\n")
@@ -1554,9 +1583,11 @@ class CznBackend(GameBackend):
             _unlink_quietly(run_path)
         if not self._webview2_installed():
             raise BackendError(
-                f"WebView2 Runtime install failed (installer exit code {installer_code}). "
-                "Check the install log; a missing GPU/Vulkan driver (for example a VM), "
-                "a full disk or a blocked download are the usual causes",
+                self._explain(
+                    f"WebView2 Runtime install failed (installer exit code {installer_code}). "
+                    "Check the install log; a missing GPU/Vulkan driver (for example a VM), "
+                    "a full disk or a blocked download are the usual causes"
+                ),
                 EXIT_WEBVIEW2_FAILED,
             )
 
@@ -1614,20 +1645,23 @@ class CznBackend(GameBackend):
             self._install_vcredist_inner()
 
     def _install_vcredist_inner(self) -> None:
-        vcredist.install(
-            self.prefix(),
-            profile=self.ctx.profile,
-            cache_dir=self._cache_dir(),
-            run_in_prefix=self._run_in_prefix,
-            emit=self.ctx.emit,
-            cancel=self.ctx.cancel,
-            constant=VCREDIST_SHA256,
-            index_pins_fn=self._vcredist_index_pins,
-            index_source_fn=self._vcredist_index_source,
-            overridden_fn=self._vcredist_overridden,
-            verify_fn=self._verify_vcredist,
-            download_fn=self._download_vcredist,
-        )
+        try:
+            vcredist.install(
+                self.prefix(),
+                profile=self.ctx.profile,
+                cache_dir=self._cache_dir(),
+                run_in_prefix=self._run_in_prefix,
+                emit=self.ctx.emit,
+                cancel=self.ctx.cancel,
+                constant=VCREDIST_SHA256,
+                index_pins_fn=self._vcredist_index_pins,
+                index_source_fn=self._vcredist_index_source,
+                overridden_fn=self._vcredist_overridden,
+                verify_fn=self._verify_vcredist,
+                download_fn=self._download_vcredist,
+            )
+        except BackendError as e:
+            raise BackendError(self._explain(e.message), e.code) from e
 
     def _ensure_vcredist(self) -> None:
         """Best-effort VC++ runtime install; never aborts the caller.

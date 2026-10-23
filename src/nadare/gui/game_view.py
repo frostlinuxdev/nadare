@@ -40,13 +40,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import paths
+from ..core import paths, userns
 from ..core.backends import Status, page_notice, supports_news, supports_update
 from ..core.events import Event
 from ..core.news import CREDIT
 from .images import ImageLoader
 from .library import backend_label, profile_art_candidates, profile_title
 from .theme import badge_style, cover_pixmap, set_state_property
+from .userns_dialog import UsernsDialog
 
 
 @dataclass
@@ -1439,7 +1440,10 @@ class GameView(QWidget):
     # ---- dialogs -----------------------------------------------------------
     def show_error(self, title: str, message: str) -> None:
         self._set_console_expanded(True)
-        QMessageBox.warning(self, title, message)
+        if userns.has_hint(message):
+            UsernsDialog(message, self).exec()
+        else:
+            QMessageBox.warning(self, title, message)
 
     def _open_logs(self) -> None:
         paths.logs_dir().mkdir(parents=True, exist_ok=True)

@@ -111,8 +111,9 @@ def test_proton_direct_links_pfx_to_a_plain_wine_prefix(tmp_path):
     argv, env = sandbox.proton_direct(proton, prefix, ["C:\\game.exe", "-x"])
     assert argv == [str(proton / "proton"), "run", "C:\\game.exe", "-x"]
     assert env["STEAM_COMPAT_DATA_PATH"] == str(prefix)
-    # #36: the Steam client path is not the game prefix (umu/Proton set it).
-    assert "STEAM_COMPAT_CLIENT_INSTALL_PATH" not in env
+    # #36: the Steam client path is never the game prefix. #430: Proton's own
+    # script still requires it, so it names a private empty directory.
+    assert env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] != str(prefix)
     assert (prefix / "pfx").is_symlink()
     assert (prefix / "pfx").resolve() == prefix.resolve()
 
