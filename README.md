@@ -233,8 +233,9 @@ from a checkout. You do not need it to use the AppImage.
   found); when it is absent and the host lacks the 32-bit libraries Proton needs,
   Nadare downloads a pinned, verified copy of umu for you. `mingw-w64` is only
   needed to rebuild the stub from source.
-  On Ubuntu 24.04+ / Mint 22 that downloaded runtime needs one AppArmor profile
-  (one command, see `docs/TESTERS.md`); `nadare doctor` shows it.
+  On Ubuntu 24.04+ that downloaded runtime needs one AppArmor profile (one command,
+  see `docs/TESTERS.md`); `nadare doctor` shows it. Linux Mint turns that
+  restriction off and is not affected.
 
 **For Fate/Grand Order (NA)** the heavy lifting is in **lepton-fgo**;
 its `lepton/check-host.sh`

@@ -53,8 +53,8 @@ Steam Linux Runtime at launch, which brings the 32-bit libraries with it. **Inst
 `umu-launcher` is still recommended** (see below): it is the path the game was developed
 and tested on.
 
-The runtime needs a user namespace. Ubuntu 24.04+ and Mint 22 block that by default; if
-the install stops there, use the AppArmor fix in the next section (one command, no
+The runtime needs a user namespace. Ubuntu 24.04+ blocks that by default (Linux Mint
+turns the block off, so it is not affected); if the install stops there, use the AppArmor fix in the next section (one command, no
 32-bit libraries). `nadare doctor` shows a `32-bit libs:` line and a
 `user namespaces:` line.
 
@@ -72,8 +72,11 @@ for your distro (the message in the app shows the same command):
 
 ### Ubuntu 24.04 and newer: "setting up uid map: Permission denied"
 
-Ubuntu 24.04+ (and Mint 22) restrict which programs may create a user namespace
-(`kernel.apparmor_restrict_unprivileged_userns=1`). The game's runtime sandbox (the
+Ubuntu 24.04+ restricts which programs may create a user namespace
+(`kernel.apparmor_restrict_unprivileged_userns=1`; other Ubuntu 24.04-based systems
+may do the same, and `nadare doctor` tells you). Linux Mint 22 ships
+`/etc/sysctl.d/20-apparmor-mint.conf`, which sets it to 0, so Mint is not affected
+(checked on the 22.3 live ISO). The game's runtime sandbox (the
 bundled Steam Runtime, run by `umu-run`) needs one, so on a stock install the Wine
 prefix or WebView2 step fails and the install log shows
 `bwrap: setting up uid map: Permission denied`. Steam and Flatpak work because Ubuntu
