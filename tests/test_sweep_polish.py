@@ -231,9 +231,9 @@ def test_library_and_sidebar_cards_show_the_profile_name(qapp):
 
 
 # ---------------------------------------------------------------------------
-# 5. #285: no Vulkan warning for a brand-new not-installed CZN profile
+# 5. CZN is an OpenGL game: its status never carries the Vulkan driver warning
 # ---------------------------------------------------------------------------
-def test_czn_status_only_mentions_vulkan_when_installed(tmp_path, monkeypatch):
+def test_czn_status_never_mentions_vulkan(tmp_path, monkeypatch):
     from nadare.backends.czn.backend import CznBackend
 
     monkeypatch.setattr(graphics, "vulkan_note", lambda: "VULKAN NOTE")
@@ -251,7 +251,7 @@ def test_czn_status_only_mentions_vulkan_when_installed(tmp_path, monkeypatch):
     monkeypatch.setattr(backend, "installed", lambda: True)
     status = backend.status()
     assert status.state == "installed"
-    assert "VULKAN NOTE" in status.message
+    assert "VULKAN NOTE" not in status.message
 
 
 def test_vulkan_note_is_plain_language(monkeypatch):

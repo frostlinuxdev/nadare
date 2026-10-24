@@ -181,6 +181,11 @@ Known limits:
   is much worse than that.
 - The first hours are the worst: the GPU driver's shader cache is cold, so new effects can
   hitch once and then not again. Judge smoothness after a few sessions, not the first.
+- Chaos Zero Nightmare does not start inside a virtual machine that shows itself as one:
+  STOVE's `ssr-stove-shield.exe` waits forever (no CPU, no game window, no error). If you
+  test in a VM, hide the hypervisor (for QEMU: `-cpu host,-hypervisor,kvm=off` and a
+  non-QEMU `-smbios type=1,manufacturer=...`); the game then reaches its login screen (tested
+  with a virtio-gpu Venus GPU).
 - MangoHud can stop the game from starting under `umu-run`; leave it off.
 - Chaos Zero Nightmare is tested on **native Wayland**. With *Display backend* set to
   X11 (XWayland) its window showed only a flat colour on NVIDIA + KDE Plasma 6.8 (the

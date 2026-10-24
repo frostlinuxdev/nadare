@@ -161,11 +161,11 @@ def _czn(tmp_path: Path):
 
 def test_czn_flags_a_bwrap_uid_map_failure_in_the_output(tmp_path: Path) -> None:
     backend = _czn(tmp_path)
-    assert backend._userns_blocked is False
+    assert backend._watch.userns_blocked is False
     backend._emit_text("INFO: steamrt4 is up to date")
-    assert backend._userns_blocked is False
+    assert backend._watch.userns_blocked is False
     backend._emit_text(BWRAP_FAILURE)
-    assert backend._userns_blocked is True
+    assert backend._watch.userns_blocked is True
 
 
 def test_czn_prefix_failure_names_apparmor_when_bwrap_was_blocked(
@@ -199,3 +199,70 @@ def test_czn_prefix_failure_is_unchanged_for_other_errors(tmp_path: Path, monkey
     with pytest.raises(BackendError) as err:
         backend._ensure_prefix()
     assert str(err.value) == "prefix creation failed (exit 1)"
+
+
+# ---- doctor asks the sandbox itself --------------------------------------------
+class _Done:
+    def __init__(self, code: int, err: str = "") -> None:
+        self.returncode = code
+        self.stderr = err
+        self.stdout = ""
+
+
+def _fake_runtime(tmp_path: Path, monkeypatch) -> Path:
+    bwrap = (
+        tmp_path / "xdg/data/umu/x/pressure-vessel/libexec/steam-runtime-tools-0/srt-bwrap"
+    )
+    bwrap.parent.mkdir(parents=True)
+    bwrap.write_text("x")
+    return bwrap
+
+
+def test_probe_is_unknown_without_a_downloaded_runtime() -> None:
+    assert userns.probe(lambda *a, **k: _Done(0)) is None
+
+
+def test_probe_reports_working_blocked_and_unclear(tmp_path: Path, monkeypatch) -> None:
+    _fake_runtime(tmp_path, monkeypatch)
+    assert userns.probe(lambda *a, **k: _Done(0)) is True
+    assert userns.probe(lambda *a, **k: _Done(1, BWRAP_FAILURE)) is False
+    assert userns.probe(lambda *a, **k: _Done(1, "something else")) is None
+
+
+def test_probe_never_raises(tmp_path: Path, monkeypatch) -> None:
+    _fake_runtime(tmp_path, monkeypatch)
+
+    def boom(*a, **k):
+        raise OSError("no")
+
+    assert userns.probe(boom) is None
+
+
+def _doctor(monkeypatch, capsys, probe_result):
+    monkeypatch.setattr(graphics, "vulkan_info", lambda **k: graphics.VulkanInfo(True))
+    monkeypatch.setattr(graphics, "dxvk_ok", lambda: True)
+    monkeypatch.setattr(process, "which", lambda name, **k: "/usr/bin/umu-run")
+    monkeypatch.setattr(runners, "all_runners", list)
+    monkeypatch.setattr(userns, "restricted", lambda *a, **k: True)
+    monkeypatch.setattr(userns, "profile_installed", lambda *a, **k: False)
+    monkeypatch.setattr(userns, "probe", lambda *a, **k: probe_result)
+    run_cli(["doctor"])
+    return capsys.readouterr().out
+
+
+def test_doctor_is_calm_when_the_sandbox_really_works(monkeypatch, capsys) -> None:
+    out = _doctor(monkeypatch, capsys, True)
+    assert "sandbox starts fine (checked)" in out
+    assert "sudo tee" not in out
+
+
+def test_doctor_says_blocked_when_the_probe_failed(monkeypatch, capsys) -> None:
+    out = _doctor(monkeypatch, capsys, False)
+    assert "blocked by AppArmor" in out
+    assert "sudo tee" in out
+
+
+def test_doctor_says_not_verified_when_there_is_no_runtime_yet(monkeypatch, capsys) -> None:
+    out = _doctor(monkeypatch, capsys, None)
+    assert "not verified yet" in out
+    assert "sudo tee" in out

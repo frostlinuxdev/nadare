@@ -455,21 +455,34 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
     if sandbox.in_flatpak():
         print("umu-run: not needed (Flatpak runs Proton directly)")
     else:
-        found = process.which("umu-run")
+        found = umu.system("umu-run", which=process.which)
+        old_system = None if found else process.which("umu-run")
         if found:
             print(f"umu-run: {found}")
         else:
-            print(
-                "umu-run: not found (Nadare can set up its own copy at launch "
-                "if 32-bit libraries are missing)"
-            )
+            if old_system:
+                print(
+                    f"umu-run: {old_system} is older than "
+                    f"{'.'.join(map(str, umu.MIN_SYSTEM_VERSION))}, which the recommended "
+                    "Proton needs; Nadare skips it and sets up its own copy at launch"
+                )
+            else:
+                print(
+                    "umu-run: not found (Nadare can set up its own copy at launch "
+                    "if 32-bit libraries are missing)"
+                )
             managed = umu.managed()
             if managed is not None:
                 print(f"umu-run: managed copy {managed}")
         missing_libs = None if found else hostlibs.missing_32bit()
         # The managed runtime brings its own 32-bit libraries, so missing host
         # libs only matter when that runtime cannot start (#429).
-        runtime_blocked = userns.restricted() and not userns.profile_installed()
+        sandbox_works = None
+        if userns.restricted() and not userns.profile_installed():
+            sandbox_works = userns.probe()
+        runtime_blocked = (
+            userns.restricted() and not userns.profile_installed() and sandbox_works is not True
+        )
         if found:
             print("32-bit libs: not needed (umu-run supplies the Steam Linux Runtime)")
         elif missing_libs is None:
@@ -488,17 +501,37 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
             )
         else:
             print("32-bit libs: OK")
+        if not found:
+            missing_gl = hostlibs.missing_gl()
+            if missing_gl:
+                print(f"GL libs: missing {', '.join(missing_gl)} (no window can open without them)")
+                fix = hostlibs.gl_install_command(missing_gl, hostlibs.distro_family())
+                if fix:
+                    print(f"  fix: {fix}")
+                reasons.append("GL libraries missing")
         if not userns.restricted():
             print("user namespaces: OK")
         elif userns.profile_installed():
             print(
                 "user namespaces: restricted, Nadare's AppArmor profile is installed"
             )
-        else:
+        elif sandbox_works:
             print(
-                "user namespaces: restricted by AppArmor (Ubuntu 24.04+); "
-                "the game's runtime sandbox may fail to start"
+                "user namespaces: restricted by AppArmor, but the game's runtime "
+                "sandbox starts fine (checked)"
             )
+        else:
+            if sandbox_works is False:
+                print(
+                    "user namespaces: blocked by AppArmor (Ubuntu 24.04+); "
+                    "the game's runtime sandbox cannot start"
+                )
+            else:
+                print(
+                    "user namespaces: restricted by AppArmor (Ubuntu 24.04+); not "
+                    "verified yet (the game's runtime is not downloaded), so its "
+                    "sandbox may fail to start"
+                )
             print("  fix: run these two commands (this also avoids the 32-bit libraries)")
             for line in userns.install_command().splitlines():
                 print(f"    {line}")

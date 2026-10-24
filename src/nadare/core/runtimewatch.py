@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Nadare contributors
 """Recognise a blocked or failed runtime from a child's output and explain it.
 
-Both failures look like ordinary non-zero exits (or, for umu, even a zero
+These failures look like ordinary non-zero exits (or, for umu, even a zero
 exit), so a backend has to remember what it saw while streaming the child's
 output before it can make the final error message actionable. :class:`RuntimeWatch`
 keeps those two flags and decorates the message on demand.
@@ -20,10 +20,12 @@ class RuntimeWatch:
 
     userns_blocked: bool = False
     umu_setup_failed: bool = False
+    umu_runtime_mismatch: bool = False
 
     def __init__(self) -> None:
         self.userns_blocked = False
         self.umu_setup_failed = False
+        self.umu_runtime_mismatch = False
 
     def feed(self, line: str) -> None:
         """Record any failure that ``line`` reveals. Never raises."""
@@ -32,6 +34,8 @@ class RuntimeWatch:
                 self.userns_blocked = True
             if umu.is_setup_failure_line(line):
                 self.umu_setup_failed = True
+            if umu.is_runtime_mismatch_line(line):
+                self.umu_runtime_mismatch = True
         except Exception:  # pragma: no cover - defensive: output must never break a run
             pass
 
@@ -40,4 +44,6 @@ class RuntimeWatch:
         out = userns.with_hint(message, blocked=self.userns_blocked)
         if self.umu_setup_failed:
             out = out + "\n" + umu.SETUP_HINT
+        if self.umu_runtime_mismatch:
+            out = out + "\n" + umu.RUNTIME_MISMATCH_HINT
         return out

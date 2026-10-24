@@ -14,6 +14,13 @@
 # NADARE_YOSTAR_ENV (default ~/nadare-index-refresh/yostar.env, mode 600); when
 # that file is absent the Yostar step is skipped, as before.
 #
+# The runtime canary (scripts/check_runtime_canary.py) runs first and turns the
+# heartbeat "down" when a new runner needs a Steam Runtime the pinned umu lacks;
+# set NADARE_SKIP_CANARY=1 to disable it.
+#
+# The CZN latest-version probe needs curl_cffi importable by python3
+# (`python3 -m pip install --user curl_cffi`); without it the run fails.
+#
 # Set NADARE_HEARTBEAT_URL (e.g. an Uptime Kuma push monitor URL) to be pinged
 # after every successful run, including "nothing to publish". A monitor that
 # expects a ping every ~15 minutes then alerts when the whole pipeline stops.
@@ -23,8 +30,19 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 index="${NADARE_INDEX_DIR:-$root/../nadare-index}"
 [[ -d "$index/.git" ]] || { echo "refresh_index: no git checkout at $index" >&2; exit 1; }
 
+# Set by the runtime canary below when a runner needs a Steam Runtime the pinned
+# umu does not know; the heartbeat then reports "down" with that message.
+canary_down=
+
 heartbeat() {
     [[ -n "${NADARE_HEARTBEAT_URL:-}" ]] || return 0
+    if [[ -n "$canary_down" ]]; then
+        curl -fsS -m 10 --retry 2 -o /dev/null -G \
+            --data-urlencode "status=down" --data-urlencode "msg=$canary_down" \
+            "${NADARE_HEARTBEAT_URL%%\?*}" \
+            || echo "refresh_index: heartbeat ping failed" >&2
+        return 0
+    fi
     curl -fsS -m 10 --retry 2 -o /dev/null "$NADARE_HEARTBEAT_URL" \
         || echo "refresh_index: heartbeat ping failed" >&2
 }
@@ -35,6 +53,20 @@ exec 9>"$lock"
 flock -n 9 || { echo "refresh_index: already running"; exit 0; }
 
 git -C "$index" pull --ff-only --quiet || { echo "refresh_index: git pull failed" >&2; exit 1; }
+
+# Runtime canary: warn before a new Proton runner outruns the Steam Runtimes the
+# pinned umu knows. Exit 4 = problem; any other failure is only logged, and a
+# canary result never blocks publishing the index.
+if [[ -z "${NADARE_SKIP_CANARY:-}" ]]; then
+    canary_out="$(python3 "$root/scripts/check_runtime_canary.py" 2>&1)"
+    canary_rc=$?
+    [[ -z "$canary_out" ]] || echo "$canary_out" >&2
+    if [[ $canary_rc -eq 4 ]]; then
+        canary_down="$(grep '^CANARY:' <<<"$canary_out" | head -c 400)"
+    elif [[ $canary_rc -ne 0 ]]; then
+        echo "refresh_index: runtime canary failed (exit $canary_rc), ignored" >&2
+    fi
+fi
 
 skip_yostar=--skip-yostar
 yostar_env="${NADARE_YOSTAR_ENV:-$HOME/nadare-index-refresh/yostar.env}"
@@ -51,7 +83,7 @@ if [[ -f "$yostar_env" && ! -L "$yostar_env" ]]; then
     set +a
     skip_yostar=
 fi
-python3 "$root/scripts/publish_index.py" --index "$index" $skip_yostar --skip-czn
+python3 "$root/scripts/publish_index.py" --index "$index" $skip_yostar
 rc=$?
 if [[ $rc -eq 3 ]]; then
     echo "refresh_index: nothing to publish"
@@ -63,6 +95,7 @@ fi
 git -C "$index" add webview2
 git -C "$index" add yostar
 git -C "$index" add vcredist
+git -C "$index" add czn
 if git -C "$index" diff --cached --quiet; then
     echo "refresh_index: nothing to publish"
     heartbeat

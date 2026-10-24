@@ -60,6 +60,51 @@ def parse_ldconfig(text: str) -> tuple[set[str], set[str]]:
     return sonames_32bit, sonames_64bit
 
 
+def _ldconfig_sonames(run) -> tuple[set[str], set[str]] | None:  # noqa: ANN001
+    """Return (32-bit, 64-bit) sonames from the first ldconfig that answers."""
+    for candidate in ("/usr/sbin/ldconfig", "/sbin/ldconfig", "/usr/bin/ldconfig", "ldconfig"):
+        try:
+            result = run([candidate, "-p"], capture_output=True, text=True, check=False)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        text = getattr(result, "stdout", "") or ""
+        if not text.strip():
+            continue
+        sonames = parse_ldconfig(text)
+        if sonames[0] or sonames[1]:
+            return sonames
+    return None
+
+
+def missing_gl(run=subprocess.run) -> list[str] | None:  # noqa: ANN001
+    """Return the 64-bit GL/EGL sonames absent from this host, or ``None`` if unknown.
+
+    Only matters when Proton runs directly (no ``umu-run``): without libglvnd
+    even native Wayland and DXVK cannot open a window (#132). Never raises.
+    """
+    sonames = _ldconfig_sonames(run)
+    if sonames is None:
+        return None
+    return [name for name in REQUIRED_GL if name not in sonames[1]]
+
+
+def gl_install_command(missing: list[str], family: str | None) -> str | None:
+    """A copy-paste command installing the GL packages for ``missing``."""
+    table = _GL_PACKAGES.get(family or "")
+    if not table:
+        return None
+    packages: list[str] = []
+    for soname in missing:
+        package = table.get(soname)
+        if package and package not in packages:
+            packages.append(package)
+    if not packages:
+        return None
+    return _INSTALL[family or ""].replace(
+        "sudo dpkg --add-architecture i386 && sudo apt update && ", ""
+    ).format(pkgs=" ".join(packages))
+
+
 def missing_32bit(run=subprocess.run) -> list[str] | None:  # noqa: ANN001
     """Return the required 32-bit sonames absent from this host, in order.
 
@@ -84,6 +129,17 @@ def missing_32bit(run=subprocess.run) -> list[str] | None:  # noqa: ANN001
         return [name for name in REQUIRED_32BIT if name not in sonames_32bit]
     return None
 
+
+#: 64-bit GL/EGL sonames a directly-run Proton needs from the host (#132).
+REQUIRED_GL = ("libGL.so.1", "libEGL.so.1")
+
+#: GL soname -> package, per distro family (glvnd dispatch libraries).
+_GL_PACKAGES: dict[str, dict[str, str]] = {
+    "debian": {"libGL.so.1": "libgl1", "libEGL.so.1": "libegl1"},
+    "fedora": {"libGL.so.1": "libglvnd-glx", "libEGL.so.1": "libglvnd-egl"},
+    "arch": {"libGL.so.1": "libglvnd", "libEGL.so.1": "libglvnd"},
+    "suse": {"libGL.so.1": "libGL1", "libEGL.so.1": "libEGL1"},
+}
 
 #: soname -> package, per distro family.
 _PACKAGES: dict[str, dict[str, str]] = {
@@ -203,7 +259,10 @@ def hint(missing: list[str], os_release: str | None = None) -> str:
 
 __all__ = [
     "REQUIRED_32BIT",
+    "REQUIRED_GL",
     "distro_family",
+    "gl_install_command",
+    "missing_gl",
     "hint",
     "install_command",
     "missing_32bit",

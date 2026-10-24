@@ -17,6 +17,7 @@ reads ``/proc/<pid>/maps`` to see which renderer a running game actually uses.
 from __future__ import annotations
 
 import ctypes
+import os
 import re
 import shutil
 import subprocess
@@ -238,6 +239,16 @@ def _query_vulkan() -> VulkanInfo:
                 available=True, api_version=loader.api_version, loader_only=True
             )
     return VulkanInfo(available=False)
+
+
+def has_display(environ: Mapping[str, str] | None = None) -> bool:
+    """Return True when an X11 or Wayland display is configured (#437).
+
+    Windows installers such as WebView2 need one; with neither variable set
+    (a headless ssh or tty session) they hang instead of failing.
+    """
+    env = os.environ if environ is None else environ
+    return bool(env.get("DISPLAY") or env.get("WAYLAND_DISPLAY"))
 
 
 def reset_cache() -> None:

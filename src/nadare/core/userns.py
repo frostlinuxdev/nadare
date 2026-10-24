@@ -14,6 +14,7 @@ uncertain means "not restricted" and nothing is blocked.
 
 from __future__ import annotations
 
+import glob
 import os
 import shlex
 import shutil
@@ -58,6 +59,55 @@ def restricted(path: str = SYSCTL_PATH) -> bool:
     except (OSError, ValueError):
         return False
     return value == "1"
+
+
+def _srt_bwrap_paths() -> list[str]:
+    """Return the Steam Runtime bwrap copies already downloaded, newest first."""
+    data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "share"
+    )
+    pattern = os.path.join(
+        glob.escape(data_home),
+        "umu",
+        "*",
+        "pressure-vessel",
+        "libexec",
+        "steam-runtime-tools-0",
+        "srt-bwrap",
+    )
+    try:
+        return sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+    except OSError:
+        return []
+
+
+def probe(run=subprocess.run) -> bool | None:  # noqa: ANN001
+    """Try the bundled ``srt-bwrap`` for real: True works, False blocked, None unknown.
+
+    The sysctl alone can give a false alarm (a profile or a distro tweak may
+    already allow the binary), so ``nadare doctor`` asks the sandbox itself.
+    ``None`` means the runtime is not downloaded yet or the result is unclear.
+    Never raises.
+    """
+    for path in _srt_bwrap_paths()[:1]:
+        try:
+            result = run(
+                [path, "--unshare-user", "--ro-bind", "/", "/", "/bin/true"],
+                capture_output=True,
+                text=True,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode == 0:
+            return True
+        output = (getattr(result, "stderr", "") or "") + (getattr(result, "stdout", "") or "")
+        if any(is_failure_line(line) for line in output.splitlines()):
+            return False
+        return None
+    return None
 
 
 def profile_installed(path: str = PROFILE_PATH) -> bool:
@@ -193,6 +243,7 @@ __all__ = [
     "install_profile",
     "is_failure_line",
     "profile_installed",
+    "probe",
     "profile_text",
     "restricted",
     "split_hint",

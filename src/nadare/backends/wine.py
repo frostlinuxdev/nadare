@@ -503,7 +503,7 @@ class WineBackend(GameBackend):
             except BackendError as exc:
                 return str(exc)
             configured = str(profile_setting(self.ctx.profile, "umu_binary", "umu-run"))
-            umu_run = shutil.which(configured) or umu.managed()
+            umu_run = umu.system(configured) or umu.managed()
             if not umu_run and not sandbox.in_flatpak():
                 # Missing 32-bit libraries are exactly the case where launch
                 # installs the managed umu; status must not download, and must
@@ -547,7 +547,7 @@ class WineBackend(GameBackend):
             # launcher dialogs/updaters behave (see the stella launcher notes).
             env.setdefault("PROTON_ENABLE_WAYLAND", "1")
             configured = str(profile_setting(self.ctx.profile, "umu_binary", "umu-run"))
-            umu_run = shutil.which(configured)
+            umu_run = umu.system(configured)
             missing = None
             if umu_run is None and not sandbox.in_flatpak():
                 missing = hostlibs.missing_32bit()

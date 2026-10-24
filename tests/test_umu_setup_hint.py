@@ -44,11 +44,11 @@ def _czn(tmp_path: Path):
 
 def test_czn_flags_a_failed_umu_setup(tmp_path: Path) -> None:
     backend = _czn(tmp_path)
-    assert backend._umu_setup_failed is False
+    assert backend._watch.umu_setup_failed is False
     backend._emit_text("INFO: steamrt4 is up to date")
-    assert backend._umu_setup_failed is False
+    assert backend._watch.umu_setup_failed is False
     backend._emit_text(NEEDS_NET)
-    assert backend._umu_setup_failed is True
+    assert backend._watch.umu_setup_failed is True
 
 
 def test_czn_prefix_failure_explains_a_failed_umu_setup(tmp_path: Path, monkeypatch) -> None:
@@ -74,3 +74,45 @@ def test_czn_webview2_failure_explains_a_failed_umu_setup(tmp_path: Path, monkey
 def test_czn_message_is_unchanged_when_nothing_failed(tmp_path: Path) -> None:
     backend = _czn(tmp_path)
     assert backend._explain("prefix creation failed (exit 1)") == "prefix creation failed (exit 1)"
+
+
+# ---- a runner whose Steam Runtime this umu does not know ---------------------------
+MISMATCH = (
+    "ValueError: Failed to match "
+    "'/home/nadare/.local/share/nadare/runners/dwproton-11.0-15-x86_64' "
+    "with a container runtime"
+)
+
+
+def test_runtime_mismatch_line_is_recognised() -> None:
+    assert umu.is_runtime_mismatch_line(MISMATCH)
+    ellipsised = "[log] Valu…rror<10>: Failed to match '/x' with a container runtime"
+    assert umu.is_runtime_mismatch_line(ellipsised)
+    assert not umu.is_runtime_mismatch_line("")
+    assert not umu.is_runtime_mismatch_line("INFO: steamrt4 is up to date")
+    assert not umu.is_runtime_mismatch_line("Failed to match nothing")
+
+
+def test_runtime_mismatch_hint_says_what_to_update() -> None:
+    text = umu.RUNTIME_MISMATCH_HINT
+    assert "umu" in text and "newer" in text
+    assert "Update" in text
+    assert "Traceback" not in text
+
+
+def test_runtimewatch_flags_and_explains_the_mismatch() -> None:
+    from nadare.core.runtimewatch import RuntimeWatch
+
+    watch = RuntimeWatch()
+    watch.feed("INFO: steamrt4 is up to date")
+    assert watch.umu_runtime_mismatch is False
+    assert watch.explain("prefix creation failed (exit 1)") == "prefix creation failed (exit 1)"
+    watch.feed(MISMATCH)
+    assert watch.umu_runtime_mismatch is True
+    assert umu.RUNTIME_MISMATCH_HINT in watch.explain("prefix creation failed (exit 1)")
+
+
+def test_czn_explains_a_runtime_mismatch(tmp_path: Path) -> None:
+    backend = _czn(tmp_path)
+    backend._emit_text(MISMATCH)
+    assert umu.RUNTIME_MISMATCH_HINT in backend._explain("prefix creation failed (exit 1)")

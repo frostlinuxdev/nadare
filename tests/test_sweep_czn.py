@@ -16,7 +16,6 @@ from _backend_helpers import make_context
 
 from nadare.backends import arknights as ak
 from nadare.backends.czn import auth as czn_auth
-from nadare.backends.czn import runners as czn_runners
 from nadare.backends.czn import update as czn_update
 from nadare.backends.czn.backend import CznBackend
 from nadare.core.config import Config
@@ -168,8 +167,6 @@ class TestXdgFallbacks:
             monkeypatch.delenv(var, raising=False)
         _force_paths_import_failure(monkeypatch)
 
-        assert czn_runners._default_runners_dir() == data / "nadare" / "runners"
-        assert czn_runners._default_cache_dir() == cache / "nadare" / "czn"
         assert czn_update._default_prefix() == data / "nadare" / "czn" / "prefix"
         assert czn_auth._default_state_dir() == data / "nadare" / "czn"
 

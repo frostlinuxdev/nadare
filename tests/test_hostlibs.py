@@ -127,3 +127,35 @@ def test_fedora_hint_warns_about_version_skew() -> None:
 def test_install_command_ignores_unknown_sonames() -> None:
     assert hostlibs.install_command(["libnope.so.1"], "fedora") is None
     assert hostlibs.install_command(["libXext.so.6"], None) is None
+
+
+def test_missing_gl_checks_the_64bit_entries_only() -> None:
+    text = (
+        "\tlibGL.so.1 (libc6) => /usr/lib/i386-linux-gnu/libGL.so.1\n"
+        "\tlibEGL.so.1 (libc6,x86-64) => /usr/lib64/libEGL.so.1\n"
+        "\tlibz.so.1 (libc6,x86-64) => /usr/lib64/libz.so.1\n"
+    )
+    run, _ = _fake_run(text)
+    assert hostlibs.missing_gl(run) == ["libGL.so.1"]
+
+
+def test_missing_gl_all_present_and_unknown() -> None:
+    text = (
+        "\tlibGL.so.1 (libc6,x86-64) => /usr/lib64/libGL.so.1\n"
+        "\tlibEGL.so.1 (libc6,x86-64) => /usr/lib64/libEGL.so.1\n"
+    )
+    run, _ = _fake_run(text)
+    assert hostlibs.missing_gl(run) == []
+    run, _ = _fake_run("")
+    assert hostlibs.missing_gl(run) is None
+
+
+def test_gl_install_command_names_the_glvnd_packages() -> None:
+    both = ["libGL.so.1", "libEGL.so.1"]
+    assert hostlibs.gl_install_command(both, "fedora") == (
+        "sudo dnf install libglvnd-glx libglvnd-egl"
+    )
+    assert hostlibs.gl_install_command(both, "arch") == "sudo pacman -S --needed libglvnd"
+    # no i386 dance for 64-bit packages
+    assert hostlibs.gl_install_command(both, "debian") == "sudo apt install libgl1 libegl1"
+    assert hostlibs.gl_install_command(both, None) is None

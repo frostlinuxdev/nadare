@@ -14,8 +14,9 @@ from nadare.backends.czn.backend import CznBackend
 from nadare.backends.fgo import installer, lepton
 from nadare.backends.fgo.backend import FgoLeptonBackend
 from nadare.backends.wine import WineBackend
-from nadare.core import download, yostar
+from nadare.core import download, runners, yostar
 from nadare.core.backends import BackendError
+from nadare.core.events import Cancelled
 
 
 def test_webview2_mismatch_gives_a_gui_action_not_an_env_var(tmp_path, monkeypatch):
@@ -73,17 +74,63 @@ def test_czn_updater_returns_its_own_code_for_a_missing_game_dir(tmp_path, monke
     assert "game dir not found" in capsys.readouterr().out
 
 
-def test_czn_runner_download_failure_names_github_not_stove(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("error", "code", "text"),
+    [
+        (download.DownloadError("cannot reach github"), 4, "GitHub"),
+        (download.IntegrityError("sha256 mismatch"), 9, "damaged or changed"),
+        (runners.RunnerError("cannot query CachyOS/x: offline"), 4, "GitHub"),
+        (
+            runners.RunnerError("refusing runner tarball from untrusted host: x"),
+            1,
+            "could not install",
+        ),
+    ],
+)
+def test_czn_runner_failures_map_to_user_messages(tmp_path, monkeypatch, error, code, text):
     backend = CznBackend(make_context(tmp_path, "stove-czn", {"prefix": str(tmp_path / "p")}))
-    monkeypatch.setattr(backend, "_run_module", lambda *a, **k: 4)
+
+    def boom(*a, **k):
+        raise error
+
+    monkeypatch.setattr(runners, "install", boom)
 
     with pytest.raises(BackendError) as exc:
         backend._download_runner("dwproton", False)
 
-    assert exc.value.code == 4
+    assert exc.value.code == code
+    assert text in exc.value.message
     assert "STOVE" not in exc.value.message
-    assert "GitHub" in exc.value.message
-    assert "internet" in exc.value.message.lower()
+
+
+def test_czn_runner_download_runs_in_process_through_core(tmp_path, monkeypatch):
+    backend = CznBackend(make_context(tmp_path, "stove-czn", {"prefix": str(tmp_path / "p")}))
+    seen = {}
+
+    def fake_install(rid, *, latest, emit, cancel):
+        seen.update(rid=rid, latest=latest, emit=emit, cancel=cancel)
+        return tmp_path / "dwproton-11.0-15-x86_64"
+
+    monkeypatch.setattr(runners, "install", fake_install)
+    monkeypatch.setattr(
+        backend, "_run_module", lambda *a, **k: pytest.fail("runner install spawned a process")
+    )
+
+    assert backend._download_runner("dwproton", True) == tmp_path / "dwproton-11.0-15-x86_64"
+    assert seen["rid"] == "dwproton" and seen["latest"] is True
+    assert seen["cancel"] is backend.ctx.cancel
+
+
+def test_czn_runner_cancel_passes_through(tmp_path, monkeypatch):
+    backend = CznBackend(make_context(tmp_path, "stove-czn", {"prefix": str(tmp_path / "p")}))
+
+    def cancelled(*a, **k):
+        raise Cancelled("download cancelled")
+
+    monkeypatch.setattr(runners, "install", cancelled)
+
+    with pytest.raises(Cancelled):
+        backend._download_runner("dwproton", False)
 
 
 class _FgoAdapter:
@@ -249,3 +296,28 @@ def test_wine_install_and_missing_exe_point_at_settings(tmp_path):
     assert "launch_exe" not in exc.value.message
     assert "Settings" in exc.value.message
     assert "Game options" in exc.value.message
+
+
+def test_has_display_needs_x11_or_wayland():
+    from nadare.core import graphics
+
+    assert graphics.has_display({"DISPLAY": ":0"})
+    assert graphics.has_display({"WAYLAND_DISPLAY": "wayland-0"})
+    assert not graphics.has_display({})
+    assert not graphics.has_display({"DISPLAY": "", "WAYLAND_DISPLAY": ""})
+
+
+def test_webview2_install_fails_fast_without_a_display(tmp_path, monkeypatch):
+    backend = CznBackend(make_context(tmp_path, "stove-czn", {"prefix": str(tmp_path / "p")}))
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setattr(czn_backend, "WEBVIEW2_SHA256", "0" * 64)
+    monkeypatch.setattr(backend, "_webview2_installed", lambda: False)
+
+    def _no_download(*a, **k):
+        raise AssertionError("downloaded without a display")
+
+    monkeypatch.setattr(backend, "_download_webview2", _no_download)
+    with pytest.raises(BackendError) as exc:
+        backend._ensure_webview2()
+    assert "No display found" in exc.value.message

@@ -12,7 +12,6 @@ import json
 import os
 import stat
 import sys
-import tarfile
 import time
 from pathlib import Path
 
@@ -20,7 +19,6 @@ import pytest
 from _backend_helpers import make_context
 
 from nadare.backends.czn import backend as czn_backend
-from nadare.backends.czn import runners as czn_runners
 from nadare.backends.czn import update as czn_update
 from nadare.backends.czn.backend import (
     GAME_SUBDIR,
@@ -913,50 +911,6 @@ class TestUpdateMain:
         )
         assert czn_update.main(["update", "--apply"]) == 2
         assert "rejected" in capsys.readouterr().out
-
-
-# ---------------------------------------------------------------------------
-# czn.runners — fake runners directory
-# ---------------------------------------------------------------------------
-class TestRunners:
-    def test_installed_lists_only_proton_dirs(self, monkeypatch, tmp_path):
-        root = tmp_path / "runners"
-        for name in ("b-runner", "a-runner"):
-            d = root / name
-            d.mkdir(parents=True)
-            (d / "proton").write_text("#!/bin/sh\n")
-        (root / "not-a-runner").mkdir()
-        monkeypatch.setattr(czn_runners, "RUNNERS_DIR", root)
-        names = [p.name for p in czn_runners.installed()]
-        assert names == ["a-runner", "b-runner"]
-
-    def test_installed_missing_dir(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(czn_runners, "RUNNERS_DIR", tmp_path / "nope")
-        assert czn_runners.installed() == []
-
-    def _make_tar(self, tar_path: Path, top: str, with_proton: bool) -> None:
-        src = tar_path.parent / top
-        src.mkdir(parents=True, exist_ok=True)
-        if with_proton:
-            (src / "proton").write_text("#!/bin/sh\n")
-        with tarfile.open(tar_path, "w:gz") as t:
-            t.add(src, arcname=top)
-
-    def test_extract_moves_proton_dir(self, monkeypatch, tmp_path):
-        tar_path = tmp_path / "proton.tar.gz"
-        self._make_tar(tar_path, "Proton-Test", with_proton=True)
-        root = tmp_path / "runners"
-        monkeypatch.setattr(czn_runners, "RUNNERS_DIR", root)
-        dest = czn_runners._extract(tar_path)
-        assert dest == root / "Proton-Test"
-        assert (dest / "proton").is_file()
-
-    def test_extract_rejects_bad_layout(self, monkeypatch, tmp_path):
-        tar_path = tmp_path / "proton.tar.gz"
-        self._make_tar(tar_path, "NoProton", with_proton=False)
-        monkeypatch.setattr(czn_runners, "RUNNERS_DIR", tmp_path / "runners")
-        with pytest.raises(czn_runners.Fail):
-            czn_runners._extract(tar_path)
 
 
 # ---------------------------------------------------------------------------

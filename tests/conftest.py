@@ -64,6 +64,12 @@ def _isolated_environment(
 
     if request.module.__name__ != "test_hostlibs":
         monkeypatch.setattr(hostlibs, "missing_32bit", lambda: [])
+        monkeypatch.setattr(hostlibs, "missing_gl", lambda: [])
+
+    # Installers need a display (#437); CI has none. Tests that exercise the
+    # headless refusal remove it again.
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        monkeypatch.setenv("DISPLAY", ":99")
 
     # Logging may already have been configured at import time (with the real
     # state dir). Tear it down and re-point the file handler at this test's

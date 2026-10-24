@@ -49,7 +49,6 @@ from ...core import (
     process,
     sandbox,
     tls,
-    userns,
     vcredist,
 )
 from ...core import runners as core_runners
@@ -62,6 +61,7 @@ from ...core.backends import (
 )
 from ...core.events import Cancelled, Event, mask
 from ...core.removal import tree_safety
+from ...core.runtimewatch import RuntimeWatch
 from ...core.secrets import SecretStore, SecretStoreError, default_collection_exists
 from .news import IMAGE_HOSTS, fetch_czn_news
 
@@ -71,7 +71,6 @@ log = logging.getLogger(__name__)
 
 AUTH_MODULE = "nadare.backends.czn.auth"
 UPDATE_MODULE = "nadare.backends.czn.update"
-RUNNERS_MODULE = "nadare.backends.czn.runners"
 
 GAME_SUBDIR = Path("drive_c/ProgramData/Smilegate/Games/ChaosZeroNightmare")
 #: Written into a prefix Nadare created, so uninstall knows it may delete it.
@@ -159,7 +158,7 @@ UPDATE_EXIT_MESSAGES: dict[int, str] = {
     5: "the game files are missing or incomplete — press Install to repair them",
 }
 
-#: ``czn_runners.py`` exit codes -> a user-safe message. Its 4 means the GitHub
+#: Runner-install failure codes -> a user-safe message. 4 means the GitHub
 #: runner download failed, not that the game's STOVE server is unreachable.
 RUNNER_EXIT_MESSAGES: dict[int, str] = {
     1: "Nadare could not install the required Proton runner. Try Install again, or "
@@ -471,10 +470,9 @@ class CznBackend(GameBackend):
         # Cached host 32-bit library preflight (see _missing_hostlibs). ``None``
         # means "unknown/not checked yet"; a list means a checked result.
         self._hostlibs_checked = False
-        #: Set once the runtime output shows the AppArmor userns block (#429).
-        self._userns_blocked = False
-        #: Set once umu reports it could not download its Steam Runtime.
-        self._umu_setup_failed = False
+        #: Remembers runtime failures seen in the output (AppArmor userns block
+        #: #429, failed umu Steam Runtime download) to explain the final error.
+        self._watch = RuntimeWatch()
         #: Extra env for prefix commands while inside _installer_environment().
         self._run_env: dict[str, str] | None = None
         #: What a silent child is doing, for the progress heartbeat (None = no beat).
@@ -798,9 +796,15 @@ class CznBackend(GameBackend):
             return self._win(path)
         return "C:\\" + "\\".join(rel.parts)
 
-    def _fail(self, what: str, code: int, messages: dict[int, str] | None = None) -> None:
+    def _fail(
+        self,
+        what: str,
+        code: int,
+        messages: dict[int, str] | None = None,
+        cause: BaseException | None = None,
+    ) -> None:
         table = EXIT_MESSAGES if messages is None else messages
-        raise BackendError(table.get(code, f"{what} failed (exit {code})"), code)
+        raise BackendError(table.get(code, f"{what} failed (exit {code})"), code) from cause
 
     def _fail_auth(self, what: str, code: int) -> None:
         """Report an auth-worker failure, keeping its real message when useful."""
@@ -893,10 +897,7 @@ class CznBackend(GameBackend):
         line = line.rstrip()
         if not line.strip():
             return
-        if userns.is_failure_line(line):
-            self._userns_blocked = True
-        if umu_mod.is_setup_failure_line(line):
-            self._umu_setup_failed = True
+        self._watch.feed(line)
         m = _FILE_PROGRESS.match(line)
         if m:
             done, total = int(m.group(1)), int(m.group(2))
@@ -915,10 +916,7 @@ class CznBackend(GameBackend):
 
     def _explain(self, message: str) -> str:
         """Add the userns and/or failed-umu-setup hint to a failure message."""
-        explained = userns.with_hint(message, blocked=self._userns_blocked)
-        if self._umu_setup_failed:
-            explained += "\n" + umu_mod.SETUP_HINT
-        return explained
+        return self._watch.explain(message)
 
     def _stream(
         self,
@@ -1157,13 +1155,22 @@ class CznBackend(GameBackend):
 
     def _download_runner(self, rid: str, latest: bool) -> Path:
         self.ctx.emit(Event("step", f"Downloading runner {rid}…"))
-        got: list[dict[str, Any]] = []
-        args = ["install", rid, "--json"] + (["--latest"] if latest else [])
-        code = self._run_module(RUNNERS_MODULE, args, parse_json=True, collect=got)
-        dest = next((e.get("path") for e in got if e.get("event") == "installed"), None)
-        if code != 0 or not dest:
-            self._fail(f"runner {rid}", code or 1, RUNNER_EXIT_MESSAGES)
-        return Path(dest)
+        try:
+            return core_runners.install(
+                rid, latest=latest, emit=self.ctx.emit, cancel=self.ctx.cancel
+            )
+        except Cancelled:
+            raise
+        except net.IntegrityError as exc:
+            self._fail(f"runner {rid}", _RUNNER_INTEGRITY_EXIT, RUNNER_EXIT_MESSAGES, exc)
+        except (net.DownloadError, OSError) as exc:
+            self._fail(f"runner {rid}", 4, RUNNER_EXIT_MESSAGES, exc)
+        except core_runners.RunnerError as exc:
+            # "cannot query/fetch" is GitHub being unreachable; the rest is a
+            # refusal (untrusted host, no tarball, no checksum to verify against).
+            offline = str(exc).startswith(("cannot query", "cannot fetch"))
+            self._fail(f"runner {rid}", 4 if offline else 1, RUNNER_EXIT_MESSAGES, exc)
+        raise AssertionError("unreachable")  # pragma: no cover - _fail always raises
 
     def resolve_runner(self) -> tuple[str, str]:
         """Return ``(protonpath, kind)`` where kind is ``proton`` or ``wine``.
@@ -1241,9 +1248,8 @@ class CznBackend(GameBackend):
             state, message = "installed", f"Installed{(' ' + version) if version else ''}"
         else:
             state, message = "not_installed", "Not installed"
-        note = graphics.vulkan_note()
-        if note and state in ("installed", "running"):
-            message = f"{message} — {note}" if message else note
+        # No Vulkan driver warning here: the game itself is OpenGL, so a missing
+        # Vulkan driver does not stop it (Arknights and Stella Sora keep theirs).
         return Status(
             state=state,
             version=version,
@@ -1506,6 +1512,16 @@ class CznBackend(GameBackend):
         pin = self._webview2_pin()
         if not pin or not _SHA256_RE.fullmatch(pin):
             raise self._webview2_pin_error(pin)
+        # The installer needs a display and hangs without one (#437), so refuse
+        # up front too instead of downloading ~215 MB first.
+        if not graphics.has_display():
+            raise BackendError(
+                "No display found (DISPLAY and WAYLAND_DISPLAY are unset), and the "
+                "WebView2 installer needs one. Run the install from a desktop session, "
+                "or over ssh with DISPLAY set (for example ssh -X, or DISPLAY=:0 on "
+                "the machine's own screen).",
+                EXIT_WEBVIEW2_FAILED,
+            )
 
         # FRESH-2: an unwritable/full cache dir must map to a BackendError like
         # every other WebView2 failure, not escape as a raw OSError.
@@ -1993,7 +2009,7 @@ class CznBackend(GameBackend):
         if extra_env:
             env.update(extra_env)
         if kind == "proton":
-            umu = shutil.which("umu-run")
+            umu = umu_mod.system()
             if umu is None and not sandbox.in_flatpak():
                 missing = self._missing_hostlibs()
                 if missing:

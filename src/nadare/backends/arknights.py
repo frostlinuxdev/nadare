@@ -822,7 +822,7 @@ class ArknightsBackend(GameBackend):
         proton, kind = self.resolve_runner()
         if kind == "proton":
             configured = str(profile_setting(self.ctx.profile, "umu_binary", "umu-run"))
-            umu_run = shutil.which(configured)
+            umu_run = umu.system(configured)
             missing = None
             if umu_run is None and not sandbox.in_flatpak():
                 missing = hostlibs.missing_32bit()

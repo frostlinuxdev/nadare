@@ -16,7 +16,6 @@ from _backend_helpers import make_context
 
 from nadare.backends.czn import auth as czn_auth
 from nadare.backends.czn import backend as czn_backend
-from nadare.backends.czn import runners as czn_runners
 from nadare.backends.czn import update as czn_update
 from nadare.backends.czn.backend import CznBackend
 from nadare.core import runners as core_runners
@@ -169,18 +168,6 @@ def test_installed_runner_skips_hidden_leftovers(monkeypatch, tmp_path):
     monkeypatch.setattr(czn_backend.paths, "runners_dir", lambda: root)
     backend = _czn_backend(tmp_path, {"prefix": str(tmp_path / "p")})
     assert backend._installed_runner("ge") == real
-
-
-def test_czn_installed_skips_hidden_leftovers(monkeypatch, tmp_path):
-    root = tmp_path / "runners"
-    real = root / "GE-Proton11-7"
-    real.mkdir(parents=True)
-    (real / "proton").write_text("#!/bin/sh\n", encoding="utf-8")
-    leftover = root / ".GE-Proton11-7.old-deadbeef"
-    leftover.mkdir(parents=True)
-    (leftover / "proton").write_text("#!/bin/sh\n", encoding="utf-8")
-    monkeypatch.setattr(czn_runners, "RUNNERS_DIR", root)
-    assert czn_runners.installed() == [real]
 
 
 # ---------------------------------------------------------------------------
