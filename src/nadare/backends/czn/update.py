@@ -71,7 +71,9 @@ except Exception:
     _SESS = None
 
 import secrets
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 SERVICE = os.environ.get("CZN_SERVICE", "STOVE_CHAOSZERO")
 CDN = os.environ.get("CZN_DL_CDN", "https://chaoszero-dl.game.onstove.com")
@@ -177,8 +179,25 @@ def _get(url: str, timeout: int = 60, max_bytes: int = MAX_TEXT_BYTES) -> bytes:
     return body
 
 
+_PROBE_LOCAL = threading.local()
+
+
+def _probe_session():
+    """A curl session private to this thread (one session is not shared across threads)."""
+    session = getattr(_PROBE_LOCAL, "session", None)
+    if session is None:
+        session = creq.Session(
+            impersonate="chrome", default_headers=False, http_version=CurlHttpVersion.V1_1
+        )
+        _PROBE_LOCAL.session = session
+    return session
+
+
 def _head_ok(url: str) -> bool:
     try:
+        if _SESS is not None:
+            r = _probe_session().get(url, headers=HEADERS, timeout=12)
+            return r.status_code == 200
         _get(url, timeout=12)
         return True
     except Exception:
@@ -206,14 +225,18 @@ def latest_version(installed: int, *, max_probes: int = MAX_PROBES) -> int:
         if _head_ok(f"{BASE}/{SERVICE}_{installed}.json"):
             latest = installed
     v = installed
-    misses = 0
-    while misses < 5 and probes < max_probes:  # allow a few gaps before giving up
-        v += 1
-        probes += 1
-        if _head_ok(f"{BASE}/{SERVICE}_{v}.json"):
-            latest, misses = v, 0
-        else:
-            misses += 1
+    # Look at five versions at a time: a missing key costs a full round trip, so walking
+    # them one by one made the check several seconds long. The result is the same as the
+    # one-at-a-time walk (stop after five consecutive misses).
+    while probes < max_probes:
+        window = list(range(v + 1, v + 1 + min(5, max_probes - probes)))
+        probes += len(window)
+        with ThreadPoolExecutor(max_workers=len(window)) as pool:
+            hits = list(pool.map(lambda n: _head_ok(f"{BASE}/{SERVICE}_{n}.json"), window))
+        found = [n for n, hit in zip(window, hits) if hit]
+        if not found:
+            break
+        latest = v = max(found)
     return latest
 
 
@@ -459,6 +482,18 @@ def _verify_cached() -> int:
     return 0
 
 
+def _write_local_version(manifest: dict, target: int) -> None:
+    """Bump the local manifest version marker (the upf) to this manifest."""
+    try:
+        upf = json.loads(UPF.read_text()) if UPF.exists() else {}
+        upf["local_version"] = int(manifest.get("version_no", target))
+        upf.setdefault("game_id", SERVICE)
+        UPF.parent.mkdir(parents=True, exist_ok=True)
+        UPF.write_text(json.dumps(upf, indent=4))
+    except Exception as e:
+        print(f"[!] could not update {UPF.name}: {e}")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
@@ -534,6 +569,11 @@ def main(argv=None) -> int:
     if not to_dl:
         count = sum(1 for _ in parse_files(manifest))
         print(f"[+] up to date — all {count} entries match on disk.")
+        if args.action == "update" and args.apply:
+            # The files already match this manifest; still advance the marker,
+            # or the status keeps showing the old number when a release
+            # changed nothing under the client files.
+            _write_local_version(manifest, target)
         _cache_manifest(manifest)
         return 0
     print(f"[*] {len(to_dl)} file(s) differ / missing, {total / 1e6:.1f} MB to fetch:")
@@ -571,15 +611,7 @@ def main(argv=None) -> int:
         except Exception as e:
             print(f"  [!] {path}: {e}")
             return 1
-    # bump local manifest version marker
-    try:
-        upf = json.loads(UPF.read_text()) if UPF.exists() else {}
-        upf["local_version"] = int(manifest.get("version_no", target))
-        upf.setdefault("game_id", SERVICE)
-        UPF.parent.mkdir(parents=True, exist_ok=True)
-        UPF.write_text(json.dumps(upf, indent=4))
-    except Exception as e:
-        print(f"[!] wrote files but failed to update {UPF.name}: {e}")
+    _write_local_version(manifest, target)
     _cache_manifest(manifest)
     print(f"[+] updated to v{manifest.get('version_no')} — {done} file(s).")
     return 0

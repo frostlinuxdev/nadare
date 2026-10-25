@@ -839,6 +839,22 @@ class TestUpdateMain:
         assert code == 0
         assert "up to date" in out
 
+    def test_apply_up_to_date_still_bumps_the_version_marker(self, monkeypatch, tmp_path):
+        game_dir = tmp_path / "game"
+        game_dir.mkdir()
+        upf = tmp_path / "upf.json"
+        upf.write_text(json.dumps({"local_version": 55, "game_id": "STOVE_CHAOSZERO"}))
+        monkeypatch.setattr(czn_update, "GAME_DIR", game_dir)
+        monkeypatch.setattr(czn_update, "UPF", upf)
+        monkeypatch.setattr(czn_update, "resolve_latest", lambda installed: (56, "index"))
+        manifest = _manifest_files("0|D|/adir")
+        manifest["version_no"] = 56
+        monkeypatch.setattr(czn_update, "fetch_manifest", lambda v: manifest)
+        assert czn_update.main(["check"]) == 0
+        assert json.loads(upf.read_text())["local_version"] == 55  # dry run writes nothing
+        assert czn_update.main(["update", "--apply"]) == 0
+        assert json.loads(upf.read_text())["local_version"] == 56
+
     def test_apply_checks_disk_space_for_total(self, monkeypatch, tmp_path, capsys):
         game_dir = tmp_path / "game"
         game_dir.mkdir()

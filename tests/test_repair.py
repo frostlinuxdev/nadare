@@ -134,7 +134,7 @@ def test_direct_arknights_repair_syncs_then_verifies(tmp_path, monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(backend, "_sync_direct", lambda: calls.append("sync") or {})
     monkeypatch.setattr(backend, "_load_manifest", lambda: object())
-    monkeypatch.setattr(ak.yostar, "plan", lambda manifest, directory: [])
+    monkeypatch.setattr(ak.yostar, "plan", lambda manifest, directory, **kw: [])
 
     backend.repair()
 
@@ -147,7 +147,7 @@ def test_direct_arknights_repair_reports_files_that_still_differ(tmp_path, monke
     monkeypatch.setattr(backend, "_sync_direct", lambda: {})
     monkeypatch.setattr(backend, "_load_manifest", lambda: object())
     missing = [type("F", (), {"path": f"game/file{i}"})() for i in range(2)]
-    monkeypatch.setattr(ak.yostar, "plan", lambda manifest, directory: missing)
+    monkeypatch.setattr(ak.yostar, "plan", lambda manifest, directory, **kw: missing)
 
     with pytest.raises(BackendError) as exc:
         backend.repair()

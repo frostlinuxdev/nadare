@@ -283,7 +283,8 @@ def _scan_query(query: ProcessQuery, *, proc_root: str | os.PathLike[str] = "/pr
         argv = cmdline_argv(entry)
         if not argv:
             continue
-        env = _environ_map(entry)
+        # The environment only matters to the prefix and basename branches below.
+        env = _environ_map(entry) if (prefix or names) else {}
         env_prefix = env.get("WINEPREFIX") or env.get("STEAM_COMPAT_DATA_PATH")
         belongs = bool(prefix) and _same_path(env_prefix, prefix)
         if not belongs and names and not env_prefix:

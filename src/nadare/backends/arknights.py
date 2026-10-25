@@ -129,6 +129,8 @@ LAUNCHER_NAMES = (
 #: Bounded discovery: how deep and how many directories to walk in the prefix.
 _SEARCH_MAX_DEPTH = 4
 _SEARCH_MAX_DIRS = 2000
+#: Marks "look the launcher up" for `_patterns` (``None`` already means "not installed").
+_SEARCH = object()
 
 
 #: Profile key recording the prefix an install actually used. Uninstall only
@@ -693,9 +695,12 @@ class ArknightsBackend(GameBackend):
         except OSError as exc:
             log.debug("%s: could not cache the published version: %s", self.display_name, exc)
 
-    def _missing_entries(self) -> list[Any]:
-        """Files a direct install still lacks or has damaged (each has ``.path``)."""
-        return list(yostar.plan(self._load_manifest(), self.install_dir()))
+    def _missing_entries(self, *, verify: bool = True) -> list[Any]:
+        """Files a direct install still lacks or has damaged (each has ``.path``).
+
+        ``verify=False`` checks presence and size only (the caller just synced and hashed them).
+        """
+        return list(yostar.plan(self._load_manifest(), self.install_dir(), verify=verify))
 
     def _sync_direct(self) -> dict[str, Any]:
         manifest = self._load_manifest()
@@ -1043,10 +1048,13 @@ class ArknightsBackend(GameBackend):
             data=data,
         )
 
-    def _patterns(self, target: Path | None = None) -> ProcessQuery:
-        """Build the structured process query for this profile's launcher."""
+    def _patterns(self, target: Path | None | object = _SEARCH) -> ProcessQuery:
+        """Build the structured process query for this profile's launcher.
+
+        Pass the launcher already resolved (``None`` for "not installed") to skip the search.
+        """
         extra = profile_setting(self.ctx.profile, "process_match")
-        if target is None:
+        if target is _SEARCH:
             target = self.find_launcher()
         names = (target.name,) if target is not None else ()
         return ProcessQuery(
@@ -1146,7 +1154,7 @@ class ArknightsBackend(GameBackend):
             raise BackendError(f"{self.display_name} is not installed")
         self._sync_direct()
         try:
-            missing = self._missing_entries()
+            missing = self._missing_entries(verify=False)
         except (BackendError, yostar.ManifestError) as exc:
             if isinstance(exc, BackendError):
                 raise

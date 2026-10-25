@@ -172,3 +172,51 @@ class TestGameRunningIgnoresHelpers:
         from nadare.backends.czn import backend
 
         assert czn_update.GAME_HELPER_EXES == backend.GAME_HELPER_EXES
+
+
+# ---------------------------------------------------------------------------
+# optimisation audit: probe the version window concurrently
+# ---------------------------------------------------------------------------
+def _sequential_latest(published: set[int], installed: int) -> int:
+    latest = installed if installed in published else 0
+    v, misses = installed, 0
+    while misses < 5:
+        v += 1
+        if v in published:
+            latest, misses = v, 0
+        else:
+            misses += 1
+    return latest
+
+
+def test_concurrent_probe_agrees_with_the_sequential_walk(monkeypatch) -> None:
+    import random
+
+    rng = random.Random(7)
+    for _ in range(60):
+        installed = rng.randrange(0, 12)
+        published = {n for n in range(installed - 2, installed + 40) if n > 0 and rng.random() < 0.6}
+        monkeypatch.setattr(
+            czn_update, "_head_ok", lambda url, p=published: int(url.rsplit("_", 1)[1][:-5]) in p
+        )
+        assert czn_update.latest_version(installed) == _sequential_latest(published, installed)
+
+
+def test_the_probe_window_runs_concurrently(monkeypatch) -> None:
+    import time
+
+    def head(url: str) -> bool:
+        time.sleep(0.1)
+        return False
+
+    monkeypatch.setattr(czn_update, "_head_ok", head)
+    start = time.perf_counter()
+    czn_update.latest_version(5)
+    assert time.perf_counter() - start < 0.35  # 6 serial probes would take 0.6 s
+
+
+def test_probe_budget_is_never_exceeded(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(czn_update, "_head_ok", lambda url: calls.append(url) or True)
+    czn_update.latest_version(0, max_probes=12)
+    assert len(calls) <= 12

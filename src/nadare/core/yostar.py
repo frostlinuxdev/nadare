@@ -725,8 +725,11 @@ def plan(
     *,
     workers: int = 6,
     cancel: Cancel | None = None,
+    verify: bool = True,
 ) -> list[ManifestFile]:
     """Return the manifest files that are missing or differ on disk.
+
+    ``verify=False`` stops at the size check (right after a sync that hashed every file).
 
     Sizes are filtered first (cheap), then CRCs are computed in a pool so
     updating an existing install does not serialise on disk reads.
@@ -744,7 +747,8 @@ def plan(
         if not target.is_file() or stat.st_size != entry.size:
             results[index] = entry
             continue
-        pending.append((index, entry, target))
+        if verify:
+            pending.append((index, entry, target))
 
     def needs_update(
         item: tuple[int, ManifestFile, Path],

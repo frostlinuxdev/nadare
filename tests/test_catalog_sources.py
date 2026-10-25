@@ -206,48 +206,6 @@ def test_endfield_plan():
 HOYO_URL = "https://sg-hyp-api.hoyoverse.com/hyp/hyp-connect/api/getGamePackages?launcher_id=VYTpXlbWo8"
 
 
-@pytest.mark.parametrize(
-    "biz,tag,exe,version,nparts",
-    [
-        ("hk4e_global", "genshin", "GenshinImpact.exe", "5.5.0", 8),
-        ("nap_global", "zzz", "ZenlessZoneZero.exe", "3.2.0", 10),
-    ],
-)
-def test_hoyo_zip_titles(biz, tag, exe, version, nparts):
-    f = FakeFetch({HOYO_URL: fx("hoyo_getGamePackages.json")})
-    plan = hoyo.resolve(biz, f)
-    assert plan.game_tag == tag and plan.exe == exe and plan.version == version
-    base, audio = plan.archives
-    assert len(base.parts) == nparts and base.unwrap == ("zip",)
-    assert all(p.md5 and p.size for p in base.parts)
-    assert base.parts[0].path.endswith(".001") and base.source.size == sum(p.size for p in base.parts)
-    assert audio.name.endswith("audio-en-us") and not audio.parts
-    assert audio.source.md5 and audio.source.size
-    all_paths_safe(plan)
-
-
-def test_hoyo_language_choice_and_unknown_language():
-    f = FakeFetch({HOYO_URL: fx("hoyo_getGamePackages.json")})
-    ja = hoyo.resolve("hk4e_global", f, language="ja-jp")
-    assert ja.archives[1].name.endswith("audio-ja-jp")
-    with pytest.raises(dd.DirectError):
-        hoyo.resolve("hk4e_global", f, language="xx-xx")
-
-
-def test_hoyo_star_rail_is_a_split_7z_plus_an_audio_7z():
-    f = FakeFetch({HOYO_URL: fx("hoyo_getGamePackages.json")})
-    plan = hoyo.resolve("hkrpg_global", f)
-    assert plan.game_tag == "hsr" and plan.exe == "StarRail.exe" and plan.version == "4.4.0"
-    base, audio = plan.archives
-    assert len(base.parts) == 12 and base.unwrap == ("7z",)
-    assert base.parts[0].path.endswith(".7z.001") and base.parts[-1].path.endswith(".7z.012")
-    assert all(p.md5 and p.size for p in base.parts)
-    assert base.source.size == sum(p.size for p in base.parts)
-    assert audio.name.endswith("audio-en-us") and audio.unwrap == ("7z",) and not audio.parts
-    assert audio.source.md5 and audio.source.size == 13942199062
-    all_paths_safe(plan)
-
-
 def test_hoyo_honkai_impact_is_a_single_7z_without_audio():
     f = FakeFetch({HOYO_URL: fx("hoyo_getGamePackages.json")})
     plan = hoyo.resolve("bh3_global", f)
@@ -276,8 +234,8 @@ def test_zip_sources_stream_and_the_nested_one_does_not():
     ef = "https://launcher.gryphline.com/api/game/get_latest?appcode=YDUTE5gscDZ229CW&channel=6&sub_channel=6"
     assert all(a.stream for a in endfield.resolve(FakeFetch({ef: fx("endfield_get_latest.json")})).archives)
     hy = FakeFetch({HOYO_URL: fx("hoyo_getGamePackages.json")})
-    for biz in ("hk4e_global", "nap_global", "hkrpg_global", "bh3_global"):
-        assert all(a.stream for a in hoyo.resolve(biz, hy).archives)  # zips and 7z, game and audio
+    # The other HoYo titles now use Sophon chunk manifests (see test_sophon.py).
+    assert all(a.stream for a in hoyo.resolve("bh3_global", hy).archives)
 
 
 # ------------------------------------------------------------------ Punishing: Gray Raven

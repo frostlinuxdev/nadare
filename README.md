@@ -1,8 +1,9 @@
 # Nadare
 
 **A Linux launcher for anime gacha games.** Install, log in and play Chaos Zero
-Nightmare, Arknights and Stella Sora from one window, with safe updates and one
-profile per game.
+Nightmare, Arknights, Stella Sora and a growing catalog of other games (Genshin
+Impact, Honkai: Star Rail, Zenless Zone Zero, Wuthering Waves, Punishing: Gray
+Raven and more) from one window, with safe updates and one profile per game.
 
 ![The Nadare library](docs/screenshots/library.png)
 
@@ -44,9 +45,12 @@ The AppImage bundles the GL loader and the Qt X11 platform libraries it needs, s
 starts on a minimal X11 desktop; only the base X11/xcb libraries every X11 or Wayland
 desktop already has come from your system.
 
-**3. Add a game.** Click **Add game**, pick *Chaos Zero Nightmare* and accept the
-defaults. Log in by scanning the QR code **shown by your own Nadare window** with
-the STOVE mobile app, click **Install**, then **Launch**.
+**3. Add a game.** Click **Add game**, pick a game and accept the defaults, then
+click **Install** and **Launch**. Each game page says what login it needs. For
+*Chaos Zero Nightmare* you scan the QR code **shown by your own Nadare window**
+with the STOVE mobile app; most catalog games log in inside the game or the publisher's own launcher.
+Games download from the publisher's own servers into Nadare's folders, or into a
+folder you choose in the game's settings.
 
 **Updating:** download the new AppImage and replace the old one; the games update
 themselves from inside Nadare. **Removing:** delete the AppImage and see
@@ -56,7 +60,7 @@ themselves from inside Nadare. **Removing:** delete the AppImage and see
 |---|---|
 | ![A game page with login, news and actions](docs/screenshots/game-page.png) | ![Per-game settings](docs/screenshots/settings.png) |
 
-*Screenshots: the 0.1.0b1 AppImage on Fedora 44 (GNOME, Wayland). Game covers are
+*Screenshots: an early 0.1.0 beta AppImage on Fedora 44 (GNOME, Wayland). Game covers are
 SteamGridDB grids by Sko514 (Chaos Zero Nightmare), The Sapper (Arknights) and
 lazzxion (Fate/Grand Order); news thumbnails come from the publishers' own
 feeds.*
@@ -68,12 +72,26 @@ feeds.*
 | **Chaos Zero Nightmare** | `stove-czn` | First-class: install, update, QR login, launch on Proton. Tested on NVIDIA and AMD. |
 | **Arknights** (EN, Yostar) | `arknights-yostar` | Install/update/launch through Proton; official launcher downloads are direct and verified. |
 | **Stella Sora** (EN, Yostar) | `stellasora-yostar` | Install/update/launch through Proton. |
-| **Fate/Grand Order (NA)** | `fgo-lepton` | **Experimental**: Android container (lepton-fgo); needs podman, a kernel with binderfs and an NVIDIA GPU. **Not installable in 0.1.0b4** (its lepton-fgo release is not in the public index yet); planned for a later beta. |
-| **Game catalog** (Brown Dust 2, Aether Gazer, Mongil: Star Dive, Wuthering Waves, Girls' Frontline 2, Arknights: Endfield, Punishing: Gray Raven, Neverness to Everness, NIKKE) | `direct-*`, `launcher-*` | **Experimental**: installs from each publisher's own servers (or runs their launcher), with a *Verified* / *Experimental* tier per game. See [docs/CATALOG.md](docs/CATALOG.md). |
+| **Fate/Grand Order (NA)** | `fgo-lepton` | **Experimental**: Android container (lepton-fgo); needs podman, a kernel with binderfs and an NVIDIA GPU. **Not installable in this beta** (its lepton-fgo release is not in the public index yet); planned for a later beta. |
+| **Game catalog** (see below) | `direct-*`, `launcher-*` | **Experimental as a whole**: installs from each publisher's own servers (or runs their launcher), with a *Verified* / *Experimental* tier per game. See [docs/CATALOG.md](docs/CATALOG.md). |
 | Wine / Steam / script / Waydroid | generic | Scaffolding: you supply the prefix, exe or app. Not a supported product yet. |
 
-Nadare is a beta: the first three are the tested paths (the game catalog and FGO
-are experimental, the generic backends are scaffolding). See [PLAN.md](PLAN.md) for what is done
+Each catalog game carries its own tier in the Add Game list:
+
+- **Verified** (played past the title screen through Nadare): Brown Dust 2, Aether
+  Gazer, Punishing: Gray Raven, Girls' Frontline 2 (the Darkwinter build), Honkai
+  Impact 3rd, Arknights: Endfield, Neverness to Everness.
+- **Experimental** (installs and launches, not played end to end yet): Wuthering
+  Waves, Mongil: Star Dive, NIKKE, Genshin Impact, Honkai: Star Rail, Zenless Zone
+  Zero. The three HoYo games install through HoYo's chunked downloads and were
+  checked as far as the in-game login screen.
+
+See [docs/CATALOG.md](docs/CATALOG.md) for how each game is installed and what
+is known to be rough.
+
+Nadare is a beta: Chaos Zero Nightmare, Arknights and Stella Sora are the
+longest-tested paths (the rest of the catalog and FGO are experimental, the
+generic backends are scaffolding). See [PLAN.md](PLAN.md) for what is done
 and what is left.
 
 Nadare runs on the shoulders of projects that already work: it drives
@@ -87,7 +105,8 @@ Chaos Zero Nightmare is proven in-game on **NVIDIA** + CachyOS (DW-Proton
 (RX 7900 XTX, Debian 13, Mesa RADV, KDE Wayland: install, QR login and launch).
 Intel GPUs are not verified yet. Other distros install and start (the AppImage
 was smoke-tested on Ubuntu 22.04 and 24.04, Debian 12, Fedora 43 and 44, Arch and
-Mint 22.1; those VM runs have no GPU).
+Mint 22.1; those VM runs have no GPU). The catalog games listed as Verified above
+were played on NVIDIA + CachyOS.
 
 ## First launch (Chaos Zero Nightmare)
 
@@ -245,7 +264,7 @@ reports the exact list. In short: a live Wayland session, `podman` with the
 Mesa GPU. Nadare downloads a pinned, sha256-checked `lepton-fgo` release on the
 first install, unless you point the profile (or `$LEPTON_FGO_REPO`) at your own
 checkout. FGO support is **experimental** (tested on NVIDIA + CachyOS only) and the
-install step does not work in 0.1.0b4: the public index does not carry the
+install step does not work in this beta: the public index does not carry the
 `lepton-fgo` release yet. It is planned for a later beta.
 
 ### Install system packages (source installs)

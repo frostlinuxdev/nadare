@@ -216,10 +216,10 @@ def test_a_failing_catalog_does_not_stop_the_other_steps_or_start_the_age_gate(
 def test_the_default_table_covers_every_visible_catalog_game_with_a_resolver(pi, monkeypatch):
     from nadare.core import directkinds as dk
 
-    monkeypatch.delenv("NADARE_SHOW_HOYO", raising=False)
+    monkeypatch.delenv("NADARE_HIDE_HOYO", raising=False)
     table = pi.default_catalog_games()
     kinds = {k for k in dk.ART if k != "launcher-nikke" and k != "launcher-nte"}
-    assert {f"direct-{tag}" for tag in table} == kinds - dk.HOYO_KINDS
+    assert {f"direct-{tag}" for tag in table} == kinds
     for tag, game in table.items():
         assert callable(game.resolve) and game.title
         folder, steam = dk.ART[f"direct-{tag}"]
@@ -383,10 +383,10 @@ def test_the_stored_reason_is_truncated_to_120_characters(pi, tmp_path):
     assert read(state)["alpha"]["reason"] == reason[:120]
 
 
-def test_the_hoyo_games_are_only_published_when_asked_for(pi, monkeypatch):
+def test_the_hoyo_games_are_published_unless_hidden(pi, monkeypatch):
     from nadare.core import directkinds as dk
 
-    monkeypatch.delenv("NADARE_SHOW_HOYO", raising=False)
-    assert not {k.removeprefix("direct-") for k in dk.HOYO_KINDS} & set(pi.default_catalog_games())
-    monkeypatch.setenv("NADARE_SHOW_HOYO", "1")
+    monkeypatch.delenv("NADARE_HIDE_HOYO", raising=False)
     assert {k.removeprefix("direct-") for k in dk.HOYO_KINDS} <= set(pi.default_catalog_games())
+    monkeypatch.setenv("NADARE_HIDE_HOYO", "1")
+    assert not {k.removeprefix("direct-") for k in dk.HOYO_KINDS} & set(pi.default_catalog_games())

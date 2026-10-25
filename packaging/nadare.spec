@@ -79,6 +79,8 @@ if collect_submodules is not None:
 # curl_cffi is imported lazily inside the CZN backend functions, so PyInstaller
 # cannot see it. It ships a vendored libcurl as the compiled `_wrapper.abi3.so`
 # plus `_cffi_backend`; collect the submodules and the shared objects explicitly.
+# zstandard picks its compiled backend at import time (HoYo's Sophon chunks are zstd).
+hiddenimports += ["zstandard", "zstandard.backend_c"]
 hiddenimports += [
     "curl_cffi",
     "curl_cffi.requests",

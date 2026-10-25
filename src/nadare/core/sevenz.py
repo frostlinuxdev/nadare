@@ -17,6 +17,7 @@ verified as it is written, and a file that fails is removed.
 
 from __future__ import annotations
 
+import itertools
 import lzma
 import stat
 import struct
@@ -598,8 +599,12 @@ def _pack_extent(streams: _StreamsInfo, folder: _Folder) -> tuple[int, int]:
     count = len(folder.packed_indices)
     if start + count > len(streams.pack_sizes):
         raise SevenZipError("missing packed stream")
-    offset = 32 + streams.pack_pos + sum(streams.pack_sizes[:start])
-    size = sum(streams.pack_sizes[start : start + count])
+    offsets = getattr(streams, "_pack_offsets", None)
+    if offsets is None:
+        offsets = [0, *itertools.accumulate(streams.pack_sizes)]
+        streams._pack_offsets = offsets
+    offset = 32 + streams.pack_pos + offsets[start]
+    size = offsets[start + count] - offsets[start]
     return offset, size
 
 

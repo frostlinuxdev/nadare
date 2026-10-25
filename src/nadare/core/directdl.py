@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import diskspace, paths, sevenz
+from . import diskspace, paths, sevenz, sophon
 from . import download as download_module
 from .download import DownloadError, download, hash_file, remote_size
 from .events import Cancel, Cancelled, Emitter, Event, emitter
@@ -136,6 +136,8 @@ class Plan:
     #: Relative path of the game executable the install should produce.
     exe: str = ""
     extra: Mapping[str, Any] = field(default_factory=dict)
+    #: HoYo-style chunked packages, installed after the files and archives.
+    sophon: tuple[sophon.SophonPackage, ...] = ()
 
 
 class _CombinedCancel:
@@ -286,13 +288,28 @@ def _crc32_file(path: Path) -> str:
     return f"{value & 0xFFFFFFFF:08X}"
 
 
-def _verify_remote(path: Path, rf: RemoteFile) -> bool:
+def _verify_remote(path: Path, rf: RemoteFile, *, hashes: bool = True) -> bool:
     try:
         if not path.is_file():
             return False
         if rf.size is not None and path.stat().st_size != rf.size:
             return False
+        if not hashes:
+            return True
         algorithms = tuple(name for name in ("md5", "sha256") if getattr(rf, name))
+        if algorithms and rf.crc32:
+            # One read pass for every declared digest.
+            hashers = {name: hashlib.new(name) for name in algorithms}
+            crc = 0
+            with open(path, "rb") as fh:
+                while block := fh.read(1 << 20):
+                    for hasher in hashers.values():
+                        hasher.update(block)
+                    crc = zlib.crc32(block, crc)
+            for name, hasher in hashers.items():
+                if hasher.hexdigest().lower() != getattr(rf, name).lower():
+                    return False
+            return f"{crc & 0xFFFFFFFF:08X}" == rf.crc32.upper()
         if algorithms:
             digests = hash_file(path, algorithms)
             for name in algorithms:
@@ -1024,6 +1041,15 @@ def _sync_archive(
 _UNWRAPS = frozenset({("zip",), ("zip", "zip"), ("7z",), ("slices",)})
 
 
+def _is_https_or_loopback(url: Any) -> bool:
+    """Production Sophon URLs must be https; the test server is loopback http."""
+    if not isinstance(url, str):
+        return False
+    if url.startswith("https://"):
+        return True
+    return url.startswith(("http://127.0.0.1:", "http://localhost:"))
+
+
 def _validate_plan(plan: Plan) -> None:
     for rf in plan.files:
         safe_relative_path(rf.path)
@@ -1047,6 +1073,11 @@ def _validate_plan(plan: Plan) -> None:
             raise DirectError(
                 f"archive {archive.name!r} has members but is not a slices archive"
             )
+    for pkg in plan.sophon:
+        safe_relative_path(pkg.name)
+        for label, url in (("manifest", pkg.manifest_url), ("chunk", pkg.chunk_url)):
+            if not _is_https_or_loopback(url):
+                raise DirectError(f"sophon {label} URL is not https: {url!r}")
 
 
 def safe_relative_path(path: str) -> str:
@@ -1066,15 +1097,28 @@ def safe_relative_path(path: str) -> str:
     return "/".join(parts)
 
 
-def plan_missing(plan: Plan, dest: Path | str) -> tuple[list[RemoteFile], list[Archive]]:
+def plan_missing(
+    plan: Plan, dest: Path | str, *, verify: bool = True
+) -> tuple[list[RemoteFile], list[Archive]]:
     """What :func:`sync` would still fetch: files that are absent or whose size/hash
-    differ, and archives with no ``.done`` record for this plan's version."""
+    differ, and archives with no ``.done`` record for this plan's version.
+
+    ``verify=False`` compares sizes only: right after a sync that already hashed every file.
+    """
     root = Path(dest)
     files = [
-        rf for rf in plan.files if not _verify_remote(root / safe_relative_path(rf.path), rf)
+        rf
+        for rf in plan.files
+        if not _verify_remote(root / safe_relative_path(rf.path), rf, hashes=verify)
     ]
     archives = [archive for archive in plan.archives if not _archive_done(plan, archive, root)]
     return files, archives
+
+
+def sophon_missing(plan: Plan, dest: Path | str) -> list[sophon.SophonPackage]:
+    """Sophon packages with no ``.done`` marker for their manifest id."""
+    root = Path(dest)
+    return [pkg for pkg in plan.sophon if not sophon.is_done(pkg, root)]
 
 
 def default_workers(file_count: int) -> int:
@@ -1089,6 +1133,17 @@ def default_workers(file_count: int) -> int:
     if file_count <= 2000:
         return 16
     return 32
+
+
+#: Parallel chunk fetches for a Sophon plan: 100k small requests are latency-bound, like loose files.
+_SOPHON_WORKERS = 24
+
+
+def plan_workers(plan: Plan) -> int:
+    """The default number of parallel downloads for ``plan``."""
+    if plan.sophon:
+        return _SOPHON_WORKERS
+    return default_workers(len(plan.files))
 
 
 @contextmanager
@@ -1175,10 +1230,22 @@ def _sync(
         _sync_archive(plan, archive, root, emit=emit, cancel=cancel, workers=workers)
         downloaded += 1
 
+    for pkg in plan.sophon:
+        if cancel is not None:
+            cancel.raise_if_cancelled()
+        say(Event("step", f"installing {pkg.name}"))
+        try:
+            sophon.sync_package(pkg, root, emit=emit, cancel=cancel, workers=workers)
+        except sophon.SophonError as exc:
+            raise DirectError(str(exc)) from exc
+        downloaded += 1
+
     try:
         (root / DL_DIR).rmdir()  # only succeeds when nothing is left in it
     except OSError:
         pass
 
-    skipped = len(plan.files) + len(plan.archives) - downloaded
+    skipped = (
+        len(plan.files) + len(plan.archives) + len(plan.sophon) - downloaded
+    )
     return {"downloaded": downloaded, "skipped": skipped}

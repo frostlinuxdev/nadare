@@ -167,17 +167,26 @@ LAUNCHER_WIZARD: tuple[tuple[str, str, str, str, str], ...] = tuple(
 TIER_VERIFIED = "Verified"
 TIER_EXPERIMENTAL = "Experimental"
 VERIFIED_KINDS = frozenset(
-    {"direct-bd2", "direct-aethergazer", "direct-pgr", "direct-gfl2", "direct-hi3"}
+    {
+        "direct-bd2",
+        "direct-aethergazer",
+        "direct-pgr",
+        "direct-gfl2",
+        "direct-hi3",
+        "direct-endfield",
+        "direct-nte",
+        "launcher-nte",
+    }
 )
 
-#: HoYo's games are kept out of the Add Game wizard (and the published catalog) unless
-#: ``NADARE_SHOW_HOYO=1``; a profile of one of these kinds that already exists still works.
+#: HoYo's games. They are offered like the rest; ``NADARE_HIDE_HOYO=1`` keeps them out of the
+#: Add Game wizard and the published catalog (a profile that already exists still works).
 HOYO_KINDS = frozenset({"direct-genshin", "direct-hsr", "direct-hi3", "direct-zzz"})
 
 
 def hoyo_visible() -> bool:
     """True when the HoYo games should be offered for new profiles."""
-    return os.environ.get("NADARE_SHOW_HOYO") == "1"
+    return os.environ.get("NADARE_HIDE_HOYO") != "1"
 
 
 def tier_of(kind: str) -> str:

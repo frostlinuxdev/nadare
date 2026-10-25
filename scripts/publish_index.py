@@ -410,7 +410,7 @@ def default_catalog_games() -> dict[str, CatalogGame]:
         if not kind.startswith("direct-"):
             continue
         if kind in dk.HOYO_KINDS and not dk.hoyo_visible():
-            continue  # hidden by default, like the Add Game wizard (NADARE_SHOW_HOYO=1 shows them)
+            continue  # NADARE_HIDE_HOYO=1 hides them, like the Add Game wizard
         tag = kind.removeprefix("direct-")
         if kind not in dk._DIRECT or (tag not in modules and tag not in _HOYO_BIZ):
             print(f"catalog {tag}: no resolver for this kind yet, skipping")

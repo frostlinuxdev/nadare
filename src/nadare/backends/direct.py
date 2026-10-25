@@ -114,21 +114,25 @@ class DirectBackend(ArknightsBackend):
     def _load_manifest(self) -> directdl.Plan:  # type: ignore[override]
         return self.plan()
 
-    def _missing_entries(self) -> list[Any]:
+    def _missing_entries(self, *, verify: bool = True) -> list[Any]:
         plan = self.plan()
         try:
-            files, archives = directdl.plan_missing(plan, self.install_dir())
+            files, archives = directdl.plan_missing(plan, self.install_dir(), verify=verify)
         except directdl.DirectError as exc:
             raise BackendError(f"{self.display_name}: {exc}") from exc
         return [
             *files,
             *(SimpleNamespace(path=archive.name) for archive in archives),
+            *(
+                SimpleNamespace(path=pkg.name)
+                for pkg in directdl.sophon_missing(plan, self.install_dir())
+            ),
         ]
 
     def _sync_direct(self) -> dict[str, Any]:
         plan = self._load_manifest()
         workers = int(
-            self.ctx.profile.get("download_workers") or directdl.default_workers(len(plan.files))
+            self.ctx.profile.get("download_workers") or directdl.plan_workers(plan)
         )
         marker = self._install_marker_path()
         marker.parent.mkdir(parents=True, exist_ok=True)

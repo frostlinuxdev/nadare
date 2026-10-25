@@ -17,6 +17,22 @@ API_URL = (
     "?launcher_id=VYTpXlbWo8"
 )
 
+#: Games that ship as Sophon chunk manifests, keyed by their branch API game id.
+_SOPHON_GAME_IDS: dict[str, str] = {
+    "hk4e_global": "gopR6Cufr3",
+    "nap_global": "U5hbdsT9W7",
+    "hkrpg_global": "4ziysqXOQ8",
+}
+
+_BRANCHES_URL = (
+    "https://sg-hyp-api.hoyoverse.com/hyp/hyp-connect/api/getGameBranches"
+    "?launcher_id=VYTpXlbWo8&game_ids%5B%5D="
+)
+_BUILD_URL = (
+    "https://sg-public-api.hoyoverse.com/downloader/sophon_chunk/api/getBuild"
+    "?branch=main&package_id={package_id}&password={password}"
+)
+
 _TITLES: dict[str, tuple[str, str]] = {
     "hk4e_global": ("genshin", "GenshinImpact.exe"),
     "nap_global": ("zzz", "ZenlessZoneZero.exe"),
@@ -29,6 +45,8 @@ def resolve(
     biz: str, fetch: Fetch | None = None, language: str = "en-us"
 ) -> directdl.Plan:
     """Return the latest full download plan for ``biz``."""
+    if biz in _SOPHON_GAME_IDS:
+        return _sophon_plan(biz, fetch or default_fetch, language)
     data = _load(fetch or default_fetch)
     package = _package(data, biz)
     major = _major(package)
@@ -80,6 +98,97 @@ def resolve(
         archives=tuple(archives),
         exe=exe,
     )
+
+
+def _sophon_plan(biz: str, fetch: Fetch, language: str) -> directdl.Plan:
+    """Build a plan from the live Sophon chunk manifests for ``biz``."""
+    game_tag, exe = _TITLES[biz]
+    branch = _load_from(
+        _BRANCHES_URL + _SOPHON_GAME_IDS[biz], fetch, "hoyo branches"
+    )
+    branches = _items(branch.get("game_branches"), "game_branches")
+    if not branches:
+        raise directdl.DirectError(f"no hoyo branch for {biz}")
+    main = branches[0].get("main") if isinstance(branches[0], Mapping) else None
+    if not isinstance(main, Mapping):
+        raise directdl.DirectError(f"hoyo branch for {biz} has no main build")
+    version = _text(main.get("tag"), "version")
+    package_id = _text(main.get("package_id"), "package_id")
+    password = _text(main.get("password"), "password")
+
+    build = _load_from(
+        _BUILD_URL.format(package_id=package_id, password=password), fetch, "hoyo builds"
+    )
+    manifests = _items(build.get("manifests"), "manifests")
+    game_entry: Mapping[str, Any] | None = None
+    audio_entry: Mapping[str, Any] | None = None
+    for entry in manifests:
+        field = entry.get("matching_field")
+        if field == "game" and game_entry is None:
+            game_entry = entry
+        elif field == language and audio_entry is None:
+            audio_entry = entry
+    if game_entry is None:
+        raise directdl.DirectError(f"no hoyo game manifest for {biz}")
+    if audio_entry is None:
+        raise directdl.DirectError(f"no hoyo audio manifest for language {language}")
+
+    game = _sophon_package(game_entry, f"{game_tag}-{version}")
+    audio = _sophon_package(
+        audio_entry, f"{game_tag}-{version}-audio-{language}"
+    )
+    return directdl.Plan(
+        game_tag=game_tag,
+        version=version,
+        archives=(),
+        exe=exe,
+        sophon=(game, audio),
+    )
+
+
+def _sophon_package(entry: Mapping[str, Any], name: str) -> Any:
+    from ..sophon import SophonPackage
+
+    manifest = entry.get("manifest")
+    manifest_download = entry.get("manifest_download")
+    chunk_download = entry.get("chunk_download")
+    stats = entry.get("stats")
+    if not all(
+        isinstance(value, Mapping)
+        for value in (manifest, manifest_download, chunk_download, stats)
+    ):
+        raise directdl.DirectError(f"hoyo manifest {name} is incomplete")
+    if manifest_download.get("encryption") != 0 or chunk_download.get("encryption") != 0:
+        raise directdl.DirectError(f"hoyo manifest {name} is encrypted")
+    manifest_id = _text(manifest.get("id"), "manifest id")
+    prefix = _url(manifest_download.get("url_prefix")).rstrip("/")
+    suffix = manifest_download.get("url_suffix") or ""
+    if not isinstance(suffix, str):
+        raise directdl.DirectError(f"invalid hoyo manifest suffix for {name}")
+    return SophonPackage(
+        name=directdl.safe_relative_path(name),
+        manifest_url=f"{prefix}/{manifest_id}{suffix}",
+        chunk_url=_url(chunk_download.get("url_prefix")).rstrip("/"),
+        manifest_id=manifest_id,
+        size=_size(stats.get("uncompressed_size")),
+    )
+
+
+def _load_from(url: str, fetch: Fetch, label: str) -> Mapping[str, Any]:
+    try:
+        payload = json.loads(ungzip(fetch(url, None)))
+    except (ValueError, TypeError, OSError) as exc:
+        raise directdl.DirectError(f"could not read {label}: {exc}") from exc
+    if not isinstance(payload, Mapping):
+        raise directdl.DirectError(f"{label} response is not an object")
+    if payload.get("retcode") != 0:
+        raise directdl.DirectError(
+            f"{label} API error: {payload.get('message', 'unknown')}"
+        )
+    data = payload.get("data")
+    if not isinstance(data, Mapping):
+        raise directdl.DirectError(f"{label} response has no data")
+    return data
 
 
 def _unwrap(name: str) -> tuple[str, ...]:

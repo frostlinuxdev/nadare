@@ -143,9 +143,14 @@ class HeroCard(QFrame):
         super().__init__(parent)
         self.setObjectName("Hero")
         self._source: QPixmap | None = None
+        #: ``(source key, width, height)`` and the cropped pixmap painted for it.
+        self._cropped_key: tuple[int, int, int] | None = None
+        self._cropped: QPixmap | None = None
 
     def set_source(self, source: QPixmap | None) -> None:
         self._source = source if (source is not None and not source.isNull()) else None
+        self._cropped_key = None
+        self._cropped = None
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
@@ -160,15 +165,19 @@ class HeroCard(QFrame):
         path = QPainterPath()
         path.addRoundedRect(QRectF(0, 0, width, height), 16, 16)
         painter.setClipPath(path)
-        scaled = self._source.scaled(
-            width,
-            height,
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        x = max(0, (scaled.width() - width) // 2)
-        y = max(0, (scaled.height() - height) // 2)
-        painter.drawPixmap(0, 0, scaled.copy(x, y, width, height))
+        key = (self._source.cacheKey(), width, height)
+        if self._cropped is None or self._cropped_key != key:
+            scaled = self._source.scaled(
+                width,
+                height,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            x = max(0, (scaled.width() - width) // 2)
+            y = max(0, (scaled.height() - height) // 2)
+            self._cropped = scaled.copy(x, y, width, height)
+            self._cropped_key = key
+        painter.drawPixmap(0, 0, self._cropped)
         gradient = QLinearGradient(0, 0, width * 0.72, 0)
         gradient.setColorAt(0.0, QColor(7, 9, 13, 245))
         gradient.setColorAt(0.5, QColor(7, 9, 13, 185))

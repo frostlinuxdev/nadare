@@ -454,6 +454,9 @@ def test_tiers_mark_only_the_launched_games_as_verified():
     assert dk.VERIFIED_KINDS <= dk.CATALOG_KINDS
     assert {dk.tier_of(k) for k in dk.CATALOG_KINDS} == {dk.TIER_VERIFIED, dk.TIER_EXPERIMENTAL}
     assert dk.tier_of("direct-bd2") == "Verified"
+    assert dk.tier_of("direct-endfield") == "Verified"
+    assert dk.tier_of("launcher-nte") == "Verified"
+    assert dk.tier_of("direct-genshin") == "Experimental"
     assert dk.tier_of("direct-wuwa") == "Experimental"
     assert dk.tier_of("not-a-kind") == "Experimental"
 
@@ -485,16 +488,18 @@ def test_wuwa_profile_overrides_win(tmp_path):
     assert backend._direct_argv(game) == [str(game), "-dx11"]
 
 
-def test_hoyo_games_are_hidden_from_the_wizard_unless_asked_for(monkeypatch):
+def test_hoyo_games_are_offered_unless_hidden(monkeypatch):
     from nadare.core import directkinds as dk
     from nadare.gui import add_game
 
-    monkeypatch.delenv("NADARE_SHOW_HOYO", raising=False)
+    monkeypatch.delenv("NADARE_HIDE_HOYO", raising=False)
     shown = {g.kind for g in add_game.available_catalog()}
-    assert not (dk.HOYO_KINDS & shown)
+    assert dk.HOYO_KINDS <= shown
     assert {"direct-bd2", "direct-wuwa", "direct-pgr"} <= shown
-    monkeypatch.setenv("NADARE_SHOW_HOYO", "1")
-    assert dk.HOYO_KINDS <= {g.kind for g in add_game.available_catalog()}
+    monkeypatch.setenv("NADARE_HIDE_HOYO", "1")
+    hidden = {g.kind for g in add_game.available_catalog()}
+    assert not (dk.HOYO_KINDS & hidden)
+    assert {"direct-bd2", "direct-wuwa", "direct-pgr"} <= hidden
 
 
 def test_hoyo_kinds_still_load_for_existing_profiles():
