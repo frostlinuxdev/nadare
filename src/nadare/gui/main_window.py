@@ -53,6 +53,7 @@ from ..core.backends import (
     supports_remember_me,
 )
 from ..core.config import Config
+from ..core.directkinds import DIRECT_KINDS
 from ..core.events import Event
 from ..core.news import NewsResult
 from . import i18n
@@ -830,7 +831,7 @@ class MainWindow(QMainWindow):
         """Whether this profile's Yostar backend really uses a published manifest."""
         data = self.config.profiles.get(profile) or {}
         kind = str(data.get("backend") or "")
-        if kind == "stellasora-yostar":
+        if kind == "stellasora-yostar" or kind in DIRECT_KINDS:
             return True  # always direct-download
         if kind != "arknights-yostar":
             return False

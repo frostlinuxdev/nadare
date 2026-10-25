@@ -28,6 +28,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from . import diskspace, download, paths
+from .directkinds import CATALOG_KINDS
 from .events import Cancel, Emitter, Event, emitter
 
 GITHUB_API = "https://api.github.com/repos/{repo}/releases"
@@ -761,7 +762,9 @@ def _extract(tar_path: Path, *, cancel: Cancel | None, emit: Emitter) -> Path:
 
 
 #: Backends whose profiles use :data:`DEFAULT_FAMILY` when they name no runner.
-PROTON_DEFAULT_BACKENDS = frozenset({"stove-czn", "arknights-yostar", "stellasora-yostar"})
+PROTON_DEFAULT_BACKENDS = frozenset(
+    {"stove-czn", "arknights-yostar", "stellasora-yostar", *CATALOG_KINDS}
+)
 
 
 def runner_size(runner: str | os.PathLike[str]) -> int:

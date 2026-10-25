@@ -70,6 +70,12 @@ def vcredist_index_url() -> str:
     return f"{base}vcredist/latest.json" if base else ""
 
 
+def kuro_tokens_url() -> str:
+    """Published Kuro launcher tokens (``""`` when the index is disabled)."""
+    base = index_base()
+    return f"{base}catalog/kuro-tokens.json" if base else ""
+
+
 def releases_api() -> str:
     """The latest-release endpoint (``""`` disables the update check)."""
     return _env("NADARE_RELEASES_API", DEFAULT_RELEASES_API)
@@ -86,6 +92,7 @@ __all__ = [
     "DEFAULT_UMU_ZIPAPP_URL",
     "czn_index_url",
     "index_base",
+    "kuro_tokens_url",
     "releases_api",
     "umu_zipapp_url",
     "vcredist_index_url",

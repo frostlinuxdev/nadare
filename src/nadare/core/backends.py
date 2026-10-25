@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from .config import Config, valid_profile_name
+from .directkinds import CATALOG_BACKENDS
 from .events import Cancel, Cancelled, Emitter, emitter
 
 
@@ -273,6 +274,7 @@ _BUILTINS = {
     "script": "nadare.backends.script:ScriptBackend",
     "arknights-yostar": "nadare.backends.arknights:ArknightsBackend",
     "stellasora-yostar": "nadare.backends.stellasora:StellaSoraBackend",
+    **CATALOG_BACKENDS,
 }
 
 

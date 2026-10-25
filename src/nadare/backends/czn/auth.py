@@ -643,6 +643,22 @@ class StoveAuth:
         _write_private(Path(out), payload)
 
     # ---- session.json assembly ----
+    def _template_is_same_account(self, template: dict) -> bool:
+        """False when a saved session.json belongs to a different STOVE account.
+
+        A template carries account-specific fields (nickname, country, birth date,
+        verification flags) so reusing one across accounts would leak user A's
+        personal data into user B's session. An absent identifier is not a
+        mismatch; only a set, differing value is.
+        """
+        for key, mine in (("member_no", self.member_no), ("guid", self.guid)):
+            if not mine:
+                continue
+            theirs = template.get(key)
+            if theirs not in (None, "") and str(theirs) != str(mine):
+                return False
+        return True
+
     def write_session_json(self, out: Path = SESSION_JSON) -> dict:
         """Prefer splicing the fresh game token into an existing proven template
         (keeps this account's exact field set); fall back to building fresh."""
@@ -662,7 +678,7 @@ class StoveAuth:
                     break
             except Exception:
                 pass
-        if template:
+        if template and self._template_is_same_account(template):
             info = dict(template)
             info["access_token"] = self.game_access
             info["refresh_token"] = self.game_refresh or info.get("refresh_token")

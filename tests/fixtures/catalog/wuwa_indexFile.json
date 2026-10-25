@@ -1,0 +1,188 @@
+{
+ "resource": [
+  {
+   "dest": "Wuthering Waves.exe",
+   "md5": "2cb7eb28586274f24c9f22f6947ff81c",
+   "size": 483768
+  },
+  {
+   "dest": "Client/Binaries/Win64/amd_fidelityfx_dx12.dll",
+   "md5": "49230ad94ed6169933cd0457501d9cb4",
+   "size": 6675664
+  },
+  {
+   "dest": "Client/Binaries/Win64/cgsdk-loader.dll",
+   "md5": "71e2e318abb684a0f8700a3516b3eb74",
+   "size": 92088
+  },
+  {
+   "dest": "Client/Binaries/Win64/cgsdk.dll",
+   "md5": "d1abc0dc510d7808da74a6213bfd700c",
+   "size": 790968
+  },
+  {
+   "dest": "ClearThirdParty.exe",
+   "md5": "3882713bea443ff96f7422cf1df725b3",
+   "size": 220600
+  },
+  {
+   "dest": "Client/Binaries/Win64/coreclr.dll",
+   "md5": "2033868711348a9ff0ee0b686093c32d",
+   "size": 4993464
+  },
+  {
+   "dest": "Client/Binaries/Win64/CrashSight64.dll",
+   "md5": "bb02b393ef4718bdb340cb17147364d3",
+   "size": 5575096
+  },
+  {
+   "dest": "Client/Binaries/Win64/GameBabyConfig64.dat",
+   "md5": "e8e7bb575fbb094adbe4f492d211bbf7",
+   "size": 299
+  },
+  {
+   "dest": "Client/Binaries/Win64/Client-Win64-ShippingBase.dll",
+   "md5": "5aa83a185ca0c85513063869847229b8",
+   "size": 38673736
+  },
+  {
+   "dest": "Client/Binaries/Win64/libcryptoMD.dll",
+   "md5": "91271f5400956e1930c08ce42c80d52b",
+   "size": 2428344
+  },
+  {
+   "dest": "Client/Binaries/Win64/JoyShockLibrary.dll",
+   "md5": "1ed9dbf85f47c23ed13c62abcdc33488",
+   "size": 224688
+  },
+  {
+   "dest": "Client/Binaries/Win64/libScePad.dll",
+   "md5": "0d05a4916aaee1ce3ce48af492bfd447",
+   "size": 236976
+  },
+  {
+   "dest": "Client/Binaries/Win64/PerfSight.dll",
+   "md5": "eca03850e2721f5bc09f14747ee394bb",
+   "size": 4828088
+  },
+  {
+   "dest": "Client/Binaries/Win64/turbojpeg.dll",
+   "md5": "1eb79e85a6f8ef42cdfaada62e723961",
+   "size": 746936
+  },
+  {
+   "dest": "Client/Binaries/Win64/libprotobuf.dll",
+   "md5": "0ae49af117a235a5c167164f16b945a4",
+   "size": 2317752
+  },
+  {
+   "dest": "Client/Binaries/Win64/AntiCheatExpert/ACE-Base.dat",
+   "md5": "719f6dbc9d2955891e015338f4253670",
+   "size": 54372
+  },
+  {
+   "dest": "Client/Binaries/Win64/libsslMD.dll",
+   "md5": "ad5b5de98bae19f6dbd6fccc00f1e82a",
+   "size": 516024
+  },
+  {
+   "dest": "Client/Binaries/Win64/AntiCheatExpert/ACE-Base64.dll",
+   "md5": "63af001824eb2378796736c2645c33cd",
+   "size": 69736848
+  },
+  {
+   "dest": "Client/Binaries/Win64/AntiCheatExpert/ACE-BASE.sys",
+   "md5": "cc05394dcaef7a1002c04dbc324ff3fd",
+   "size": 4125432
+  },
+  {
+   "dest": "Client/Binaries/Win64/AntiCheatExpert/ACE-CORE.sys2",
+   "md5": "cdb956389efa5ad875e8c8c3f9530ae9",
+   "size": 3272880
+  },
+  {
+   "dest": "Client/Binaries/Win64/AntiCheatExpert/ACE-CORE.sysa2",
+   "md5": "41cbf0c1a99a60d4cd0bf07629464d3e",
+   "size": 1596640
+  },
+  {
+   "dest": "Client/Binaries/Win64/AntiCheatExpert/ACE-Service64.exe",
+   "md5": "f49b484edaaf829c6dc2f8d65e5926f0",
+   "size": 3251080
+  },
+  {
+   "dest": "Client/Binaries/Win64/AntiCheatExpert/ACE-CORE.sys",
+   "md5": "2c2677ef812676e97a188eb6c84cdbc7",
+   "size": 3923120
+  },
+  {
+   "dest": "Client/Binaries/Win64/AntiCheatExpert/ACE-Setup64.exe",
+   "md5": "b77f2e3c15a36f466be5a908e5df35f1",
+   "size": 899984
+  },
+  {
+   "dest": "Client/Binaries/Win64/AntiCheatExpert/ACE-CORE.sysa",
+   "md5": "155fa1c0c4770325b502ccc9a0c5a3a8",
+   "size": 1704168
+  },
+  {
+   "dest": "Client/Binaries/Win64/D3D12/d3d12SDKLayers.dll",
+   "md5": "4ff04e3e1b067f447f453166c4e59f86",
+   "size": 4932640
+  },
+  {
+   "dest": "Client/Binaries/Win64/Mono/System.IO.Compression.Native.dll",
+   "md5": "48bb6154673ca2f9ce41ae36868e5244",
+   "size": 936376
+  },
+  {
+   "dest": "Client/Binaries/Win64/Mono/System.Globalization.Native.dll",
+   "md5": "f49024ec7b56db397c41c61a46999d64",
+   "size": 105400
+  },
+  {
+   "dest": "Client/Binaries/Win64/D3D12/D3D12Core.dll",
+   "md5": "91b14e973642494d14ea1acb2779d4eb",
+   "size": 4821064
+  },
+  {
+   "dest": "Client/Binaries/Win64/ThirdParty/KrPcSdk_Global/Config.txt",
+   "md5": "8a9f9336c705ebf56214834ab4bac425",
+   "size": 90
+  },
+  {
+   "dest": "Client/Binaries/Win64/Client-Win64-Shipping.exe",
+   "md5": "5bd71aa693f2de0ba00aafb29fb166ec",
+   "size": 169207816,
+   "chunkInfos": [
+    {
+     "start": 0,
+     "end": 104857599,
+     "md5": "7359edb64bc4d9b668123bcaa21f5678"
+    },
+    {
+     "start": 104857600,
+     "end": 169207815,
+     "md5": "0e0e5a355323d11fd8861bd29dc36ce5"
+    }
+   ]
+  },
+  {
+   "dest": "Client/Binaries/Win64/ThirdParty/KrPcSdk_Global/KRSDKRes/KRSDKUnsupportedVideoWebView/libcef.dll",
+   "md5": "c674dc1935cba88cee6352615b10cdf7",
+   "size": 155668560,
+   "chunkInfos": [
+    {
+     "start": 0,
+     "end": 104857599,
+     "md5": "d9aac6d804d17631041346c7427b0de4"
+    },
+    {
+     "start": 104857600,
+     "end": 155668559,
+     "md5": "0790650d74db309377f7cc67fe708a4e"
+    }
+   ]
+  }
+ ]
+}

@@ -335,6 +335,9 @@ class ArknightsBackend(GameBackend):
     install_subdir: Path = DEFAULT_INSTALL_SUBDIR
     launcher_names: tuple[str, ...] = LAUNCHER_NAMES
     direct_exe: str = "Arknights.exe"
+    #: Installer defaults and trust, overridable by launcher-only games.
+    default_installer_url: str = DEFAULT_INSTALLER_URL
+    installer_api: str | None = INSTALLER_API
 
     #: A non-strict runner setup failure, kept so a new prefix never falls back
     #: to a bare ``wine`` that is not installed (or not wanted).
@@ -483,7 +486,7 @@ class ArknightsBackend(GameBackend):
             fetched = self._fetch_installer_url()
             if fetched:
                 return fetched
-        return DEFAULT_INSTALLER_URL
+        return self.default_installer_url
 
     def _installer_sha256(self) -> str | None:
         """The pinned installer digest, validated, or ``None`` when unset."""
@@ -505,21 +508,27 @@ class ArknightsBackend(GameBackend):
             return False
         if self._installer_sha256() is not None:
             return True
+        return self._installer_host_trusted(url)
+
+    def _installer_host_trusted(self, url: str) -> bool:
+        """Whether an unpinned installer may come from ``url``'s host (Yostar's)."""
         return yostar.base_url_trusted(url)
 
     def require_installer_url(self, *, resolve: bool = False) -> str:
         url = self.installer_url(resolve=resolve)
         if not self._installer_is_usable(url):
             raise BackendError(
-                "no usable Arknights installer URL: set profile 'installer_url' to the "
-                "official Windows client .exe link on a Yostar host (or pin its "
+                f"no usable {self.display_name} installer URL: set profile 'installer_url' to "
+                "the official Windows client .exe link on the publisher's host (or pin its "
                 "'installer_sha256'); the pinned default may be stale (see TODO)"
             )
         return url
 
     def _fetch_installer_url(self, *, timeout: int = 30) -> str | None:
+        if not self.installer_api:
+            return None
         try:
-            payload = download.fetch_json(INSTALLER_API, timeout=timeout)
+            payload = download.fetch_json(self.installer_api, timeout=timeout)
         except Exception as exc:  # noqa: BLE001 - fall back to the pinned URL
             self.info(f"could not resolve the installer link ({exc}); using the pinned URL")
             return None
@@ -539,11 +548,13 @@ class ArknightsBackend(GameBackend):
         pinned = self._installer_sha256()
         # An unpinned installer is only trusted by its host, so a redirect must
         # stay on Yostar's hosts; a pinned one is verified by its digest.
-        redirect_allowed = None if pinned else yostar.base_url_trusted
+        redirect_allowed = None if pinned else self._installer_host_trusted
         size = download.remote_size(url, redirect_allowed=redirect_allowed)
         if size:
             diskspace.check_space(dest.parent, size)
-        self.ctx.emit(Event("step", f"Downloading the Arknights PC client installer ({dest.name})"))
+        self.ctx.emit(
+            Event("step", f"Downloading the {self.display_name} PC client installer ({dest.name})")
+        )
         result = download.download(
             url,
             dest,
@@ -682,6 +693,10 @@ class ArknightsBackend(GameBackend):
         except OSError as exc:
             log.debug("%s: could not cache the published version: %s", self.display_name, exc)
 
+    def _missing_entries(self) -> list[Any]:
+        """Files a direct install still lacks or has damaged (each has ``.path``)."""
+        return list(yostar.plan(self._load_manifest(), self.install_dir()))
+
     def _sync_direct(self) -> dict[str, Any]:
         manifest = self._load_manifest()
         workers = profile_setting(self.ctx.profile, "download_workers", 6)
@@ -713,15 +728,41 @@ class ArknightsBackend(GameBackend):
             on_result=lambda label: self.info(f"renderer: {label}"),
         )
 
+    # ---- launch-time additions (login tokens and the like) -----------------
+    def launch_extra_args(self) -> list[str]:
+        """Arguments appended after the profile's ``launch_args`` (default: none)."""
+        return []
+
+    def launch_extra_env(self) -> dict[str, str]:
+        """Environment added for the game process (default: none)."""
+        return {}
+
+    def launch_secrets(self) -> tuple[str, ...]:
+        """Values that must never appear in a log line (default: none)."""
+        return ()
+
+    def _redacted(self, text: str) -> str:
+        for secret in self.launch_secrets():
+            if secret:
+                text = text.replace(secret, "<redacted>")
+        return text
+
+    def _direct_argv(self, target: Path) -> list[str]:
+        """The program and arguments handed to umu-run for a direct launch."""
+        return [str(target), *self._extra_args("launch_args"), *self.launch_extra_args()]
+
     def _launch_direct(self) -> int:
         target = self.direct_target()
         if target is None or not target.is_file():
             raise BackendError(f"game executable not found: {target}")
         self._run_vcredist(created=False)
-        argv, env = self._prefix_command([str(target), *self._extra_args("launch_args")])
+        argv, env = self._prefix_command(
+            self._direct_argv(target),
+            self.launch_extra_env() or None,
+        )
         self.ctx.emit(Event("step", f"{self.display_name}: launching {target.name}"))
         self.info(self._runtime_note())
-        self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
+        self.info(self._redacted("exec: " + " ".join(shlex.quote(part) for part in argv)))
         _renderer, note = graphics.effective_renderer(self.ctx.profile)
         if note:
             self.info(note)
@@ -779,7 +820,7 @@ class ArknightsBackend(GameBackend):
     def _target(self) -> Path:
         target = self.find_launcher()
         if target is None:
-            raise BackendError(f"Arknights launcher not found under {self.install_dir()}")
+            raise BackendError(f"{self.display_name} launcher not found under {self.install_dir()}")
         return target
 
     # ---- command construction ---------------------------------------------
@@ -1058,11 +1099,11 @@ class ArknightsBackend(GameBackend):
             self._run_vcredist(created=False)
         installer = self._download_installer(url)
         argv, env = self._prefix_command([str(installer), *self._extra_args("installer_args")])
-        self.ctx.emit(Event("step", f"Running the Arknights installer in {self.prefix()}"))
+        self.ctx.emit(Event("step", f"Running the {self.display_name} installer in {self.prefix()}"))
         self.ctx.emit(
             Event(
                 "step",
-                "Finish the installer window; the Arknights launcher will then download the game",
+                f"Finish the installer window; the {self.display_name} launcher will then download the game",
             )
         )
         self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
@@ -1070,14 +1111,14 @@ class ArknightsBackend(GameBackend):
             argv, env, on_line=self._on_line, cancel=self.ctx.cancel
         )
         if self.find_launcher() is None:
-            self.info(f"Arknights installer exited with code {code} and left no launcher")
+            self.info(f"{self.display_name} installer exited with code {code} and left no launcher")
             raise BackendError(
                 self._watch.explain(
-                    "The Arknights installer did not finish. Try Install again. If it still "
+                    f"The {self.display_name} installer did not finish. Try Install again. If it still "
                     "fails, open Settings → Runner and choose Proton-CachyOS."
                 )
             )
-        self.ctx.emit(Event("done", "Arknights installer finished"))
+        self.ctx.emit(Event("done", f"{self.display_name} installer finished"))
 
     def update(self) -> None:
         self.ctx.cancel.raise_if_cancelled()
@@ -1089,11 +1130,11 @@ class ArknightsBackend(GameBackend):
             return
         if self.find_launcher() is None:
             raise BackendError("the game is not installed")
-        self.ctx.emit(Event("step", "Starting the Arknights launcher (it checks for updates)"))
+        self.ctx.emit(Event("step", f"Starting the {self.display_name} launcher (it checks for updates)"))
         code = self.launch()
         if code != 0:
             raise BackendError(
-                self._watch.explain(f"the Arknights launcher exited with code {code}")
+                self._watch.explain(f"the {self.display_name} launcher exited with code {code}")
             )
 
     def repair(self) -> None:
@@ -1105,7 +1146,7 @@ class ArknightsBackend(GameBackend):
             raise BackendError(f"{self.display_name} is not installed")
         self._sync_direct()
         try:
-            missing = yostar.plan(self._load_manifest(), self.install_dir())
+            missing = self._missing_entries()
         except (BackendError, yostar.ManifestError) as exc:
             if isinstance(exc, BackendError):
                 raise
@@ -1162,7 +1203,7 @@ class ArknightsBackend(GameBackend):
             return self._launch_direct()
         self._run_vcredist(created=False)
         argv, env, target = self.build_launch()
-        self.ctx.emit(Event("step", f"Arknights: launching {target.name}"))
+        self.ctx.emit(Event("step", f"{self.display_name}: launching {target.name}"))
         self.info(self._runtime_note())
         self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
         _renderer, note = graphics.effective_renderer(self.ctx.profile)
@@ -1207,13 +1248,13 @@ class ArknightsBackend(GameBackend):
             if direct
             else target is not None,
         }
-        missing: list[yostar.ManifestFile] = []
+        missing: list[Any] = []
         manifest_note = ""
         if direct:
             checks["installation"] = not self._install_incomplete()
             if checks["installation"] and checks["launcher"]:
                 try:
-                    missing = yostar.plan(self._load_manifest(), self.install_dir())
+                    missing = self._missing_entries()
                 except (BackendError, yostar.ManifestError) as exc:
                     # Offline or a broken manifest: do not call the files bad.
                     manifest_note = f" (could not compare with the game's file list: {exc})"

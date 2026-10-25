@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..core.directkinds import DIRECT_KINDS, DIRECT_LABEL, LAUNCHER_KINDS, LAUNCHER_LABEL
 from .images import ImageLoader
 from .theme import ACCENT, badge_style, cover_pixmap, repolish
 
@@ -63,6 +64,8 @@ _BACKEND_LABELS = {
     "stove-czn": "Windows game via Proton",
     "arknights-yostar": "Yostar launcher",
     "stellasora-yostar": "Yostar launcher",
+    **dict.fromkeys(DIRECT_KINDS, DIRECT_LABEL),
+    **dict.fromkeys(LAUNCHER_KINDS, LAUNCHER_LABEL),
     "fgo-lepton": "Android container",
     "wine": "Wine / Proton game",
     "steam": "Steam game",

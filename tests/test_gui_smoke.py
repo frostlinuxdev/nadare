@@ -1976,6 +1976,24 @@ def test_game_view_shows_login_state(tmp_path, qapp):
         view.deleteLater()
 
 
+def test_game_view_names_the_account_and_offers_login_first(tmp_path, qapp):
+    from nadare.core.backends import Status
+    from nadare.gui.game_view import GameView
+
+    view = GameView()
+    view.set_profile("sample", {"backend": "direct-mongil"})
+    try:
+        view.set_status(Status("installed", data={"logged_in": True, "account": "Cat"}))
+        assert view.account_label.text() == "Logged in as Cat"
+        view.set_status(Status("installed", data={"logged_in": False, "login_required": True}))
+        assert view.account_label.text() == "Not logged in"
+        assert view._primary_op() == "login"
+        view.set_status(Status("installed", data={"logged_in": True, "login_required": False}))
+        assert view._primary_op() == "launch"
+    finally:
+        view.deleteLater()
+
+
 def test_failed_removal_clears_the_removing_status(tmp_path, qapp, monkeypatch):
     from nadare.core import removal
 

@@ -16,6 +16,12 @@ prints them. Committing and pushing is left to the caller::
         git -C ../nadare-index commit -am "..." && git -C ../nadare-index push
 
 Exit status: 0 = changed, 3 = nothing to publish, anything else = error.
+
+The optional catalog section (``--catalog``) publishes the latest version of
+each direct-download game and a media file pointing at its official cover art
+into ``<index>/catalog``. It is off by default, runs at most once per
+``--catalog-max-age-hours``, and keeps a game's previously published entry when
+its resolver or image check fails.
 """
 
 from __future__ import annotations
@@ -28,10 +34,12 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 REPO = Path(__file__).resolve().parents[1]
 GENERATOR = REPO / "ci" / "yostar-manifests" / "generate.py"
@@ -352,6 +360,272 @@ def publish_vcredist(out: Path, env: dict[str, str], opener: Any = None) -> bool
     return True
 
 
+class CatalogGame(NamedTuple):
+    """One catalog game: its title, resolver, cover-art folder and Steam id."""
+
+    title: str
+    resolve: Callable[[], object]
+    image_base: str
+    steam_appid: int | None
+
+
+_HOYO_BIZ = {
+    "genshin": "hk4e_global",
+    "hsr": "hkrpg_global",
+    "hi3": "bh3_global",
+    "zzz": "nap_global",
+}
+
+
+def default_catalog_games() -> dict[str, CatalogGame]:
+    """The catalog table, built from the backend registry (no network access)."""
+    src = str(REPO / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from nadare.core import directkinds as dk
+    from nadare.core.sources import (
+        aethergazer,
+        bd2,
+        endfield,
+        gfl2,
+        hoyo,
+        mongil,
+        nte,
+        pgr,
+        wuwa,
+    )
+
+    modules = {
+        "bd2": bd2,
+        "aethergazer": aethergazer,
+        "mongil": mongil,
+        "wuwa": wuwa,
+        "pgr": pgr,
+        "gfl2": gfl2,
+        "endfield": endfield,
+        "nte": nte,
+    }
+    games: dict[str, CatalogGame] = {}
+    for kind, (folder, steam_appid) in dk.ART.items():
+        if not kind.startswith("direct-"):
+            continue
+        if kind in dk.HOYO_KINDS and not dk.hoyo_visible():
+            continue  # hidden by default, like the Add Game wizard (NADARE_SHOW_HOYO=1 shows them)
+        tag = kind.removeprefix("direct-")
+        if kind not in dk._DIRECT or (tag not in modules and tag not in _HOYO_BIZ):
+            print(f"catalog {tag}: no resolver for this kind yet, skipping")
+            continue
+        if tag in modules:
+            module = modules[tag]
+
+            def resolve(module=module) -> object:
+                return module.resolve().version
+
+        else:
+            biz = _HOYO_BIZ[tag]
+
+            def resolve(biz=biz) -> object:
+                return hoyo.resolve(biz).version
+
+        games[tag] = CatalogGame(
+            title=dk._DIRECT[kind][1],
+            resolve=resolve,
+            image_base=f"{dk.SITE_IMAGES}/{folder}",
+            steam_appid=steam_appid,
+        )
+    return games
+
+
+def default_check(url: str) -> int:
+    """The HTTP status of a HEAD request for ``url`` (``HTTPError`` included)."""
+    request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "nadare-index"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+
+
+def _differs_stable(path: Path, data: bytes) -> bool:
+    """True when ``path`` is missing, not valid JSON, or differs from ``data`` beyond timestamps."""
+    if not path.exists():
+        return True
+    try:
+        return _stable(path.read_bytes()) != _stable(data)
+    except ValueError:
+        return True
+
+
+def _load_catalog_failures(path: Path) -> dict[str, dict[str, Any]]:
+    """The per-tag failure counts (``{}`` when the file is missing or corrupt)."""
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {
+        tag: entry
+        for tag, entry in value.items()
+        if isinstance(tag, str) and isinstance(entry, dict) and isinstance(entry.get("count"), int)
+    }
+
+
+def _write_catalog_failures(path: Path, failures: dict[str, dict[str, Any]]) -> None:
+    """Atomically persist the failure counts."""
+    text = json.dumps(failures, indent=2, sort_keys=True) + "\n"
+    _atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def _report_catalog_failures(
+    failures: dict[str, dict[str, Any]], fail_threshold: int
+) -> None:
+    """Print a canary line for every source that has failed enough runs in a row."""
+    for tag in sorted(failures):
+        entry = failures[tag]
+        count = entry["count"]
+        if count >= fail_threshold:
+            reason = str(entry.get("reason", ""))
+            print(f"CANARY: catalog source {tag} has failed {count} runs in a row ({reason})")
+
+
+def publish_catalog(
+    out: Path,
+    env: dict[str, str],
+    *,
+    games: dict[str, CatalogGame] | None = None,
+    check: Callable[[str], int] | None = None,
+    now: float | None = None,
+    deadline: float = 300.0,
+    clock: Callable[[], float] = time.monotonic,
+    failures_state: Path | None = None,
+    fail_threshold: int = 3,
+) -> bool:
+    """Publish ``<out>/index.json`` and per-game media files for the catalog.
+
+    A game whose resolver fails (or returns no usable version) keeps its
+    previously published entry and media; a media file whose content only
+    differs in ``generated_at`` is not rewritten. An empty index is never
+    published. Games not reached within ``deadline`` seconds keep their published entries.
+    When ``failures_state`` is set, consecutive resolver failures are counted there and a
+    ``CANARY:`` line is printed once a source reaches ``fail_threshold``.
+    Returns True only when a file was written.
+    """
+    games = default_catalog_games() if games is None else games
+    check = default_check if check is None else check
+    now = time.time() if now is None else now
+    generated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    index_path = out / "index.json"
+    failures = _load_catalog_failures(failures_state) if failures_state is not None else {}
+    previous_failures = {tag: dict(entry) for tag, entry in failures.items()}
+    try:
+        index = _load_history(index_path)
+    except RuntimeError as exc:
+        print(f"catalog: {exc}; rebuilding the index from this run")
+        index = {}
+    changed = False
+    successful: dict[str, Any] = {}
+    started = clock()
+    for tag in sorted(games):
+        if clock() - started > deadline:
+            print(f"catalog {tag}: deadline reached, keeping the published entries")
+            break
+        game = games[tag]
+        try:
+            version = game.resolve()
+        except Exception as exc:
+            reason = str(exc) or type(exc).__name__
+            print(
+                f"catalog {tag}: not refreshed this run ({reason}), keeping the published entry"
+            )
+            if failures_state is not None:
+                failures[tag] = {
+                    "count": failures.get(tag, {}).get("count", 0) + 1,
+                    "reason": reason[:120],
+                }
+            continue
+        if not isinstance(version, str) or not version.strip():
+            print(
+                f"catalog {tag}: not refreshed this run (no usable version), "
+                "keeping the published entry"
+            )
+            if failures_state is not None:
+                failures[tag] = {
+                    "count": failures.get(tag, {}).get("count", 0) + 1,
+                    "reason": "no usable version",
+                }
+            continue
+        version = version.strip()
+        if failures_state is not None:
+            failures.pop(tag, None)
+        media_path = out / f"{tag}.media.json"
+        previous: dict[str, Any] = {}
+        if media_path.exists():
+            try:
+                value = json.loads(media_path.read_text(encoding="utf-8"))
+            except ValueError:
+                value = None
+            if isinstance(value, dict):
+                previous = value
+        media: dict[str, Any] = {
+            "game_tag": tag,
+            "title": game.title,
+            "generated_at": generated_at,
+        }
+        for name in ("hero", "thumb"):
+            url = f"{game.image_base}/{name}.webp"
+            try:
+                status = check(url)
+            except OSError:
+                status = 503  # unreachable right now: same as a transient server error
+            if status == 200:
+                media[name] = url
+            elif name in previous:
+                # A 404 can be a deploy in flight and a 5xx/429 a hiccup: keep the last good value.
+                media[name] = previous[name]
+        if game.steam_appid is not None:
+            media["steam_appid"] = game.steam_appid
+        data = (json.dumps(media, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        if _differs_stable(media_path, data):
+            _atomic_write_bytes(media_path, data)
+            changed = True
+        successful[tag] = {
+            "title": game.title,
+            "version": version,
+            "media": f"{tag}.media.json",
+        }
+    index.update(successful)
+    if failures_state is not None:
+        if failures != previous_failures:
+            _write_catalog_failures(failures_state, failures)
+        _report_catalog_failures(failures, fail_threshold)
+    if not index:
+        return False
+    text = json.dumps(index, indent=2, sort_keys=True) + "\n"
+    if not index_path.exists() or index_path.read_text(encoding="utf-8") != text:
+        _atomic_write_bytes(index_path, text.encode("utf-8"))
+        changed = True
+    return changed
+
+
+def catalog_due(state: Path, max_age_hours: float, now: float | None = None) -> bool:
+    """True when the catalog has not been checked within ``max_age_hours``."""
+    now = time.time() if now is None else now
+    if max_age_hours <= 0 or not state.exists():
+        return True
+    return now - state.stat().st_mtime >= max_age_hours * 3600
+
+
+def mark_catalog_checked(state: Path, now: float | None = None) -> None:
+    """Record a successful catalog check in ``state``."""
+    now = time.time() if now is None else now
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.touch(exist_ok=True)
+    os.utime(state, (now, now))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--index", required=True, type=Path, help="nadare-index checkout")
@@ -359,6 +633,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-yostar", action="store_true")
     parser.add_argument("--skip-webview2", action="store_true")
     parser.add_argument("--skip-vcredist", action="store_true")
+    parser.add_argument("--catalog", action="store_true")
+    parser.add_argument("--catalog-force", action="store_true")
+    parser.add_argument("--catalog-max-age-hours", type=float, default=6)
+    parser.add_argument("--catalog-fail-threshold", type=int, default=3)
     args = parser.parse_args(argv)
 
     env = dict(os.environ)
@@ -371,6 +649,26 @@ def main(argv: list[str] | None = None) -> int:
         changed |= publish_webview2(args.index / "webview2", env)
     if not args.skip_vcredist:
         changed |= publish_vcredist(args.index / "vcredist", env)
+    if args.catalog:
+        state_root = Path(env.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+        state = state_root / "nadare-index" / "catalog-checked"
+        if not args.catalog_force and not catalog_due(state, args.catalog_max_age_hours):
+            print("catalog: checked recently, skipping")
+        else:
+            try:
+                changed |= publish_catalog(
+                    args.index / "catalog",
+                    env,
+                    failures_state=state_root / "nadare-index" / "catalog-failures.json",
+                    fail_threshold=args.catalog_fail_threshold,
+                )
+            except Exception as exc:  # noqa: BLE001 - the catalog is optional; keep the other steps
+                print(
+                    f"catalog: failed ({type(exc).__name__}: {exc}); other steps unaffected",
+                    file=sys.stderr,
+                )
+            else:
+                mark_catalog_checked(state)
     print("changed" if changed else "nothing to publish")
     return 0 if changed else UNCHANGED
 

@@ -34,3 +34,18 @@ def write_exe(path: Path, text: str = "#!/bin/sh\n") -> Path:
     path.write_text(text)
     path.chmod(0o755)
     return path
+
+
+def make_jwt(sub: str = "P12345", exp: int | None = None) -> str:
+    """An unsigned, JWT-shaped token for login tests."""
+    import base64
+    import json
+    import time
+
+    def b64(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+    exp = int(time.time()) + 86400 if exp is None else exp
+    header = b64(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
+    payload = b64(json.dumps({"sub": sub, "exp": exp}).encode())
+    return f"{header}.{payload}.{b64(b'signature-bytes')}"

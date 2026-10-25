@@ -1,0 +1,188 @@
+{
+ "resource": [
+  {
+   "dest": "PGR.exe",
+   "md5": "3e63ff00a2ff69073eae121e9cdcd1c3",
+   "size": 459192
+  },
+  {
+   "dest": "PGRBase.dll",
+   "md5": "5987fb2cdf28c9f06b6d16e08a214a5c",
+   "size": 34361168
+  },
+  {
+   "dest": "baselib.dll",
+   "md5": "c62544e30864c18a65451dce2ea80e07",
+   "size": 419096
+  },
+  {
+   "dest": "version.json",
+   "md5": "92cfd5bd32586cd66ac3f7474cd6f013",
+   "size": 24
+  },
+  {
+   "dest": "AntiCheatExpert/ACE-BASE.sys",
+   "md5": "7f565e836c8a015a74f655e7c18d61bc",
+   "size": 4283040
+  },
+  {
+   "dest": "UnityPlayer.dll",
+   "md5": "fc9758541dee3125a3b4b4a3c6a45f7a",
+   "size": 31039256
+  },
+  {
+   "dest": "AntiCheatExpert/ACE-Base.dat",
+   "md5": "09d7398a7c21debae6b470d0552d84fd",
+   "size": 65636
+  },
+  {
+   "dest": "AntiCheatExpert/ACE-Base64.dll",
+   "md5": "cd61d0af7a16bf865536aab09b45c0ff",
+   "size": 52605152
+  },
+  {
+   "dest": "AntiCheatExpert/ACE-Service64.exe",
+   "md5": "7215d73e107a31bbb6f434f4e3f55029",
+   "size": 3261264
+  },
+  {
+   "dest": "AntiCheatExpert/ACE-CORE.sys",
+   "md5": "26374581540c081ba36f9bf179cc3312",
+   "size": 2841776
+  },
+  {
+   "dest": "AntiCheatExpert/ACE-CORE.sys2",
+   "md5": "6416de004c98ec4058f667682580caf3",
+   "size": 2498720
+  },
+  {
+   "dest": "AntiCheatExpert/ACE-Setup64.exe",
+   "md5": "dfafe77ba792899ee4fc22775535f947",
+   "size": 898896
+  },
+  {
+   "dest": "PGR_Data/globalgamemanagers",
+   "md5": "ff5f8cc5e459e09dc83caae54c25d3cf",
+   "size": 414924
+  },
+  {
+   "dest": "PGR_Data/app.info",
+   "md5": "2dba52b7776512739ec4c2f9c94802dc",
+   "size": 12
+  },
+  {
+   "dest": "PGR_Data/boot.config",
+   "md5": "eb83ba62809fe743252b8700ad46dd41",
+   "size": 120
+  },
+  {
+   "dest": "PGR_Data/globalgamemanagers.assets",
+   "md5": "c2562f86781f2185754159203c75999a",
+   "size": 867108
+  },
+  {
+   "dest": "PGR_Data/level1",
+   "md5": "d94cd8782d0bfcff8ad44e3ceb71949f",
+   "size": 6332
+  },
+  {
+   "dest": "PGR_Data/globalgamemanagers.assets.resS",
+   "md5": "9b05b38451d82ef5180569a06c659d42",
+   "size": 1036800
+  },
+  {
+   "dest": "PGR_Data/level0",
+   "md5": "4d5448eb42d4df9f4d0d8da40bbf2457",
+   "size": 3816
+  },
+  {
+   "dest": "PGR_Data/level2",
+   "md5": "e14c87f053fb2ab8702f1f4779f1868e",
+   "size": 936
+  },
+  {
+   "dest": "PGR_Data/resources.assets.resS",
+   "md5": "f4ce34bcb740e6cd51655a8690e81024",
+   "size": 2669248
+  },
+  {
+   "dest": "PGR_Data/level3",
+   "md5": "e14c87f053fb2ab8702f1f4779f1868e",
+   "size": 936
+  },
+  {
+   "dest": "PGR_Data/RuntimeInitializeOnLoads.json",
+   "md5": "a073e268e7b0a5ddf4c66b230f515ecb",
+   "size": 2506
+  },
+  {
+   "dest": "PGR_Data/resources.assets",
+   "md5": "68ebc314518856dd1c04c6d58c0f93e1",
+   "size": 2157360
+  },
+  {
+   "dest": "PGR_Data/sharedassets0.assets",
+   "md5": "02436846a6e9f130b9d7b8797e608a7f",
+   "size": 780
+  },
+  {
+   "dest": "PGR_Data/ScriptingAssemblies.json",
+   "md5": "84dd077a04528ba6645de6f3b5c93227",
+   "size": 4749
+  },
+  {
+   "dest": "PGR_Data/sharedassets1.assets.resS",
+   "md5": "785b5ce7375356ebdcac7f0c585956e6",
+   "size": 2971056
+  },
+  {
+   "dest": "PGR_Data/sharedassets1.assets",
+   "md5": "3e1ead8ff881981e7e54edefba748bf1",
+   "size": 1120
+  },
+  {
+   "dest": "PGR_Data/sharedassets3.assets",
+   "md5": "afe5db8252028b8a890b9324df2a1e8c",
+   "size": 337
+  },
+  {
+   "dest": "PGR_Data/sharedassets2.assets",
+   "md5": "afe5db8252028b8a890b9324df2a1e8c",
+   "size": 337
+  },
+  {
+   "dest": "GameAssembly.dll",
+   "md5": "e55fc2a521eafabc054bde453db3f9bb",
+   "size": 170116104,
+   "chunkInfos": [
+    {
+     "start": 0,
+     "end": 104857599,
+     "md5": "e6deb2f2609d01108f93890d20c8e903"
+    },
+    {
+     "start": 104857600,
+     "end": 170116103,
+     "md5": "0b752401e228a7057ae7fe5980ab1d9c"
+    }
+   ]
+  },
+  {
+   "dest": "PGR_Data/Plugins/KRSDKRes/KRSDKWebView/libcef.dll",
+   "md5": "fd3b3143130f9f4d2c4503eda04ab348",
+   "size": 156463024,
+   "chunkInfos": [
+    {
+     "start": 0,
+     "end": 104857599,
+     "md5": "6a0d1ba6e1086307a8c1f0a6ef629f8c"
+    },
+    {
+     "start": 104857600,
+     "end": 156463023,
+     "md5": "641aab98181bc66e77353ae925849001"
+    }
+   ]
+  }
+ ]
+}

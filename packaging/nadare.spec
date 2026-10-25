@@ -49,6 +49,8 @@ datas = [
      "nadare/backends/czn/stub_src"),
     (os.path.join(SRC, "nadare", "backends", "czn", "build_stub.sh"),
      "nadare/backends/czn"),
+    # C sources the Endfield launch helper compiles at run time (core/endfield_shim.py).
+    (os.path.join(SRC, "nadare", "core", "shim_src"), "nadare/core/shim_src"),
 ]
 
 # Backends are imported lazily by the registry (core/backends.py _BUILTINS), and

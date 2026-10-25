@@ -984,7 +984,11 @@ class GameView(QWidget):
         known = "logged_in" in data and status.state != "not_installed"
         self.account_label.setVisible(known)
         if known:
-            self.account_label.setText("Logged in" if data["logged_in"] else "Not logged in")
+            text = "Logged in" if data["logged_in"] else "Not logged in"
+            account = data.get("account")
+            if data["logged_in"] and isinstance(account, str) and account:
+                text += f" as {account}"
+            self.account_label.setText(text)
 
     def _set_badge(self, state: str, message: str = "") -> None:
         pill_state, label = badge_style(state)

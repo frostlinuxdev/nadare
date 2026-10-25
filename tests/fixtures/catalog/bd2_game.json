@@ -1,0 +1,151 @@
+{
+  "download_url" : "https:\/\/pc.bd2.pmang.cloud\/browndust2starter\/games\/10000001",
+  "environment" : "LIVE",
+  "exe_file" : "BrownDust II.exe",
+  "first_version" : "20260812000",
+  "install_path" : "Browndust2_10000001",
+  "last_file" : {
+    "file" : "\/20261023000.tied.dat",
+    "file_size" : 412792209,
+    "tied_crc" : "736BBB9D",
+    "unziped_size" : 938665228,
+    "version" : "20261023000"
+  },
+  "last_version" : "20261023000",
+  "minimum_version" : "20230919000",
+  "patchs" : [
+    {
+      "patch_info" : {
+        "diff_crc" : "D945DE8D",
+        "diff_file" : "\/20260812000_20260814000.diff",
+        "diff_file_size" : 15076669,
+        "next_version" : "20260814000"
+      },
+      "tied_crc" : "104C6B75",
+      "version" : "20260812000"
+    },
+    {
+      "patch_info" : {
+        "diff_crc" : "850BD759",
+        "diff_file" : "\/20260814000_20260824000.diff",
+        "diff_file_size" : 31622858,
+        "next_version" : "20260824000"
+      },
+      "tied_crc" : "E43FB466",
+      "version" : "20260814000"
+    },
+    {
+      "patch_info" : {
+        "diff_crc" : "6E18AA03",
+        "diff_file" : "\/20260824000_20260824001.diff",
+        "diff_file_size" : 26688415,
+        "next_version" : "20260824001"
+      },
+      "tied_crc" : "F0C3C14F",
+      "version" : "20260824000"
+    },
+    {
+      "patch_info" : {
+        "diff_crc" : "D8C619CD",
+        "diff_file" : "\/20260824001_20260827000.diff",
+        "diff_file_size" : 16813470,
+        "next_version" : "20260827000"
+      },
+      "tied_crc" : "463982CE",
+      "version" : "20260824001"
+    },
+    {
+      "patch_info" : {
+        "diff_crc" : "4BD3BFF2",
+        "diff_file" : "\/20260827000_20260827001.diff",
+        "diff_file_size" : 3809,
+        "next_version" : "20260827001"
+      },
+      "tied_crc" : "8BD9A390",
+      "version" : "20260827000"
+    },
+    {
+      "patch_info" : {
+        "diff_crc" : "0801BCC0",
+        "diff_file" : "\/20260827001_20260827002.diff",
+        "diff_file_size" : 3813,
+        "next_version" : "20260827002"
+      },
+      "tied_crc" : "E4930FE1",
+      "version" : "20260827001"
+    },
+    {
+      "patch_info" : {
+        "diff_crc" : "BA216ABA",
+        "diff_file" : "\/20260827002_20260905000.diff",
+        "diff_file_size" : 47088975,
+        "next_version" : "20260905000"
+      },
+      "tied_crc" : "C3143868",
+      "version" : "20260827002"
+    },
+    {
+      "patch_info" : {
+        "diff_crc" : "C8B46B8A",
+        "diff_file" : "\/20260905000_20260918000.diff",
+        "diff_file_size" : 32323346,
+        "next_version" : "20260918000"
+      },
+      "tied_crc" : "F0A0E438",
+      "version" : "20260905000"
+    },
+    {
+      "patch_info" : {
+        "diff_crc" : "838D5441",
+        "diff_file" : "\/20260918000_20261002000.diff",
+        "diff_file_size" : 129316249,
+        "next_version" : "20261002000"
+      },
+      "tied_crc" : "37851F23",
+      "version" : "20260918000"
+    },
+    {
+      "patch_info" : {
+        "diff_crc" : "68192AA9",
+        "diff_file" : "\/20261002000_20261016000.diff",
+        "diff_file_size" : 22342811,
+        "next_version" : "20261016000"
+      },
+      "tied_crc" : "3FF8CB73",
+      "version" : "20261002000"
+    },
+    {
+      "patch_info" : {
+        "diff_crc" : "67CF2C0F",
+        "diff_file" : "\/20261016000_20261023000.diff",
+        "diff_file_size" : 12905163,
+        "next_version" : "20261023000"
+      },
+      "tied_crc" : "5D9A6085",
+      "version" : "20261016000"
+    }
+  ],
+  "registry" : {
+    "ie_emulation" : ""
+  },
+  "result" : 0,
+  "settings" : {
+    "service" : "bd2_gpg",
+    "ver" : 1
+  },
+  "shortcuts" : {
+    "icon_not_used_20260812" : "https:\/\/www.browndust2.com\/launcher-assets\/BrownDust2_gpg.ico",
+    "removes" : [
+      "브라운더스트2 런처",
+      "Browndust2 Launcher",
+      "Browndust2ランチャー",
+      "棕色塵埃2程式"
+    ]
+  },
+  "title" : "브라운더스트2",
+  "title_jp" : "ブラウンダスト2 (GPG)",
+  "title_kr" : "브라운더스트2 (GPG)",
+  "title_us" : "Brown Dust2 (GPG)",
+  "title_zh_cn" : "棕色尘埃2 (GPG)",
+  "title_zh_tw" : "棕色塵埃2 (GPG)"
+}

@@ -1,0 +1,69 @@
+<?xml version="1.0" ?>
+<config>
+	<AppVersion>0.0</AppVersion>
+	<ResVersion>1.4.9</ResVersion>
+	<UpdateResVersion>0.0</UpdateResVersion>
+	<Section>1.4</Section>
+	<UpdateBranchName>Publish_Update</UpdateBranchName>
+	<ExtensionDisabled>0001</ExtensionDisabled>
+	<ResSize>98011909917</ResSize>
+	<Hash>a777a6</Hash>
+	<BaseVerson appVersion="0.0">
+		<Res section="0.104" version="0.104.9" Tag="pakchunk104" ResSize="2009020181"/>
+		<Res section="0.103" version="0.103.9" Tag="pakchunk103" ResSize="1835488252"/>
+		<Res section="0.102" version="0.102.9" Tag="pakchunk102" ResSize="1752255391"/>
+		<Res section="0.101" version="0.101.9" Tag="pakchunk101" ResSize="1791590939"/>
+		<Res section="1.4" version="1.4.9" Tag="baseTag" ResSize="98011909917"/>
+	</BaseVerson>
+	<Tag>baseTag</Tag>
+	<Extra>
+		<BaseTag>
+			<item name="baseTag"/>
+		</BaseTag>
+		<speed>50</speed>
+		<maxThreadCnt>5</maxThreadCnt>
+		<tagTaskThreadCnt>2</tagTaskThreadCnt>
+		<diffHash>f624dfb9a7d9f58dab600f0d0799b1a4</diffHash>
+		<listHash>ede1d11136e3a02e1923c4198af58461</listHash>
+		<playAssetsTimeout>20</playAssetsTimeout>
+		<Devices>
+			<d name="cc62a32400090313b8eb85691b97459b_00059a3c7a00"/>
+			<d name="824e61c83ed90fafc2b42ce08a86d0ea_cc28aacac0b3"/>
+			<d name="90325a3534653d47c0aa09a853edf328_74563c3f4d68"/>
+			<d name="ec20571abcc65c8823ff3ed916ba320b_bcfce76e91eb"/>
+			<d name="2d98f6b1d7d8f371a8ff913f719fc0a2_60cf846a3c88"/>
+			<d name="7d6f2be961c24cadbbc4c2b0ea423476_08bfb8a7f0c1"/>
+			<d name="3b11b3e37e01cc3e756d6b8441cac0da"/>
+			<d name="522147b1e3975aba1e995c7022229b7a_cc28aacfc4e4"/>
+			<d name="84d9b66c06e08fa617192cef8db05b37_bcfce76bd6cb"/>
+			<d name=" 44799d0edb327b3fe291e43ae1b5c41f_30c599af288c"/>
+			<d name="c5a80da3f2e2e009060dc264fe6c9f84_3c7c3f140615"/>
+			<d name="2ad407d7bf542711bee4bcb2ef2080c5_cc28aa77e917"/>
+			<d name="1ca56e400f4647c73c7605b3ea5d1f88_c87f54a886dc"/>
+			<d name="f2079194d2e9beb37fcb4845bede649d_30c5994acaa3"/>
+			<d name="46fc8a93e77b70415822694c3a54d5e3_bcfce76d2715"/>
+			<d name="48e30a844d6b581683e9e298b301cbc1_04421a0af827"/>
+			<d name="6b18a40375cad2a5b002f4d0a5d66864_c87f546bc2e7"/>
+			<d name="993dc155806baa1f89178fb47235d165_30c5994ac873"/>
+			<d name="d4abda2928635cd8782dc9912592ae92_74563c64e66b"/>
+			<d name="2ad407d7bf542711bee4bcb2ef2080c5"/>
+			<d name="a234c0627d189bc88ff285beb1e37e4f_a0ad9f161136"/>
+			<d name="33688c08b5b0aa0631ed293c4624a043_08bfb842ae0e"/>
+			<d name="daeeb092304f93fc174777f97f11dd8d_c87f54a96c41"/>
+			<d name="2e230da6a61c03c93cda6e14cab5c929_bcfce764d41d"/>
+			<d name="7f36ad3d755fedaf3136624d69cb53f8_bcfce76456dc"/>
+			<d name="	 ec20571abcc65c8823ff3ed916ba320b_bcfce76e91eb"/>
+			<d name="d8a7e7923d9f9c0d860a4d4dabe47c40_08bfb8a73a7f"/>
+			<d name="6018502d212f58abc7edad060b327f77_3c7c3fba020a"/>
+			<d name="eb059363df611c144a8d5dde0ee74cc0_04421a088ca1"/>
+			<d name="dd7c51788eafc320be0c11c05847de27_58112293060d"/>
+			<d name="8b0f1446428ab065983422f8716d2f24_e89c2574a110"/>
+			<d name="9df9c3474f9674abcd27ee04d1ea93eb_b082e23fefeb"/>
+			<d name="42d2b4d85ed76dfd03aa7e04b34bbf8a_cc28aa350172"/>
+			<d name="a0af3d99902d2805b6cf38dd97df93c0_d45d64d1a9bf"/>
+			<d name="bf409766d9a8d28b43e051628182e478_08bfb8a73a3d"/>
+		</Devices>
+		<Compressed>1</Compressed>
+		<Encrypt>1</Encrypt>
+	</Extra>
+</config>

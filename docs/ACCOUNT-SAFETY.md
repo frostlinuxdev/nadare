@@ -90,6 +90,16 @@ Rules for Nadare:
   again to invalidate the old session chain, change password; FGO: contact
   support, re-secure with the game's own transfer/linking options).
 
+### Netmarble (Mongil: Star Dive)
+
+The game is given `NMAUTH_TOKEN` on its command line, so while it runs the
+launcher token is visible in `/proc/<pid>/cmdline` to any process running as
+the same user. Whether the game would read it from the environment alone has
+not been tested, so argv is still used. Treat
+this as a known exposure: it is limited to the local account and the token's
+lifetime, but it is not secret from same-user processes. A future launcher
+update should retest an environment-only handoff.
+
 ## GUI wiring
 
 - *Settings → Account → Remember me*: per-profile toggle, shown only for backends

@@ -16,10 +16,16 @@
 #
 # The runtime canary (scripts/check_runtime_canary.py) runs first and turns the
 # heartbeat "down" when a new runner needs a Steam Runtime the pinned umu lacks;
-# set NADARE_SKIP_CANARY=1 to disable it.
+# set NADARE_SKIP_CANARY=1 to disable it. The Kuro token canary
+# (scripts/check_kuro_tokens.py) runs with it and reports a refused or malformed token
+# (the one published in catalog/kuro-tokens.json, else the one built into Nadare), and
+# scripts/check_installer_pins.py reports a stale NTE installer pin or Endfield installer host.
+# With the catalog on, a source that fails three catalog runs in a row also turns it "down".
 #
 # The CZN latest-version probe needs curl_cffi importable by python3
 # (`python3 -m pip install --user curl_cffi`); without it the run fails.
+#
+# Set NADARE_INDEX_CATALOG=1 to also publish catalog/ (latest game versions and cover-art pointers).
 #
 # Set NADARE_HEARTBEAT_URL (e.g. an Uptime Kuma push monitor URL) to be pinged
 # after every successful run, including "nothing to publish". A monitor that
@@ -68,6 +74,38 @@ if [[ -z "${NADARE_SKIP_CANARY:-}" ]]; then
     fi
 fi
 
+# Kuro token canary: checks the tokens published in catalog/kuro-tokens.json, or the
+# ones built into Nadare when nothing is published, so it needs no catalog switch.
+# Exit 4 = problem, joined to the same "down" message; any other failure is logged
+# and ignored like the runtime canary.
+if [[ -z "${NADARE_SKIP_CANARY:-}" ]]; then
+    kuro_out="$(python3 "$root/scripts/check_kuro_tokens.py" --index "$index" 2>&1)"
+    kuro_rc=$?
+    [[ -z "$kuro_out" ]] || echo "$kuro_out" >&2
+    if [[ $kuro_rc -eq 4 ]]; then
+        kuro_down="$(grep '^CANARY:' <<<"$kuro_out" | head -c 400)"
+        canary_down="${canary_down:+$canary_down; }$kuro_down"
+        canary_down="${canary_down:0:400}"
+    elif [[ $kuro_rc -ne 0 ]]; then
+        echo "refresh_index: kuro token canary failed (exit $kuro_rc), ignored" >&2
+    fi
+fi
+
+# Installer pin canary: the pinned NTE installer and the Endfield installer host. Exit 4 =
+# a pin went stale; handled like the canaries above and never blocks publishing.
+if [[ -z "${NADARE_SKIP_CANARY:-}" ]]; then
+    pins_out="$(python3 "$root/scripts/check_installer_pins.py" 2>&1)"
+    pins_rc=$?
+    [[ -z "$pins_out" ]] || echo "$pins_out" >&2
+    if [[ $pins_rc -eq 4 ]]; then
+        pins_down="$(grep '^CANARY:' <<<"$pins_out" | head -c 400)"
+        canary_down="${canary_down:+$canary_down; }$pins_down"
+        canary_down="${canary_down:0:400}"
+    elif [[ $pins_rc -ne 0 ]]; then
+        echo "refresh_index: installer pin canary failed (exit $pins_rc), ignored" >&2
+    fi
+fi
+
 skip_yostar=--skip-yostar
 yostar_env="${NADARE_YOSTAR_ENV:-$HOME/nadare-index-refresh/yostar.env}"
 if [[ -f "$yostar_env" && ! -L "$yostar_env" ]]; then
@@ -83,8 +121,20 @@ if [[ -f "$yostar_env" && ! -L "$yostar_env" ]]; then
     set +a
     skip_yostar=
 fi
-python3 "$root/scripts/publish_index.py" --index "$index" $skip_yostar
+# The game catalog (catalog/, latest versions + art pointers) is opt-in: set NADARE_INDEX_CATALOG=1
+# (e.g. in /etc/nadare-index-refresh.env) to publish it. It runs at most every 6 hours.
+catalog=
+[[ "${NADARE_INDEX_CATALOG:-}" == 1 ]] && catalog=--catalog
+publish_out="$(python3 "$root/scripts/publish_index.py" --index "$index" $skip_yostar $catalog 2>&1)"
 rc=$?
+[[ -z "$publish_out" ]] || echo "$publish_out"
+# A catalog source that keeps failing prints CANARY: lines (see publish_catalog); they
+# turn the heartbeat "down" like the other canaries.
+catalog_down="$(grep '^CANARY:' <<<"$publish_out" | head -c 400)"
+if [[ -n "$catalog_down" ]]; then
+    canary_down="${canary_down:+$canary_down; }$catalog_down"
+    canary_down="${canary_down:0:400}"
+fi
 if [[ $rc -eq 3 ]]; then
     echo "refresh_index: nothing to publish"
     heartbeat
@@ -96,6 +146,7 @@ git -C "$index" add webview2
 git -C "$index" add yostar
 git -C "$index" add vcredist
 git -C "$index" add czn
+[[ -d "$index/catalog" ]] && git -C "$index" add catalog
 if git -C "$index" diff --cached --quiet; then
     echo "refresh_index: nothing to publish"
     heartbeat

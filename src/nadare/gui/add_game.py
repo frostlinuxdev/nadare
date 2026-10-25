@@ -35,6 +35,15 @@ from PyQt6.QtWidgets import (
 from ..core import backends, paths
 from ..core.backends import BackendError
 from ..core.config import MAX_PROFILE_NAME, Config, valid_profile_name
+from ..core.directkinds import (
+    CATALOG_KINDS,
+    DIRECT_WIZARD,
+    HOYO_KINDS,
+    LAUNCHER_WIZARD,
+    TIER_HELP,
+    hoyo_visible,
+    tier_of,
+)
 from .theme import apply_theme
 
 
@@ -46,6 +55,8 @@ class GameType:
     kind: str
     group: str = "Games"
     install_subdir: str = ""
+    #: Folder (under the prefix) that holds ``install_subdir``.
+    install_root: str = "drive_c/YostarGames"
     exes: tuple[str, ...] = ()
     #: Short tag shown after the title in the list (e.g. "Experimental").
     badge: str = ""
@@ -84,6 +95,37 @@ CATALOG: tuple[GameType, ...] = (
         install_subdir="StellaSora_EN",
         exes=("StellaSora.exe",),
     ),
+    *(
+        GameType(
+            title,
+            kind,
+            install_subdir=subdir,
+            install_root=root,
+            exes=(exe,),
+            badge=tier_of(kind),
+            badge_help=(
+                "Installs straight from the publisher's servers, without their launcher. "
+                + TIER_HELP[tier_of(kind)]
+            ),
+        )
+        for kind, title, root, subdir, exe in DIRECT_WIZARD
+    ),
+    *(
+        GameType(
+            title,
+            kind,
+            install_subdir=subdir,
+            install_root=root,
+            exes=(exe,),
+            badge=tier_of(kind),
+            badge_help=(
+                "Runs the publisher's own launcher under Wine/Proton. "
+                + TIER_HELP[tier_of(kind)]
+                + " Anti-cheat or launcher updates can break it."
+            ),
+        )
+        for kind, title, root, subdir, exe in LAUNCHER_WIZARD
+    ),
     GameType(
         "Wine / Proton game",
         "wine",
@@ -108,7 +150,9 @@ CATALOG: tuple[GameType, ...] = (
 )
 
 #: Kinds that run through a Wine/Proton prefix (so the wizard offers a prefix).
-PREFIX_KINDS = frozenset({"wine", "script", "arknights-yostar", "stellasora-yostar", "stove-czn"})
+PREFIX_KINDS = frozenset(
+    {"wine", "script", "arknights-yostar", "stellasora-yostar", "stove-czn", *CATALOG_KINDS}
+)
 
 #: Prefix kinds whose whole install lives inside the Wine prefix (no separate
 #: game folder), so a picked "install folder" is really the prefix.
@@ -116,8 +160,10 @@ PREFIX_ONLY_KINDS = frozenset({"stove-czn"})
 
 
 def available_catalog() -> tuple[GameType, ...]:
-    """The catalog minus built-in kinds this build could not load (e.g. no FGO)."""
+    """The catalog minus kinds this build could not load (e.g. no FGO) and the HoYo games."""
     missing = set(backends.unavailable())
+    if not hoyo_visible():
+        missing |= HOYO_KINDS
     return tuple(g for g in CATALOG if g.kind not in missing)
 
 
@@ -187,7 +233,7 @@ def detect_import(kind: str, folder: str | Path | None, prefix: str | Path | Non
         info["notes"].append(f"Found the Wine prefix at {adopted}.")
 
     if game and game.install_subdir:
-        subdir = Path("drive_c") / "YostarGames" / game.install_subdir
+        subdir = Path(game.install_root) / game.install_subdir
         # The user may have picked the prefix itself (which holds drive_c/...).
         layout_root = adopted if adopted is not None else folder_path
         if layout_root and (layout_root / "drive_c").is_dir():

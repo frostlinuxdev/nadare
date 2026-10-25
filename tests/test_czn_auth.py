@@ -266,6 +266,56 @@ def test_write_session_json_splices_into_an_existing_template(authmod, monkeypat
     assert "expire_time" in info
 
 
+def test_write_session_json_discards_another_accounts_template(authmod, monkeypatch, tmp_path):
+    out = tmp_path / "session.json"
+    out.write_text(
+        json.dumps(
+            {
+                "access_token": "OLD",
+                "member_no": "A-1",
+                "guid": "G-A",
+                "member_nickname": "UserA",
+                "country_cd": "ZZ",
+                "birth_dt": "19900101",
+                "person_verify_yn": "y",
+                "email_verify_yn": "n",
+            }
+        )
+    )
+    stove, _ = _stove(authmod, monkeypatch, state={"member_no": "B-2", "guid": "G-B"})
+    stove.game_access = "NEW"
+    stove.game_refresh = "NEW_RT"
+    info = stove.write_session_json(out)
+    assert info["member_no"] == "B-2" and info["guid"] == "G-B"
+    for key in ("member_nickname", "country_cd", "birth_dt", "person_verify_yn"):
+        assert info.get(key) != {
+            "member_nickname": "UserA",
+            "country_cd": "ZZ",
+            "birth_dt": "19900101",
+            "person_verify_yn": "y",
+        }[key]
+    assert info["email_verify_yn"] != "n"
+
+
+def test_write_session_json_keeps_a_template_from_the_same_account(authmod, monkeypatch, tmp_path):
+    out = tmp_path / "session.json"
+    out.write_text(
+        json.dumps(
+            {
+                "access_token": "OLD",
+                "member_no": "B-2",
+                "guid": "G-B",
+                "member_nickname": "UserB",
+                "country_cd": "DE",
+            }
+        )
+    )
+    stove, _ = _stove(authmod, monkeypatch, state={"member_no": "B-2", "guid": "G-B"})
+    stove.game_access = "NEW"
+    info = stove.write_session_json(out)
+    assert info["member_nickname"] == "UserB" and info["country_cd"] == "DE"
+
+
 def test_write_private_is_atomic_and_0600(authmod, tmp_path):
     path = tmp_path / "secret.json"
     authmod._write_private(path, '{"k": 1}')

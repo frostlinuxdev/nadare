@@ -69,10 +69,11 @@ feeds.*
 | **Arknights** (EN, Yostar) | `arknights-yostar` | Install/update/launch through Proton; official launcher downloads are direct and verified. |
 | **Stella Sora** (EN, Yostar) | `stellasora-yostar` | Install/update/launch through Proton. |
 | **Fate/Grand Order (NA)** | `fgo-lepton` | **Experimental**: Android container (lepton-fgo); needs podman, a kernel with binderfs and an NVIDIA GPU. **Not installable in 0.1.0b4** (its lepton-fgo release is not in the public index yet); planned for a later beta. |
+| **Game catalog** (Brown Dust 2, Aether Gazer, Mongil: Star Dive, Wuthering Waves, Girls' Frontline 2, Arknights: Endfield, Punishing: Gray Raven, Neverness to Everness, NIKKE) | `direct-*`, `launcher-*` | **Experimental**: installs from each publisher's own servers (or runs their launcher), with a *Verified* / *Experimental* tier per game. See [docs/CATALOG.md](docs/CATALOG.md). |
 | Wine / Steam / script / Waydroid | generic | Scaffolding: you supply the prefix, exe or app. Not a supported product yet. |
 
-Nadare is a beta: the first three are the tested paths (FGO is experimental,
-the generic backends are scaffolding). See [PLAN.md](PLAN.md) for what is done
+Nadare is a beta: the first three are the tested paths (the game catalog and FGO
+are experimental, the generic backends are scaffolding). See [PLAN.md](PLAN.md) for what is done
 and what is left.
 
 Nadare runs on the shoulders of projects that already work: it drives

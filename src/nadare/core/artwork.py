@@ -610,12 +610,42 @@ def _sgdb_key(profile: dict) -> str | None:
     return str(key) if key else None
 
 
+def _catalog_art(profile: dict) -> tuple[str, int | None] | None:
+    """The (site image folder, Steam app id) a catalog game ships with, if it is one."""
+    from . import directkinds
+
+    return directkinds.ART.get(str(profile.get("backend") or ""))
+
+
 def _steam_candidates(profile: dict, kind: str = "cover") -> Iterator[str]:
     appid = profile.get("steam_appid")
+    if not appid:
+        catalog = _catalog_art(profile)
+        appid = catalog[1] if catalog else None
     if not appid:
         return
     for name in _STEAM_FILES.get(kind, _STEAM_FILES["cover"]):
         yield STEAM_CDN.format(appid=appid, name=name)
+
+
+#: Image names on the FrostLinux site to try for each art kind, best first.
+_SITE_FILES: dict[str, tuple[str, ...]] = {
+    "cover": ("cover", "thumb", "hero"),
+    "thumb": ("thumb",),
+    "hero": ("hero", "thumb"),
+    "icon": ("thumb",),
+}
+
+
+def _site_candidates(profile: dict, kind: str = "cover") -> Iterator[str]:
+    """The FrostLinux site's own images for a catalog game (``hero.webp`` / ``thumb.webp``)."""
+    from . import directkinds
+
+    catalog = _catalog_art(profile)
+    if not catalog:
+        return
+    for name in _SITE_FILES.get(kind, ()):
+        yield f"{directkinds.SITE_IMAGES}/{catalog[0]}/{name}.webp"
 
 
 def _norm_title(text: object) -> str:
@@ -677,11 +707,13 @@ def _anilist_candidates(term: str) -> Iterator[str]:
 def _candidates(profile: dict, title: str | None, kind: str = "cover") -> Iterator[str]:
     """Yield image URLs from the usable sources, best first, lazily.
 
-    Steam CDN (publisher-supplied store art) always applies. SteamGridDB is only
-    queried when an API key is present; AniList only when the user opts in with
+    Steam CDN (publisher-supplied store art) always applies; the catalog games also have images
+    on the FrostLinux site and a default Steam app id (``core.directkinds.ART``). SteamGridDB
+    is only queried when an API key is present; AniList only when the user opts in with
     ``NADARE_ART_THIRD_PARTY=1``. Third-party scraping is off by default.
     """
     yield from _steam_candidates(profile, kind)
+    yield from _site_candidates(profile, kind)
 
     key = _sgdb_key(profile)
     if key:
@@ -755,6 +787,41 @@ def _sync_dir(path: Path) -> None:
         os.close(fd)
 
 
+#: Formats worth re-encoding; GIFs may be animated and WebP is already small.
+_RECODE_EXTS = frozenset({"png", "jpg", "bmp"})
+WEBP_QUALITY = 90
+
+
+def _recode_webp(content: bytes, ext: str) -> tuple[bytes, str]:
+    """Re-encode a downloaded PNG/JPEG/BMP as WebP when that is smaller.
+
+    Publisher art arrives as large PNGs; WebP keeps the picture (and any alpha) at a
+    fraction of the size. Uses Qt's image writer when Qt is importable and its WebP
+    plugin is present; on any failure the original bytes are returned untouched.
+    """
+    if ext not in _RECODE_EXTS:
+        return content, ext
+    try:
+        from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+        from PyQt6.QtGui import QImage
+
+        image = QImage.fromData(content)
+        if image.isNull():
+            return content, ext
+        data = QByteArray()
+        buffer = QBuffer(data)
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        if not image.save(buffer, "WEBP", WEBP_QUALITY):
+            return content, ext
+        encoded = bytes(data)
+    except Exception as exc:  # noqa: BLE001 - recoding is an optimisation only
+        log.debug("webp recode skipped: %s", exc)
+        return content, ext
+    if not encoded or len(encoded) >= len(content):
+        return content, ext
+    return encoded, "webp"
+
+
 def _store(
     url: str,
     slug: str,
@@ -780,6 +847,7 @@ def _store(
         if cached_official is not None:
             return cached_official
     content, ext = _download(url, timeout=timeout, cancel=cancel)
+    content, ext = _recode_webp(content, ext)
     dest = cache_dir() / f"{safe_slug}-{safe_kind}.{ext}"
     try:
         if dest.resolve().parent != cache_dir().resolve():

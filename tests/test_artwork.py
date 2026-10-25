@@ -677,3 +677,102 @@ def test_download_closes_the_response_when_the_body_is_too_big(fake: FakeRequest
     fake.routes["https://cdn.example/a.jpg"] = resp
     assert artwork.download("https://cdn.example/a.jpg", "game", "hero", ("cdn.example",)) is None
     assert resp.closed == 1
+
+
+# ------------------------------------------------------------------ catalog games
+def _urls(profile: dict, kind: str = "cover") -> list[str]:
+    return list(artwork._candidates(profile, None, kind))
+
+
+def test_a_catalog_game_gets_its_steam_app_and_the_site_images() -> None:
+    urls = _urls({"backend": "direct-nte"})
+    steam = [u for u in urls if "steamstatic" in u]
+    site = [u for u in urls if "frostlinuxdev.github.io" in u]
+    assert steam and all("/apps/4508340/" in u for u in steam)
+    assert site == [
+        "https://frostlinuxdev.github.io/images/neverness-to-everness/cover.webp",
+        "https://frostlinuxdev.github.io/images/neverness-to-everness/thumb.webp",
+        "https://frostlinuxdev.github.io/images/neverness-to-everness/hero.webp",
+    ]
+    assert urls.index(steam[0]) < urls.index(site[0])  # publisher store art first
+
+
+def test_hero_art_prefers_the_hero_image_and_falls_back_to_the_thumb() -> None:
+    site = [u for u in _urls({"backend": "direct-endfield"}, "hero") if "github.io" in u]
+    assert [u.rsplit("/", 1)[1] for u in site] == ["hero.webp", "thumb.webp"]
+
+
+def test_a_game_without_a_steam_id_still_gets_site_images() -> None:
+    urls = _urls({"backend": "direct-genshin"})
+    assert not [u for u in urls if "steamstatic" in u]
+    assert [u for u in urls if "github.io" in u]
+
+
+def test_a_profile_steam_id_wins_over_the_catalog_default() -> None:
+    urls = _urls({"backend": "direct-nte", "steam_appid": 111})
+    assert "/apps/111/" in urls[0] and not [u for u in urls if "/apps/4508340/" in u]
+
+
+def test_other_backends_get_no_catalog_candidates() -> None:
+    assert _urls({"backend": "arknights-yostar"}) == []
+    assert _urls({}) == []
+
+
+def test_the_art_table_covers_every_catalog_kind_and_only_https_public_hosts() -> None:
+    from nadare.core import directkinds as dk
+
+    assert set(dk.ART) == set(dk.CATALOG_KINDS)
+    for kind in dk.ART:
+        for u in _urls({"backend": kind}, "cover") + _urls({"backend": kind}, "hero"):
+            assert artwork.host_allowed(u, ()), u
+
+
+# ------------------------------------------------------------------ webp recoding
+def _png_bytes(width: int = 400, height: int = 300) -> bytes:
+    from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+    from PyQt6.QtGui import QColor, QImage
+
+    image = QImage(width, height, QImage.Format.Format_ARGB32)
+    image.fill(QColor(30, 60, 200, 255))
+    data = QByteArray()
+    buffer = QBuffer(data)
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    assert image.save(buffer, "PNG")
+    return bytes(data)
+
+
+def test_a_downloaded_png_is_cached_as_a_smaller_webp(fake: FakeRequests) -> None:
+    pytest.importorskip("PyQt6.QtGui")
+    png = _png_bytes()
+    url = "https://cdn.example/hero.png"
+    fake.routes[url] = FakeResponse(content=png, headers={"Content-Type": "image/png"})
+    path = artwork.download(url, "game", "hero", ("cdn.example",))
+    assert path is not None and path.suffix == ".webp"
+    assert path.read_bytes()[:4] == b"RIFF" and path.read_bytes()[8:12] == b"WEBP"
+    assert path.stat().st_size < len(png)
+
+
+def test_bytes_qt_cannot_decode_are_cached_unchanged(fake: FakeRequests) -> None:
+    url = "https://cdn.example/a.png"
+    fake.routes[url] = FakeResponse(content=b"IMG", headers={"Content-Type": "image/png"})
+    path = artwork.download(url, "game", "hero", ("cdn.example",))
+    assert path is not None and path.suffix == ".png" and path.read_bytes() == b"IMG"
+
+
+def test_gifs_and_webps_are_not_recoded() -> None:
+    assert artwork._recode_webp(b"GIF89a....", "gif") == (b"GIF89a....", "gif")
+    assert artwork._recode_webp(b"RIFFxxxxWEBP", "webp") == (b"RIFFxxxxWEBP", "webp")
+
+
+def test_recoding_is_skipped_when_qt_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_qt(name, *args, **kwargs):
+        if name.startswith("PyQt6"):
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_qt)
+    assert artwork._recode_webp(b"\x89PNGdata", "png") == (b"\x89PNGdata", "png")

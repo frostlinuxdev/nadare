@@ -419,3 +419,12 @@ def test_certifi_is_pinned_past_the_emsign_incident():
     assert pin is not None, "requirements.txt must pin certifi"
     assert tuple(int(p) for p in pin.group(1).split(".")) >= (2026, 10, 19)
     assert "certifi>=2026.10.19" in _text("pyproject.toml")
+
+
+def test_the_appimage_spec_ships_the_endfield_helper_source():
+    """endfield_shim compiles core/shim_src/suspend_start.c at run time, so the bundle needs it."""
+    spec = _text("packaging/nadare.spec")
+    assert re.search(r'"core",\s*"shim_src"\)[^)]*"nadare/core/shim_src"', spec), (
+        "packaging/nadare.spec must ship nadare/core/shim_src (the AppImage lacked it in 0.1.0b7)"
+    )
+    assert (_REPO_ROOT / "src/nadare/core/shim_src/suspend_start.c").is_file()
