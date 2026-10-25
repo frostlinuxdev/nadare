@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import itertools
 import lzma
+import os
 import stat
 import struct
 import threading
@@ -507,6 +508,31 @@ def _safe_name(raw: str) -> str:
     return clean
 
 
+def _safe_destination_path(dest: Path, relative: str) -> Path:
+    """Return an extraction path with no symlinked components below ``dest``."""
+    relative = _safe_name(relative)
+    dest_real = Path(os.path.realpath(dest))
+    target = dest / relative
+    current = dest
+    for part in relative.split("/"):
+        current = current / part
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise SevenZipError(f"cannot inspect destination path {relative!r}: {exc}") from exc
+        if stat.S_ISLNK(mode):
+            raise SevenZipError(f"symlink in destination path {relative!r}")
+    try:
+        parent_real = Path(os.path.realpath(target.parent))
+        if os.path.commonpath((str(dest_real), str(parent_real))) != str(dest_real):
+            raise SevenZipError(f"destination path escapes root: {relative!r}")
+    except ValueError as exc:
+        raise SevenZipError(f"destination path escapes root: {relative!r}") from exc
+    return target
+
+
 def _check_attrs(path: str, attrs: int | None, is_dir: bool) -> None:
     if attrs is None or not (attrs & 0x8000):
         return
@@ -775,7 +801,7 @@ def _extract_archive(
 
     dest.mkdir(parents=True, exist_ok=True)
     for item in dirs:
-        (dest / item.path).mkdir(parents=True, exist_ok=True)
+        _safe_destination_path(dest, item.path).mkdir(parents=True, exist_ok=True)
 
     lock = threading.Lock()
     count = 0
@@ -800,8 +826,9 @@ def _extract_archive(
             progress(done, total)
 
     for item in empty_files:
-        out = dest / item.path
+        out = _safe_destination_path(dest, item.path)
         out.parent.mkdir(parents=True, exist_ok=True)
+        out = _safe_destination_path(dest, item.path)
         out.write_bytes(b"")
         add_count(1)
 
@@ -817,8 +844,9 @@ def _extract_archive(
         while current <= last_stream and folder.stream_sizes[current] == 0:
             record = stream_map.get(current)
             if record is not None:
-                out = dest_dir / record.path
+                out = _safe_destination_path(dest_dir, record.path)
                 out.parent.mkdir(parents=True, exist_ok=True)
+                out = _safe_destination_path(dest_dir, record.path)
                 out.write_bytes(b"")
                 if record.digest is not None and record.digest != 0:
                     out.unlink(missing_ok=True)
@@ -862,8 +890,9 @@ def _extract_archive(
                     record = stream_map.get(current)
                     if record is not None:
                         if out_file is None:
-                            active = dest / record.path
+                            active = _safe_destination_path(dest, record.path)
                             active.parent.mkdir(parents=True, exist_ok=True)
+                            active = _safe_destination_path(dest, record.path)
                             out_file = open(active, "wb")
                             running_crc = 0
                         out_file.write(piece)
@@ -875,8 +904,9 @@ def _extract_archive(
                         record = stream_map.get(current)
                         if record is not None:
                             if out_file is None:
-                                active = dest / record.path
+                                active = _safe_destination_path(dest, record.path)
                                 active.parent.mkdir(parents=True, exist_ok=True)
+                                active = _safe_destination_path(dest, record.path)
                                 out_file = open(active, "wb")
                                 running_crc = 0
                             out_file.close()

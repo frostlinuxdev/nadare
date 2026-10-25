@@ -8,11 +8,12 @@ import json
 from pathlib import Path
 
 import pytest
-import zstandard
+zstandard = pytest.importorskip("zstandard")
 
 from _httpserver import Server as _Server
 from nadare.core import directdl as dd
 from nadare.core import sophon
+from nadare.core.backends import BackendError
 from nadare.core.events import Cancel, Cancelled
 from nadare.core.sources import hoyo
 
@@ -179,6 +180,214 @@ def test_update_reuses_unchanged_chunks_and_resizes_the_file(servers, tmp_path):
     assert len(build.chunk_requests()) == 2  # the changed chunk and the new tail only
 
 
+def test_failed_update_keeps_old_file_and_cleans_staging_file(servers, tmp_path, monkeypatch):
+    old = b"old" * 100
+    (tmp_path / "f.bin").write_bytes(old)
+    build = Build({"f.bin": b"new" * 100}, chunk_size=100)
+    servers(build)
+    real_fetch = sophon._fetch_chunk
+    calls = 0
+
+    def flaky_fetch(pool, pkg, chunk, cancel=None):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise sophon.SophonError("simulated chunk failure")
+        return real_fetch(pool, pkg, chunk, cancel)
+
+    monkeypatch.setattr(sophon, "_fetch_chunk", flaky_fetch)
+    with pytest.raises(dd.DirectError, match="simulated chunk failure"):
+        dd.sync(plan_for(build), tmp_path, workers=1)
+
+    assert (tmp_path / "f.bin").read_bytes() == old
+    assert not (tmp_path / "f.bin.nadare-new").exists()
+    assert not (tmp_path / ".nadare" / "sophon-game.done").exists()
+
+
+def test_cancelled_update_keeps_old_file_and_cleans_staging_file(servers, tmp_path, monkeypatch):
+    old = b"old" * 100
+    (tmp_path / "f.bin").write_bytes(old)
+    build = Build({"f.bin": b"new" * 100}, chunk_size=100)
+    servers(build)
+    cancel = Cancel()
+    real_fetch = sophon._fetch_chunk
+    calls = 0
+
+    def cancel_after_first(pool, pkg, chunk, combined=None):
+        nonlocal calls
+        calls += 1
+        data = real_fetch(pool, pkg, chunk, combined)
+        if calls == 2:
+            cancel.cancel()
+        return data
+
+    monkeypatch.setattr(sophon, "_fetch_chunk", cancel_after_first)
+    with pytest.raises(Cancelled):
+        dd.sync(plan_for(build), tmp_path, cancel=cancel, workers=1)
+
+    assert (tmp_path / "f.bin").read_bytes() == old
+    assert not (tmp_path / "f.bin.nadare-new").exists()
+    assert not (tmp_path / ".nadare" / "sophon-game.done").exists()
+
+
+def test_successful_update_atomically_replaces_file(servers, tmp_path):
+    old = b"old" * 100
+    new = b"new" * 100
+    target = tmp_path / "f.bin"
+    target.write_bytes(old)
+    before = target.stat().st_ino
+    build = Build({"f.bin": new}, chunk_size=100)
+    servers(build)
+
+    dd.sync(plan_for(build), tmp_path, workers=1)
+
+    assert target.read_bytes() == new
+    assert target.stat().st_ino != before
+    assert not (tmp_path / "f.bin.nadare-new").exists()
+
+
+def test_failed_then_successful_update_preserves_executable_mode(servers, tmp_path, monkeypatch):
+    target = tmp_path / "game.bin"
+    old = b"old" * 100
+    new = b"new" * 100
+    target.write_bytes(old)
+    target.chmod(0o755)
+    build = Build({"game.bin": new}, chunk_size=100)
+    servers(build)
+    real_fetch = sophon._fetch_chunk
+
+    def fail_once(*args, **kwargs):
+        monkeypatch.setattr(sophon, "_fetch_chunk", real_fetch)
+        raise sophon.SophonError("simulated transient chunk failure")
+
+    monkeypatch.setattr(sophon, "_fetch_chunk", fail_once)
+    with pytest.raises(dd.DirectError, match="simulated transient chunk failure"):
+        dd.sync(plan_for(build), tmp_path, workers=1)
+
+    assert target.read_bytes() == old
+    assert target.stat().st_mode & 0o777 == 0o755
+    dd.sync(plan_for(build), tmp_path, workers=1)
+
+    assert target.read_bytes() == new
+    assert target.stat().st_mode & 0o777 == 0o755
+
+
+def test_unchanged_sophon_file_is_not_rewritten(servers, tmp_path):
+    build = Build({"f.bin": b"unchanged" * 100}, chunk_size=100)
+    servers(build)
+    pkg = build.package()
+    sophon.sync_package(pkg, tmp_path, workers=1)
+    target = tmp_path / "f.bin"
+    before = target.stat()
+
+    sophon.sync_package(pkg, tmp_path, workers=1)
+
+    after = target.stat()
+    assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
+
+def test_stale_sophon_staging_file_is_removed_on_next_sync(servers, tmp_path):
+    build = Build({"f.bin": b"recovered" * 100}, chunk_size=100)
+    servers(build)
+    (tmp_path / "f.bin.nadare-new").write_bytes(b"partial from a crash")
+
+    dd.sync(plan_for(build), tmp_path, workers=1)
+
+    assert (tmp_path / "f.bin").read_bytes() == build.files["f.bin"]
+    assert not (tmp_path / "f.bin.nadare-new").exists()
+
+
+def test_cancelled_fresh_install_resumes_only_missing_chunks(servers, tmp_path, monkeypatch):
+    build = Build({"f.bin": b"resume me" * 100}, chunk_size=100)
+    server = servers(build)
+    cancel = Cancel()
+    real_emit = sophon.download_module._emit_progress
+
+    def cancel_after_first_written_chunk(say, stage, done, total):
+        real_emit(say, stage, done, total)
+        if done >= 100:
+            cancel.cancel()
+
+    monkeypatch.setattr(sophon.download_module, "_emit_progress", cancel_after_first_written_chunk)
+    with pytest.raises(Cancelled):
+        dd.sync(plan_for(build), tmp_path, cancel=cancel, workers=1)
+    first_requests = len(build.chunk_requests())
+    assert first_requests == 1
+
+    monkeypatch.setattr(sophon.download_module, "_emit_progress", real_emit)
+    dd.sync(plan_for(build), tmp_path, workers=1)
+
+    assert (tmp_path / "f.bin").read_bytes() == build.files["f.bin"]
+    assert len(build.chunk_requests()) - first_requests == 8
+    assert not (tmp_path / "f.bin.nadare-new").exists()
+
+
+def test_changed_file_is_replaced_before_next_file_download(servers, tmp_path, monkeypatch):
+    old = {"a.bin": b"A" * 100, "b.bin": b"B" * 100}
+    new = {"a.bin": b"a" * 100, "b.bin": b"b" * 100}
+    for name, data in old.items():
+        (tmp_path / name).write_bytes(data)
+    build = Build(new, chunk_size=100)
+    servers(build)
+    b_chunks = {c.name for entry in sophon.parse_manifest(build.manifest_raw) if entry.path == "b.bin" for c in entry.chunks}
+    real_fetch = sophon._fetch_chunk
+    checked = []
+
+    def observe_order(pool, pkg, chunk, cancel=None):
+        if chunk.name in b_chunks:
+            checked.append((tmp_path / "a.bin").read_bytes())
+        return real_fetch(pool, pkg, chunk, cancel)
+
+    monkeypatch.setattr(sophon, "_fetch_chunk", observe_order)
+    dd.sync(plan_for(build), tmp_path, workers=1)
+
+    assert checked == [new["a.bin"]]
+
+
+def test_update_checks_space_before_staging_file(servers, tmp_path, monkeypatch):
+    from nadare.core import diskspace
+
+    old = b"old" * 100
+    (tmp_path / "f.bin").write_bytes(old)
+    build = Build({"f.bin": b"new" * 100}, chunk_size=100)
+    servers(build)
+    checked = []
+
+    def no_space(path, needed, margin=0.05):
+        checked.append((Path(path), needed))
+        raise BackendError("simulated disk full", code=4)
+
+    monkeypatch.setattr(diskspace, "check_space", no_space)
+    with pytest.raises(BackendError, match="simulated disk full"):
+        dd.sync(plan_for(build), tmp_path, workers=1)
+
+    assert checked == [(tmp_path, len(build.files["f.bin"]))]
+    assert (tmp_path / "f.bin").read_bytes() == old
+    assert not (tmp_path / "f.bin.nadare-new").exists()
+
+
+def test_existing_file_chunk_checks_run_in_workers_once_per_chunk(servers, tmp_path, monkeypatch):
+    build = Build({"f.bin": b"unchanged" * 100}, chunk_size=100)
+    servers(build)
+    target = tmp_path / "f.bin"
+    target.write_bytes(build.files["f.bin"])
+    seen = []
+    real_matches = sophon._chunk_matches
+
+    def record_thread(fh, chunk):
+        seen.append(threading.current_thread().name)
+        return real_matches(fh, chunk)
+
+    import threading
+
+    monkeypatch.setattr(sophon, "_chunk_matches", record_thread)
+    sophon.sync_package(build.package(), tmp_path, workers=2)
+
+    chunk_count = len(sophon.parse_manifest(build.manifest_raw)[0].chunks)
+    assert len(seen) == chunk_count
+    assert all(name != "MainThread" for name in seen)
+
+
 def test_shrinking_file_is_truncated(servers, tmp_path):
     (tmp_path / "f.bin").write_bytes(b"z" * 1000)
     build = Build({"f.bin": b"z" * 100}, chunk_size=100)
@@ -228,6 +437,72 @@ def test_unsafe_manifest_path_never_writes_outside(servers, tmp_path):
     with pytest.raises(dd.DirectError):
         dd.sync(plan_for(build), tmp_path / "game")
     assert not (tmp_path / "x.bin").exists()
+
+
+def test_manifest_path_through_symlinked_parent_is_rejected(servers, tmp_path):
+    build = Build({"link/save": b"attacker"}, chunk_size=100)
+    servers(build)
+    root = tmp_path / "game"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    original = outside / "save"
+    original.write_bytes(b"USERDATA")
+    (root / "link").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(dd.DirectError, match="symlink|outside|unsafe"):
+        dd.sync(plan_for(build), root)
+
+    assert original.read_bytes() == b"USERDATA"
+    assert not (root / ".nadare" / "sophon-game.done").exists()
+
+
+def test_manifest_path_to_symlinked_file_is_rejected(servers, tmp_path):
+    build = Build({"save": b"attacker"}, chunk_size=100)
+    servers(build)
+    root = tmp_path / "game"
+    outside = tmp_path / "outside-save"
+    root.mkdir()
+    outside.write_bytes(b"USERDATA")
+    (root / "save").symlink_to(outside)
+
+    with pytest.raises(dd.DirectError, match="symlink|outside|unsafe"):
+        dd.sync(plan_for(build), root)
+
+    assert outside.read_bytes() == b"USERDATA"
+    assert not (root / ".nadare" / "sophon-game.done").exists()
+
+
+def test_update_refuses_symlinked_atomic_staging_target(servers, tmp_path):
+    root = tmp_path / "game"
+    root.mkdir()
+    old = b"old" * 100
+    (root / "f.bin").write_bytes(old)
+    outside = tmp_path / "outside-stage"
+    outside.write_bytes(b"USERDATA")
+    (root / "f.bin.nadare-new").symlink_to(outside)
+    build = Build({"f.bin": b"new" * 100}, chunk_size=100)
+    servers(build)
+
+    with pytest.raises(dd.DirectError, match="symlink|outside|unsafe"):
+        dd.sync(plan_for(build), root, workers=1)
+
+    assert (root / "f.bin").read_bytes() == old
+    assert outside.read_bytes() == b"USERDATA"
+    assert not (root / ".nadare" / "sophon-game.done").exists()
+
+
+def test_symlinked_install_root_is_allowed(servers, tmp_path):
+    build = Build({"save": b"regular content"}, chunk_size=100)
+    servers(build)
+    real_root = tmp_path / "real-game"
+    real_root.mkdir()
+    root_link = tmp_path / "game-link"
+    root_link.symlink_to(real_root, target_is_directory=True)
+
+    dd.sync(plan_for(build), root_link)
+
+    assert (real_root / "save").read_bytes() == b"regular content"
 
 
 # --------------------------------------------------------------- the HoYo source
@@ -416,3 +691,16 @@ def test_direct_backend_reports_an_unfinished_sophon_package_as_missing(tmp_path
     done.mkdir(parents=True)
     (done / "sophon-g-1.done").write_text("m1")
     assert backend._missing_entries(verify=False) == []
+
+
+def test_a_missing_zstandard_does_not_break_importing_or_the_other_games(monkeypatch):
+    import importlib
+    import sys
+
+    monkeypatch.setitem(sys.modules, "zstandard", None)  # `import zstandard` now raises
+    for name in ("nadare.core.sophon", "nadare.core.directdl", "nadare.backends.direct"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    mod = importlib.import_module("nadare.core.sophon")  # must import without it
+    importlib.import_module("nadare.backends.direct")
+    with pytest.raises(mod.SophonError, match="zstandard"):
+        mod._zstd()

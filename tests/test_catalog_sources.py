@@ -182,6 +182,20 @@ def test_gfl2_plan():
     all_paths_safe(plan)
 
 
+def test_gfl2_haoplay_global_plan_is_only_the_small_client_from_the_intl_cdn():
+    cdn = "https://gf2-intl-cdn.17996cdn.com/prod/"
+    flex = "https://gf2-launcher-intl.haoplay.com/flexible_config"
+    f = FakeFetch({flex: fx("gfl2_haoplay_flexible_config.json")})  # nothing else is fetched
+    plan = gfl2.resolve_haoplay(f)
+    assert plan.game_tag == "gfl2-haoplay"
+    assert plan.version == "2.0.3936.14886.28279+client-2.0.3936"
+    assert plan.exe == "GF2_Exilium.exe"
+    assert plan.files == ()  # the game downloads its own ~60 GB of resources in-game
+    (arc,) = plan.archives
+    assert arc.source.url == cdn + "package/PCClient/2.0.3936/GF2_Exilium_Origin.zip"
+    all_paths_safe(plan)
+
+
 # ------------------------------------------------------------ Endfield
 def test_endfield_plan():
     url = "https://launcher.gryphline.com/api/game/get_latest?appcode=YDUTE5gscDZ229CW&channel=6&sub_channel=6"

@@ -120,9 +120,10 @@ class NetmarbleLoginMixin:
                 return None
             if name not in _CACHE:
                 try:
-                    _CACHE[name] = _decode(_store().get(name))
+                    saved = _decode(_store().get(name))
                 except SecretStoreError:
-                    _CACHE[name] = None
+                    return None
+                _CACHE[name] = saved
             return _CACHE[name]
 
     def _keep(self, session: Session) -> None:

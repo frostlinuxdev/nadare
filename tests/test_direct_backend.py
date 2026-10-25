@@ -455,7 +455,8 @@ def test_tiers_mark_only_the_launched_games_as_verified():
     assert {dk.tier_of(k) for k in dk.CATALOG_KINDS} == {dk.TIER_VERIFIED, dk.TIER_EXPERIMENTAL}
     assert dk.tier_of("direct-bd2") == "Verified"
     assert dk.tier_of("direct-endfield") == "Verified"
-    assert dk.tier_of("launcher-nte") == "Verified"
+    assert dk.tier_of("direct-nte") == "Verified"
+    assert dk.tier_of("launcher-nte") == "Experimental"
     assert dk.tier_of("direct-genshin") == "Experimental"
     assert dk.tier_of("direct-wuwa") == "Experimental"
     assert dk.tier_of("not-a-kind") == "Experimental"
@@ -509,3 +510,46 @@ def test_hoyo_kinds_still_load_for_existing_profiles():
     assert dk.HOYO_KINDS <= set(dk.CATALOG_BACKENDS)
     assert dk.tier_of("direct-hi3") == "Verified"
     assert dk.tier_of("direct-zzz") == "Experimental"
+
+
+def test_gfl2_haoplay_is_a_launcher_kind_with_a_trusted_installer():
+    from nadare.backends import launcher
+    from nadare.core import directkinds as dk
+
+    assert "launcher-gfl2-haoplay" in dk.CATALOG_KINDS
+    assert dk.tier_of("launcher-gfl2-haoplay") == "Experimental"
+    cls = launcher.Gfl2HaoplayBackend
+    assert cls.kind == "launcher-gfl2-haoplay" and cls.launcher_names == ("PCLauncher.exe",)
+    assert cls.default_installer_url.startswith("https://gf2-dl.haoplay.com/")
+    assert any(cls.default_installer_url.split("/")[2].endswith(h) for h in cls.trusted_hosts)
+
+
+def test_gfl2_haoplay_direct_kind_is_registered_and_experimental():
+    from nadare.backends import direct
+    from nadare.core import directkinds as dk
+
+    assert "direct-gfl2-haoplay" in dk.CATALOG_KINDS
+    assert dk.tier_of("direct-gfl2-haoplay") == "Experimental"
+    cls = direct.Gfl2HaoplayBackend
+    assert cls.kind == "direct-gfl2-haoplay" and cls.direct_exe == "GF2_Exilium.exe"
+    assert cls.plan_factory is not direct.Gfl2Backend.plan_factory
+
+
+def test_gfl2_haoplay_pins_umu_id_zero_unless_the_profile_overrides_it(tmp_path, monkeypatch):
+    from nadare.backends import direct
+
+    def env_for(profile):
+        ctx = make_context(
+            tmp_path, "direct-gfl2-haoplay", {"prefix": str(tmp_path / "pfx"), **profile}
+        )
+        b = direct.Gfl2HaoplayBackend(ctx)
+        monkeypatch.setattr(b, "resolve_runner", lambda: ("/opt/proton", "proton"))
+        monkeypatch.setattr(
+            "nadare.core.umu.system", lambda configured="umu-run": "/usr/bin/umu-run"
+        )
+        return b._prefix_command(["x.exe"])[1]
+
+    env = env_for({})
+    assert env["UMU_ID"] == "0" and env["GAMEID"] == "0"
+    custom = env_for({"extra_env": {"UMU_ID": "umu-7", "GAMEID": "umu-7"}})
+    assert custom["UMU_ID"] == "umu-7" and custom["GAMEID"] == "umu-7"

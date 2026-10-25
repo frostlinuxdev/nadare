@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import hashlib
 import io
+import threading
+import time
 import zipfile
 import zlib
 from pathlib import Path
@@ -36,6 +38,87 @@ def md5(b: bytes) -> str:
 
 def crc32(b: bytes) -> str:
     return f"{zlib.crc32(b) & 0xFFFFFFFF:08X}"
+
+
+def test_merge_tree_rejects_symlinked_destination_parent_and_target(tmp_path):
+    source = tmp_path / "source"
+    dest = tmp_path / "dest"
+    outside = tmp_path / "outside"
+    source.mkdir()
+    dest.mkdir()
+    outside.mkdir()
+    outside_file = outside / "save"
+    outside_file.write_bytes(b"USERDATA")
+
+    (source / "link").mkdir()
+    (source / "link" / "save").write_bytes(b"attacker")
+    (dest / "link").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(dd.DirectError, match="symlink|outside|unsafe"):
+        dd._merge_tree(source, dest)
+    assert outside_file.read_bytes() == b"USERDATA"
+
+    (dest / "link").unlink()
+    (source / "link").rename(source / "link-dir")
+    (source / "save").write_bytes(b"attacker")
+    (dest / "save").symlink_to(outside_file)
+    with pytest.raises(dd.DirectError, match="symlink|outside|unsafe"):
+        dd._merge_tree(source, dest)
+    assert outside_file.read_bytes() == b"USERDATA"
+
+
+def test_failed_direct_download_preserves_existing_file_and_cleans_stage(tmp_path, monkeypatch):
+    target = tmp_path / "game.bin"
+    old = b"OLD-GAME-DATA"
+    target.write_bytes(old)
+    rf = dd.RemoteFile("game.bin", "https://example.invalid/game.bin", 4)
+
+    def fail(*args, **kwargs):
+        raise dd.DownloadError("simulated CDN failure")
+
+    monkeypatch.setattr(dd, "download", fail)
+    with pytest.raises(dd.DirectError, match="download failed"):
+        dd._download_remote(rf, target, emit=None, cancel=None)
+
+    assert target.read_bytes() == old
+    assert not (tmp_path / "game.bin.nadare-new").exists()
+    assert not (tmp_path / "game.bin.nadare-new.part").exists()
+
+
+def test_digest_mismatch_preserves_existing_file_and_cleans_stage(tmp_path, monkeypatch):
+    target = tmp_path / "game.bin"
+    old = b"OLD-GAME-DATA"
+    target.write_bytes(old)
+    rf = dd.RemoteFile("game.bin", "https://example.invalid/game.bin", 4, md5=md5(b"GOOD"))
+
+    def write_bad(_url, dest, **kwargs):
+        Path(dest).write_bytes(b"EVIL")
+
+    monkeypatch.setattr(dd, "download", write_bad)
+    with pytest.raises(dd.DirectError, match="hash mismatch"):
+        dd._download_remote(rf, target, emit=None, cancel=None)
+
+    assert target.read_bytes() == old
+    assert not (tmp_path / "game.bin.nadare-new").exists()
+    assert not (tmp_path / "game.bin.nadare-new.part").exists()
+
+
+def test_verified_download_replaces_existing_file(tmp_path, monkeypatch):
+    target = tmp_path / "game.bin"
+    old = b"OLD-GAME-DATA"
+    target.write_bytes(old)
+    old_inode = target.stat().st_ino
+    good = b"GOOD"
+    rf = dd.RemoteFile("game.bin", "https://example.invalid/game.bin", len(good), md5=md5(good))
+
+    def write_good(_url, dest, **kwargs):
+        Path(dest).write_bytes(good)
+
+    monkeypatch.setattr(dd, "download", write_good)
+    dd._download_remote(rf, target, emit=None, cancel=None)
+
+    assert target.read_bytes() == good
+    assert target.stat().st_ino != old_inode
+    assert not (tmp_path / "game.bin.nadare-new").exists()
 
 
 def make_zip(files: dict[str, bytes], stored: bool = False) -> bytes:
@@ -108,6 +191,48 @@ def test_corrupted_file_is_refetched(server, tmp_path):
     assert [f.path for f in files] == ["a.bin"] and archives == []
     assert dd.sync(plan, tmp_path) == {"downloaded": 1, "skipped": 0}
     assert (tmp_path / "a.bin").read_bytes() == a
+
+
+def test_plan_missing_checks_in_parallel_and_preserves_plan_order(tmp_path, monkeypatch):
+    good = b"good bytes"
+    (tmp_path / "good.bin").write_bytes(good)
+    (tmp_path / "small.bin").write_bytes(b"x")
+    (tmp_path / "wrong-hash.bin").write_bytes(b"bad bytes!")
+    plan = dd.Plan(
+        "T",
+        "1",
+        files=(
+            dd.RemoteFile("missing.bin", "https://example.invalid/missing", len(good), md5=md5(good)),
+            dd.RemoteFile("good.bin", "https://example.invalid/good", len(good), md5=md5(good)),
+            dd.RemoteFile("small.bin", "https://example.invalid/small", len(good), md5=md5(good)),
+            dd.RemoteFile("wrong-hash.bin", "https://example.invalid/wrong-hash", len(good), md5=md5(good)),
+        ),
+    )
+    thread_names = set()
+    original = dd._verify_remote
+
+    def observed(*args, **kwargs):
+        thread_names.add(threading.current_thread().name)
+        time.sleep(0.01)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(dd, "_verify_remote", observed)
+    missing, archives = dd.plan_missing(plan, tmp_path, check_workers=3)
+
+    assert [rf.path for rf in missing] == ["missing.bin", "small.bin", "wrong-hash.bin"]
+    assert archives == []
+    assert len(thread_names) > 1
+    assert len(thread_names) <= 3
+    assert not any(t.name.startswith("nadare-plan-missing") for t in threading.enumerate())
+
+
+def test_cancelled_sync_skips_plan_missing_workers(tmp_path, monkeypatch):
+    cancel = Cancel()
+    cancel.cancel()
+    monkeypatch.setattr(dd, "plan_missing", lambda *a, **k: pytest.fail("preflight ran after cancel"))
+    with pytest.raises(Cancelled):
+        dd.sync(dd.Plan("T", "1"), tmp_path, cancel=cancel)
+    assert not any(t.name.startswith("nadare-plan-missing") for t in threading.enumerate())
 
 
 @pytest.mark.parametrize("field", ["md5", "crc32"])

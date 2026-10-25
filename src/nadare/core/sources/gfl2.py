@@ -13,6 +13,8 @@ from .. import directdl
 from . import Fetch, default_fetch
 
 FLEX_URL = "https://gf2-launcher-us.sunborngame.com/flexible_config"
+#: The Haoplay global build publishes the same flexible config on its own host.
+HAOPLAY_FLEX_URL = "https://gf2-launcher-intl.haoplay.com/flexible_config"
 DATA_DIR = "GF2_Exilium_Data/LocalCache/Data/"
 ARCHIVE_NAME = "GF2_Exilium_Origin.zip"
 
@@ -51,9 +53,15 @@ def _int(value: Any) -> int:
         raise directdl.DirectError(f"invalid size: {value!r}") from exc
 
 
-def resolve(fetch: Fetch | None = None) -> directdl.Plan:
+def resolve(
+    fetch: Fetch | None = None,
+    *,
+    flex_url: str = FLEX_URL,
+    game_tag: str = "gfl2",
+    client_only: bool = False,
+) -> directdl.Plan:
     fetch = fetch or default_fetch
-    doc = _loads(fetch(FLEX_URL, None), "flexible config")
+    doc = _loads(fetch(flex_url, None), "flexible config")
     if "code" in doc and str(doc["code"]) != "0":
         raise directdl.DirectError(f"flexible config error: {doc.get('msg', doc['code'])}")
     data = _field(doc, "data")
@@ -77,7 +85,7 @@ def resolve(fetch: Fetch | None = None) -> directdl.Plan:
     download_addr = _https(_field(plug, "game_download_addr"), "game_download_addr")
 
     version_url = _join(cdn, "AssetBundles_Windows", resource_version, "Version.txt")
-    version_data = fetch(version_url, None)
+    version_data = b"" if client_only else fetch(version_url, None)
 
     files: list[directdl.RemoteFile] = []
     for line in version_data.decode("utf-8", "replace").splitlines():
@@ -95,15 +103,16 @@ def resolve(fetch: Fetch | None = None) -> directdl.Plan:
             directdl.RemoteFile(path=dest, url=_https(url, "asset URL"), size=_int(size), md5=md5)
         )
 
-    version_dest = directdl.safe_relative_path(DATA_DIR + "Version_D.txt")
-    files.append(
-        directdl.RemoteFile(
-            path=version_dest,
-            url=version_url,
-            size=len(version_data),
-            md5=hashlib.md5(version_data).hexdigest(),
+    if not client_only:
+        version_dest = directdl.safe_relative_path(DATA_DIR + "Version_D.txt")
+        files.append(
+            directdl.RemoteFile(
+                path=version_dest,
+                url=version_url,
+                size=len(version_data),
+                md5=hashlib.md5(version_data).hexdigest(),
+            )
         )
-    )
 
     archive = directdl.Archive(
         name=directdl.safe_relative_path(ARCHIVE_NAME),
@@ -115,9 +124,14 @@ def resolve(fetch: Fetch | None = None) -> directdl.Plan:
     )
 
     return directdl.Plan(
-        game_tag="gfl2",
-        version=version,
+        game_tag=game_tag,
+        version=(f"{version}+client-{client_version}" if client_only else version),
         files=tuple(files),
         archives=(archive,),
         exe="GF2_Exilium.exe",
     )
+
+
+def resolve_haoplay(fetch: Fetch | None = None) -> directdl.Plan:
+    """The Haoplay global build: only the small client, the game fetches its resources itself."""
+    return resolve(fetch, flex_url=HAOPLAY_FLEX_URL, game_tag="gfl2-haoplay", client_only=True)

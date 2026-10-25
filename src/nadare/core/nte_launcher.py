@@ -105,15 +105,28 @@ def _extract(sevenz: str, archive: Path, outdir: Path, run: Callable[..., Any]) 
 
 
 def _stage_tree(src: Path, dest: Path) -> None:
-    """Copy ``src`` to ``dest`` via a temporary sibling, never leaving a partial tree."""
+    """Copy ``src`` to ``dest`` via staging, restoring the old tree on failure."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     temporary = dest.with_name("." + dest.name + ".tmp")
+    backup = dest.with_name("." + dest.name + ".old")
     shutil.rmtree(temporary, ignore_errors=True)
+    if backup.exists():
+        if dest.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+        else:
+            os.replace(backup, dest)
     try:
         shutil.copytree(src, temporary)
         if dest.exists():
-            shutil.rmtree(dest)
-        os.replace(temporary, dest)
+            os.replace(dest, backup)
+        try:
+            os.replace(temporary, dest)
+        except BaseException:
+            if backup.exists() and not dest.exists():
+                os.replace(backup, dest)
+            raise
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
     except BaseException:
         shutil.rmtree(temporary, ignore_errors=True)
         raise

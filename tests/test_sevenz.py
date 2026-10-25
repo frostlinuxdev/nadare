@@ -39,6 +39,21 @@ def test_list_entries(name):
     assert {e.path for e in entries if e.is_dir} == {"sub", "sub/deep"}
 
 
+def test_extract_refuses_existing_symlinked_destination_parent(tmp_path):
+    dest = tmp_path / "install"
+    outside = tmp_path / "outside"
+    dest.mkdir()
+    outside.mkdir()
+    original = outside / "data.bin"
+    original.write_bytes(b"USERDATA")
+    (dest / "sub").symlink_to(outside, target_is_directory=True)
+
+    with open7z("lzma2") as fh, pytest.raises(sevenz.SevenZipError, match="symlink|outside"):
+        sevenz.extract(fh, dest)
+
+    assert original.read_bytes() == b"USERDATA"
+
+
 @pytest.mark.parametrize("name", LAYOUTS)
 def test_extract_matches_the_original_tree(name, tmp_path):
     with open7z(name) as fh:

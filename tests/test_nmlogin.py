@@ -185,6 +185,34 @@ def test_a_remembered_login_survives_a_restart_and_is_read_once(tmp_path, store,
     assert store.gets == 1  # status() polling must not hammer the keyring
 
 
+def test_keyring_read_failure_is_retried_on_the_next_session_lookup(tmp_path, monkeypatch):
+    session = nm.Session(
+        token=make_jwt("P9"),
+        expires_at=int(time.time()) + 3600,
+        player_id="P9",
+        device_key="0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d",
+        name="Cat",
+    )
+
+    class FailOnceStore:
+        calls = 0
+
+        def get(self, profile):
+            self.calls += 1
+            if self.calls == 1:
+                raise SecretStoreError("temporarily locked")
+            assert profile == "mongil"
+            return nmlogin._encode(session)
+
+    store = FailOnceStore()
+    monkeypatch.setattr(nmlogin, "_store", lambda: store)
+    backend = make_backend(tmp_path, {"remember_me": True})
+
+    assert backend._session() is None
+    assert backend._session() == session
+    assert store.calls == 2
+
+
 def test_without_remember_me_a_restart_forgets_the_login(tmp_path, store, sign_in):
     sign_in(make_jwt())
     b = make_backend(tmp_path)

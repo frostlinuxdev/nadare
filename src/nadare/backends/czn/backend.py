@@ -35,6 +35,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -1533,9 +1534,10 @@ class CznBackend(GameBackend):
             raise BackendError(
                 f"cannot access the WebView2 cache: {e}", EXIT_WEBVIEW2_FAILED
             ) from e
+        work_id = f"{os.getpid()}-{uuid.uuid4().hex}"
         if not cached:
             self.ctx.emit(Event("step", "Downloading the Microsoft WebView2 Runtime (~215 MB)…"))
-            tmp = inst.with_suffix(".part")
+            tmp = inst.with_name(f"{inst.name}.{work_id}.part")
             urls = [WEBVIEW2_URL]
             if not self._webview2_overridden():
                 if self.ctx.cancel.cancelled:
@@ -1580,7 +1582,7 @@ class CznBackend(GameBackend):
                 ) from None
         # FRESH-6: verify a private, read-only copy and run *that*, so the
         # verified bytes cannot be swapped between the hash check and the exec.
-        run_path = self._cache_dir() / f".webview2-run-{os.getpid()}.exe"
+        run_path = self._cache_dir() / f".webview2-run-{work_id}.exe"
         try:
             try:
                 shutil.copyfile(inst, run_path)

@@ -283,6 +283,88 @@ class Gfl2Backend(DirectBackend):
     plan_factory = staticmethod(gfl2.resolve)
 
 
+class Gfl2HaoplayBackend(Gfl2Backend):
+    """The Haoplay global build: same client layout, downloaded from Haoplay's CDN."""
+
+    kind = "direct-gfl2-haoplay"
+    game_tag = "gfl2-haoplay"
+    display_name = "Girls' Frontline 2 (Haoplay global build)"
+    install_subdir = _subdir("GF2Haoplay")
+    install_size_hint = int(1 * GB)  # the small client; the game downloads ~60 GB itself
+    plan_factory = staticmethod(gfl2.resolve_haoplay)
+    #: The game only starts under umu's id 0 (``wine start /wait /unix``); a named id or a Steam
+    #: app id makes Proton run it through steam.exe and it hangs. A profile ``extra_env`` wins.
+    umu_id = "0"
+
+    def _ensure_webview2(self) -> None:
+        # Share CZN's pinned Microsoft download, cache verification and silent
+        # installer, while using the exact prefix and runner selected here.
+        from .czn.backend import CznBackend
+
+        owner = self
+
+        class HaoplayWebView2Installer(CznBackend):
+            def _migrate_legacy_state(self) -> None:
+                # This profile has no CZN credentials to migrate.
+                pass
+
+            def prefix(self) -> Path:
+                return owner.prefix()
+
+            def _run_in_prefix(self, args: list[str]) -> int:
+                cmd, env = owner._prefix_command(
+                    args, {"PROTON_ENABLE_WAYLAND": "0"}
+                )
+                return self._stream(cmd, env, cwd=owner.prefix())
+
+        HaoplayWebView2Installer(self.ctx)._ensure_webview2()
+
+    def install(self) -> None:
+        self.ctx.cancel.raise_if_cancelled()
+        self.ctx.set(INSTALLED_PREFIX_KEY, str(self.prefix()))
+        self._ensure_default_runner(strict=False)
+        self._ensure_direct_prefix()
+        self._ensure_webview2()
+        self._sync_direct()
+
+    def launch(self) -> int:
+        self.ctx.cancel.raise_if_cancelled()
+        target = self.direct_target()
+        if target is None or not target.is_file():
+            raise BackendError(f"game executable not found: {target}")
+        self._ensure_default_runner(strict=True)
+        self._ensure_webview2()
+        return self._launch_direct()
+
+    def launch_extra_env(self) -> dict[str, str]:
+        configured = profile_setting(self.ctx.profile, "extra_env")
+        browser_args = (
+            configured.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")
+            if isinstance(configured, dict)
+            else None
+        )
+        return {"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS": str(browser_args or "--no-sandbox")}
+
+    def _prefix_command(
+        self, args: list[str], extra_env: dict[str, str] | None = None
+    ) -> tuple[list[str], dict[str, str]]:
+        argv, env = super()._prefix_command(args, extra_env)
+        profile_env = profile_setting(self.ctx.profile, "extra_env")
+        explicit = {**(profile_env if isinstance(profile_env, dict) else {}), **(extra_env or {})}
+        env["GAMEID"] = str(explicit.get("GAMEID") or self.umu_id)
+        env["UMU_ID"] = str(explicit.get("UMU_ID") or env["GAMEID"])
+        return argv, env
+
+    page_notice = (
+        "Nadare installs only the small Haoplay global client straight from Haoplay's servers "
+        "(no launcher); the game downloads and updates its ~60 GB itself on first start. "
+        "Nadare installs Microsoft's WebView2 Runtime into this game's prefix for sign-in. "
+        "If the sign-in page misbehaves, try the other Display backend in Settings.",
+        "https://gf2.haoplay.com/",
+        "Official site",
+    )
+
+
 class EndfieldBackend(DirectBackend):
     kind = "direct-endfield"
     game_tag = "endfield"

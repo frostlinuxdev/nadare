@@ -218,7 +218,7 @@ def test_the_default_table_covers_every_visible_catalog_game_with_a_resolver(pi,
 
     monkeypatch.delenv("NADARE_HIDE_HOYO", raising=False)
     table = pi.default_catalog_games()
-    kinds = {k for k in dk.ART if k != "launcher-nikke" and k != "launcher-nte"}
+    kinds = {k for k in dk.ART if not k.startswith("launcher-")}
     assert {f"direct-{tag}" for tag in table} == kinds
     for tag, game in table.items():
         assert callable(game.resolve) and game.title
@@ -286,7 +286,7 @@ def test_the_refresh_script_has_the_catalog_switch_off_by_default():
     text = (SCRIPT.parent / "refresh_index.sh").read_text(encoding="utf-8")
     assert '[[ "${NADARE_INDEX_CATALOG:-}" == 1 ]] && catalog=--catalog' in text
     assert 'publish_index.py" --index "$index" $skip_yostar $catalog' in text
-    assert '[[ -d "$index/catalog" ]] && git -C "$index" add catalog' in text
+    assert 'stage_index_changes.sh" "$index" "${NADARE_INDEX_CATALOG:-0}"' in text
 
 
 def test_repeated_failures_raise_a_canary_exactly_at_the_threshold(pi, tmp_path, capsys):

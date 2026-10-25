@@ -34,6 +34,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -402,6 +403,7 @@ def default_catalog_games() -> dict[str, CatalogGame]:
         "wuwa": wuwa,
         "pgr": pgr,
         "gfl2": gfl2,
+        "gfl2-haoplay": types.SimpleNamespace(resolve=gfl2.resolve_haoplay),
         "endfield": endfield,
         "nte": nte,
     }

@@ -26,3 +26,6 @@ certifi==2026.10.19
 # PRIVACY.md.
 keyring==25.7.0
 SecretStorage==3.5.0
+
+# --- Sophon manifests ------------------------------------------------------
+zstandard>=0.22

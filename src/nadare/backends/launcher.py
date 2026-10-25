@@ -161,4 +161,26 @@ class NteBackend(LauncherBackend):
     )
 
 
+class Gfl2HaoplayBackend(LauncherBackend):
+    """Girls' Frontline 2: Exilium, global build by Haoplay (the other build is ``direct-gfl2``)."""
+
+    kind = "launcher-gfl2-haoplay"
+    game_tag = "gfl2-haoplay"
+    display_name = "Girls' Frontline 2 (Haoplay global build)"
+    install_subdir = _subdir("drive_c/Program Files", "GF2")
+    launcher_names = ("PCLauncher.exe",)
+    direct_exe = "PCLauncher.exe"
+    default_installer_url = "https://gf2-dl.haoplay.com/pc/GF2_v1.0.3.exe"
+    trusted_hosts = ("haoplay.com",)
+    page_notice = (
+        "This is the global build run by Haoplay; its launcher needs the .NET and Visual C++ "
+        "runtimes the installer bundles, and signs you in with an embedded web view. Choose "
+        "an install folder on C: in the installer. The launcher then downloads the game "
+        "(about 31 GB). On Wayland, set the profile's Display backend to Auto or Wayland if "
+        "the sign-in page misbehaves.",
+        "https://gf2.haoplay.com/",
+        "Official site",
+    )
+
+
 __all__ = ["LauncherBackend"]

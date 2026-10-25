@@ -71,6 +71,13 @@ _DIRECT: dict[str, tuple[str, str, str, str, str]] = {
         "NevernessToEverness",
         "Client/WindowsNoEditor/HT/Binaries/Win64/HTGame.exe",
     ),
+    "direct-gfl2-haoplay": (
+        "Gfl2HaoplayBackend",
+        "Girls' Frontline 2 (Haoplay global build)",
+        "drive_c/Games",
+        "GF2Haoplay",
+        "GF2_Exilium.exe",
+    ),
     "direct-genshin": (
         "GenshinBackend",
         "Genshin Impact",
@@ -117,6 +124,13 @@ _LAUNCHER: dict[str, tuple[str, str, str, str, str]] = {
         "Neverness To Everness",
         "NTEGlobalLauncher.exe",
     ),
+    "launcher-gfl2-haoplay": (
+        "Gfl2HaoplayBackend",
+        "Girls' Frontline 2 (Haoplay global build)",
+        "drive_c/Program Files",
+        "GF2",
+        "PCLauncher.exe",
+    ),
 }
 
 #: Where the catalog games' cover art comes from: kind -> (image folder on the FrostLinux site,
@@ -133,12 +147,14 @@ ART: dict[str, tuple[str, int | None]] = {
     "direct-gfl2": ("girls-frontline-2", 3347400),
     "direct-endfield": ("arknights-endfield", 4732690),
     "direct-nte": ("neverness-to-everness", 4508340),
+    "direct-gfl2-haoplay": ("girls-frontline-2", 3308670),
     "direct-genshin": ("genshin-impact", None),
     "direct-hsr": ("honkai-star-rail", None),
     "direct-hi3": ("honkai-impact-3rd", None),
     "direct-zzz": ("zenless-zone-zero", 4162040),
     "launcher-nikke": ("nikke", None),
     "launcher-nte": ("neverness-to-everness", 4508340),
+    "launcher-gfl2-haoplay": ("girls-frontline-2", 3308670),
 }
 
 DIRECT_KINDS = frozenset(_DIRECT)
@@ -175,7 +191,6 @@ VERIFIED_KINDS = frozenset(
         "direct-hi3",
         "direct-endfield",
         "direct-nte",
-        "launcher-nte",
     }
 )
 

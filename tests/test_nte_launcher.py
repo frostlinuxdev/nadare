@@ -178,3 +178,28 @@ def test_fetch_installer_replaces_a_poisoned_cache(tmp_path, monkeypatch):
 
     assert nl._fetch_installer(cache, _dl(urls, data=good)) == cache
     assert cache.read_bytes() == good and urls == [nl.INSTALLER_URL]
+
+
+def test_stage_tree_restores_old_launcher_when_commit_rename_fails(tmp_path, monkeypatch):
+    source = tmp_path / "new-launcher"
+    source.mkdir()
+    (source / "NTEGlobalLauncher.exe").write_bytes(b"new launcher")
+    dest = tmp_path / "install" / "NTEGlobal"
+    dest.mkdir(parents=True)
+    (dest / "NTEGlobalLauncher.exe").write_bytes(b"old launcher")
+    (dest / "user-config.json").write_text("{\"account\": \"kept\"}")
+    temporary = dest.with_name("." + dest.name + ".tmp")
+    real_replace = nl.os.replace
+
+    def fail_staged_commit(src, dst):
+        if Path(src) == temporary and Path(dst) == dest:
+            raise OSError("simulated rename failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(nl.os, "replace", fail_staged_commit)
+    with pytest.raises(OSError, match="simulated rename failure"):
+        nl._stage_tree(source, dest)
+
+    assert (dest / "NTEGlobalLauncher.exe").read_bytes() == b"old launcher"
+    assert (dest / "user-config.json").read_text() == "{\"account\": \"kept\"}"
+    assert not temporary.exists()

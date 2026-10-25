@@ -93,6 +93,33 @@ def test_a_deleted_member_makes_the_archive_missing_again(server, tmp_path):
     assert not dd._archive_done(plan, arc, tmp_path)
 
 
+def test_a_member_with_a_changed_size_makes_the_archive_missing_again(server, tmp_path):
+    z = make_zip({"game.exe": b"MZ", "data/x.bin": b"123"})
+    s = server({"/g.zip": z})
+    arc = dd.Archive("g", dd.RemoteFile("g.zip", s.url + "/g.zip", len(z), md5=md5(z)))
+    plan = dd.Plan("T", "1", archives=(arc,))
+
+    dd.sync(plan, tmp_path)
+    (tmp_path / "data/x.bin").write_bytes(b"changed size")
+
+    assert dd.plan_missing(plan, tmp_path) == ([], [arc])
+
+
+def test_a_b8_done_record_with_members_but_no_sizes_is_accepted(server, tmp_path):
+    z = make_zip({"game.exe": b"MZ", "data/x.bin": b"123"})
+    s = server({"/g.zip": z})
+    arc = dd.Archive("g", dd.RemoteFile("g.zip", s.url + "/g.zip", len(z), md5=md5(z)))
+    plan = dd.Plan("T", "1", archives=(arc,))
+
+    dd.sync(plan, tmp_path)
+    record_path = tmp_path / dd.STATE_DIR / "g.done"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record.pop("member_sizes")
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    assert dd.plan_missing(plan, tmp_path) == ([], [])
+
+
 def test_an_old_done_record_without_members_is_still_accepted(server, tmp_path):
     z = make_zip({"game.exe": b"MZ", "data/x.bin": b"123"})
     s = server({"/g.zip": z})

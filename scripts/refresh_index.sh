@@ -142,18 +142,18 @@ if [[ $rc -eq 3 ]]; then
 fi
 [[ $rc -eq 0 ]] || { echo "refresh_index: publish failed (exit $rc)" >&2; exit "$rc"; }
 
-git -C "$index" add webview2
-git -C "$index" add yostar
-git -C "$index" add vcredist
-git -C "$index" add czn
-[[ -d "$index/catalog" ]] && git -C "$index" add catalog
-if git -C "$index" diff --cached --quiet; then
+if "$root/scripts/stage_index_changes.sh" "$index" "${NADARE_INDEX_CATALOG:-0}"; then
+    :
+else
+    stage_rc=$?
+    if [[ $stage_rc -ne 3 ]]; then
+        echo "refresh_index: staging/commit failed (exit $stage_rc)" >&2
+        exit "$stage_rc"
+    fi
     echo "refresh_index: nothing to publish"
     heartbeat
     exit 0
 fi
-git -C "$index" commit -q -m "webview2: refresh installer hash list" \
-    || { echo "refresh_index: commit failed" >&2; exit 1; }
 git -C "$index" push --quiet origin HEAD || exit 1
 echo "refresh_index: published"
 heartbeat

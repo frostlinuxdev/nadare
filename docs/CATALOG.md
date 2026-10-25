@@ -11,13 +11,15 @@ Every catalog game carries a support tier in the Add Game wizard:
 
 | Tier | Meaning |
 |---|---|
-| **Verified** | A maintainer installed it through Nadare and played it past the title screen on a real machine. Currently: Brown Dust 2, Aether Gazer, Punishing: Gray Raven, Girls' Frontline 2 (the Darkwinter build), Honkai Impact 3rd, Arknights: Endfield and Neverness to Everness. |
+| **Verified** | A maintainer installed it through Nadare and played it past the title screen on a real machine. Currently: Brown Dust 2, Aether Gazer, Punishing: Gray Raven, Girls' Frontline 2 (the Darkwinter build), Honkai Impact 3rd, Arknights: Endfield and Neverness to Everness (the direct install). |
 | **Experimental** | The install path is covered by tests and fixtures, but nobody has played it end to end yet, or it needs a workaround (an anti-cheat, a publisher launcher, a login). It can break when a publisher changes something. |
 
 The HoYo games (Genshin Impact, Honkai: Star Rail, Honkai Impact 3rd, Zenless Zone Zero) are offered
 like the others. Honkai Impact 3rd is Verified; the other three install through HoYo's chunked
 "Sophon" downloads and were checked as far as the in-game login screen, so they are Experimental.
 `NADARE_HIDE_HOYO=1` hides all four from the Add Game wizard.
+When a Sophon update changes a file, Nadare stages its verified replacement beside the installed
+file before swapping it in; allow free space for the largest changed file during an update.
 
 HoYo's anti-cheat only works on Linux with DW-Proton's built-in fixes (it runs the game through
 `steam.exe` and automates the "disconnecting trick" during the anti-cheat's start-up), which it

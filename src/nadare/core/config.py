@@ -497,20 +497,38 @@ class Config:
     def _merge_profile(
         snapshot: dict[str, Any], local: dict[str, Any], disk: dict[str, Any]
     ) -> dict[str, Any]:
-        """Three-way merge one profile: local edits win, untouched keys take disk.
+        """Three-way merge mappings: local edits win, untouched keys take disk.
 
-        A key removed locally (in the snapshot, gone now) stays removed even if
-        the other process changed it; a key added on disk is kept.
+        Nested mappings are merged by key too, so independent edits (such as
+        separate ``extra_env`` variables) are retained. A key removed locally
+        stays removed even if the other process changed it; a disk-only key is
+        kept.
         """
         missing = object()
-        merged = dict(local)
-        for key in set(snapshot) | set(local) | set(disk):
-            if snapshot.get(key, missing) != local.get(key, missing):
-                continue  # changed locally: keep the local value (or its absence)
-            if key in disk:
-                merged[key] = disk[key]
-            else:
-                merged.pop(key, None)
+
+        def merge_mapping(
+            base: dict[str, Any], ours: dict[str, Any], theirs: dict[str, Any]
+        ) -> dict[str, Any]:
+            merged = dict(ours)
+            for key in set(base) | set(ours) | set(theirs):
+                base_value = base.get(key, missing)
+                our_value = ours.get(key, missing)
+                if (
+                    isinstance(base_value, dict)
+                    and isinstance(our_value, dict)
+                    and isinstance(theirs.get(key), dict)
+                ):
+                    merged[key] = merge_mapping(base_value, our_value, theirs[key])
+                    continue
+                if base_value != our_value:
+                    continue  # changed locally: keep the local value (or its absence)
+                if key in theirs:
+                    merged[key] = theirs[key]
+                else:
+                    merged.pop(key, None)
+            return merged
+
+        merged = merge_mapping(snapshot, local, disk)
         Config._normalise_legacy_keys(merged)
         return merged
 

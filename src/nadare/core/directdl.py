@@ -49,6 +49,7 @@ from .rangefile import RangeError, RangePart, RangeReader
 #: Most files fetched in parallel. A game with tens of thousands of small files is latency-bound
 #: per connection, so one install needs well over 16 connections to fill a fast line.
 MAX_WORKERS = 64
+_PLAN_CHECK_MAX_WORKERS = 16
 DL_DIR = ".nadare-dl"
 #: Directory (under the install dir) holding one ``<name>.done`` per unwrapped archive.
 STATE_DIR = ".nadare"
@@ -339,10 +340,13 @@ def _download_remote(
         size = remote_size(rf.url, headers=dict(rf.headers))
     if size:
         diskspace.check_space(path.parent, size)
+    preserve_existing = path.exists()
+    temporary = path.with_name(path.name + ".nadare-new")
+    destination = temporary if preserve_existing else path
     try:
         download(
             rf.url,
-            path,
+            destination,
             expected_size=size,
             expected_sha256=rf.sha256,
             headers=dict(rf.headers),
@@ -350,18 +354,22 @@ def _download_remote(
             cancel=cancel,
             resume=True,
         )
-        if (rf.md5 or rf.crc32) and not _verify_remote(path, rf):
+        if (rf.md5 or rf.crc32) and not _verify_remote(destination, rf):
             raise DirectError(f"hash mismatch for {rf.path}")
+        if preserve_existing:
+            os.replace(temporary, path)
     except DirectError:
-        # The bytes arrived but are corrupt: drop both the file and any part.
-        _remove_file(path)
+        # A corrupt staged copy must never remove the installed file.
+        _remove_file(destination)
+        _remove_file(destination.with_name(destination.name + ".part"))
         raise
     except DownloadError as exc:
-        _remove_file(path)
+        if preserve_existing:
+            _remove_file(temporary)
+            _remove_file(temporary.with_name(temporary.name + ".part"))
         raise DirectError(f"download failed for {rf.path}: {exc}") from exc
     except BaseException:
-        # Cancellation or a local write error: keep the file and .part so the
-        # next sync can resume (download.py deliberately keeps .part too).
+        # Cancellation or a local write error keeps the .part for resume.
         raise
 
 
@@ -375,7 +383,8 @@ def _done_record(
             record[name] = value.lower()
     if members is not None:
         sorted_members = sorted(set(members))
-        record["members"] = sorted_members[:5000]
+        recorded_members = sorted_members[:5000]
+        record["members"] = recorded_members
         if len(sorted_members) > 5000:
             record["members_truncated"] = True
     return record
@@ -404,6 +413,9 @@ def _archive_done(plan: Plan, archive: Archive, dest: Path) -> bool:
     if members is not None:
         if not isinstance(members, list):
             return False
+        member_sizes = record.get("member_sizes")
+        if member_sizes is not None and not isinstance(member_sizes, dict):
+            return False
         for member in members:
             if not isinstance(member, str):
                 return False
@@ -411,7 +423,19 @@ def _archive_done(plan: Plan, archive: Archive, dest: Path) -> bool:
                 path = dest / safe_relative_path(member)
             except DirectError:
                 return False
-            if not path.is_file():
+            try:
+                if not path.is_file():
+                    return False
+                if member_sizes is not None:
+                    expected_size = member_sizes.get(member)
+                    if (
+                        isinstance(expected_size, bool)
+                        or not isinstance(expected_size, int)
+                        or expected_size < 0
+                        or path.stat().st_size != expected_size
+                    ):
+                        return False
+            except OSError:
                 return False
     return True
 
@@ -448,14 +472,41 @@ def _extract_zip_to(zip_path: Path | _JoinedFile, target: Path) -> list[str]:
         raise DirectError(f"cannot extract {zip_path.name}: {exc}") from exc
 
 
+def _safe_destination_path(dest: Path, relative: str) -> Path:
+    """Return a destination path that has no symlinked components below ``dest``."""
+    relative = safe_relative_path(relative)
+    dest_real = Path(os.path.realpath(dest))
+    target = dest / relative
+    current = dest
+    for part in relative.split("/"):
+        current = current / part
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise DirectError(f"cannot inspect install path {relative!r}: {exc}") from exc
+        if stat.S_ISLNK(mode):
+            raise DirectError(f"symlink in install path {relative!r}")
+    try:
+        parent_real = Path(os.path.realpath(target.parent))
+        if os.path.commonpath((str(dest_real), str(parent_real))) != str(dest_real):
+            raise DirectError(f"install path escapes root: {relative!r}")
+    except ValueError as exc:
+        raise DirectError(f"install path escapes root: {relative!r}") from exc
+    return target
+
+
 def _merge_tree(source: Path, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     for path in sorted(source.rglob("*")):
-        target = dest / path.relative_to(source)
+        relative = path.relative_to(source).as_posix()
+        target = _safe_destination_path(dest, relative)
         if path.is_dir():
             target.mkdir(parents=True, exist_ok=True)
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
+            target = _safe_destination_path(dest, relative)
             os.replace(path, target)
 
 
@@ -587,6 +638,11 @@ def _write_done(
     record_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = record_path.with_name(f"{record_path.name}.tmp")
     record = _done_record(plan, archive, members)
+    if members is not None:
+        record["member_sizes"] = {
+            member: (dest / safe_relative_path(member)).stat().st_size
+            for member in record["members"]
+        }
     temporary.write_text(json.dumps(record), encoding="utf-8")
     os.replace(temporary, record_path)
 
@@ -682,13 +738,13 @@ def _install_streamed_zip(
     """Write the members of an already-open remote zip into ``dest``."""
     for info, relative in entries:
         if info.is_dir():
-            (dest / relative).mkdir(parents=True, exist_ok=True)
+            _safe_destination_path(dest, relative).mkdir(parents=True, exist_ok=True)
 
     todo: list[tuple[zipfile.ZipInfo, str]] = []
     for info, relative in entries:
         if info.is_dir():
             continue
-        if not _stream_member_current(dest / relative, info):
+        if not _stream_member_current(_safe_destination_path(dest, relative), info):
             todo.append((info, relative))
 
     total = sum(info.file_size for info, _ in todo)
@@ -729,8 +785,9 @@ def _install_streamed_zip(
                         break
                     dst.write(block)
                     add_progress(len(block))
-            out = dest / relative
+            out = _safe_destination_path(dest, relative)
             out.parent.mkdir(parents=True, exist_ok=True)
+            out = _safe_destination_path(dest, relative)
             os.replace(temporary, out)
         except Cancelled:
             _remove_file(temporary)
@@ -909,13 +966,13 @@ def _stream_7z_archive(
             raise DirectError(f"cannot open {archive.name}: {exc}") from exc
 
         for entry in entries:
-            safe_relative_path(entry.path)
+            _safe_destination_path(dest, entry.path)
         wanted: set[str] = set()
         total = 0
         for entry in entries:
             relative = safe_relative_path(entry.path)
             if entry.is_dir:
-                (dest / relative).mkdir(parents=True, exist_ok=True)
+                _safe_destination_path(dest, relative).mkdir(parents=True, exist_ok=True)
                 continue
             if entry.size == 0 and not (dest / relative).is_file():
                 wanted.add(entry.path)
@@ -1098,19 +1155,38 @@ def safe_relative_path(path: str) -> str:
 
 
 def plan_missing(
-    plan: Plan, dest: Path | str, *, verify: bool = True
+    plan: Plan, dest: Path | str, *, verify: bool = True, check_workers: int | None = None
 ) -> tuple[list[RemoteFile], list[Archive]]:
     """What :func:`sync` would still fetch: files that are absent or whose size/hash
     differ, and archives with no ``.done`` record for this plan's version.
 
     ``verify=False`` compares sizes only: right after a sync that already hashed every file.
+    File checks run in bounded batches; the returned missing-file list keeps plan order.
     """
     root = Path(dest)
-    files = [
-        rf
-        for rf in plan.files
-        if not _verify_remote(root / safe_relative_path(rf.path), rf, hashes=verify)
-    ]
+    workers = min(
+        max(1, _PLAN_CHECK_MAX_WORKERS if check_workers is None else check_workers),
+        _PLAN_CHECK_MAX_WORKERS,
+        len(plan.files) or 1,
+    )
+
+    def needs_download(rf: RemoteFile) -> bool:
+        return not _verify_remote(root / safe_relative_path(rf.path), rf, hashes=verify)
+
+    files: list[RemoteFile] = []
+    if workers == 1:
+        files.extend(rf for rf in plan.files if needs_download(rf))
+    else:
+        # Executor.map preserves input order but eagerly submits its inputs in
+        # Python 3.12. Submit only one capped batch at a time to bound queued
+        # futures and each worker's live file/hash state.
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="nadare-plan-missing"
+        ) as pool:
+            for offset in range(0, len(plan.files), workers):
+                batch = plan.files[offset : offset + workers]
+                results = pool.map(needs_download, batch)
+                files.extend(rf for rf, missing in zip(batch, results) if missing)
     archives = [archive for archive in plan.archives if not _archive_done(plan, archive, root)]
     return files, archives
 
@@ -1172,13 +1248,16 @@ def sync(
     emit: Emitter | None = None,
     cancel: Cancel | None = None,
     workers: int = 4,
+    check_workers: int | None = None,
 ) -> dict[str, int]:
     """Install ``plan`` into ``dest``. Returns ``{"downloaded": n, "skipped": m}``
     counting files plus archives. Idempotent: a second run fetches nothing."""
     _validate_plan(plan)
     root = Path(dest).expanduser()
     with _install_lock(root):
-        return _sync(plan, root, emit=emit, cancel=cancel, workers=workers)
+        return _sync(
+            plan, root, emit=emit, cancel=cancel, workers=workers, check_workers=check_workers
+        )
 
 
 def _sync(
@@ -1188,12 +1267,13 @@ def _sync(
     emit: Emitter | None,
     cancel: Cancel | None,
     workers: int,
+    check_workers: int | None = None,
 ) -> dict[str, int]:
     say = emitter(emit)
     if cancel is not None:
         cancel.raise_if_cancelled()
 
-    missing_files, missing_archives = plan_missing(plan, root)
+    missing_files, missing_archives = plan_missing(plan, root, check_workers=check_workers)
     downloaded = 0
     stop = Cancel()
     combined = _CombinedCancel(cancel, stop)

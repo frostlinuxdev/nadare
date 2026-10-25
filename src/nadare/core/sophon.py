@@ -7,7 +7,7 @@ file of the game together with the chunks it is made of. Each chunk is its own
 zstd frame on the CDN and is addressed by name, so an install can fetch only
 the chunks that are missing or damaged and resume at chunk granularity.
 
-Only the standard library plus :mod:`zstandard` is used here; this module
+Only the standard library plus :mod:`zstandard` (imported lazily) is used here; this module
 deliberately does not import :mod:`nadare.core.directdl`.
 """
 
@@ -15,6 +15,9 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import os
+import shutil
+import stat
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,9 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import zstandard
-
-from . import download as download_module
+from . import diskspace, download as download_module
 from .download import DownloadError
 from .events import Cancel, Cancelled, Emitter, Event, emitter
 
@@ -38,6 +39,17 @@ STATE_DIR = ".nadare"
 
 class SophonError(RuntimeError):
     """A manifest, a chunk or the local install is invalid."""
+
+
+def _zstd() -> Any:
+    """The ``zstandard`` module, imported on first use so only Sophon installs need it."""
+    try:
+        import zstandard
+    except ImportError as exc:
+        raise SophonError(
+            "the 'zstandard' Python package is missing; install it (pip install zstandard)"
+        ) from exc
+    return zstandard
 
 
 @dataclass(frozen=True)
@@ -157,6 +169,35 @@ def _safe_relative_path(path: str) -> str:
     return path
 
 
+def _target_path(root: Path, relative: str) -> Path:
+    """Resolve a manifest path while rejecting symlinks below the install root.
+
+    The root itself may be a symlink; only components beneath it are forbidden.
+    """
+    relative = _safe_relative_path(relative)
+    root_real = Path(os.path.realpath(root))
+    target = root / relative
+    current = root
+    for part in relative.split("/"):
+        current = current / part
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise SophonError(f"cannot inspect install path {relative!r}: {exc}") from exc
+        if stat.S_ISLNK(mode):
+            raise SophonError(f"symlink in install path {relative!r}")
+
+    try:
+        parent_real = Path(os.path.realpath(target.parent))
+        if os.path.commonpath((str(root_real), str(parent_real))) != str(root_real):
+            raise SophonError(f"install path escapes root: {relative!r}")
+    except ValueError as exc:
+        raise SophonError(f"install path escapes root: {relative!r}") from exc
+    return target
+
+
 def _parse_chunk(data: bytes) -> ChunkEntry:
     name = ""
     md5 = ""
@@ -268,8 +309,8 @@ def _fetch_bytes(
 def _load_manifest(pool: download_module.HttpClientPool, pkg: SophonPackage) -> list[FileEntry]:
     body = _fetch_bytes(pool, pkg.manifest_url, _MAX_MANIFEST_BYTES)
     try:
-        raw = zstandard.ZstdDecompressor().decompress(body, max_output_size=1 << 31)
-    except zstandard.ZstdError as exc:
+        raw = _zstd().ZstdDecompressor().decompress(body, max_output_size=1 << 31)
+    except _zstd().ZstdError as exc:
         raise SophonError(f"manifest for {pkg.name} is not a zstd frame: {exc}") from exc
     return parse_manifest(raw)
 
@@ -292,8 +333,8 @@ def _fetch_chunk(
     if chunk.cmd5 and hashlib.md5(body).hexdigest().lower() != chunk.cmd5.lower():
         raise SophonError(f"compressed md5 mismatch for chunk {chunk.name!r}")
     try:
-        data = zstandard.ZstdDecompressor().decompress(body, max_output_size=chunk.size)
-    except zstandard.ZstdError as exc:
+        data = _zstd().ZstdDecompressor().decompress(body, max_output_size=chunk.size)
+    except _zstd().ZstdError as exc:
         raise SophonError(f"cannot decompress chunk {chunk.name!r}: {exc}") from exc
     if len(data) != chunk.size:
         raise SophonError(
@@ -318,6 +359,7 @@ def sync_package(
         cancel.raise_if_cancelled()
 
     pool = download_module.HttpClientPool()
+    staging_paths: list[Path] = []
     try:
         files = _load_manifest(pool, pkg)
         root.mkdir(parents=True, exist_ok=True)
@@ -341,56 +383,160 @@ def sync_package(
                 last_emit = current
             download_module._emit_progress(say, "install", current, total)
 
-        # Every file exists at its final size before the chunk tasks write into it.
-        created: set[str] = set()
+        matched_chunks: dict[str, set[ChunkEntry]] = {}
+        existing: set[str] = set()
         for entry in files:
-            target = root / entry.path
+            target = _target_path(root, entry.path)
             target.parent.mkdir(parents=True, exist_ok=True)
-            if not target.exists():
-                created.add(entry.path)
-            with open(target, "r+b" if target.exists() else "w+b") as fh:
-                fh.truncate(entry.size)
+            target = _target_path(root, entry.path)
+            temporary = _target_path(root, entry.path + ".nadare-new")
+            # Stale staging files are owned by this sync path; clean them lazily
+            # instead of walking the full install tree on every update.
+            if temporary.is_file() or temporary.is_symlink():
+                temporary.unlink()
+            if target.is_file():
+                existing.add(entry.path)
 
-        def install_chunks(
-            entry: FileEntry, chunks: tuple[ChunkEntry, ...], combined: _CombinedCancel
-        ) -> None:
-            with open(root / entry.path, "r+b") as fh:
-                for chunk in chunks:
-                    combined.raise_if_cancelled()
-                    # A file created just now is zeros: skip reading it back to hash it.
-                    if entry.path in created or not _chunk_matches(fh, chunk):
-                        data = _fetch_chunk(pool, pkg, chunk, combined)
-                        combined.raise_if_cancelled()
-                        fh.seek(chunk.offset)
-                        fh.write(data)
+        def inspect_file(entry: FileEntry) -> set[ChunkEntry]:
+            target = _target_path(root, entry.path)
+            with open(target, "rb") as old_file:
+                return {chunk for chunk in entry.chunks if _chunk_matches(old_file, chunk)}
+
+        # Check installed files concurrently. The matching chunk set is reused
+        # below, so changed files do not hash the old bytes a second time.
+        inspect_entries = [entry for entry in files if entry.path in existing]
+        if inspect_entries:
+            inspect_workers = max(1, min(workers, _MAX_WORKERS, len(inspect_entries)))
+            with ThreadPoolExecutor(max_workers=inspect_workers) as executor:
+                futures = {
+                    executor.submit(inspect_file, entry): entry for entry in inspect_entries
+                }
+                for future in as_completed(futures):
+                    entry = futures[future]
+                    matched_chunks[entry.path] = future.result()
+
+        unchanged: set[str] = set()
+        for entry in files:
+            if (
+                entry.path in existing
+                and _target_path(root, entry.path).stat().st_size == entry.size
+                and len(matched_chunks[entry.path]) == len(entry.chunks)
+            ):
+                unchanged.add(entry.path)
+                for chunk in entry.chunks:
                     add_progress(chunk.size)
 
-        tasks = [
-            (entry, entry.chunks[i : i + _CHUNKS_PER_TASK])
-            for entry in files
-            for i in range(0, len(entry.chunks), _CHUNKS_PER_TASK)
-        ]
-        stop = Cancel()
-        combined = _CombinedCancel(cancel, stop)
-        errors: list[BaseException] = []
-        limit = max(1, min(workers, _MAX_WORKERS, len(tasks) or 1))
-        with ThreadPoolExecutor(max_workers=limit) as executor:
-            futures = [executor.submit(install_chunks, e, c, combined) for e, c in tasks]
-            for future in as_completed(futures):
+        def install_chunks(
+            entry: FileEntry,
+            chunks: tuple[ChunkEntry, ...],
+            output_path: Path,
+            old_path: Path | None,
+            matched: set[ChunkEntry],
+            combined: _CombinedCancel,
+        ) -> None:
+            output_relative = entry.path + ".nadare-new" if old_path is not None else entry.path
+            output_path = _target_path(root, output_relative)
+            if old_path is not None:
+                old_path = _target_path(root, entry.path)
+            with open(output_path, "r+b") as output:
+                old_file = open(old_path, "rb") if old_path is not None else None
                 try:
-                    future.result()
-                except BaseException as exc:  # noqa: BLE001 - re-raised below
-                    errors.append(exc)
-                    stop.cancel()
-                    for other in futures:
-                        other.cancel()
-        for exc in errors:
-            if not isinstance(exc, Cancelled):
-                raise exc
-        if errors:
-            raise errors[0]
+                    for chunk in chunks:
+                        combined.raise_if_cancelled()
+                        if old_file is not None and chunk in matched:
+                            old_file.seek(chunk.offset)
+                            data = old_file.read(chunk.size)
+                        else:
+                            data = _fetch_chunk(pool, pkg, chunk, combined)
+                            combined.raise_if_cancelled()
+                        output.seek(chunk.offset)
+                        output.write(data)
+                        add_progress(chunk.size)
+                finally:
+                    if old_file is not None:
+                        old_file.close()
+
+        def run_tasks(
+            task_items: list[tuple[FileEntry, tuple[ChunkEntry, ...], Path, Path | None, set[ChunkEntry]]]
+        ) -> None:
+            if not task_items:
+                return
+            stop = Cancel()
+            combined = _CombinedCancel(cancel, stop)
+            errors: list[BaseException] = []
+            limit = max(1, min(workers, _MAX_WORKERS, len(task_items)))
+            with ThreadPoolExecutor(max_workers=limit) as executor:
+                futures = [
+                    executor.submit(install_chunks, entry, chunks, output, old, matched, combined)
+                    for entry, chunks, output, old, matched in task_items
+                ]
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except BaseException as exc:  # noqa: BLE001 - re-raised below
+                        errors.append(exc)
+                        stop.cancel()
+                        for other in futures:
+                            other.cancel()
+            for exc in errors:
+                if not isinstance(exc, Cancelled):
+                    raise exc
+            if errors:
+                raise errors[0]
+
+        def batches(entry: FileEntry) -> list[tuple[ChunkEntry, ...]]:
+            return [
+                entry.chunks[i : i + _CHUNKS_PER_TASK]
+                for i in range(0, len(entry.chunks), _CHUNKS_PER_TASK)
+            ]
+
+        # New files can be written in place: there is no old copy to protect,
+        # and keeping the final path lets an interrupted first install resume.
+        fresh_entries = [entry for entry in files if entry.path not in existing]
+        fresh_tasks: list[
+            tuple[FileEntry, tuple[ChunkEntry, ...], Path, Path | None, set[ChunkEntry]]
+        ] = []
+        for entry in fresh_entries:
+            target = _target_path(root, entry.path)
+            with open(target, "w+b") as fh:
+                fh.truncate(entry.size)
+            fresh_tasks.extend(
+                (entry, chunk_batch, target, None, set()) for chunk_batch in batches(entry)
+            )
+        run_tasks(fresh_tasks)
+
+        # Stage one changed existing file at a time. Each file is swapped in as
+        # soon as its chunk batches finish, so staging needs at most that file's
+        # size in additional disk space.
+        for entry in files:
+            if entry.path not in existing or entry.path in unchanged:
+                continue
+            target = _target_path(root, entry.path)
+            diskspace.check_space(target.parent, entry.size)
+            temporary = _target_path(root, entry.path + ".nadare-new")
+            staging_paths.append(temporary)
+            with open(temporary, "w+b") as fh:
+                fh.truncate(entry.size)
+            update_tasks = [
+                (entry, chunk_batch, temporary, target, matched_chunks[entry.path])
+                for chunk_batch in batches(entry)
+            ]
+            run_tasks(update_tasks)
+            target = _target_path(root, entry.path)
+            temporary = _target_path(root, entry.path + ".nadare-new")
+            shutil.copymode(target, temporary)
+            with open(temporary, "r+b") as fh:
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(temporary, target)
     finally:
         pool.close()
+        for temporary in staging_paths:
+            try:
+                relative = temporary.relative_to(root).as_posix()
+                _target_path(root, relative).unlink(missing_ok=True)
+            except (OSError, SophonError):
+                pass
 
     if total:
         download_module._emit_progress(say, "install", total, total)

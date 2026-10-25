@@ -163,6 +163,23 @@ def test_symlink_members_are_refused(server, tmp_path):
     assert not (tmp_path / "good.txt").exists()
 
 
+def test_streamed_zip_refuses_existing_symlinked_parent(server, tmp_path):
+    z = make_zip({"data/save": b"new"})
+    s = server({"/g.zip": z})
+    dest = tmp_path / "install"
+    outside = tmp_path / "outside"
+    dest.mkdir()
+    outside.mkdir()
+    original = outside / "save"
+    original.write_bytes(b"old")
+    (dest / "data").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(dd.DirectError, match="symlink|outside|unsafe"):
+        dd.sync(plan(s.url + "/g.zip", size=len(z)), dest)
+
+    assert original.read_bytes() == b"old"
+
+
 def test_free_space_is_checked_before_any_member_is_fetched(server, tmp_path, monkeypatch):
     from nadare.core import diskspace
 
