@@ -95,7 +95,9 @@ def test_plan_missing_without_verify_checks_sizes_only(tmp_path, monkeypatch):
             for n in ("ok.bin", "short.bin", "flipped.bin", "gone.bin")
         ),
     )
-    monkeypatch.setattr(dd, "hash_file", lambda *a, **k: (_ for _ in ()).throw(AssertionError("hashed")))
+    monkeypatch.setattr(
+        dd, "hash_file", lambda *a, **k: (_ for _ in ()).throw(AssertionError("hashed"))
+    )
     files, _ = dd.plan_missing(plan, tmp_path, verify=False)
     assert sorted(f.path for f in files) == ["gone.bin", "short.bin"]
 
@@ -109,7 +111,9 @@ def test_yostar_plan_without_verify_does_not_crc(tmp_path, monkeypatch):
         yostar.ManifestFile(path="b.bin", size=8, crc64=1),
     ]
     manifest = types.SimpleNamespace(files=entries)
-    monkeypatch.setattr(yostar, "crc64_file", lambda p: (_ for _ in ()).throw(AssertionError("crc")))
+    monkeypatch.setattr(
+        yostar, "crc64_file", lambda p: (_ for _ in ()).throw(AssertionError("crc"))
+    )
     assert [e.path for e in yostar.plan(manifest, tmp_path, verify=False)] == ["b.bin"]
 
 

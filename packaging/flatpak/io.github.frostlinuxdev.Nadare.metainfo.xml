@@ -15,6 +15,7 @@
   <content_rating type="oars-1.1"/>
   <releases>
     <!-- Keep in sync with pyproject.toml [project].version. -->
+    <release version="0.1.0b10" date="2026-10-26"/>
     <release version="0.1.0b9" date="2026-10-25"/>
     <release version="0.1.0b8" date="2026-10-25"/>
     <release version="0.1.0b7" date="2026-10-25"/>

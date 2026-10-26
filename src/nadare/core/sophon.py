@@ -18,6 +18,7 @@ import http.client
 import os
 import shutil
 import stat
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -25,7 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import diskspace, download as download_module
+from . import diskspace
+from . import download as download_module
 from .download import DownloadError
 from .events import Cancel, Cancelled, Emitter, Event, emitter
 
@@ -272,6 +274,182 @@ def is_done(pkg: SophonPackage, root: Path) -> bool:
         return False
 
 
+def _ledger_path(pkg: SophonPackage, root: Path) -> Path:
+    return root / STATE_DIR / f"sophon-{pkg.name}.files"
+
+
+def _validate_ledger_entry(entry: str, ledger: Path) -> str:
+    """Return a ledger path, or raise :class:`SophonError` when it is unsafe."""
+    if not isinstance(entry, str) or not entry:
+        raise SophonError(f"unsafe empty path in {ledger.name}")
+    if "\\" in entry:
+        raise SophonError(f"unsafe backslash path in {ledger.name}: {entry!r}")
+    if entry.startswith("/"):
+        raise SophonError(f"unsafe absolute path in {ledger.name}: {entry!r}")
+    if any(part in ("", ".", "..") for part in entry.split("/")):
+        raise SophonError(f"unsafe path in {ledger.name}: {entry!r}")
+    return entry
+
+
+def _ensure_safe_parents(root: Path, relative: str) -> None:
+    """Reject a ledger path reached through a symlinked parent directory."""
+    current = root
+    for part in relative.split("/")[:-1]:
+        current = current / part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise SophonError(f"unsafe path {relative!r}: {exc}") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise SophonError(
+                f"unsafe path {relative!r}: parent {part!r} is a symlink"
+            )
+        if not stat.S_ISDIR(info.st_mode):
+            return
+
+
+def _check_state_storage(root: Path, path: Path | None = None) -> None:
+    """Refuse metadata paths whose .nadare directory or target is a symlink."""
+    state = root / STATE_DIR
+    try:
+        info = state.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise SophonError(f"cannot inspect {STATE_DIR}: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode):
+        raise SophonError(f"{STATE_DIR} metadata directory is a symlink")
+    if not stat.S_ISDIR(info.st_mode):
+        raise SophonError(f"{STATE_DIR} metadata path is not a directory")
+    if path is not None:
+        try:
+            target_info = path.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise SophonError(f"cannot inspect {path.name}: {exc}") from exc
+        if stat.S_ISLNK(target_info.st_mode):
+            raise SophonError(f"{path.name} metadata file is a symlink")
+        if not stat.S_ISREG(target_info.st_mode):
+            raise SophonError(f"{path.name} metadata path is not a regular file")
+
+
+def _read_ledger(pkg: SophonPackage, root: Path) -> tuple[list[str], str | None]:
+    """Read prior paths and raw text, validating metadata before anything is written."""
+    ledger = _ledger_path(pkg, root)
+    _check_state_storage(root, ledger)
+    try:
+        raw = ledger.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return [], None
+    except OSError as exc:
+        raise SophonError(f"cannot read {ledger.name}: {exc}") from exc
+    except UnicodeError as exc:
+        raise SophonError(f"invalid text in {ledger.name}: {exc}") from exc
+    entries: list[str] = []
+    for line in raw.splitlines():
+        if not line:
+            continue
+        entries.append(_validate_ledger_entry(line, ledger))
+    return entries, raw
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` through a temporary file and ``os.replace`` (never the target)."""
+    if path.parent.name == STATE_DIR:
+        _check_state_storage(path.parent.parent, path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary_path, path)
+    except BaseException:
+        try:
+            temporary_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _other_package_paths(root: Path, current_ledger: Path) -> set[str] | None:
+    """Read sibling package ledgers; return None when ownership is uncertain."""
+    state = root / STATE_DIR
+    try:
+        mode = state.lstat().st_mode
+    except FileNotFoundError:
+        return set()
+    except OSError:
+        return None
+    if stat.S_ISLNK(mode) or not stat.S_ISDIR(mode):
+        return None
+
+    protected: set[str] = set()
+    try:
+        ledgers = state.glob("sophon-*.files")
+        for ledger in ledgers:
+            if ledger == current_ledger:
+                continue
+            _check_state_storage(root, ledger)
+            raw = ledger.read_text(encoding="utf-8")
+            for line in raw.splitlines():
+                if line:
+                    protected.add(_validate_ledger_entry(line, ledger))
+    except (OSError, UnicodeError, SophonError):
+        # If another package's ownership data is unreadable, keep every leftover.
+        return None
+    return protected
+
+
+def _cleanup_stale_files(
+    root: Path, previous: list[str], current: list[str], current_ledger: Path
+) -> None:
+    """Remove unowned stale ledger paths, then prune empty directories."""
+    protected = _other_package_paths(root, current_ledger)
+    if protected is None:
+        return
+    keep = set(current) | protected
+    parents: set[Path] = set()
+    for relative in previous:
+        if relative in keep or relative.split("/", 1)[0] == STATE_DIR:
+            continue
+        try:
+            # Re-check at deletion time: a parent may have become a symlink meanwhile.
+            _ensure_safe_parents(root, relative)
+        except SophonError:
+            continue
+        try:
+            (root / relative).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # Best effort: one stubborn file must not fail an otherwise good install.
+            continue
+        parents.add(Path(relative).parent)
+    for parent in sorted(parents, key=lambda path: len(path.parts), reverse=True):
+        if not parent.parts or parent == Path("."):
+            continue
+        target = root / parent
+        while target != root:
+            try:
+                _ensure_safe_parents(root, target.relative_to(root).as_posix() + "/.nadare-prune")
+                info = target.lstat()
+            except (OSError, SophonError):
+                break
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                break
+            try:
+                target.rmdir()  # only succeeds while the directory is empty
+            except OSError:
+                break
+            target = target.parent
+
+
 #: Attempts per request before an error fails the install (the CDN drops a connection now and then).
 _ATTEMPTS = 4
 #: Largest manifest body accepted (compressed); a real one is under ~30 MB.
@@ -353,7 +531,11 @@ def sync_package(
     cancel: Cancel | None = None,
     workers: int = 4,
 ) -> None:
-    """Install ``pkg`` into ``root``, fetching only missing or damaged chunks."""
+    """Install ``pkg`` into ``root``, fetching only missing or damaged chunks.
+
+    Every sync reloads the manifest and verifies the local chunks even when the
+    ``.done`` marker matches; re-sync is also the repair path for damaged files.
+    """
     say = emitter(emit)
     if cancel is not None:
         cancel.raise_if_cancelled()
@@ -362,6 +544,7 @@ def sync_package(
     staging_paths: list[Path] = []
     try:
         files = _load_manifest(pool, pkg)
+        previous, previous_text = _read_ledger(pkg, root)
         root.mkdir(parents=True, exist_ok=True)
         total = sum(entry.size for entry in files)
         done = 0
@@ -457,7 +640,9 @@ def sync_package(
                         old_file.close()
 
         def run_tasks(
-            task_items: list[tuple[FileEntry, tuple[ChunkEntry, ...], Path, Path | None, set[ChunkEntry]]]
+            task_items: list[
+                tuple[FileEntry, tuple[ChunkEntry, ...], Path, Path | None, set[ChunkEntry]]
+            ],
         ) -> None:
             if not task_items:
                 return
@@ -541,7 +726,22 @@ def sync_package(
     if total:
         download_module._emit_progress(say, "install", total, total)
 
+    current = list(dict.fromkeys(entry.path for entry in files))
+    ledger = _ledger_path(pkg, root)
     marker = _marker_path(pkg, root)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(pkg.manifest_id, encoding="utf-8")
+    # Publish the new ownership set before best-effort cleanup. If pruning fails
+    # partway, the old paths are no longer in the ledger and will not be retried.
+    _atomic_write_text(ledger, "".join(f"{path}\n" for path in current))
+    try:
+        _atomic_write_text(marker, pkg.manifest_id)
+    except BaseException:
+        try:
+            if previous_text is None:
+                ledger.unlink(missing_ok=True)
+            else:
+                _atomic_write_text(ledger, previous_text)
+        except OSError:
+            pass
+        raise
+    _cleanup_stale_files(root, previous, current, ledger)
     say(Event("log", f"installed {pkg.name}", data={"sophon": pkg.name}))

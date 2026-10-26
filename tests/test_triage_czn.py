@@ -87,7 +87,7 @@ def test_update_apply_reports_a_directory_conflict(monkeypatch, tmp_path, capsys
     monkeypatch.setattr(
         czn_update,
         "plan",
-        lambda manifest: ([("/f.bin", "1", "c0", "a" * 32, "b" * 32, 1)], ["/collide"]),
+        lambda manifest, **_kw: ([("/f.bin", "1", "c0", "a" * 32, "b" * 32, 1)], ["/collide"]),
     )
 
     assert czn_update.main(["update", "--apply"]) == 1

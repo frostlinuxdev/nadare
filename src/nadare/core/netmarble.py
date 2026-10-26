@@ -183,7 +183,9 @@ def session_from_token(
     expires_at = int(now) + 30 * 86400 if exp == 0 else exp
     if expires_at - EXPIRY_SKEW <= now:
         raise NetmarbleError("the sign-in has already expired")
-    return Session(token=token, expires_at=expires_at, player_id=sub, device_key=device_key, name=name)
+    return Session(
+        token=token, expires_at=expires_at, player_id=sub, device_key=device_key, name=name
+    )
 
 
 def is_expired(session: Session, now: float | None = None) -> bool:
@@ -216,7 +218,9 @@ class CallbackServer:
             def log_message(self, format: str, *args: object) -> None:
                 pass
 
-            def _reply(self, status: int, body: bytes, content_type: str = "text/plain; charset=utf-8") -> None:
+            def _reply(
+                self, status: int, body: bytes, content_type: str = "text/plain; charset=utf-8"
+            ) -> None:
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
@@ -266,7 +270,7 @@ class CallbackServer:
                     return
                 self._reply(
                     200,
-                    b"<!doctype html><html><head><meta charset=\"utf-8\"><title>Nadare</title></head>"
+                    b'<!doctype html><html><head><meta charset="utf-8"><title>Nadare</title></head>'
                     b"<body><h1>Netmarble sign-in complete</h1>"
                     b"<p>You can close this tab and return to Nadare.</p></body></html>",
                     "text/html; charset=utf-8",
@@ -277,7 +281,9 @@ class CallbackServer:
         except OSError:
             self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.port = int(self._httpd.server_address[1])
-        self._thread = threading.Thread(target=self._httpd.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True)
+        self._thread = threading.Thread(
+            target=self._httpd.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True
+        )
         self._thread.start()
 
     port: int
@@ -322,7 +328,9 @@ def fetch_user_name(token: str, fetch: Fetch | None = None) -> str:
         if fetch is None:
             from .download import http_get
 
-            fetch = lambda url, headers=None: http_get(url, headers=headers)
+            def fetch(url, headers=None):
+                return http_get(url, headers=headers)
+
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
@@ -422,7 +430,9 @@ def ensure_wine_device_key(prefix: Path | str, device_key: str) -> bool:
             text += "\n"
         text += f'\n{_REG_HEADER} {stamp}\n#time={filetime:x}\n{value}\n'
     else:
-        end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("[")), len(lines))
+        end = next(
+            (i for i in range(start + 1, len(lines)) if lines[i].startswith("[")), len(lines)
+        )
         found = next(
             (i for i in range(start + 1, end) if lines[i].lstrip().startswith(_VALUE_PREFIX)),
             None,

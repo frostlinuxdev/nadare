@@ -72,7 +72,11 @@ def browser_that_signs_in(token, delay=0.1):
     def open_browser(self, url):
         q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
         redirect = q["redirectUrl"]  # Netmarble's page appends accessToken to this URL
-        target = redirect + ("&" if "?" in redirect else "?") + urllib.parse.urlencode({"accessToken": token})
+        target = (
+            redirect
+            + ("&" if "?" in redirect else "?")
+            + urllib.parse.urlencode({"accessToken": token})
+        )
 
         def go():
             time.sleep(delay)
@@ -318,7 +322,9 @@ def test_launch_of_an_uninstalled_game_is_not_a_login_error(tmp_path, store):
 
 def test_launch_with_an_expired_login_says_so(tmp_path, store):
     b = make_backend(tmp_path)
-    nmlogin._LIVE["mongil"] = nm.Session(make_jwt(), int(time.time()) - 10, "P", "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d")
+    nmlogin._LIVE["mongil"] = nm.Session(
+        make_jwt(), int(time.time()) - 10, "P", "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"
+    )
     with pytest.raises(BackendError, match="(?i)expired"):
         b.launch()
     assert b.status().data["login_expired"] is True and b.status().data["logged_in"] is False
@@ -347,7 +353,14 @@ def test_launch_hands_the_game_its_token_but_never_logs_it(tmp_path, store, sign
     assert b.launch() == 0
     args = launch_spy["args"]
     assert args[0].endswith("STARDIVE.exe") and "-windowed" in args
-    for a in ("NMAUTH_TYPE=netmarble", "-NMAUTH_TYPE=netmarble", f"NMAUTH_TOKEN={token}", f"-NMAUTH_TOKEN={token}", "NMENV=nmp", "-NMENV=nmp"):
+    for a in (
+        "NMAUTH_TYPE=netmarble",
+        "-NMAUTH_TYPE=netmarble",
+        f"NMAUTH_TOKEN={token}",
+        f"-NMAUTH_TOKEN={token}",
+        "NMENV=nmp",
+        "-NMENV=nmp",
+    ):
         assert a in args
     assert args.index("-windowed") < args.index("NMAUTH_TYPE=netmarble")  # profile args first
     env = launch_spy["extra_env"]
@@ -386,7 +399,9 @@ def test_other_games_launch_unchanged(tmp_path, monkeypatch):
     monkeypatch.setattr(ak.ArknightsBackend, "_ensure_default_runner", lambda self, strict: None)
     monkeypatch.setattr(ak.ArknightsBackend, "_run_vcredist", lambda self, created=False: None)
     monkeypatch.setattr(ak, "stream", lambda *a, **k: 0)
-    b = direct.BrownDust2Backend(make_context(tmp_path, "direct-bd2", {"prefix": str(tmp_path / "pfx")}))
+    b = direct.BrownDust2Backend(
+        make_context(tmp_path, "direct-bd2", {"prefix": str(tmp_path / "pfx")})
+    )
     write_exe(b.install_dir() / "BrownDust II.exe", "MZ")
     assert b.launch() == 0
     assert len(seen["args"]) == 1 and seen["extra_env"] is None
@@ -403,7 +418,9 @@ def test_a_drive_by_request_without_the_state_cannot_log_you_in(tmp_path, store,
         def go():
             time.sleep(0.1)
             try:
-                urllib.request.urlopen(base + "?" + urllib.parse.urlencode({"accessToken": attacker}), timeout=5)
+                urllib.request.urlopen(
+                    base + "?" + urllib.parse.urlencode({"accessToken": attacker}), timeout=5
+                )
             except Exception:
                 pass  # 403 is the expected answer
 
@@ -424,4 +441,7 @@ def test_status_asks_for_a_login_only_once_the_game_is_installed(tmp_path, store
     assert b.status().data["login_required"] is True
     b.login()
     assert b.status().data["login_required"] is False
-    assert make_backend(tmp_path / "other", installed=False, name="m2").status().data["login_required"] is False
+    assert (
+        make_backend(tmp_path / "other", installed=False, name="m2").status().data["login_required"]
+        is False
+    )

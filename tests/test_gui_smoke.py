@@ -684,6 +684,21 @@ def test_page_notice_link_label_matches_the_backend(tmp_path, qapp):
         qapp.processEvents()
 
 
+def test_nikke_page_notice_explains_both_manual_install_clicks(tmp_path, qapp):
+    from nadare.gui.game_view import GameView
+
+    view = GameView()
+    try:
+        view.set_profile("nikke", {"backend": "launcher-nikke", "title": "NIKKE"})
+        text = view.notice_label.text()
+        assert "INSTALL" in text
+        assert "miniloader" in text.lower()
+        assert "installer window" in text.lower()
+    finally:
+        view.deleteLater()
+        qapp.processEvents()
+
+
 def test_sidebar_shows_beta_pill(tmp_path, qapp):
     window = MainWindow(_empty_config(tmp_path))
     try:

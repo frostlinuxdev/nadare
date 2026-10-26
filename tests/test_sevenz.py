@@ -21,7 +21,9 @@ LAYOUTS = ["lzma2", "lzma1", "copy", "bcj", "plainhdr", "nonsolid"]
 
 def tree(root: Path) -> dict[str, bytes]:
     return {
-        p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()
+        p.relative_to(root).as_posix(): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
     }
 
 
@@ -78,7 +80,12 @@ def test_split_volumes_read_as_one_file(tmp_path):
 def test_only_filter_and_progress(tmp_path):
     seen: list[tuple[int, int]] = []
     with open7z("lzma2") as fh:
-        n = sevenz.extract(fh, tmp_path, only=lambda p: p.startswith("sub/"), progress=lambda a, b: seen.append((a, b)))
+        n = sevenz.extract(
+            fh,
+            tmp_path,
+            only=lambda p: p.startswith("sub/"),
+            progress=lambda a, b: seen.append((a, b)),
+        )
     assert set(tree(tmp_path)) == {"sub/data.bin", "sub/deep/text.txt"}
     assert n == 2
     assert seen and seen[-1][0] <= seen[-1][1] and all(b >= a for a, b in seen)
@@ -137,12 +144,37 @@ def test_a_damaged_header_is_detected():
 def test_an_unsupported_coder_is_reported_by_name():
     # Build a tiny, valid-CRC archive whose only coder id is PPMd (030401).
     streams = bytes([0x06, 0x00, 0x01, 0x09, 0x04, 0x00])  # PackInfo: pos 0, 1 stream, size 4
-    unpack = bytes([0x07, 0x0B, 0x01, 0x00, 0x01, 0x23, 0x03, 0x04, 0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00,
-                    0x0C, 0x04, 0x00])
+    unpack = bytes(
+        [
+            0x07,
+            0x0B,
+            0x01,
+            0x00,
+            0x01,
+            0x23,
+            0x03,
+            0x04,
+            0x01,
+            0x05,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x0C,
+            0x04,
+            0x00,
+        ]
+    )
     header = bytes([0x01, 0x04]) + streams + unpack + bytes([0x00, 0x00])
     body = b"\x00" * 4
     start = struct.pack("<QQI", len(body), len(header), zlib.crc32(header) & 0xFFFFFFFF)
-    sig = b"7z\xbc\xaf\x27\x1c" + b"\x00\x04" + struct.pack("<I", zlib.crc32(start) & 0xFFFFFFFF) + start
+    sig = (
+        b"7z\xbc\xaf\x27\x1c"
+        + b"\x00\x04"
+        + struct.pack("<I", zlib.crc32(start) & 0xFFFFFFFF)
+        + start
+    )
     with pytest.raises(sevenz.SevenZipError):
         sevenz.list_entries(io.BytesIO(sig + body + header))
 

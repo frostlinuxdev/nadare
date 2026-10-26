@@ -251,6 +251,23 @@ def _same_path(first: str | None, second: str | None) -> bool:
     return os.path.normpath(first) == os.path.normpath(second)
 
 
+def _query_matches(query: ProcessQuery, argv: list[str], env: dict[str, str]) -> bool:
+    prefix = str(query.prefix).strip() if query.prefix else ""
+    names = {name.lower() for name in query.names if name}
+    extra = str(query.match).strip() if query.match else ""
+    wanted_args = {arg for arg in query.args if arg}
+    env_prefix = env.get("WINEPREFIX") or env.get("STEAM_COMPAT_DATA_PATH")
+    belongs = bool(prefix) and _same_path(env_prefix, prefix)
+    if not belongs and names and not env_prefix:
+        basename = os.path.basename(argv[0]).lower()
+        belongs = basename in names
+    if not belongs and wanted_args:
+        belongs = any(arg in argv for arg in wanted_args)
+    if not belongs and extra:
+        belongs = extra in " ".join(argv)
+    return belongs
+
+
 def _scan_query(query: ProcessQuery, *, proc_root: str | os.PathLike[str] = "/proc") -> list[int]:
     """Return PIDs that belong to ``query`` under ``proc_root``."""
     prefix = str(query.prefix).strip() if query.prefix else ""
@@ -285,19 +302,7 @@ def _scan_query(query: ProcessQuery, *, proc_root: str | os.PathLike[str] = "/pr
             continue
         # The environment only matters to the prefix and basename branches below.
         env = _environ_map(entry) if (prefix or names) else {}
-        env_prefix = env.get("WINEPREFIX") or env.get("STEAM_COMPAT_DATA_PATH")
-        belongs = bool(prefix) and _same_path(env_prefix, prefix)
-        if not belongs and names and not env_prefix:
-            # A directly-executed exe (no Wine environment) is the only case
-            # where the basename may stand in for a prefix match. A Wine process
-            # in a *different* prefix must never count, even on a name collision.
-            basename = os.path.basename(argv[0]).lower()
-            belongs = basename in names
-        if not belongs and wanted_args:
-            belongs = any(arg in argv for arg in wanted_args)
-        if not belongs and extra:
-            belongs = extra in " ".join(argv)
-        if belongs:
+        if _query_matches(query, argv, env):
             hits.append(pid)
     return hits
 
@@ -328,6 +333,14 @@ def scan_pids(
     match a bare path.
     """
     if isinstance(patterns, ProcessQuery):
+        round_ = process.current_process_scan_round()
+        if round_ is not None and Path(proc_root) == round_.proc_root:
+            hits: list[int] = []
+            for record in round_.records():
+                if _query_matches(patterns, record.argv, record.environ):
+                    _SCAN_START[record.pid] = record.started
+                    hits.append(record.pid)
+            return hits
         return remember_start(_scan_query(patterns, proc_root=proc_root))
     if names is not None:
         query = ProcessQuery(

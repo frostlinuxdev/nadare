@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -277,13 +278,47 @@ def detect_import(kind: str, folder: str | Path | None, prefix: str | Path | Non
     return info
 
 
+class _ElidedLabel(QLabel):
+    """A one-line label that shortens the middle of a long path instead of widening the dialog."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._full = ""
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def full_text(self) -> str:
+        return self._full
+
+    def set_full_text(self, text: str) -> None:
+        self._full = text
+        self.setToolTip(text)
+        self._elide()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        shown = self.fontMetrics().elidedText(
+            self._full, Qt.TextElideMode.ElideMiddle, max(self.width(), 60)
+        )
+        if shown != self.text():
+            self.setText(shown)
+
+
 class AddGameDialog(QDialog):
     """QDialog that creates one profile for a chosen backend."""
 
     created = pyqtSignal(str)  # profile name
 
     def __init__(
-        self, config: Config, parent: QWidget | None = None, data_root: Path | None = None
+        self,
+        config: Config,
+        parent: QWidget | None = None,
+        data_root: Path | None = None,
+        *,
+        kind: str | None = None,
+        advanced: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("Root")
@@ -328,7 +363,8 @@ class AddGameDialog(QDialog):
         self.game_list.setObjectName("GameList")
         self.game_list.setMaximumHeight(210)
         self._first_row = -1
-        self._populate_games()
+        valid_kind = kind if any(game.kind == kind for game in available_catalog()) else None
+        self._populate_games(advanced_only=advanced)
         self.game_list.currentRowChanged.connect(self._on_game_changed)
         root.addWidget(self.game_list)
 
@@ -359,8 +395,23 @@ class AddGameDialog(QDialog):
         self.folder = QLineEdit()
         self.folder.setPlaceholderText("folder the game will live in")
         self.folder.textEdited.connect(lambda _t: setattr(self, "_folder_touched", True))
+        self.folder.textChanged.connect(self._folder_changed)
         self.folder.editingFinished.connect(self.detect)
-        form.addRow(self.folder_label, self._with_browse(self.folder, self._browse_folder))
+        folder_field = QWidget()
+        folder_layout = QVBoxLayout(folder_field)
+        folder_layout.setContentsMargins(0, 0, 0, 0)
+        folder_layout.setSpacing(4)
+        folder_layout.addWidget(self._with_browse(self.folder, self._browse_folder))
+        self.prefix_summary = _ElidedLabel()
+        self.prefix_summary.setObjectName("Muted")
+        self.prefix_summary.setAccessibleName("Wine prefix location")
+        folder_layout.addWidget(self.prefix_summary)
+        self.prefix_toggle = QPushButton("Choose the Wine prefix separately…")
+        self.prefix_toggle.setObjectName("Link")
+        self.prefix_toggle.setAutoDefault(False)
+        self.prefix_toggle.clicked.connect(self._toggle_prefix)
+        folder_layout.addWidget(self.prefix_toggle, alignment=Qt.AlignmentFlag.AlignLeft)
+        form.addRow(self.folder_label, folder_field)
         self.folder_free = QLabel("")
         self.folder_free.setObjectName("Muted")
         form.addRow("", self.folder_free)
@@ -385,6 +436,7 @@ class AddGameDialog(QDialog):
         form.addRow("", self.prefix_free)
 
         self._location_open = False
+        self._prefix_open = False
         self.location_toggle = QPushButton("Choose where to install…")
         self.location_toggle.setObjectName("GhostButton")
         self.location_toggle.setAutoDefault(False)
@@ -427,6 +479,12 @@ class AddGameDialog(QDialog):
 
         self._select_row(self._first_row)
         self._on_game_changed(self._first_row)
+        if advanced:
+            self.game_list.setAccessibleName("Advanced game type")
+        elif valid_kind:
+            self.set_backend(valid_kind)
+            # The store already chose the game; an unknown kind keeps the full list.
+            self.game_list.hide()
         self._apply_location_visibility()
         self._fit_to_screen(body)
 
@@ -438,8 +496,9 @@ class AddGameDialog(QDialog):
         self.resize(max(self.minimumWidth(), self.sizeHint().width()), max(300, min(want, limit)))
 
     # ---- construction helpers ---------------------------------------------
-    def _populate_games(self) -> None:
-        for group in ("Games", ADVANCED_GROUP):
+    def _populate_games(self, *, advanced_only: bool = False) -> None:
+        groups = (ADVANCED_GROUP,) if advanced_only else ("Games", ADVANCED_GROUP)
+        for group in groups:
             header = QListWidgetItem(group.upper())
             header.setFlags(Qt.ItemFlag.NoItemFlags)
             self.game_list.addItem(header)
@@ -497,6 +556,7 @@ class AddGameDialog(QDialog):
     def set_install_dir(self, path: str | Path) -> None:
         self.folder.setText(str(path))
         self._folder_touched = True
+        self._folder_changed()
 
     def set_prefix(self, path: str | Path) -> None:
         self.prefix.setText(str(path))
@@ -534,6 +594,7 @@ class AddGameDialog(QDialog):
         game = self._selected_game()
         if game is None:
             return
+        self._prefix_open = False
         self.prefix.setPlaceholderText(
             "Folder of the existing install"
             if self.import_existing.isChecked()
@@ -553,7 +614,7 @@ class AddGameDialog(QDialog):
             # A default prefix only makes sense for a fresh install; in Import
             # mode an auto-filled, non-existent path must never be accepted.
             if game.kind in PREFIX_KINDS and self.install_new.isChecked():
-                self.prefix.setText(str(self._root() / self._slug() / "prefix"))
+                self.prefix.setText(self._matching_prefix(self.folder.text()))
             else:
                 self.prefix.clear()
         self._update_size_hint()
@@ -561,6 +622,26 @@ class AddGameDialog(QDialog):
 
     def _toggle_location(self) -> None:
         self._location_open = not self._location_open
+        self._apply_location_visibility()
+
+    def _matching_prefix(self, folder: str | Path) -> str:
+        """The Wine prefix that sits next to ``folder`` (the default one when it has no name)."""
+        text = str(folder).strip()
+        path = Path(text) if text else None
+        if path is None or not path.name:
+            return str(self._root() / self._slug() / "prefix")  # empty, "/" or "."
+        return str(path.parent / ("prefix" if path.name == "install" else f"{path.name}-prefix"))
+
+    def _folder_changed(self, _text: str = "") -> None:
+        if not self._prefix_touched and self.install_new.isChecked():
+            game = self._selected_game()
+            if game is not None and game.kind in PREFIX_KINDS:
+                self.prefix.setText(self._matching_prefix(self.folder.text()))
+        self._update_prefix_summary()
+        self._update_free_space()
+
+    def _toggle_prefix(self) -> None:
+        self._prefix_open = not self._prefix_open
         self._apply_location_visibility()
 
     def _apply_location_visibility(self) -> None:
@@ -580,8 +661,22 @@ class AddGameDialog(QDialog):
         # an import, which asks for that location in the prefix row instead).
         form.setRowVisible(0, show and not prefix_only)  # install folder
         form.setRowVisible(1, show and not prefix_only)
-        form.setRowVisible(2, show and uses_prefix)  # Wine prefix
-        form.setRowVisible(3, show and uses_prefix)
+        # A fresh install hides the Wine prefix row (its label, field and free-space line)
+        # behind the "separately" link; an import and a prefix-only kind always show it.
+        advanced = getattr(self, "_prefix_open", False)
+        prefix_shown = show and uses_prefix and (prefix_only or importing or advanced)
+        form.setRowVisible(2, prefix_shown)  # Wine prefix
+        form.setRowVisible(3, prefix_shown)
+        if hasattr(self, "prefix_toggle"):
+            prefix_controls = show and uses_prefix and not prefix_only and not importing
+            self.prefix_summary.setVisible(prefix_controls)
+            self.prefix_toggle.setVisible(prefix_controls)
+            self.prefix_toggle.setText(
+                "Use the matching prefix folder"
+                if self._prefix_open
+                else "Choose the Wine prefix separately…"
+            )
+            self._update_prefix_summary()
         form.setRowVisible(self.location_toggle, not importing)
         self._apply_prefix_label(prefix_only)
         self.location_toggle.setText(
@@ -603,6 +698,7 @@ class AddGameDialog(QDialog):
                 widget.setToolTip("")
 
     def _on_mode_changed(self, _checked: bool = False) -> None:
+        self._prefix_open = self.import_existing.isChecked()
         self._apply_location_visibility()
         if self.import_existing.isChecked():
             self.folder_label.setText("Existing game folder")
@@ -620,9 +716,15 @@ class AddGameDialog(QDialog):
                 self.folder.setText(str(self._root() / self._slug() / "install"))
             if not self._prefix_touched and self._selected_game() is not None:
                 if self._selected_game().kind in PREFIX_KINDS:
-                    self.prefix.setText(str(self._root() / self._slug() / "prefix"))
+                    self.prefix.setText(self._matching_prefix(self.folder.text()))
         self._update_size_hint()
+        self._folder_changed()
         self.detect()
+
+    def _update_prefix_summary(self) -> None:
+        game = self._selected_game()
+        if game is not None and game.kind in PREFIX_KINDS and self.install_new.isChecked():
+            self.prefix_summary.set_full_text(f"Wine prefix: {self.prefix.text()}")
 
     def _update_size_hint(self) -> None:
         """Explain that Install new downloads later, with the known download size."""
@@ -646,6 +748,7 @@ class AddGameDialog(QDialog):
         if chosen:
             self.folder.setText(chosen)
             self._folder_touched = True
+            self._folder_changed()
             self.detect()
 
     def _browse_prefix(self) -> None:

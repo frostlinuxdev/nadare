@@ -21,6 +21,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -218,6 +219,94 @@ def iter_processes() -> Iterator[ProcessInfo]:
         if not cmdline and not exe:
             continue
         yield ProcessInfo(pid=pid, name=name or Path(cmdline[0]).name, cmdline=cmdline, exe=exe)
+
+
+@dataclass(frozen=True)
+class ProcessRecord:
+    """One same-user process captured for a shared status-probe round."""
+
+    pid: int
+    argv: list[str]
+    environ: dict[str, str]
+    started: str | None
+
+
+class ProcessScanRound:
+    """Lazy, immutable process snapshot shared only within an explicit probe round."""
+
+    def __init__(self, proc_root: str | os.PathLike[str] = "/proc") -> None:
+        self.proc_root = Path(proc_root)
+        self._lock = threading.Lock()
+        self._records: tuple[ProcessRecord, ...] | None = None
+
+    def records(self) -> tuple[ProcessRecord, ...]:
+        if self._records is not None:
+            return self._records
+        with self._lock:
+            if self._records is not None:
+                return self._records
+            try:
+                entries = list(self.proc_root.iterdir())
+            except OSError:
+                self._records = ()
+                return self._records
+            records: list[ProcessRecord] = []
+            me, uid = os.getpid(), os.getuid()
+            real_proc = self.proc_root == Path("/proc")
+            for entry in entries:
+                if not entry.name.isdigit():
+                    continue
+                pid = int(entry.name)
+                if pid == me:
+                    continue
+                try:
+                    if entry.stat().st_uid != uid:
+                        continue
+                    started_before = _pid_starttime(pid) if real_proc else None
+                    raw = (entry / "cmdline").read_bytes()
+                    argv = [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+                    if not argv:
+                        continue
+                    try:
+                        env_raw = (entry / "environ").read_bytes()
+                    except OSError:
+                        env_raw = b""
+                    environ: dict[str, str] = {}
+                    for part in env_raw.split(b"\0"):
+                        if not part:
+                            continue
+                        key, _, value = part.partition(b"=")
+                        environ[key.decode("utf-8", "replace")] = value.decode(
+                            "utf-8", "replace"
+                        )
+                    started_after = _pid_starttime(pid) if real_proc else None
+                    if started_after != started_before:
+                        continue
+                    records.append(ProcessRecord(pid, argv, environ, started_after))
+                except OSError:
+                    continue
+            self._records = tuple(records)
+            return self._records
+
+
+_PROCESS_SCAN_LOCAL = threading.local()
+
+
+@contextmanager
+def use_process_scan_round(round_: ProcessScanRound):
+    """Bind one snapshot to the current status worker thread."""
+    previous = getattr(_PROCESS_SCAN_LOCAL, "round", None)
+    _PROCESS_SCAN_LOCAL.round = round_
+    try:
+        yield
+    finally:
+        _PROCESS_SCAN_LOCAL.round = previous
+
+
+def current_process_scan_round() -> ProcessScanRound | None:
+    """Return the snapshot bound to this worker, if it belongs to a probe round."""
+    value = getattr(_PROCESS_SCAN_LOCAL, "round", None)
+    return value if isinstance(value, ProcessScanRound) else None
 
 
 def _under_prefix(value: str, prefix: str) -> bool:

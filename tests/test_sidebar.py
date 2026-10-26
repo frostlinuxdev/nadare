@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Offscreen tests for the sidebar's installed-games list.
+"""Offscreen tests for the sidebar's game list.
 
-Only games the backend last reported as installed (or running / update
-available) appear in the sidebar; status results add and remove rows live.
+Every game in the library appears in the sidebar: running first, then installed
+(or updatable) games, then the rest, each alphabetical; status results reorder rows live.
 """
 
 from __future__ import annotations
@@ -43,24 +43,47 @@ def window(qtbot, tmp_path, monkeypatch):
     return win
 
 
-def test_only_installed_profiles_are_listed(window):
-    window._on_result("alpha", Status("installed"))
-    window._on_result("beta", Status("not_installed"))
+def test_every_library_game_is_listed_installed_ones_first(window):
+    window._on_result("alpha", Status("not_installed"))
+    window._on_result("beta", Status("installed"))
     window._on_result("gamma", Status("error"))
 
-    assert window.sidebar_games.profiles() == ["alpha"]
-    assert window.sidebar_games.row("beta") is None
+    assert window.sidebar_games.profiles() == ["beta", "alpha", "gamma"]
+    assert all(window.sidebar_games.row(name) is not None for name in ("alpha", "beta", "gamma"))
 
 
-def test_status_change_adds_and_removes_rows(window):
+def test_games_are_listed_before_any_status_is_known(window):
+    # Nothing has reported yet (the first probe is still running): no game may be missing.
+    assert window.sidebar_games.profiles() == ["alpha", "beta", "gamma"]
+
+
+def test_status_change_reorders_rows_but_never_drops_one(window):
     window._on_result("alpha", Status("not_installed"))
-    assert window.sidebar_games.profiles() == []
+    window._on_result("beta", Status("installed"))
+    assert window.sidebar_games.profiles() == ["beta", "alpha", "gamma"]
 
     window._on_result("alpha", Status("installed"))
-    assert window.sidebar_games.profiles() == ["alpha"]
+    assert window.sidebar_games.profiles() == ["alpha", "beta", "gamma"]
 
     window._on_result("alpha", Status("not_installed"))
-    assert window.sidebar_games.profiles() == []
+    assert window.sidebar_games.profiles() == ["beta", "alpha", "gamma"]
+
+
+def test_a_game_added_to_the_library_shows_at_once_even_if_not_installed(window):
+    window.config.add_profile("delta", backend="wine", title="Delta")
+    window.refresh_library()
+
+    assert "delta" in window.sidebar_games.profiles()
+    row = window.sidebar_games.row("delta")
+    assert row is not None and row.dot.isHidden()  # no running or update dot
+
+
+def test_removing_a_game_still_removes_its_row(window):
+    assert window.sidebar_games.row("beta") is not None
+    del window.config.profiles["beta"]
+    window.refresh_library()
+
+    assert window.sidebar_games.profiles() == ["alpha", "gamma"]
 
 
 def test_running_games_sort_first_then_alphabetically(window):
@@ -69,6 +92,25 @@ def test_running_games_sort_first_then_alphabetically(window):
     window._on_result("beta", Status("running", running=True))
 
     assert window.sidebar_games.profiles() == ["beta", "alpha", "gamma"]
+
+
+def test_initial_profile_probe_passes_one_shared_proc_round(window, monkeypatch):
+    started = []
+    monkeypatch.setattr(
+        window,
+        "_start",
+        lambda profile, operation, payload=None, silent=False: started.append(
+            (profile, operation, payload, silent)
+        ) or True,
+    )
+    window._current_profile = ""
+
+    window._probe_all()
+
+    assert len(started) == 3
+    assert all(operation == "status" and silent for _, operation, _, silent in started)
+    assert started[0][2] is not None
+    assert all(payload is started[0][2] for _, _, payload, _ in started)
 
 
 def test_running_and_update_dots(window):
@@ -83,6 +125,38 @@ def test_running_and_update_dots(window):
     assert update is not None
     assert update.dot.property("kind") == "update"
     assert not update.dot.isHidden()
+
+
+def test_sidebar_decodes_cover_icons_off_the_gui_thread(window, tmp_path):
+    import threading
+
+    from PyQt6.QtGui import QColor, QImage
+
+    cover = tmp_path / "cover.png"
+    image = QImage(320, 480, QImage.Format.Format_RGB32)
+    image.fill(QColor("steelblue"))
+    assert image.save(str(cover))
+
+    sidebar = window.sidebar_games
+    loader = sidebar._images
+    main_thread = threading.get_ident()
+    decode_threads = []
+    original_decode = loader._decode
+
+    def record_thread(*args, **kwargs):
+        decode_threads.append(threading.get_ident())
+        return original_decode(*args, **kwargs)
+
+    loader._decode = record_thread
+    sidebar.set_profiles(
+        {"alpha": {"backend": "wine", "title": "Alpha", "cover": str(cover)}},
+        {"alpha": Status("installed")},
+    )
+    loader.wait()
+
+    row = sidebar.row("alpha")
+    assert row is not None and not row.icon.pixmap().isNull()
+    assert decode_threads and all(thread_id != main_thread for thread_id in decode_threads)
 
 
 def test_click_opens_the_game_page(window, qtbot):

@@ -63,12 +63,15 @@ from .library import LibraryPage, count_text, profile_title
 from .notice import AccountNoticeDialog
 from .settings import SettingsPage
 from .sidebar import SidebarGames
+from .store_flow import StoreFlow
 from .theme import app_icon, apply_theme, brand_pixmap, repolish
 from .workers import BackendController, CallTask
 
 PAGE_LIBRARY = 0
 PAGE_GAME = 1
 PAGE_SETTINGS = 2
+#: Appended last so the older page indexes never move.
+PAGE_STORE = 3
 
 #: Operations that must not run until the account notice is acknowledged.
 NOTICE_OPERATIONS = frozenset({"install", "update", "launch"})
@@ -93,6 +96,8 @@ UPDATE_CHECK_INTERVAL = 6 * 60 * 60
 
 #: How often a visible window re-probes the game page's status (#371).
 STATUS_REFRESH_INTERVAL_MS = 30_000
+#: Ceiling for the retry backoff after consecutive failed status probes of one game.
+STATUS_ERROR_MAX_INTERVAL_MS = 10 * 60_000
 
 
 def _unknown_backend_message(value: str) -> str:
@@ -156,6 +161,8 @@ class MainWindow(QMainWindow):
         self._close_requested_by_signal = False
         #: Last rendered state per profile (status/news/media + monotonic stamp).
         self._snapshots: dict[str, dict[str, Any]] = {}
+        #: Consecutive failed status probes, used for per-profile retry backoff.
+        self._status_errors: dict[str, int] = {}
         #: Bumped whenever a profile disappears or reappears, so a result from a
         #: worker started for the old profile cannot land on its same-named
         #: replacement.
@@ -187,6 +194,9 @@ class MainWindow(QMainWindow):
         self._restore_geometry()
 
         self._build_shell()
+
+        self.store.install_requested.connect(lambda kind: self._add_game_dialog(kind=kind))
+        self.store.own_game_requested.connect(lambda: self._add_game_dialog(advanced=True))
 
         self.controller = BackendController(config, self)
         self._wire_controller()
@@ -226,8 +236,25 @@ class MainWindow(QMainWindow):
         self._refresh_status_if_idle()
 
     def _on_status_timer(self) -> None:
-        if self.isVisible():
-            self._refresh_status_if_idle()
+        """Re-probe the shown game, backing off while its probes keep failing."""
+        if not self.isVisible():
+            return
+        profile = self._current_profile
+        if not profile or profile not in self.config.profiles or profile in self._busy:
+            return
+        if self._status_errors.get(profile, 0):
+            checked_at = self._snapshots.get(profile, {}).get("status_at")
+            wait = self._status_interval_ms(profile) / 1000
+            if checked_at is not None and time.monotonic() - checked_at < wait:
+                return
+        self._start(profile, "status", silent=True)
+
+    def _status_interval_ms(self, profile: str) -> int:
+        """Polling interval: the normal refresh, or an exponential retry after failures."""
+        failures = self._status_errors.get(profile, 0)
+        if not failures:
+            return STATUS_REFRESH_INTERVAL_MS
+        return min(60_000 * 2 ** min(failures - 1, 4), STATUS_ERROR_MAX_INTERVAL_MS)
 
     def _sync_profiles_from_disk(self) -> None:
         """Drop profiles another process removed; keep unsaved local additions."""
@@ -247,6 +274,7 @@ class MainWindow(QMainWindow):
             self.config._removed.discard(name)
             self.config._snapshot.pop(name, None)
             self._snapshots.pop(name, None)
+            self._status_errors.pop(name, None)
             dropped.append(name)
         if not dropped:
             return
@@ -280,14 +308,16 @@ class MainWindow(QMainWindow):
         self.library = LibraryPage()
         self.game = GameView()
         self.settings = SettingsPage()
+        self.store = StoreFlow()
         self.stack.addWidget(self.library)
         self.stack.addWidget(self.game)
         self.stack.addWidget(self.settings)
+        self.stack.addWidget(self.store)
         root.addWidget(self.stack, 1)
 
         # UI intent -> controller / navigation.
         self.library.open_game.connect(self.open_game)
-        self.library.add_game.connect(self._add_game)
+        self.library.add_game.connect(self.show_store)
         self.game.back_requested.connect(self.show_library)
         self.game.action_requested.connect(self._on_game_action)
         self.game.cancel_requested.connect(self._on_cancel)
@@ -358,6 +388,12 @@ class MainWindow(QMainWindow):
         side.addWidget(nav_label)
         side.addSpacing(4)
 
+        self.store_button = QPushButton("Store")
+        self.store_button.setObjectName("NavItem")
+        self.store_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.store_button.clicked.connect(self.show_store)
+        side.addWidget(self.store_button)
+
         self.library_button = QPushButton("Library")
         self.library_button.setObjectName("NavItem")
         self.library_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -407,7 +443,12 @@ class MainWindow(QMainWindow):
 
     # ---- navigation chrome -------------------------------------------------
     def _set_active_nav(self, active: str) -> None:
-        for name, button in (("library", self.library_button), ("settings", self.settings_button)):
+        buttons = (
+            ("store", self.store_button),
+            ("library", self.library_button),
+            ("settings", self.settings_button),
+        )
+        for name, button in buttons:
             button.setProperty("active", "true" if name == active else "false")
             repolish(button)
 
@@ -438,6 +479,10 @@ class MainWindow(QMainWindow):
             if st is not None and name in self.config.profiles:
                 self.library.set_state(name, st.state, st.running)
         self.sidebar_games.set_profiles(self.config.profiles)
+        self.store.set_installed_kinds(frozenset(
+            str(data.get("backend") or "") for data in self.config.profiles.values()
+            if data.get("backend")
+        ))
 
     def _remember_active(self, name: str) -> None:
         """Reopen this game next start (the config's ``active_profile``)."""
@@ -456,6 +501,15 @@ class MainWindow(QMainWindow):
         self._set_active_nav("library")
         self.sidebar_games.set_active("")
         self._set_side_status("Library")
+
+    def show_store(self) -> None:
+        self.store.show_grid()
+        self.stack.setCurrentIndex(PAGE_STORE)
+        self._current_profile = ""
+        self._set_active_nav("store")
+        self.sidebar_games.set_active("")
+        self._set_side_status("Store")
+        self.store.grid.focus_search()
 
     def open_game(self, profile: str) -> None:
         """Show the per-game page for ``profile``."""
@@ -631,6 +685,7 @@ class MainWindow(QMainWindow):
         title = self._game_title(profile)
         self._busy.pop(profile, None)
         self._snapshots.pop(profile, None)
+        self._status_errors.pop(profile, None)
         self._remember_notice.pop(profile, None)
         self._remember_watching.discard(profile)
         self._remember_pending.discard(profile)
@@ -737,8 +792,8 @@ class MainWindow(QMainWindow):
         if profile == self._current_profile:
             self._set_side_status("Could not remove the saved login")
 
-    def _add_game(self) -> None:
-        dialog = AddGameDialog(self.config, self)
+    def _add_game_dialog(self, *, kind: str | None = None, advanced: bool = False) -> None:
+        dialog = AddGameDialog(self.config, self, kind=kind, advanced=advanced)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         profile = dialog.created_profile
@@ -1086,6 +1141,10 @@ class MainWindow(QMainWindow):
             snap = self._snapshot(profile)
             snap["status"] = result
             snap["status_at"] = time.monotonic()
+            if result.state == "error":
+                self._status_errors[profile] = self._status_errors.get(profile, 0) + 1
+            else:
+                self._status_errors.pop(profile, None)
             self.library.set_state(profile, result.state, result.running)
             self.sidebar_games.set_status(profile, result)
             if profile == self._current_profile:
@@ -1291,6 +1350,7 @@ class MainWindow(QMainWindow):
             # (or re-add) the game (#366).
             message = _unknown_backend_message(kind)
         status = Status(state="error", message=message)
+        self._status_errors[profile] = self._status_errors.get(profile, 0) + 1
         snap = self._snapshot(profile)
         snap["status"] = status
         snap["status_at"] = time.monotonic()
@@ -1353,10 +1413,14 @@ class MainWindow(QMainWindow):
 
     # ---- probing ------------------------------------------------------------
     def _probe_all(self) -> None:
-        for profile in self.config.profiles:
-            if profile == self._current_profile:
-                continue
-            self._start(profile, "status", silent=True)
+        profiles = [profile for profile in self.config.profiles if profile != self._current_profile]
+        if not profiles:
+            return
+        from ..core.process import ProcessScanRound
+
+        scan_round = ProcessScanRound()
+        for profile in profiles:
+            self._start(profile, "status", payload=scan_round, silent=True)
 
     # ---- shutdown -----------------------------------------------------------
     # ---- update check ---------------------------------------------------------
@@ -1502,4 +1566,4 @@ class MainWindow(QMainWindow):
         return answer == QMessageBox.StandardButton.Close
 
 
-__all__ = ["MainWindow", "PAGE_LIBRARY", "PAGE_GAME", "PAGE_SETTINGS"]
+__all__ = ["MainWindow", "PAGE_LIBRARY", "PAGE_GAME", "PAGE_SETTINGS", "PAGE_STORE"]

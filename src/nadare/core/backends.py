@@ -292,19 +292,30 @@ def kinds() -> list[str]:
     return sorted(set(_REGISTRY) | set(_BUILTINS))
 
 
-def load_builtins() -> None:
+def _load_builtin(kind: str) -> type[GameBackend] | None:
+    """Import and register one builtin backend, leaving its siblings untouched."""
     with _REGISTRY_LOCK:
-        for kind, target in _BUILTINS.items():
-            if kind in _REGISTRY:
-                continue
-            mod_name, _, attr = target.partition(":")
-            try:
-                mod = importlib.import_module(mod_name)
-                _REGISTRY[kind] = getattr(mod, attr)
-            except Exception:
-                # A backend whose dependencies are absent simply is not offered.
-                log.debug("backend %s unavailable", kind, exc_info=True)
-                continue
+        registered = _REGISTRY.get(kind)
+        target = _BUILTINS.get(kind)
+    if registered is not None or target is None:
+        return registered
+    mod_name, _, attr = target.partition(":")
+    try:
+        mod = importlib.import_module(mod_name)
+        cls = getattr(mod, attr)
+    except Exception:
+        log.debug("backend %s unavailable", kind, exc_info=True)
+        return None
+    with _REGISTRY_LOCK:
+        return _REGISTRY.setdefault(kind, cls)
+
+
+def load_builtins() -> None:
+    """Import all builtins for explicit inventory checks such as ``doctor``."""
+    with _REGISTRY_LOCK:
+        pending = [kind for kind in _BUILTINS if kind not in _REGISTRY]
+    for kind in pending:
+        _load_builtin(kind)
 
 
 def unavailable() -> list[str]:
@@ -315,15 +326,17 @@ def unavailable() -> list[str]:
 
 def is_available(kind: str) -> bool:
     """True when ``kind`` resolved to a registered backend (e.g. not omitted)."""
-    load_builtins()
-    return kind in _REGISTRY
+    with _REGISTRY_LOCK:
+        if kind in _REGISTRY:
+            return True
+    return _load_builtin(kind) is not None
 
 
 def get(kind: str) -> type[GameBackend]:
-    load_builtins()
-    if kind not in _REGISTRY:
+    backend = _load_builtin(kind)
+    if backend is None:
         raise BackendError(f"unknown backend: {kind!r} (have: {', '.join(kinds())})")
-    return _REGISTRY[kind]
+    return backend
 
 
 def supports_remember_me(kind: str) -> bool:

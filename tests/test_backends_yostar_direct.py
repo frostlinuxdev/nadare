@@ -264,6 +264,8 @@ class TestStellaSora:
         )
         monkeypatch.setattr(ak, "stream", lambda *a, **k: 0)
         monkeypatch.setattr(ak.hostlibs, "missing_32bit", lambda: [])
+        # CI runners have no wine; the test must not depend on one being installed.
+        monkeypatch.setattr(ak, "first_wine", lambda: Path("/usr/bin/wine"))
         backend.launch()
         assert calls == [1]
 

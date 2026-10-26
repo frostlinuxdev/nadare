@@ -70,12 +70,12 @@ def test_czn_repair_updates_then_reports_a_clean_install(tmp_path, monkeypatch):
     backend.ctx.emit = events.append
     calls: list[str] = []
     monkeypatch.setattr(backend, "_game_running", lambda: False)
-    monkeypatch.setattr(backend, "update", lambda: calls.append("update"))
+    monkeypatch.setattr(backend, "update", lambda full=False: calls.append(("update", full)))
     monkeypatch.setattr(backend, "_differing_files", lambda: [])
 
     backend.repair()
 
-    assert calls == ["update"]
+    assert calls == [("update", True)]  # Repair must hash every file
     assert ("step", "Checking every game file") in [(e.kind, e.message) for e in events]
     assert ("done", "All game files check out") in [(e.kind, e.message) for e in events]
 
@@ -83,7 +83,7 @@ def test_czn_repair_updates_then_reports_a_clean_install(tmp_path, monkeypatch):
 def test_czn_repair_fails_when_files_are_still_damaged(tmp_path, monkeypatch):
     backend = _czn_backend(tmp_path)
     monkeypatch.setattr(backend, "_game_running", lambda: False)
-    monkeypatch.setattr(backend, "update", lambda: None)
+    monkeypatch.setattr(backend, "update", lambda full=False: None)
     monkeypatch.setattr(backend, "_differing_files", lambda: ["/bin/a.dll", "/bin/b.dll"])
 
     with pytest.raises(BackendError) as exc:

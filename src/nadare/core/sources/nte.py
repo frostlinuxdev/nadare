@@ -24,8 +24,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .. import directdl
-from . import Fetch, default_fetch
-from . import _aes
+from . import Fetch, _aes, default_fetch
 
 ENTRY_CONFIG_URL = "https://ntecdn1.perfectworld.com/clientRes/publish_PC/Version/Windows/config.xml"
 MAGIC = b"PatcherXML0\x00"
@@ -100,8 +99,8 @@ def plan_from_xml(xml: str, res_url: str, version: str) -> directdl.Plan:
     ``<Res>`` elements become whole files at ``Res/<md5[0]>/<md5>.<size>``; each
     ``<Package><Pak>`` becomes a ``("slices",)`` archive whose ``<Entry>`` records
     are the members (``offset``/``size``/``md5``). ``<BaseVersion>`` (optional tags)
-    are left out, and so is every path listed in ``<Ignored>``. Raises :class:`directdl.DirectError` on malformed
-    or hostile input.
+    are left out, and so is every path listed in ``<Ignored>``. Raises
+    :class:`directdl.DirectError` on malformed or hostile input.
     """
     if urlparse(res_url).scheme != "https":
         raise directdl.DirectError(f"refusing a non-https URL: {res_url!r}")

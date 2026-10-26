@@ -97,18 +97,18 @@ def _expand_key(key: bytes) -> list[bytes]:
         if i % 4 == 0:
             w = [_SBOX[w[1]] ^ rcon, _SBOX[w[2]], _SBOX[w[3]], _SBOX[w[0]]]
             rcon = _xtime(rcon)
-        words.append([a ^ b for a, b in zip(words[i - 4], w)])
+        words.append([a ^ b for a, b in zip(words[i - 4], w, strict=False)])
     return [bytes(b for word in words[r * 4:r * 4 + 4] for b in word) for r in range(11)]
 
 
 def _decrypt_block(block: bytes, round_keys: list[bytes]) -> bytes:
     """Decrypt one 16-byte block with the AES-128 inverse cipher."""
-    s = [a ^ b for a, b in zip(block, round_keys[10])]
+    s = [a ^ b for a, b in zip(block, round_keys[10], strict=False)]
     for rnd in range(9, -1, -1):
         # Inverse ShiftRows: row r is rotated right by r.
         s = [s[(i % 4) + 4 * ((i // 4 - i % 4) % 4)] for i in range(16)]
         s = [_INV_SBOX[b] for b in s]
-        s = [a ^ b for a, b in zip(s, round_keys[rnd])]
+        s = [a ^ b for a, b in zip(s, round_keys[rnd], strict=False)]
         if rnd:
             # Inverse MixColumns.
             out = [0] * 16
@@ -140,7 +140,7 @@ def aes128_cbc_decrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
     for off in range(0, len(data), 16):
         block = data[off:off + 16]
         plain = _decrypt_block(block, round_keys)
-        out.extend(a ^ b for a, b in zip(plain, prev))
+        out.extend(a ^ b for a, b in zip(plain, prev, strict=False))
         prev = block
     return bytes(out)
 

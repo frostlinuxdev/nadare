@@ -261,6 +261,98 @@ def test_activation_refreshes_status_only_when_not_busy(tmp_path: Path, qapp, mo
         qapp.processEvents()
 
 
+def _timer_window(tmp_path: Path, monkeypatch):
+    """A window with several games whose timer-started probes are recorded."""
+    window = _window(
+        tmp_path,
+        {name: {"backend": "wine", "title": name} for name in ("current", "a", "b", "c", "d")},
+    )
+    started: list[tuple[str, str]] = []
+    monkeypatch.setattr(window, "isVisible", lambda: True)
+    monkeypatch.setattr(
+        window,
+        "_start",
+        lambda profile, op, payload=None, silent=False: started.append((profile, op)) or True,
+    )
+    window._current_profile = "current"
+    return window, started
+
+
+def test_status_timer_probes_only_the_shown_profile_every_tick(
+    tmp_path: Path, qapp, monkeypatch
+) -> None:
+    window, started = _timer_window(tmp_path, monkeypatch)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(main_window_mod.time, "monotonic", lambda: clock["now"])
+    try:
+        for state in ("installed", "not_installed", "running", "installed"):
+            window._snapshots["current"] = {
+                "status": main_window_mod.Status(state),
+                "status_at": clock["now"] - 29.9,  # the previous probe finished just now
+            }
+            window._on_status_timer()
+            clock["now"] += 30
+        # One probe per tick, always the visible game, whatever its state: the page
+        # keeps the same 30 s refresh it had before, and other games are not polled.
+        assert started == [("current", "status")] * 4
+    finally:
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_status_timer_skips_a_busy_or_hidden_window(tmp_path: Path, qapp, monkeypatch) -> None:
+    window, started = _timer_window(tmp_path, monkeypatch)
+    try:
+        window._busy["current"] = "install"
+        window._on_status_timer()
+        del window._busy["current"]
+        monkeypatch.setattr(window, "isVisible", lambda: False)
+        window._on_status_timer()
+        assert started == []
+    finally:
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_status_timer_backs_off_a_failing_profile(tmp_path: Path, qapp, monkeypatch) -> None:
+    window, started = _timer_window(tmp_path, monkeypatch)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(main_window_mod.time, "monotonic", lambda: clock["now"])
+    try:
+        window._on_failed("current", "status", "offline")
+        window._snapshots["current"]["status_at"] = clock["now"]
+        clock["now"] += 30
+        window._on_status_timer()  # 30 s after the first failure: still backing off (60 s)
+        assert started == []
+        clock["now"] += 31
+        window._on_status_timer()
+        assert started == [("current", "status")]
+    finally:
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_status_error_retry_interval_backs_off_per_profile(tmp_path: Path, qapp) -> None:
+    window = _window(tmp_path, {"alpha": {"backend": "wine", "title": "Alpha"}})
+    try:
+        window._current_profile = "alpha"
+        assert window._status_interval_ms("alpha") == main_window_mod.STATUS_REFRESH_INTERVAL_MS
+        for count, expected in enumerate((60_000, 120_000, 240_000, 480_000, 600_000, 600_000), 1):
+            window._on_failed("alpha", "status", "offline")
+            assert window._status_errors["alpha"] == count
+            assert window._status_interval_ms("alpha") == expected
+        window._on_result("alpha", main_window_mod.Status("installed"))
+        assert "alpha" not in window._status_errors
+        assert window._status_interval_ms("alpha") == main_window_mod.STATUS_REFRESH_INTERVAL_MS
+    finally:
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()
+
+
 # ---- #374: a deleted explicit Proton runner is not READY -------------------
 def _ark_backend(tmp_path: Path, profile: dict | None = None) -> ArknightsBackend:
     return ArknightsBackend(make_context(tmp_path, ak.KIND, profile))

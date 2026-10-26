@@ -72,7 +72,9 @@ class RangeReader(io.RawIOBase):
         self._readahead = readahead
         self._blocks_ahead = max(1, readahead // block_size) if readahead > block_size else 1
         # Readahead needs room for the block it was asked for plus the ones it fetched.
-        limit = max(cache_blocks, self._blocks_ahead + 1) if readahead > block_size else cache_blocks
+        limit = (
+            max(cache_blocks, self._blocks_ahead + 1) if readahead > block_size else cache_blocks
+        )
         self._cache_limit = limit
         self._retries = retries
         self._backoff = backoff
@@ -146,8 +148,10 @@ class RangeReader(io.RawIOBase):
             content_range = resp.headers.get("Content-Range", "")
             try:
                 first = int(content_range.split()[1].split("-", 1)[0])
-            except (IndexError, ValueError):
-                raise RangeError(f"invalid Content-Range from {part.url}: {content_range!r}")
+            except (IndexError, ValueError) as exc:
+                raise RangeError(
+                    f"invalid Content-Range from {part.url}: {content_range!r}"
+                ) from exc
             if first != start:
                 raise RangeError(
                     f"Content-Range from {part.url} starts at {first}, wanted {start}"

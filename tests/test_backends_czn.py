@@ -7,12 +7,19 @@ opens a socket or runs a subprocess that reaches the network.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
+import http.client
+import http.server
 import json
 import os
+import socket
 import stat
 import sys
+import threading
 import time
+import tracemalloc
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -702,6 +709,80 @@ def _write_matching(path: Path, data: bytes) -> str:
     return hashlib.md5(data).hexdigest()
 
 
+def _chunk_server(body: bytes, *, interrupt_first_at: int | None = None):
+    requests: list[str | None] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):  # noqa: N802
+            range_header = self.headers.get("Range")
+            requests.append(range_header)
+            if interrupt_first_at and len(requests) == 1:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body[:interrupt_first_at])
+                self.wfile.flush()
+                self.close_connection = True
+                try:
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                self.connection.close()
+                return
+            start = 0
+            if range_header:
+                start = int(range_header.removeprefix("bytes=").removesuffix("-"))
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{len(body) - 1}/{len(body)}")
+            else:
+                self.send_response(200)
+            self.send_header("Content-Length", str(len(body) - start))
+            self.end_headers()
+            for offset in range(start, len(body), 1 << 18):
+                self.wfile.write(body[offset : offset + (1 << 18)])
+
+        def log_message(self, _format, *_args):  # noqa: ANN002, ANN003
+            return
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread, f"http://127.0.0.1:{server.server_port}", requests
+
+
+class _LocalHttpResponse:
+    def __init__(self, connection: http.client.HTTPConnection, response) -> None:
+        self._connection = connection
+        self._response = response
+        self._content: bytes | None = None
+        self.status_code = response.status
+        self.headers = response.headers
+
+    def iter_content(self, chunk_size: int):
+        while chunk := self._response.read1(chunk_size):
+            yield chunk
+
+    @property
+    def content(self) -> bytes:
+        if self._content is None:
+            self._content = self._response.read()
+        return self._content
+
+    def close(self) -> None:
+        self._response.close()
+        self._connection.close()
+
+
+class _LocalHttpSession:
+    def get(self, url: str, *, headers: dict, timeout: float, stream: bool = False):
+        parsed = urllib.parse.urlsplit(url)
+        connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=timeout)
+        connection.request("GET", parsed.path, headers=headers)
+        return _LocalHttpResponse(connection, connection.getresponse())
+
+
 class TestUpdateHelpers:
     def test_parse_files(self):
         manifest = _manifest_files(
@@ -730,6 +811,89 @@ class TestUpdateHelpers:
         to_download, dirs = czn_update.plan(manifest)
         assert [p for p, *_ in to_download] == ["/missing.bin"]
         assert dirs == ["/newdir"]
+
+    def test_plan_skips_rehash_for_unchanged_verified_file(self, monkeypatch, tmp_path):
+        game_dir = tmp_path / "game"
+        cache = tmp_path / "verified-stat.json"
+        monkeypatch.setattr(czn_update, "GAME_DIR", game_dir)
+        monkeypatch.setattr(czn_update, "STAT_CACHE", cache, raising=False)
+        data = b"verified client binary"
+        md5 = _write_matching(game_dir / "a.bin", data)
+        manifest = _manifest_files(
+            f"0|F|/a.bin|3|c0|g|{len(data)}|9|{md5}|{'d' * 32}|x"
+        )
+        original_hash = czn_update._md5_file
+        hashed: list[Path] = []
+
+        def counting_hash(path):
+            hashed.append(path)
+            return original_hash(path)
+
+        monkeypatch.setattr(czn_update, "_md5_file", counting_hash)
+        assert czn_update.plan(manifest)[0] == []
+        assert hashed == [game_dir / "a.bin"]
+        assert czn_update.plan(manifest)[0] == []
+        assert hashed == [game_dir / "a.bin"]
+
+    def test_plan_rehashes_and_catches_changed_file(self, monkeypatch, tmp_path):
+        game_dir = tmp_path / "game"
+        cache = tmp_path / "verified-stat.json"
+        monkeypatch.setattr(czn_update, "GAME_DIR", game_dir)
+        monkeypatch.setattr(czn_update, "STAT_CACHE", cache, raising=False)
+        data = b"verified client binary"
+        md5 = _write_matching(game_dir / "a.bin", data)
+        manifest = _manifest_files(
+            f"0|F|/a.bin|3|c0|g|{len(data)}|9|{md5}|{'d' * 32}|x"
+        )
+        assert czn_update.plan(manifest)[0] == []
+        (game_dir / "a.bin").write_bytes(b"modified client binary")
+        changed, _dirs = czn_update.plan(manifest)
+        assert [row[0] for row in changed] == ["/a.bin"]
+        assert json.loads(cache.read_text())["files"] == {}
+
+    def test_plan_rehashes_same_size_file_even_if_mtime_is_restored(
+        self, monkeypatch, tmp_path
+    ):
+        game_dir = tmp_path / "game"
+        monkeypatch.setattr(czn_update, "GAME_DIR", game_dir)
+        monkeypatch.setattr(
+            czn_update, "STAT_CACHE", tmp_path / "verified-stat.json", raising=False
+        )
+        original = b"trusted bytes"
+        md5 = _write_matching(game_dir / "a.bin", original)
+        path = game_dir / "a.bin"
+        manifest = _manifest_files(
+            f"0|F|/a.bin|3|c0|g|{len(original)}|9|{md5}|{'d' * 32}|x"
+        )
+        assert czn_update.plan(manifest)[0] == []
+        before = path.stat()
+        path.write_bytes(b"tampered data")
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+        changed, _dirs = czn_update.plan(manifest)
+        assert [row[0] for row in changed] == ["/a.bin"]
+        assert json.loads((tmp_path / "verified-stat.json").read_text())["files"] == {}
+
+    def test_plan_invalidates_stat_fingerprint_when_manifest_hash_changes(
+        self, monkeypatch, tmp_path
+    ):
+        game_dir = tmp_path / "game"
+        monkeypatch.setattr(czn_update, "GAME_DIR", game_dir)
+        monkeypatch.setattr(
+            czn_update, "STAT_CACHE", tmp_path / "verified-stat.json", raising=False
+        )
+        data = b"verified client binary"
+        md5 = _write_matching(game_dir / "a.bin", data)
+        manifest = _manifest_files(
+            f"0|F|/a.bin|3|c0|g|{len(data)}|9|{md5}|{'d' * 32}|x"
+        )
+        assert czn_update.plan(manifest)[0] == []
+        changed_manifest = _manifest_files(
+            f"0|F|/a.bin|3|c0|g|{len(data)}|9|{'0' * 32}|{'d' * 32}|x"
+        )
+        changed, _dirs = czn_update.plan(changed_manifest)
+        assert [row[0] for row in changed] == ["/a.bin"]
+        assert json.loads((tmp_path / "verified-stat.json").read_text())["files"] == {}
 
     def test_plan_rejects_traversal_file(self, monkeypatch, tmp_path):
         game_dir = tmp_path / "game"
@@ -864,7 +1028,7 @@ class TestUpdateMain:
         monkeypatch.setattr(
             czn_update,
             "plan",
-            lambda manifest: ([
+            lambda manifest, **_kw: ([
                 ("/a.bin", "3", "c0", "u" * 32, "p" * 32, 1234),
                 ("/b.bin", "3", "c0", "u" * 32, "p" * 32, 66),
             ], []),
@@ -884,10 +1048,73 @@ class TestUpdateMain:
     def test_download_file_writes_bytes(self, monkeypatch, tmp_path):
         game_dir = tmp_path / "game"
         monkeypatch.setattr(czn_update, "GAME_DIR", game_dir)
-        monkeypatch.setattr(czn_update, "_fetch_verified", lambda *a, **k: b"payload")
+
+        def fake_fetch(_path, _vf, _ci, _md5u, _md5p, _usize, _packed_tmp, output_tmp):
+            output_tmp.write_bytes(b"payload")
+            return len(b"payload")
+
+        monkeypatch.setattr(czn_update, "_fetch_verified_to_file", fake_fetch)
         n = czn_update.download_file("/sub/file.bin", "3", "c0", "u", "p")
         assert n == len(b"payload")
         assert (game_dir / "sub/file.bin").read_bytes() == b"payload"
+
+    def test_download_resumes_a_truncated_chunk_with_range(self, monkeypatch, tmp_path):
+        payload = hashlib.shake_256(b"resume test").digest(4 << 20)
+        packed = gzip.compress(payload)
+        server, thread, base, requests = _chunk_server(
+            packed, interrupt_first_at=1 << 20
+        )
+        game_dir = tmp_path / "game"
+        monkeypatch.setattr(czn_update, "_SESS", _LocalHttpSession())
+        monkeypatch.setattr(czn_update, "BASE", base)
+        monkeypatch.setattr(czn_update, "GAME_DIR", game_dir)
+        monkeypatch.setattr(czn_update.time, "sleep", lambda _seconds: None)
+        try:
+            size = czn_update.download_file(
+                "/sub/file.bin",
+                "3",
+                "chunk",
+                hashlib.md5(payload).hexdigest(),
+                hashlib.md5(packed).hexdigest(),
+                len(payload),
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+        assert size == len(payload)
+        assert (game_dir / "sub/file.bin").read_bytes() == payload
+        assert requests == [None, f"bytes={1 << 20}-"]
+        assert not (game_dir / "sub/file.bin.part").exists()
+        assert not (game_dir / "sub/file.bin.part.gz").exists()
+
+    def test_download_stream_memory_stays_below_chunk_size(self, monkeypatch, tmp_path):
+        payload = hashlib.shake_256(b"memory test").digest(16 << 20)
+        packed = gzip.compress(payload)
+        server, thread, base, _requests = _chunk_server(packed)
+        game_dir = tmp_path / "game"
+        monkeypatch.setattr(czn_update, "_SESS", _LocalHttpSession())
+        monkeypatch.setattr(czn_update, "BASE", base)
+        monkeypatch.setattr(czn_update, "GAME_DIR", game_dir)
+        tracemalloc.start()
+        try:
+            size = czn_update.download_file(
+                "/large.bin",
+                "3",
+                "large",
+                hashlib.md5(payload).hexdigest(),
+                hashlib.md5(packed).hexdigest(),
+                len(payload),
+            )
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+        assert size == len(payload)
+        assert (game_dir / "large.bin").stat().st_size == len(payload)
+        assert peak < 10 << 20
 
     def test_apply_rejects_a_traversal_manifest_and_writes_nothing(
         self, monkeypatch, tmp_path, capsys
@@ -3487,3 +3714,101 @@ class TestImpl2CznFixes:
 
         assert "429" in exc.value.message
         assert "QR code expired" not in exc.value.message
+
+
+def _forge_verified(cache: Path, path: str, target: Path, md5: str) -> None:
+    """Make the stat cache claim ``target`` is verified, as silent corruption would leave it."""
+    info = target.stat()
+    row = {
+        "md5": md5,
+        "size": info.st_size,
+        "mtime_ns": info.st_mtime_ns,
+        "ctime_ns": info.st_ctime_ns,
+        "ino": info.st_ino,
+        "dev": info.st_dev,
+    }
+    cache.write_text(json.dumps({"schema": 1, "files": {path: row}}))
+
+
+def _corrupted_install(monkeypatch, tmp_path):
+    """A game file whose content no longer matches the manifest but whose stat the cache trusts."""
+    game_dir = tmp_path / "game"
+    cache = tmp_path / "verified-stat.json"
+    monkeypatch.setattr(czn_update, "GAME_DIR", game_dir)
+    monkeypatch.setattr(czn_update, "STAT_CACHE", cache)
+    data = b"verified client binary"
+    md5 = _write_matching(game_dir / "a.bin", data)
+    manifest = _manifest_files(f"0|F|/a.bin|3|c0|g|{len(data)}|9|{md5}|{'d' * 32}|x")
+    (game_dir / "a.bin").write_bytes(b"verified client bynary")  # same size, bit flipped
+    _forge_verified(cache, "/a.bin", game_dir / "a.bin", md5)
+    return game_dir, cache, manifest
+
+
+class TestFullVerificationIgnoresStatCache:
+    def test_launch_path_trusts_the_cache(self, monkeypatch, tmp_path):
+        _game_dir, _cache, manifest = _corrupted_install(monkeypatch, tmp_path)
+        assert czn_update.plan(manifest)[0] == []
+
+    def test_full_plan_hashes_and_catches_the_file(self, monkeypatch, tmp_path):
+        _game_dir, cache, manifest = _corrupted_install(monkeypatch, tmp_path)
+        changed, _dirs = czn_update.plan(manifest, trust_stat_cache=False)
+        assert [row[0] for row in changed] == ["/a.bin"]
+        assert json.loads(cache.read_text())["files"] == {}
+
+    def test_full_plan_refreshes_the_cache_from_what_it_hashed(self, monkeypatch, tmp_path):
+        game_dir, cache, manifest = _corrupted_install(monkeypatch, tmp_path)
+        data = b"verified client binary"
+        (game_dir / "a.bin").write_bytes(data)  # repaired
+        assert czn_update.plan(manifest, trust_stat_cache=False)[0] == []
+        assert "/a.bin" in json.loads(cache.read_text())["files"]
+
+    def test_verify_action_always_hashes(self, monkeypatch, tmp_path, capsys):
+        game_dir, _cache, manifest = _corrupted_install(monkeypatch, tmp_path)
+        manifest_cache = tmp_path / "manifest.json"
+        manifest_cache.write_text(json.dumps(manifest))
+        monkeypatch.setattr(czn_update, "MANIFEST_CACHE", manifest_cache)
+        assert czn_update._verify_cached() == 0
+        event = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert event["checked"] is True
+        assert event["count"] == 1
+        assert event["differ"] == ["/a.bin"]
+
+    @pytest.mark.parametrize("flag, expected", [([], True), (["--full"], False)])
+    def test_full_flag_reaches_plan(self, monkeypatch, tmp_path, flag, expected):
+        game_dir, _cache, manifest = _corrupted_install(monkeypatch, tmp_path)
+        seen: list[bool] = []
+
+        def fake_plan(_manifest, trust_stat_cache=True):
+            seen.append(trust_stat_cache)
+            return [], []
+
+        monkeypatch.setattr(czn_update, "plan", fake_plan)
+        monkeypatch.setattr(czn_update, "local_version", lambda: 5)
+        monkeypatch.setattr(czn_update, "resolve_latest", lambda _inst: (5, "test"))
+        monkeypatch.setattr(czn_update, "fetch_manifest", lambda _target: manifest)
+        monkeypatch.setattr(czn_update, "_cache_manifest", lambda _manifest: None)
+        monkeypatch.setattr(czn_update, "_write_local_version", lambda *_a: None)
+        assert czn_update.main(["update", "--apply", *flag]) == 0
+        assert seen == [expected]
+
+
+class TestRepairForcesFullVerification:
+    def _backend(self, make_backend_context, tmp_path, monkeypatch):
+        backend = _make_backend(make_backend_context, tmp_path / "pfx")
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_game_running", lambda: False)
+        monkeypatch.setattr(
+            backend, "_run_module", lambda _mod, args, **_kw: calls.append(list(args)) or 0
+        )
+        monkeypatch.setattr(backend, "_differing_files", lambda: [])
+        return backend, calls
+
+    def test_repair_hashes_every_file(self, make_backend_context, tmp_path, monkeypatch):
+        backend, calls = self._backend(make_backend_context, tmp_path, monkeypatch)
+        backend.repair()
+        assert calls == [["update", "--apply", "--full"]]
+
+    def test_plain_update_keeps_the_fast_path(self, make_backend_context, tmp_path, monkeypatch):
+        backend, calls = self._backend(make_backend_context, tmp_path, monkeypatch)
+        backend.update()
+        assert calls == [["update", "--apply"]]

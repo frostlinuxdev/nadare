@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Hermetic tests for the CZN updater's verification and probing.
 
-``_get`` is replaced with an in-memory fake so no test touches the network.
+The chunk stream is replaced with a temporary-file fake so no test touches the network.
 """
 
 from __future__ import annotations
@@ -22,21 +22,22 @@ def _pack(payload: bytes) -> bytes:
 # ---------------------------------------------------------------------------
 # F7 — verification must fail closed
 # ---------------------------------------------------------------------------
-def test_fetch_verified_rejects_empty_manifest_md5(monkeypatch) -> None:
+def test_fetch_verified_rejects_empty_manifest_md5(monkeypatch, tmp_path) -> None:
     """An empty manifest md5 column must refuse the chunk, not skip the check."""
-    packed = _pack(b"payload")
-    monkeypatch.setattr(czn_update, "_get", lambda *a, **k: packed)
     with pytest.raises(ManifestError):
-        czn_update._fetch_verified("/bin/a.dll", "3", "c0", "", "")
+        czn_update._fetch_verified_to_file(
+            "/bin/a.dll", "3", "c0", "", "", None,
+            tmp_path / "packed.part", tmp_path / "output.part",
+        )
 
 
-def test_fetch_verified_rejects_a_bad_unpacked_md5(monkeypatch) -> None:
+def test_fetch_verified_rejects_a_bad_unpacked_md5(monkeypatch, tmp_path) -> None:
     payload = b"payload"
     packed = _pack(payload)
-    monkeypatch.setattr(czn_update, "_get", lambda *a, **k: packed)
     with pytest.raises(ManifestError):
-        czn_update._fetch_verified(
-            "/bin/a.dll", "3", "c0", "not-a-hash", hashlib.md5(packed).hexdigest()
+        czn_update._fetch_verified_to_file(
+            "/bin/a.dll", "3", "c0", "not-a-hash", hashlib.md5(packed).hexdigest(),
+            None, tmp_path / "packed.part", tmp_path / "output.part",
         )
 
 
@@ -46,7 +47,12 @@ def test_download_file_rejects_a_size_mismatch(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(czn_update, "GAME_DIR", game_dir)
     payload = b"payload"
     packed = _pack(payload)
-    monkeypatch.setattr(czn_update, "_get", lambda *a, **k: packed)
+
+    def fake_stream(_url, dest, **_kwargs):
+        dest.write_bytes(packed)
+        return len(packed)
+
+    monkeypatch.setattr(czn_update, "_download_stream", fake_stream)
     with pytest.raises(ValueError):
         czn_update.download_file(
             "/a.bin", "3", "c0", hashlib.md5(payload).hexdigest(),
@@ -58,19 +64,27 @@ def test_download_file_rejects_a_size_mismatch(monkeypatch, tmp_path) -> None:
 # ---------------------------------------------------------------------------
 # F8 — a decompression bomb is bounded
 # ---------------------------------------------------------------------------
-def test_fetch_verified_caps_the_unpacked_size(monkeypatch) -> None:
-    """A chunk that expands past the cap is aborted instead of buffered whole."""
+def test_fetch_verified_caps_the_unpacked_size(monkeypatch, tmp_path) -> None:
+    """A chunk that expands past the cap is aborted during streaming decode."""
     monkeypatch.setattr(czn_update, "MAX_UNPACKED", 4096)
     payload = b"x" * 1_000_000
     packed = _pack(payload)
-    monkeypatch.setattr(czn_update, "_get", lambda *a, **k: packed)
+
+    def fake_stream(_url, dest, **_kwargs):
+        dest.write_bytes(packed)
+        return len(packed)
+
+    monkeypatch.setattr(czn_update, "_download_stream", fake_stream)
     with pytest.raises(ValueError):
-        czn_update._fetch_verified(
+        czn_update._fetch_verified_to_file(
             "/bomb.bin",
             "3",
             "c0",
             hashlib.md5(payload).hexdigest(),
             hashlib.md5(packed).hexdigest(),
+            None,
+            tmp_path / "packed.part",
+            tmp_path / "output.part",
         )
 
 
@@ -195,7 +209,9 @@ def test_concurrent_probe_agrees_with_the_sequential_walk(monkeypatch) -> None:
     rng = random.Random(7)
     for _ in range(60):
         installed = rng.randrange(0, 12)
-        published = {n for n in range(installed - 2, installed + 40) if n > 0 and rng.random() < 0.6}
+        published = {
+            n for n in range(installed - 2, installed + 40) if n > 0 and rng.random() < 0.6
+        }
         monkeypatch.setattr(
             czn_update, "_head_ok", lambda url, p=published: int(url.rsplit("_", 1)[1][:-5]) in p
         )

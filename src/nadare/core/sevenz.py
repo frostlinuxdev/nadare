@@ -760,7 +760,14 @@ def list_entries(fh: BinaryIO) -> list[Entry]:
         ]
     except SevenZipError:
         raise
-    except (IndexError, struct.error, ValueError, EOFError, lzma.LZMAError, UnicodeDecodeError) as exc:
+    except (
+        IndexError,
+        struct.error,
+        ValueError,
+        EOFError,
+        lzma.LZMAError,
+        UnicodeDecodeError,
+    ) as exc:
         raise SevenZipError(str(exc)) from exc
 
 
@@ -781,8 +788,12 @@ def _extract_archive(
         return only is None or only(path)
 
     dirs = [item for item in archive.files if item.is_dir and wanted(item.path)]
-    empty_files = [item for item in archive.files if item.empty and not item.is_dir and wanted(item.path)]
-    regular = [item for item in archive.files if not item.is_dir and not item.empty and wanted(item.path)]
+    empty_files = [
+        item for item in archive.files if item.empty and not item.is_dir and wanted(item.path)
+    ]
+    regular = [
+        item for item in archive.files if not item.is_dir and not item.empty and wanted(item.path)
+    ]
 
     by_folder: dict[int, list[_File]] = {}
     for item in regular:
@@ -1035,5 +1046,12 @@ def extract(
         raise
     except SevenZipError:
         raise
-    except (IndexError, struct.error, ValueError, EOFError, lzma.LZMAError, UnicodeDecodeError) as exc:
+    except (
+        IndexError,
+        struct.error,
+        ValueError,
+        EOFError,
+        lzma.LZMAError,
+        UnicodeDecodeError,
+    ) as exc:
         raise SevenZipError(str(exc)) from exc

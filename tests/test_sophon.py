@@ -8,14 +8,16 @@ import json
 from pathlib import Path
 
 import pytest
+
 zstandard = pytest.importorskip("zstandard")
 
-from _httpserver import Server as _Server
-from nadare.core import directdl as dd
-from nadare.core import sophon
-from nadare.core.backends import BackendError
-from nadare.core.events import Cancel, Cancelled
-from nadare.core.sources import hoyo
+from _httpserver import Server as _Server  # noqa: E402
+
+from nadare.core import directdl as dd  # noqa: E402
+from nadare.core import sophon  # noqa: E402
+from nadare.core.backends import BackendError  # noqa: E402
+from nadare.core.events import Cancel, Cancelled  # noqa: E402
+from nadare.core.sources import hoyo  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures" / "catalog"
 
@@ -76,7 +78,10 @@ class Build:
                 )
             entries += field_bytes(
                 1,
-                field_bytes(1, name) + chunks + field_varint(4, len(data)) + field_bytes(5, md5(data)),
+                field_bytes(1, name)
+                + chunks
+                + field_varint(4, len(data))
+                + field_bytes(5, md5(data)),
             )
         self.manifest_raw = entries
         self.objects["/manifests/m1"] = zstandard.ZstdCompressor().compress(entries)
@@ -131,7 +136,9 @@ def test_parse_manifest_reads_files_chunks_and_skips_directories():
 
 
 def test_parse_manifest_rejects_unsafe_paths_and_garbage():
-    evil = field_bytes(1, field_bytes(1, "../escape") + field_varint(4, 0) + field_bytes(5, md5(b"")))
+    evil = field_bytes(
+        1, field_bytes(1, "../escape") + field_varint(4, 0) + field_bytes(5, md5(b""))
+    )
     with pytest.raises(sophon.SophonError):
         sophon.parse_manifest(evil)
     with pytest.raises(sophon.SophonError):
@@ -299,7 +306,7 @@ def test_stale_sophon_staging_file_is_removed_on_next_sync(servers, tmp_path):
 
 def test_cancelled_fresh_install_resumes_only_missing_chunks(servers, tmp_path, monkeypatch):
     build = Build({"f.bin": b"resume me" * 100}, chunk_size=100)
-    server = servers(build)
+    servers(build)
     cancel = Cancel()
     real_emit = sophon.download_module._emit_progress
 
@@ -329,7 +336,12 @@ def test_changed_file_is_replaced_before_next_file_download(servers, tmp_path, m
         (tmp_path / name).write_bytes(data)
     build = Build(new, chunk_size=100)
     servers(build)
-    b_chunks = {c.name for entry in sophon.parse_manifest(build.manifest_raw) if entry.path == "b.bin" for c in entry.chunks}
+    b_chunks = {
+        c.name
+        for entry in sophon.parse_manifest(build.manifest_raw)
+        if entry.path == "b.bin"
+        for c in entry.chunks
+    }
     real_fetch = sophon._fetch_chunk
     checked = []
 
@@ -426,12 +438,16 @@ def test_plan_missing_uses_the_done_marker(servers, tmp_path):
     assert dd.sophon_missing(plan, tmp_path) == []
     other = dd.Plan("T", "2", sophon=(build.package(),))
     object.__setattr__(other.sophon[0], "manifest_id", "m2")
-    assert dd.sophon_missing(other, tmp_path) == [other.sophon[0]]  # a new build id is missing again
+    assert dd.sophon_missing(other, tmp_path) == [
+        other.sophon[0]
+    ]  # a new build id is missing again
 
 
 def test_unsafe_manifest_path_never_writes_outside(servers, tmp_path):
     build = Build({"ok.bin": b"1" * 10}, chunk_size=100)
-    evil = field_bytes(1, field_bytes(1, "../x.bin") + field_varint(4, 0) + field_bytes(5, md5(b"")))
+    evil = field_bytes(
+        1, field_bytes(1, "../x.bin") + field_varint(4, 0) + field_bytes(5, md5(b""))
+    )
     build.objects["/manifests/m1"] = zstandard.ZstdCompressor().compress(evil)
     servers(build)
     with pytest.raises(dd.DirectError):
@@ -577,8 +593,24 @@ def test_hoyo_sophon_rejects_encrypted_builds():
 @pytest.mark.parametrize(
     "biz,tag,exe,version,game_id,package_id,password",
     [
-        ("hk4e_global", "genshin", "GenshinImpact.exe", "7.1.0", "gopR6Cufr3", "ScSYQBFhu9", "bDL4JUHL625x"),
-        ("nap_global", "zzz", "ZenlessZoneZero.exe", "3.3.0", "U5hbdsT9W7", "qsoIbfMm4x", "lh0OmNjbhG9x"),
+        (
+            "hk4e_global",
+            "genshin",
+            "GenshinImpact.exe",
+            "7.1.0",
+            "gopR6Cufr3",
+            "ScSYQBFhu9",
+            "bDL4JUHL625x",
+        ),
+        (
+            "nap_global",
+            "zzz",
+            "ZenlessZoneZero.exe",
+            "3.3.0",
+            "U5hbdsT9W7",
+            "qsoIbfMm4x",
+            "lh0OmNjbhG9x",
+        ),
     ],
 )
 def test_hoyo_sophon_genshin_and_zzz_install_only_game_and_the_chosen_audio(
@@ -600,7 +632,9 @@ def test_hoyo_sophon_genshin_and_zzz_install_only_game_and_the_chosen_audio(
     )
     plan = hoyo.resolve(biz, f)
     assert plan.game_tag == tag and plan.exe == exe and plan.version == version
-    game, audio = plan.sophon  # ZZZ's numeric on-demand resource packs and "mini-*" audio are skipped
+    game, audio = (
+        plan.sophon
+    )  # ZZZ's numeric on-demand resource packs and "mini-*" audio are skipped
     assert game.name == f"{tag}-{version}" and audio.name == f"{tag}-{version}-audio-en-us"
     assert game.size > 10**10 and audio.size > 10**8
 
@@ -608,7 +642,10 @@ def test_hoyo_sophon_genshin_and_zzz_install_only_game_and_the_chosen_audio(
 def test_hoyo_honkai_impact_still_uses_the_old_package_list():
     f = FakeFetch(
         {
-            "https://sg-hyp-api.hoyoverse.com/hyp/hyp-connect/api/getGamePackages?launcher_id=VYTpXlbWo8": (
+            (
+                "https://sg-hyp-api.hoyoverse.com/hyp/hyp-connect/api/getGamePackages"
+                "?launcher_id=VYTpXlbWo8"
+            ): (
                 FIXTURES / "hoyo_getGamePackages.json"
             ).read_bytes()
         }
@@ -652,7 +689,9 @@ def test_a_fresh_install_does_not_hash_the_zero_filled_files(servers, tmp_path, 
     servers(build)
     calls = []
     real = sophon._chunk_matches
-    monkeypatch.setattr(sophon, "_chunk_matches", lambda fh, chunk: calls.append(1) or real(fh, chunk))
+    monkeypatch.setattr(
+        sophon, "_chunk_matches", lambda fh, chunk: calls.append(1) or real(fh, chunk)
+    )
     dd.sync(plan_for(build), tmp_path)
     assert calls == []  # the file did not exist: every chunk is fetched without reading it back
     dd.sync(plan_for(build), tmp_path)
@@ -682,7 +721,9 @@ def test_direct_backend_reports_an_unfinished_sophon_package_as_missing(tmp_path
 
     pkg = sophon.SophonPackage("g-1", "https://x/m", "https://x/c", "m1", 1)
     plan = dd.Plan("T", "1", sophon=(pkg,))
-    monkeypatch.setattr(direct.GenshinBackend, "plan_factory", staticmethod(lambda fetch=None: plan))
+    monkeypatch.setattr(
+        direct.GenshinBackend, "plan_factory", staticmethod(lambda fetch=None: plan)
+    )
     backend = direct.GenshinBackend(
         make_context(tmp_path, "direct-genshin", {"install_dir": str(tmp_path / "game")}, "g")
     )

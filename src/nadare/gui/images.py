@@ -79,9 +79,17 @@ class _TaskSignals(QObject):
 
 
 class _DecodeTask(QRunnable):
+    """One decode on a pool thread.
+
+    ``signals`` belongs to the loader, never to the task: Qt deletes a finished task on a
+    pool thread, and a QObject created on the GUI thread must not be destroyed there
+    (it left dangling wrappers that crashed PyQt when the QApplication was released).
+    """
+
     def __init__(
         self,
         key: tuple,
+        signals: _TaskSignals,
         path: str,
         width: int,
         height: int,
@@ -90,7 +98,7 @@ class _DecodeTask(QRunnable):
         trim_bottom: float = 0.0,
     ) -> None:
         super().__init__()
-        self.signals = _TaskSignals()
+        self.signals = signals
         self._key = key
         self._path = path
         self._width = width
@@ -109,7 +117,10 @@ class _DecodeTask(QRunnable):
                 image = self._decode(self._path, self._width, self._height, crop=self._crop)
         except Exception:  # noqa: BLE001 - a broken image is not fatal
             image = None
-        self.signals.done.emit(self._key, image)
+        try:
+            self.signals.done.emit(self._key, image)
+        except RuntimeError:  # the loader was destroyed while the decode ran
+            pass
 
 
 class ImageLoader(QObject):
@@ -130,6 +141,8 @@ class ImageLoader(QObject):
         self._waiters: dict[tuple, list[Callable]] = {}
         self._decode = decode or decode_scaled
         self._pool = pool or QThreadPool.globalInstance()
+        self._signals = _TaskSignals(self)
+        self._signals.done.connect(self._on_done)
 
     @staticmethod
     def resolve(paths: Iterable[str | None] | str | None) -> str | None:
@@ -174,8 +187,7 @@ class ImageLoader(QObject):
             self._waiters.setdefault(key, []).append(callback)
             return key
         self._waiters[key] = [callback]
-        task = _DecodeTask(key, path, width, height, crop, self._decode, trim)
-        task.signals.done.connect(self._on_done)
+        task = _DecodeTask(key, self._signals, path, width, height, crop, self._decode, trim)
         self._pending[key] = task
         self._pool.start(task)
         return key

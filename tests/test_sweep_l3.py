@@ -239,6 +239,8 @@ def test_official_install_runs_vcredist_once_on_a_fresh_prefix(
     )
     monkeypatch.setattr(ArknightsBackend, "_download_installer", lambda *a, **k: installer)
     monkeypatch.setattr(ak, "stream", lambda *a, **k: 0)
+    # CI runners have no wine; the test must not depend on one being installed.
+    monkeypatch.setattr(ak, "first_wine", lambda: Path("/usr/bin/wine"))
     monkeypatch.setattr(ArknightsBackend, "find_launcher", lambda self: installer)
     backend.ctx.emit = lambda _e: None
 

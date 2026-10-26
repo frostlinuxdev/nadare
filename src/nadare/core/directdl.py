@@ -1107,6 +1107,21 @@ def _is_https_or_loopback(url: Any) -> bool:
     return url.startswith(("http://127.0.0.1:", "http://localhost:"))
 
 
+def _remove_stale_parts(root: Path, keep: set[str]) -> None:
+    """Best-effort removal of abandoned ``*.part`` files inside a successfully synced root."""
+    for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+        for name in filenames:
+            if not name.endswith(".part"):
+                continue
+            path = Path(dirpath) / name
+            if path.relative_to(root).as_posix() in keep:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
 def _validate_plan(plan: Plan) -> None:
     for rf in plan.files:
         safe_relative_path(rf.path)
@@ -1186,7 +1201,7 @@ def plan_missing(
             for offset in range(0, len(plan.files), workers):
                 batch = plan.files[offset : offset + workers]
                 results = pool.map(needs_download, batch)
-                files.extend(rf for rf, missing in zip(batch, results) if missing)
+                files.extend(rf for rf, missing in zip(batch, results, strict=False) if missing)
     archives = [archive for archive in plan.archives if not _archive_done(plan, archive, root)]
     return files, archives
 
@@ -1211,7 +1226,8 @@ def default_workers(file_count: int) -> int:
     return 32
 
 
-#: Parallel chunk fetches for a Sophon plan: 100k small requests are latency-bound, like loose files.
+#: Parallel chunk fetches for a Sophon plan: 100k small requests are latency-bound, like loose
+#: files.
 _SOPHON_WORKERS = 24
 
 
@@ -1320,6 +1336,22 @@ def _sync(
             raise DirectError(str(exc)) from exc
         downloaded += 1
 
+    keep_parts = {safe_relative_path(rf.path) for rf in plan.files}
+    can_prune_parts = True
+    for pkg in plan.sophon:
+        ledger = sophon._ledger_path(pkg, root)
+        try:
+            raw = ledger.read_text(encoding="utf-8")
+            keep_parts.update(
+                sophon._validate_ledger_entry(line, ledger)
+                for line in raw.splitlines()
+                if line
+            )
+        except (OSError, UnicodeError, sophon.SophonError):
+            can_prune_parts = False
+            break
+    if can_prune_parts:
+        _remove_stale_parts(root, keep_parts)
     try:
         (root / DL_DIR).rmdir()  # only succeeds when nothing is left in it
     except OSError:

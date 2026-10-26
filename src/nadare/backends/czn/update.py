@@ -31,7 +31,8 @@ Mechanism (all from unauthenticated endpoints, headers caller-id + caller-detail
                   md5_unpacked | md5_packed | ...
                D: idx | D | /path
   chunks:   <CDN>/game/dpms_STOVE_CHAOSZERO/v<ver_folder>/<chunk>.gz
-            -> verify md5_packed, gunzip, verify md5_unpacked, write to <root>/<path>.
+            -> stream to a resumable .part.gz, verify md5_packed, gunzip to .part,
+               verify md5_unpacked, then atomically install at <root>/<path>.
 
 Files are synced by comparing each manifest file's md5_unpacked to the on-disk
 file, so it works for a fresh install or an update. vcredist/directx/dotnet
@@ -43,11 +44,11 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
-import io
 import json
 import os
 import re
 import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 
@@ -136,6 +137,9 @@ GAME_DIR = PREFIX / "drive_c/ProgramData/Smilegate/Games/ChaosZeroNightmare"
 UPF = GAME_DIR / "combinedata_manifest" / f"GameManifest_{SERVICE}.upf"
 #: Copy of the last applied manifest, so ``verify`` can hash the install offline.
 MANIFEST_CACHE = GAME_DIR / "combinedata_manifest" / f"nadare-manifest-{SERVICE}.json"
+#: Stat fingerprints of files whose content hash matched the current manifest.
+#: Stored outside GAME_DIR so game updates do not overwrite verification state.
+STAT_CACHE = PREFIX / f"nadare-verified-files-{SERVICE}.json"
 
 HEADERS = {
     "caller-id": CALLER_ID,
@@ -233,7 +237,7 @@ def latest_version(installed: int, *, max_probes: int = MAX_PROBES) -> int:
         probes += len(window)
         with ThreadPoolExecutor(max_workers=len(window)) as pool:
             hits = list(pool.map(lambda n: _head_ok(f"{BASE}/{SERVICE}_{n}.json"), window))
-        found = [n for n, hit in zip(window, hits) if hit]
+        found = [n for n, hit in zip(window, hits, strict=False) if hit]
         if not found:
             break
         latest = v = max(found)
@@ -327,9 +331,57 @@ def _rel(path: str) -> Path:
     return GAME_DIR / rel
 
 
-def plan(manifest: dict):
-    """Return (to_download, dirs) comparing manifest md5s to on-disk files."""
+def _load_stat_cache() -> dict[str, dict[str, int | str]]:
+    """Load verified-file fingerprints; malformed or missing state is a miss."""
+    try:
+        raw = json.loads(STAT_CACHE.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict) or raw.get("schema") != 1:
+        return {}
+    files = raw.get("files")
+    if not isinstance(files, dict):
+        return {}
+    return {
+        path: row
+        for path, row in files.items()
+        if isinstance(path, str)
+        and isinstance(row, dict)
+        and isinstance(row.get("md5"), str)
+    }
+
+
+def _write_stat_cache(files: dict[str, dict[str, int | str]]) -> None:
+    """Atomically save successful file checks; failure only costs performance."""
+    tmp: str | None = None
+    try:
+        STAT_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=STAT_CACHE.parent, delete=False
+        ) as stream:
+            tmp = stream.name
+            json.dump({"schema": 1, "files": files}, stream, separators=(",", ":"))
+        os.replace(tmp, STAT_CACHE)
+    except OSError:
+        if tmp:
+            try:
+                Path(tmp).unlink()
+            except OSError:
+                pass
+
+
+def plan(manifest: dict, trust_stat_cache: bool = True):
+    """Return (to_download, dirs) comparing manifest md5s to on-disk files.
+
+    ``trust_stat_cache`` lets the launch-time check skip hashing a file whose stat
+    fingerprint matches its last verified state. Verify and Repair pass ``False``:
+    they must read every file, since silent corruption leaves the stat unchanged.
+    The cache is still refreshed from what was actually hashed.
+    """
     to_download, dirs = [], []
+    stored = _load_stat_cache()
+    cached = stored if trust_stat_cache else {}
+    verified: dict[str, dict[str, int | str]] = {}
     for kind, path, vf, ci, md5u, md5p, usize in parse_files(manifest):
         try:
             dst = _rel(path)  # reject absolute/traversal paths from the manifest
@@ -340,15 +392,35 @@ def plan(manifest: dict):
             continue
         if path.lstrip("/").lower().startswith(PREREQ_PREFIXES):
             continue
-        if _md5_file(dst) != (md5u or "").lower():
+        expected = (md5u or "").lower()
+        try:
+            stat = dst.stat()
+            fingerprint: dict[str, int | str] = {
+                "md5": expected,
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                "ctime_ns": stat.st_ctime_ns,
+                "ino": stat.st_ino,
+                "dev": stat.st_dev,
+            }
+        except OSError:
+            fingerprint = {}
+        if fingerprint and cached.get(path) == fingerprint:
+            verified[path] = fingerprint
+            continue
+        if _md5_file(dst) != expected:
             to_download.append((path, vf, ci, md5u, md5p, usize))
+        elif fingerprint:
+            verified[path] = fingerprint
+    if verified != stored:
+        _write_stat_cache(verified)
     return to_download, dirs
 
 
 def _manifest_md5(value: str, path: str, kind: str) -> str:
     """A manifest md5 column, lowercased; an empty/malformed one is rejected.
 
-    Failing closed matters: ``_fetch_verified`` used to treat an empty column as
+    Failing closed matters: the streaming fetch must reject an empty column as
     "nothing to check" and wrote the chunk unverified.
     """
     if not _MD5_RE.fullmatch(value or ""):
@@ -356,54 +428,156 @@ def _manifest_md5(value: str, path: str, kind: str) -> str:
     return value.lower()
 
 
-def _gunzip_capped(packed: bytes, cap: int | None = None) -> bytes:
-    """Gunzip ``packed``, aborting once the output would exceed ``cap`` bytes."""
-    limit = MAX_UNPACKED if cap is None else cap
-    out = bytearray()
-    with gzip.GzipFile(fileobj=io.BytesIO(packed)) as gz:
-        while True:
-            chunk = gz.read(1 << 20)
-            if not chunk:
-                break
-            out.extend(chunk)
-            if len(out) > limit:
-                raise ValueError(f"unpacked chunk exceeds {limit} bytes")
-    return bytes(out)
+def _download_stream(
+    url: str, dest: Path, *, timeout: int = 300, max_bytes: int = MAX_UNPACKED
+) -> int:
+    """Append a streamed response, resuming a partial file when Range is honored."""
+    offset = dest.stat().st_size if dest.is_file() else 0
+    headers = dict(HEADERS)
+    if offset:
+        headers["Range"] = f"bytes={offset}-"
+    response = None
+    try:
+        if _SESS is not None:
+            response = _SESS.get(url, headers=headers, timeout=timeout, stream=True)
+            status = response.status_code
+        else:
+            req = urllib.request.Request(url, headers=headers)
+            response = (
+                tls.urlopen(req, timeout=timeout, context=tls.ssl_context())
+                if tls is not None
+                else urllib.request.urlopen(req, timeout=timeout)
+            )  # noqa: S310
+            status = response.status if hasattr(response, "status") else response.getcode()
+
+        response_headers = response.headers
+        if status == 416 and offset:
+            match = re.fullmatch(r"bytes \*/(\d+)", response_headers.get("Content-Range", ""))
+            if match and int(match.group(1)) == offset:
+                return offset  # a completed packed part from an interrupted prior run
+            dest.unlink(missing_ok=True)
+            raise ValueError(f"invalid range response for {url}")
+        if status not in (200, 206):
+            raise FileNotFoundError(f"{status} {url}")
+
+        range_match = None
+        if status == 206:
+            match = re.fullmatch(
+                r"bytes (\d+)-(\d+)/(\d+|\*)", response_headers.get("Content-Range", "")
+            )
+            if (
+                not match
+                or int(match.group(1)) != offset
+                or int(match.group(2)) < offset
+                or (match.group(3) != "*" and int(match.group(2)) + 1 != int(match.group(3)))
+            ):
+                dest.unlink(missing_ok=True)
+                raise ValueError(f"invalid Content-Range for {url}")
+            range_match = match
+            mode = "ab" if offset else "wb"
+        else:
+            offset = 0  # the server ignored Range; restart from the response body
+            mode = "wb"
+
+        try:
+            expected_response = int(response_headers.get("Content-Length", ""))
+        except ValueError:
+            expected_response = None
+        if (
+            range_match
+            and expected_response is not None
+            and expected_response != int(range_match.group(2)) - offset + 1
+        ):
+            dest.unlink(missing_ok=True)
+            raise ValueError(f"invalid Content-Length for {url}")
+        received = 0
+        with dest.open(mode) as stream:
+            if hasattr(response, "iter_content"):
+                chunks = response.iter_content(chunk_size=1 << 20)
+            else:
+                def read_chunks():
+                    while True:
+                        read = getattr(response, "read1", response.read)
+                        chunk = read(1 << 20)
+                        if not chunk:
+                            break
+                        yield chunk
+
+                chunks = read_chunks()
+            for chunk in chunks:
+                if not chunk:
+                    continue
+                received += len(chunk)
+                if offset + received > max_bytes:
+                    dest.unlink(missing_ok=True)
+                    raise ValueError(f"response too large for {url}")
+                stream.write(chunk)
+        if expected_response is not None and received != expected_response:
+            raise OSError(f"incomplete response for {url}: {received}/{expected_response} bytes")
+        return offset + received
+    finally:
+        if response is not None:
+            close = getattr(response, "close", None)
+            if close:
+                close()
 
 
-def _fetch_verified(path, vf, ci, md5u, md5p, usize=None) -> bytes:
+def _fetch_verified_to_file(path, vf, ci, md5u, md5p, usize, packed_tmp, output_tmp) -> int:
+    """Stream, verify and decompress a chunk into its uncommitted output file."""
     md5p = _manifest_md5(md5p, path, "packed")
     md5u = _manifest_md5(md5u, path, "unpacked")
     url = f"{BASE}/v{vf}/{ci}.gz"
-    packed = _get(url, timeout=300, max_bytes=MAX_UNPACKED)
-    if hashlib.md5(packed).hexdigest() != md5p:
+    _download_stream(url, packed_tmp, timeout=300, max_bytes=MAX_UNPACKED)
+    if _md5_file(packed_tmp) != md5p:
+        packed_tmp.unlink(missing_ok=True)
         raise ValueError(f"packed md5 mismatch for {path} ({url})")
-    data = _gunzip_capped(packed)
-    if hashlib.md5(data).hexdigest() != md5u:
-        raise ValueError(f"unpacked md5 mismatch for {path}")
-    if usize is not None and len(data) != int(usize):
-        raise ValueError(f"unpacked size mismatch for {path}")
-    return data
+
+    digest = hashlib.md5()
+    size = 0
+    try:
+        with gzip.open(packed_tmp, "rb") as source, output_tmp.open("wb") as target:
+            while chunk := source.read(1 << 20):
+                size += len(chunk)
+                if size > MAX_UNPACKED:
+                    raise ValueError(f"unpacked chunk exceeds {MAX_UNPACKED} bytes")
+                digest.update(chunk)
+                target.write(chunk)
+        if digest.hexdigest() != md5u:
+            raise ValueError(f"unpacked md5 mismatch for {path}")
+        if usize is not None and size != int(usize):
+            raise ValueError(f"unpacked size mismatch for {path}")
+    except BaseException:
+        output_tmp.unlink(missing_ok=True)
+        packed_tmp.unlink(missing_ok=True)
+        raise
+    packed_tmp.unlink(missing_ok=True)
+    return size
 
 
 def download_file(path, vf, ci, md5u, md5p, usize=None, attempts=3):
+    dst = _rel(path)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(dst.suffix + ".part")
+    packed_tmp = dst.with_suffix(dst.suffix + ".part.gz")
     for i in range(attempts):
         try:
-            data = _fetch_verified(path, vf, ci, md5u, md5p, usize)
+            size = _fetch_verified_to_file(
+                path, vf, ci, md5u, md5p, usize, packed_tmp, tmp
+            )
             break
         except ManifestError:
+            tmp.unlink(missing_ok=True)
+            packed_tmp.unlink(missing_ok=True)
             raise  # a missing/invalid manifest md5 is not transient
         except Exception as e:
+            tmp.unlink(missing_ok=True)
             if i == attempts - 1:
                 raise
             print(f"  [~] {path}: {e}; retrying ({i + 2}/{attempts})")
             time.sleep(2 * (i + 1))
-    dst = _rel(path)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.with_suffix(dst.suffix + ".part")
-    tmp.write_bytes(data)
     tmp.replace(dst)
-    return len(data)
+    packed_tmp.unlink(missing_ok=True)
+    return size
 
 
 #: Executables from the game's bin dir that are not "the game": the crash
@@ -464,7 +638,7 @@ def _verify_cached() -> int:
     """Hash the install against the cached manifest; print one JSON event line."""
     try:
         manifest = json.loads(MANIFEST_CACHE.read_text())
-        differ, _dirs = plan(manifest)
+        differ, _dirs = plan(manifest, trust_stat_cache=False)
     except (OSError, ValueError, ManifestError):
         print(json.dumps({"event": "verify", "checked": False}))
         return 0
@@ -503,6 +677,11 @@ def main(argv=None) -> int:
         "--apply",
         action="store_true",
         help="with `update`: actually download and write (default is dry-run)",
+    )
+    ap.add_argument(
+        "--full",
+        action="store_true",
+        help="hash every file instead of trusting the verified-files cache (used by Repair)",
     )
     ap.add_argument("--version", type=int, help="target a specific manifest version")
     ap.add_argument(
@@ -560,7 +739,7 @@ def main(argv=None) -> int:
     )
 
     try:
-        to_dl, dirs = plan(manifest)
+        to_dl, dirs = plan(manifest, trust_stat_cache=not args.full)
     except ManifestError as e:
         print(f"[!] manifest rejected: {e}")
         return 2

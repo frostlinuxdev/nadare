@@ -1757,10 +1757,11 @@ class CznBackend(GameBackend):
             self._fail("install", code, UPDATE_EXIT_MESSAGES)
         self.ctx.emit(Event("done", "Chaos Zero Nightmare is installed"))
 
-    def update(self) -> None:
+    def update(self, *, full: bool = False) -> None:
         if self._game_running():
             self._fail("update", 8)
-        code = self._run_module(UPDATE_MODULE, ["update", "--apply"])
+        args = ["update", "--apply", *(["--full"] if full else [])]
+        code = self._run_module(UPDATE_MODULE, args)
         if code == 3:
             self._fail("update", 8)
         if code != 0:
@@ -1771,7 +1772,7 @@ class CznBackend(GameBackend):
         if self._game_running():
             self._fail("repair", 8)
         self.ctx.emit(Event("step", "Checking every game file"))
-        self.update()
+        self.update(full=True)
         bad = self._differing_files()
         if bad:
             shown = ", ".join(bad[:5])

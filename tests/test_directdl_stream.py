@@ -47,7 +47,10 @@ def make_zip(files: dict[str, bytes], stored: set[str] = frozenset(), extra=None
 
 
 def files(n=12):
-    out = {f"data/part{i}.bin": os.urandom(30_000) if i % 3 == 0 else bytes([i]) * 30_000 for i in range(n)}
+    out = {
+        f"data/part{i}.bin": os.urandom(30_000) if i % 3 == 0 else bytes([i]) * 30_000
+        for i in range(n)
+    }
     out["readme.txt"] = b"hello\n" * 50
     out["empty.bin"] = b""
     out["deep/er/still/f.dat"] = os.urandom(7_000)
@@ -56,7 +59,9 @@ def files(n=12):
 
 def plan(url, version="1", size=None, parts=(), workers_note=None):
     src = dd.RemoteFile("g.zip", url, size)
-    return dd.Plan("T", version, archives=(dd.Archive("g", src, parts=parts, unwrap=("zip",), stream=True),))
+    return dd.Plan(
+        "T", version, archives=(dd.Archive("g", src, parts=parts, unwrap=("zip",), stream=True),)
+    )
 
 
 def tree(root: Path) -> dict[str, bytes]:
@@ -208,8 +213,13 @@ def test_split_archives_stream_too(server, tmp_path):
         dd.RemoteFile(f"g.zip.00{i + 1}", s.url + f"/p{i}", cut[i + 1] - cut[i]) for i in range(3)
     )
     p = dd.Plan(
-        "T", "1",
-        archives=(dd.Archive("g", dd.RemoteFile("g.zip", "", len(z)), parts=parts, unwrap=("zip",), stream=True),),
+        "T",
+        "1",
+        archives=(
+            dd.Archive(
+                "g", dd.RemoteFile("g.zip", "", len(z)), parts=parts, unwrap=("zip",), stream=True
+            ),
+        ),
     )
     dd.sync(p, tmp_path)
     assert tree(tmp_path) == f
@@ -246,7 +256,9 @@ def test_progress_is_reported(server, tmp_path):
 def test_the_stream_flag_is_ignored_for_other_archive_kinds(server, tmp_path):
     blob = (Path(__file__).parent / "fixtures" / "sevenz" / "lzma2.7z").read_bytes()
     s = server({"/g.7z": blob})
-    arc = dd.Archive("g", dd.RemoteFile("g.7z", s.url + "/g.7z", len(blob)), unwrap=("7z",), stream=True)
+    arc = dd.Archive(
+        "g", dd.RemoteFile("g.7z", s.url + "/g.7z", len(blob)), unwrap=("7z",), stream=True
+    )
     dd.sync(dd.Plan("T", "1", archives=(arc,)), tmp_path)
     assert (tmp_path / "hello.txt").is_file()
 
@@ -275,7 +287,9 @@ def tree7(root: Path) -> dict[str, bytes]:
 
 def plan7(url, size, parts=(), md5=None):
     src = dd.RemoteFile("g.7z", url, size, md5=md5)
-    return dd.Plan("T", "1", archives=(dd.Archive("g", src, parts=parts, unwrap=("7z",), stream=True),))
+    return dd.Plan(
+        "T", "1", archives=(dd.Archive("g", src, parts=parts, unwrap=("7z",), stream=True),)
+    )
 
 
 def test_a_7z_streams_without_storing_the_archive(server, tmp_path):
@@ -332,7 +346,13 @@ def test_7z_volumes_stream_as_one_archive(server, tmp_path):
         dd.RemoteFile("g.7z.001", s.url + "/a", len(parts_b[0])),
         dd.RemoteFile("g.7z.002", s.url + "/b", len(parts_b[1])),
     )
-    arc = dd.Archive("g", dd.RemoteFile("g.7z", "", sum(map(len, parts_b))), parts=parts, unwrap=("7z",), stream=True)
+    arc = dd.Archive(
+        "g",
+        dd.RemoteFile("g.7z", "", sum(map(len, parts_b))),
+        parts=parts,
+        unwrap=("7z",),
+        stream=True,
+    )
     dd.sync(dd.Plan("T", "1", archives=(arc,)), tmp_path)
     assert tree7(tmp_path) == tree7(SEVENZ / "expected")
     assert not (tmp_path / dd.DL_DIR).exists()

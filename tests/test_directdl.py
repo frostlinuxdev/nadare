@@ -12,8 +12,8 @@ import zlib
 from pathlib import Path
 
 import pytest
-
 from _httpserver import Server as _Server
+
 from nadare.core import directdl as dd
 from nadare.core.events import Cancel, Cancelled, Event
 
@@ -202,10 +202,14 @@ def test_plan_missing_checks_in_parallel_and_preserves_plan_order(tmp_path, monk
         "T",
         "1",
         files=(
-            dd.RemoteFile("missing.bin", "https://example.invalid/missing", len(good), md5=md5(good)),
+            dd.RemoteFile(
+                "missing.bin", "https://example.invalid/missing", len(good), md5=md5(good)
+            ),
             dd.RemoteFile("good.bin", "https://example.invalid/good", len(good), md5=md5(good)),
             dd.RemoteFile("small.bin", "https://example.invalid/small", len(good), md5=md5(good)),
-            dd.RemoteFile("wrong-hash.bin", "https://example.invalid/wrong-hash", len(good), md5=md5(good)),
+            dd.RemoteFile(
+                "wrong-hash.bin", "https://example.invalid/wrong-hash", len(good), md5=md5(good)
+            ),
         ),
     )
     thread_names = set()
@@ -229,7 +233,9 @@ def test_plan_missing_checks_in_parallel_and_preserves_plan_order(tmp_path, monk
 def test_cancelled_sync_skips_plan_missing_workers(tmp_path, monkeypatch):
     cancel = Cancel()
     cancel.cancel()
-    monkeypatch.setattr(dd, "plan_missing", lambda *a, **k: pytest.fail("preflight ran after cancel"))
+    monkeypatch.setattr(
+        dd, "plan_missing", lambda *a, **k: pytest.fail("preflight ran after cancel")
+    )
     with pytest.raises(Cancelled):
         dd.sync(dd.Plan("T", "1"), tmp_path, cancel=cancel)
     assert not any(t.name.startswith("nadare-plan-missing") for t in threading.enumerate())
@@ -506,7 +512,9 @@ def test_7z_split_volumes_are_read_without_joining(server, tmp_path, monkeypatch
         dd.RemoteFile("g.7z.001", s.url + "/a", len(chunks[0]), md5=md5(chunks[0])),
         dd.RemoteFile("g.7z.002", s.url + "/b", len(chunks[1]), md5=md5(chunks[1])),
     )
-    arc = dd.Archive("g", dd.RemoteFile("g.7z", "", sum(map(len, chunks))), parts=parts, unwrap=("7z",))
+    arc = dd.Archive(
+        "g", dd.RemoteFile("g.7z", "", sum(map(len, chunks))), parts=parts, unwrap=("7z",)
+    )
     seen: list[bool] = []
     from nadare.core import sevenz
 

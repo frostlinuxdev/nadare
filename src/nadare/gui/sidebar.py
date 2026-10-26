@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Nadare contributors
-"""The sidebar's installed-games list.
+"""The sidebar's game list.
 
-Only profiles the backend last reported as installed (or running, or with an
-update available) get a row here; everything else lives on the Library page.
-The widget is presentation only — it renders the ``Status`` objects the main
+Every profile in the library gets a row: running games first, then installed
+(or updatable) ones, then the rest (not installed yet, or no status yet), each
+group alphabetical. The widget is presentation only — it renders the ``Status`` objects the main
 window forwards and emits :attr:`SidebarGames.open_game` when a row is clicked.
 """
 
@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.backends import Status
+from .images import ImageLoader
 from .library import display_title, profile_art_candidates
 from .theme import cover_pixmap, load_card_pixmap, repolish
 
@@ -54,19 +55,26 @@ def _updatable(status: Status | None) -> bool:
     return bool((status.data or {}).get("update_available"))
 
 
-def icon_pixmap(profile: dict[str, Any], title: str):
-    """A small square icon: the logo, then cover/hero, then a placeholder."""
+def _icon_candidates(profile: dict[str, Any]) -> list[str]:
+    """Return the logo then cover/hero candidates for one sidebar row."""
     candidates: list[str] = []
     logo = profile.get("logo")
     if logo:
         # ``logo`` is not is_file()-checked like profile_art_candidates: a FIFO
         # or other non-regular file would make QPixmap block while it reads.
         try:
-            if Path(str(logo)).expanduser().is_file():
-                candidates.append(str(logo))
+            path = Path(str(logo)).expanduser()
+            if path.is_file():
+                candidates.append(str(path))
         except (TypeError, ValueError, RuntimeError, OSError):
             pass  # includes RuntimeError from an unresolvable ``~user``
     candidates.extend(profile_art_candidates(profile))
+    return candidates
+
+
+def icon_pixmap(profile: dict[str, Any], title: str):
+    """A small square icon: the logo, then cover/hero, then a placeholder."""
+    candidates = _icon_candidates(profile)
     art = load_card_pixmap(candidates)
     return cover_pixmap(art, ICON_SIZE, ICON_SIZE, title, radius=8)
 
@@ -137,7 +145,11 @@ class GameRow(QFrame):
         )
         self.title_label.setToolTip(title)
         self.setToolTip(title)
-        self.icon.setPixmap(icon_pixmap(profile, title))
+        self.set_icon_art(None, title)
+
+    def set_icon_art(self, art: Any, title: str) -> None:
+        """Apply a decoded icon, or restore the lightweight placeholder."""
+        self.icon.setPixmap(cover_pixmap(art, ICON_SIZE, ICON_SIZE, title, radius=8))
 
     def set_state(self, status: Status | None) -> None:
         """Show the running dot (blue) or the update dot (amber)."""
@@ -181,6 +193,8 @@ class SidebarGames(QWidget):
         self._statuses: dict[str, Status] = {}
         self._active = ""
         self._rows: dict[str, GameRow] = {}
+        self._images = ImageLoader(capacity=128, parent=self)
+        self._icon_tokens: dict[str, tuple] = {}
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -247,10 +261,14 @@ class SidebarGames(QWidget):
         entries: list[tuple[int, str, str]] = []
         for name in self._profiles:
             status = self._statuses.get(name)
-            if not is_installed(status):
-                continue
+            if _running(status):
+                rank = 0
+            elif is_installed(status):
+                rank = 1
+            else:
+                rank = 2  # not installed yet, or no status reported yet
             title = display_title(name, self._profiles)
-            entries.append((0 if _running(status) else 1, title.lower(), name))
+            entries.append((rank, title.lower(), name))
         entries.sort()
         return [name for _rank, _title, name in entries]
 
@@ -262,6 +280,7 @@ class SidebarGames(QWidget):
         for name in list(self._rows):
             if name not in wanted:
                 row = self._rows.pop(name)
+                self._icon_tokens.pop(name, None)
                 row.setParent(None)
                 row.deleteLater()
 
@@ -273,14 +292,18 @@ class SidebarGames(QWidget):
                 row = GameRow(
                     name,
                     title,
-                    icon_pixmap(profile, title),
                     active=(name == self._active),
                     parent=self._container,
                 )
                 row.clicked.connect(self.open_game.emit)
                 self._rows[name] = row
-            else:
                 row.update_content(profile, title)
+                self._request_icon(name, row, profile, title)
+            else:
+                previous_key = row._content_key
+                row.update_content(profile, title)
+                if row._content_key != previous_key:
+                    self._request_icon(name, row, profile, title)
                 row.set_active(name == self._active)
             row.set_state(self._statuses.get(name))
             self._rows_layout.insertWidget(index, row)
@@ -289,6 +312,23 @@ class SidebarGames(QWidget):
         self._container.adjustSize()
         # Keep the mapping's order in sync with the visual order (profiles()).
         self._rows = {name: self._rows[name] for name in order}
+
+    def _request_icon(
+        self, name: str, row: GameRow, profile: dict[str, Any], title: str
+    ) -> None:
+        """Decode large cover files off the GUI thread and ignore stale results."""
+        candidates = _icon_candidates(profile)
+        token = (row._content_key, tuple(candidates))
+        self._icon_tokens[name] = token
+
+        def apply(pixmap) -> None:
+            if self._rows.get(name) is not row or self._icon_tokens.get(name) != token:
+                return
+            row.set_icon_art(pixmap, title)
+
+        self._images.request(
+            candidates, ICON_SIZE, ICON_SIZE, apply, crop=True, cover=True
+        )
 
 
 __all__ = ["GameRow", "SidebarGames", "icon_pixmap", "is_installed"]

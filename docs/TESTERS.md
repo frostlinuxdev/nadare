@@ -130,7 +130,7 @@ Install 32-bit Vulkan on your distro if the check above fails:
 
 ## 3. First run
 
-1. **Add game → Chaos Zero Nightmare**, accept the default prefix.
+1. Open the **Store** (first item in the sidebar, also behind **+ Add game**), pick **Chaos Zero Nightmare** and press **Install**; accept the default prefix.
 2. Log in by scanning the QR code **shown by your own Nadare window**.
 3. Install. The first install fetches the Proton runner (~320 MB), WebView2 (~215 MB) and the STOVE client files (~270 MB); the game then downloads its own data on first launch.
 
@@ -191,6 +191,10 @@ Known limits:
   X11 (XWayland) its window showed only a flat colour on NVIDIA + KDE Plasma 6.8 (the
   game runs and connects, it just does not draw). Leave the setting on Auto, and
   tell us if X11 works or fails on yours.
+- Chaos Zero Nightmare may close itself about two minutes into a session with the in-game notice
+  `uncheater@0xe0190266` if you play over a VPN or proxy (STOVE's anti-cheat). A tester saw exactly
+  that with Mullvad over Shadowsocks until the VPN was turned off, so turn it off before you launch
+  the game.
 - FGO (Fate/Grand Order) **does not install in 0.1.0b4**: its lepton-fgo release
   is not in the public index yet (planned for a later beta). It is experimental, needs
   podman and a binderfs kernel, and on SELinux

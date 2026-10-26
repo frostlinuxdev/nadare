@@ -239,14 +239,22 @@ def test_hoyo_unknown_biz():
 
 def test_zip_sources_stream_and_the_nested_one_does_not():
     base = "https://pc.bd2.pmang.cloud/browndust2starter/games/10000001"
-    assert not any(a.stream for a in bd2.resolve(FakeFetch({base + "/game.json": fx("bd2_game.json")})).archives)
+    assert not any(
+        a.stream
+        for a in bd2.resolve(FakeFetch({base + "/game.json": fx("bd2_game.json")})).archives
+    )
 
     ag = "https://us-api.yongshigame.com/game-website-server/pass/sdk/get_update_version?gameId=1"
-    assert all(a.stream for a in aethergazer.resolve(FakeFetch({ag: fx("ag_get_update_version.json")})).archives)
+    assert all(
+        a.stream
+        for a in aethergazer.resolve(FakeFetch({ag: fx("ag_get_update_version.json")})).archives
+    )
     mg = "https://apis.netmarble.com/cpplauncher/api/game/monster2/builds?buildCode=A"
     assert all(a.stream for a in mongil.resolve(FakeFetch({mg: fx("mongil_builds.json")})).archives)
     ef = "https://launcher.gryphline.com/api/game/get_latest?appcode=YDUTE5gscDZ229CW&channel=6&sub_channel=6"
-    assert all(a.stream for a in endfield.resolve(FakeFetch({ef: fx("endfield_get_latest.json")})).archives)
+    assert all(
+        a.stream for a in endfield.resolve(FakeFetch({ef: fx("endfield_get_latest.json")})).archives
+    )
     hy = FakeFetch({HOYO_URL: fx("hoyo_getGamePackages.json")})
     # The other HoYo titles now use Sophon chunk manifests (see test_sophon.py).
     assert all(a.stream for a in hoyo.resolve("bh3_global", hy).archives)
@@ -262,7 +270,6 @@ def pgr_routes(token=PGR_TOKEN):
 
     index = json.loads(fx("pgr_index.json"))
     cfg = index["default"]["config"]
-    root = "https://zspms-volcdn-gamestarter.kurogame.net/"  # the highest-P CDN in the fixture
     best = max(index["default"]["cdnList"], key=lambda c: int(c["P"]))["url"]
     return pgr.index_url(token), {
         pgr.index_url(token): fx("pgr_index.json"),
@@ -293,7 +300,9 @@ def test_pgr_token_can_be_overridden():
 
     url, routes, _root, _cfg = pgr_routes("OVERRIDETOKEN0123456789abcdefghij")
     assert "50015_OVERRIDETOKEN0123456789abcdefghij" in url
-    assert pgr.resolve(FakeFetch(routes), token="OVERRIDETOKEN0123456789abcdefghij").version == "4.8.0"
+    assert (
+        pgr.resolve(FakeFetch(routes), token="OVERRIDETOKEN0123456789abcdefghij").version == "4.8.0"
+    )
     for bad in ("", "has space", "../x", "a" * 80, "tok/en"):
         with pytest.raises(dd.DirectError):
             pgr.index_url(bad)

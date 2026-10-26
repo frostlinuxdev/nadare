@@ -30,11 +30,14 @@ import json
 import os
 import re
 import socket
+import threading
+import time
 import uuid
 from collections.abc import Iterator
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 from . import paths
 from .logging import get_logger
@@ -70,6 +73,26 @@ ANILIST_QUERY = (
     "query ($search: String) { Media(search: $search, type: ANIME) "
     "{ coverImage { extraLarge large } } }"
 )
+
+# Stable publisher pages and their distinct image hosts. The OGP image URLs are
+# intentionally resolved from page metadata because HoYoverse rotates hashed paths.
+_PUBLISHER_OGP: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
+    "direct-genshin": (
+        "https://genshin.hoyoverse.com/en/home",
+        ("genshin.hoyoverse.com",),
+        ("upload-static.hoyoverse.com",),
+    ),
+    "direct-hsr": (
+        "https://hsr.hoyoverse.com/en-us/",
+        ("hsr.hoyoverse.com",),
+        ("fastcdn.hoyoverse.com",),
+    ),
+    "direct-zzz": (
+        "https://zenless.hoyoverse.com/en-us/",
+        ("zenless.hoyoverse.com",),
+        ("fastcdn.hoyoverse.com",),
+    ),
+}
 
 SEARCH_TIMEOUT = 20
 DOWNLOAD_TIMEOUT = 60
@@ -149,6 +172,7 @@ def _entries(profile: dict, keys: tuple[str, ...]) -> list[tuple[int, int, int, 
                 path = Path(str(value)).expanduser()
             except (TypeError, ValueError):
                 continue
+            path = _migrated_cache_path(path)
             if not path.is_file():
                 continue
             tier = SOURCE_TIER[source_of(profile, key, value)]
@@ -184,9 +208,20 @@ def resolve_kind(profile: dict, kind: str) -> Path | None:
             path = Path(str(value)).expanduser()
         except (TypeError, ValueError):
             continue
+        path = _migrated_cache_path(path)
         if path.is_file():
             return path
     return None
+
+
+def _migrated_cache_path(path: Path) -> Path:
+    """Resolve a saved pre-migration cache path to its WebP replacement."""
+    if path.is_file() or path.parent != cache_dir():
+        return path
+    if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".bmp"}:
+        return path
+    replacement = path.with_suffix(".webp")
+    return replacement if replacement.is_file() else path
 
 
 def ordered_paths(profile: dict, keys: tuple[str, ...] | None = None) -> list[str]:
@@ -648,6 +683,70 @@ def _site_candidates(profile: dict, kind: str = "cover") -> Iterator[str]:
         yield f"{directkinds.SITE_IMAGES}/{catalog[0]}/{name}.webp"
 
 
+class _OgImageParser(HTMLParser):
+    """Extract a publisher page's Open Graph image without a third-party parser."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.image: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "meta" or self.image:
+            return
+        values = {key.lower(): value for key, value in attrs}
+        marker = (values.get("property") or values.get("name") or "").lower()
+        if marker in {"og:image", "og:image:url"}:
+            self.image = values.get("content")
+
+
+def _publisher_og_image(profile: dict, kind: str) -> tuple[str, tuple[str, ...]] | None:
+    """Resolve a catalog publisher's current cover URL from its official page."""
+    if kind != "cover":
+        return None
+    config = _PUBLISHER_OGP.get(str(profile.get("backend") or ""))
+    if config is None:
+        return None
+    page, page_hosts, image_hosts = config
+    if not host_allowed(page, page_hosts) or not _public_resolution(page):
+        return None
+    response = None
+    try:
+        response = _curl().get(
+            page, timeout=SEARCH_TIMEOUT, allow_redirects=False, stream=True
+        )
+        if _status(response) != 200:
+            return None
+        body = _read_capped(response, MAX_JSON_BYTES, page)
+        parser = _OgImageParser()
+        parser.feed(body.decode("utf-8", errors="replace"))
+        if not parser.image:
+            return None
+        image = urljoin(page, parser.image.strip())
+        if not host_allowed(image, image_hosts) or not _public_resolution(image):
+            return None
+        return image, image_hosts
+    except Exception as exc:  # noqa: BLE001 - publisher metadata is an optional fallback
+        log.debug("publisher cover lookup failed (%s): %s", page, exc)
+        return None
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close()
+
+
+def _publisher_art_source(profile: dict, path: Path) -> bool:
+    """Return whether a cached image has a validated publisher CDN source sidecar."""
+    config = _PUBLISHER_OGP.get(str(profile.get("backend") or ""))
+    if config is None or path.parent != cache_dir():
+        return False
+    try:
+        source = src_sidecar(path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return host_allowed(source, config[2])
+
+
 def _norm_title(text: object) -> str:
     """Casefold ``text`` and drop everything that is not alphanumeric.
 
@@ -704,17 +803,12 @@ def _anilist_candidates(term: str) -> Iterator[str]:
             yield str(url)
 
 
-def _candidates(profile: dict, title: str | None, kind: str = "cover") -> Iterator[str]:
-    """Yield image URLs from the usable sources, best first, lazily.
-
-    Steam CDN (publisher-supplied store art) always applies; the catalog games also have images
-    on the FrostLinux site and a default Steam app id (``core.directkinds.ART``). SteamGridDB
-    is only queried when an API key is present; AniList only when the user opts in with
-    ``NADARE_ART_THIRD_PARTY=1``. Third-party scraping is off by default.
-    """
+def _catalog_candidates(profile: dict, kind: str) -> Iterator[str]:
     yield from _steam_candidates(profile, kind)
     yield from _site_candidates(profile, kind)
 
+
+def _optional_candidates(profile: dict, title: str | None) -> Iterator[str]:
     key = _sgdb_key(profile)
     if key:
         try:
@@ -731,12 +825,24 @@ def _candidates(profile: dict, title: str | None, kind: str = "cover") -> Iterat
                 log.debug("AniList lookup failed: %s", exc)
 
 
+def _candidates(profile: dict, title: str | None, kind: str = "cover") -> Iterator[str]:
+    """Yield catalog art first, then optional SteamGridDB/AniList sources."""
+    yield from _catalog_candidates(profile, kind)
+    yield from _optional_candidates(profile, title)
+
+
 # ---------------------------------------------------------------------------
 # cache write + public entry point
 # ---------------------------------------------------------------------------
 def _cached(slug: str, kind: str) -> Path | None:
-    for ext in _IMAGE_EXTS:
-        candidate = cache_dir() / f"{slug}-{kind}.{ext}"
+    root = cache_dir()
+    root_key = str(root)
+    if root.is_dir() and root_key not in _migrated_cache_roots:
+        _schedule_cover_migration(root)
+    # Prefer the replacement if migration has installed it but not yet removed
+    # the original file.
+    for ext in ("webp", *(ext for ext in _IMAGE_EXTS if ext != "webp")):
+        candidate = root / f"{slug}-{kind}.{ext}"
         if candidate.is_file():
             return candidate
     return None
@@ -788,8 +894,35 @@ def _sync_dir(path: Path) -> None:
 
 
 #: Formats worth re-encoding; GIFs may be animated and WebP is already small.
-_RECODE_EXTS = frozenset({"png", "jpg", "bmp"})
+_RECODE_EXTS = frozenset({"png", "jpg", "jpeg", "bmp"})
 WEBP_QUALITY = 90
+_migrated_cache_roots: set[str] = set()
+_migrating_cache_roots: set[str] = set()
+_migration_lock = threading.Lock()
+
+
+def _schedule_cover_migration(root: Path) -> None:
+    """Run the one-time cache migration off the caller thread (often the GUI)."""
+    root_key = str(root)
+    with _migration_lock:
+        if root_key in _migrated_cache_roots or root_key in _migrating_cache_roots:
+            return
+        _migrating_cache_roots.add(root_key)
+
+    def run() -> None:
+        try:
+            _cleanup_stale_cache_parts(root)
+            migrate_cached_covers()
+        finally:
+            with _migration_lock:
+                _migrating_cache_roots.discard(root_key)
+                _migrated_cache_roots.add(root_key)
+
+    try:
+        threading.Thread(target=run, name="cover-cache-migration", daemon=True).start()
+    except Exception:
+        with _migration_lock:
+            _migrating_cache_roots.discard(root_key)
 
 
 def _recode_webp(content: bytes, ext: str) -> tuple[bytes, str]:
@@ -820,6 +953,120 @@ def _recode_webp(content: bytes, ext: str) -> tuple[bytes, str]:
     if not encoded or len(encoded) >= len(content):
         return content, ext
     return encoded, "webp"
+
+
+def migrate_cached_covers() -> int:
+    """Convert cached PNG/JPEG covers to WebP without risking originals.
+
+    Normal lookups schedule this sweep on a daemon thread so decoding a large
+    existing cache cannot block the GUI. Existing profile paths are resolved to
+    the same-stem WebP by :func:`_migrated_cache_path` after conversion.
+    """
+    root = cache_dir()
+    changed = 0
+    try:
+        sources = list(root.iterdir()) if root.is_dir() else []
+    except OSError as exc:
+        log.debug("cached cover migration could not scan %s: %s", root, exc)
+        return 0
+    for source in sources:
+        if (
+            not source.is_file()
+            or source.suffix.lower().lstrip(".") not in {"png", "jpg", "jpeg"}
+        ):
+            continue
+        try:
+            original = source.read_bytes()
+            encoded, ext = _recode_webp(original, source.suffix.lower().lstrip("."))
+            if ext != "webp" or not encoded or encoded == original:
+                continue
+            from PyQt6.QtGui import QImage
+
+            if QImage.fromData(encoded).isNull():
+                continue
+            target = source.with_suffix(".webp")
+            if target.exists():
+                continue
+            part = _part_path(target)
+            source_sidecar = src_sidecar(source)
+            try:
+                with open(part, "wb") as fh:
+                    fh.write(encoded)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                # Verify the durable temporary file before installing it.
+                if QImage.fromData(part.read_bytes()).isNull():
+                    continue
+                if source_sidecar.is_file():
+                    _copy_sidecar_atomically(source_sidecar, src_sidecar(target))
+                os.replace(part, target)
+                _sync_dir(root)
+            finally:
+                part.unlink(missing_ok=True)
+            if source_sidecar.is_file():
+                source_sidecar.unlink()
+            source.unlink()
+            changed += 1
+        except Exception as exc:  # noqa: BLE001 - cache migration must not break startup
+            log.debug("cached cover migration skipped for %s: %s", source, exc)
+    return changed
+
+
+def _copy_sidecar_atomically(source: Path, target: Path) -> None:
+    """Durably copy an official URL sidecar before its old image is removed."""
+    data = source.read_bytes()
+    part = _part_path(target)
+    try:
+        with open(part, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(part, target)
+        _sync_dir(target.parent)
+    finally:
+        part.unlink(missing_ok=True)
+
+
+def _part_owner_is_alive(path: Path) -> bool:
+    """Protect a generated temp file while the process that owns it is alive."""
+    pieces = path.name.rsplit(".", 3)
+    if (
+        len(pieces) != 4
+        or pieces[3] != "part"
+        or not re.fullmatch(r"[0-9a-f]{32}", pieces[2])
+    ):
+        return False
+    try:
+        pid = int(pieces[1])
+    except ValueError:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _cleanup_stale_cache_parts(root: Path) -> None:
+    """Remove old regular ``.part`` files in the flat covers cache only."""
+    cutoff = time.time() - 24 * 60 * 60
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return
+    for path in entries:
+        if not path.name.endswith(".part") or path.is_symlink() or not path.is_file():
+            continue
+        try:
+            if path.stat().st_mtime >= cutoff or _part_owner_is_alive(path):
+                continue
+            path.unlink()
+        except OSError:
+            continue
 
 
 def _store(
@@ -904,18 +1151,34 @@ def fetch(profile: dict, title: str | None = None, kind: str = "cover") -> Path 
         if cached is not None:
             log.debug("artwork cache hit: %s", cached)
             return cached
-        for url in _candidates(profile, title, kind):
-            if not host_allowed(url, ()):  # https only, never a local/private host
-                log.debug("artwork candidate rejected (host): %s", url)
-                continue
-            if not _public_resolution(url):
-                # Public-looking name that actually resolves locally (#32.4).
-                log.debug("artwork candidate rejected (resolves locally): %s", url)
-                continue
-            try:
-                return _store(url, slug_, kind)
-            except Exception as exc:  # noqa: BLE001 - try the next candidate
-                log.debug("artwork candidate failed (%s): %s", url, exc)
+
+        def try_candidates(urls: Iterator[str]) -> Path | None:
+            for url in urls:
+                if not host_allowed(url, ()):  # https only, never a local/private host
+                    log.debug("artwork candidate rejected (host): %s", url)
+                    continue
+                if not _public_resolution(url):
+                    # Public-looking name that actually resolves locally (#32.4).
+                    log.debug("artwork candidate rejected (resolves locally): %s", url)
+                    continue
+                try:
+                    return _store(url, slug_, kind)
+                except Exception as exc:  # noqa: BLE001 - try the next candidate
+                    log.debug("artwork candidate failed (%s): %s", url, exc)
+            return None
+
+        path = try_candidates(_catalog_candidates(profile, kind))
+        if path is not None:
+            return path
+        publisher = _publisher_og_image(profile, kind)
+        if publisher is not None:
+            url, allowed_hosts = publisher
+            path = download(url, slug_, kind, allowed_hosts, official=True)
+            if path is not None:
+                return path
+        path = try_candidates(_optional_candidates(profile, title))
+        if path is not None:
+            return path
         log.info("no artwork found for %s", slug_)
         return None
     except Exception as exc:  # noqa: BLE001 - never raise into the UI
@@ -939,7 +1202,10 @@ def fetch_all(
     found: dict[str, Path] = {}
     for kind in kinds:
         path = fetch(profile, title=title, kind=kind)
-        if path is not None and record_thirdparty(profile, path, kind):
+        if path is not None and _publisher_art_source(profile, path):
+            if record_official(profile, path, kind):
+                found[kind] = path
+        elif path is not None and record_thirdparty(profile, path, kind):
             found[kind] = path
     return found
 

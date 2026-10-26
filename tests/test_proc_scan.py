@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from nadare.backends.wine import ProcessQuery, scan_pids
+from nadare.core.process import ProcessScanRound, use_process_scan_round
 
 
 def _pid(root: Path, pid: int, argv: list[str], env: dict[str, str] | None = None) -> None:
@@ -87,3 +88,45 @@ def test_prefix_and_names_pair_form(tmp_path: Path) -> None:
     root = tmp_path / "proc"
     _pid(root, 700, ["/usr/bin/wine"], {"WINEPREFIX": "/games/pfx"})
     assert scan_pids("/games/pfx", ["game.exe"], proc_root=root) == [700]
+
+
+def test_explicit_probe_round_reuses_one_snapshot_but_independent_scan_is_fresh(tmp_path):
+    root = tmp_path / "proc"
+    _pid(root, 800, ["/usr/bin/wine", "game.exe"], {"WINEPREFIX": "/games/one"})
+    round_ = ProcessScanRound(proc_root=root)
+
+    with use_process_scan_round(round_):
+        assert scan_pids(ProcessQuery(prefix="/games/one"), proc_root=root) == [800]
+        (root / "800").rename(root / "801")
+        assert scan_pids(ProcessQuery(prefix="/games/one"), proc_root=root) == [800]
+        assert scan_pids(ProcessQuery(prefix="/games/two"), proc_root=root) == []
+
+    assert scan_pids(ProcessQuery(prefix="/games/one"), proc_root=root) == [801]
+
+
+def test_status_worker_uses_the_probe_round_payload(tmp_path, monkeypatch):
+    from nadare.core.backends import Status
+    from nadare.core.config import Config
+    from nadare.gui import workers
+
+    root = tmp_path / "proc"
+    _pid(root, 810, ["/usr/bin/wine", "game.exe"], {"WINEPREFIX": "/games/one"})
+    round_ = ProcessScanRound(proc_root=root)
+    config = Config.load(tmp_path / "config.json")
+    config.add_profile("p", backend="wine")
+    result = []
+
+    class FakeBackend:
+        def status(self):
+            query = ProcessQuery(prefix="/games/one")
+            first = scan_pids(query, proc_root=root)
+            (root / "810").rename(root / "811")
+            second = scan_pids(query, proc_root=root)
+            return Status("installed", data={"pids": (first, second)})
+
+    monkeypatch.setattr(workers, "create", lambda *args, **kwargs: FakeBackend())
+    worker = workers.BackendWorker(config, "p", "status", payload=round_)
+    worker.result.connect(result.append)
+    worker.run()
+
+    assert result[0].data["pids"] == ([810], [810])

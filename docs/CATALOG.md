@@ -7,7 +7,7 @@ Nadare can add games beyond its hand-built backends in two ways:
 | `direct-<game>` | Straight from the publisher's public patch API. No launcher. | Brown Dust 2, Wuthering Waves, GFL2 |
 | `launcher-<game>` | The publisher's own installer and launcher run under DW-Proton. | NIKKE, Neverness to Everness |
 
-Every catalog game carries a support tier in the Add Game wizard:
+Every catalog game carries a support tier, shown on its card in the **Store** (the first item in the sidebar; search it and filter by tier) and again on its page:
 
 | Tier | Meaning |
 |---|---|
@@ -17,7 +17,7 @@ Every catalog game carries a support tier in the Add Game wizard:
 The HoYo games (Genshin Impact, Honkai: Star Rail, Honkai Impact 3rd, Zenless Zone Zero) are offered
 like the others. Honkai Impact 3rd is Verified; the other three install through HoYo's chunked
 "Sophon" downloads and were checked as far as the in-game login screen, so they are Experimental.
-`NADARE_HIDE_HOYO=1` hides all four from the Add Game wizard.
+`NADARE_HIDE_HOYO=1` hides all four from the Store and the Add Game dialog.
 When a Sophon update changes a file, Nadare stages its verified replacement beside the installed
 file before swapping it in; allow free space for the largest changed file during an update.
 

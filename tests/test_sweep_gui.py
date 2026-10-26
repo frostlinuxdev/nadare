@@ -39,14 +39,20 @@ def _window(tmp_path):
 # ---- #98: re-added profile must not reuse a removed profile's status ----------
 def test_sidebar_drops_statuses_of_removed_profiles(qapp):
     sidebar = SidebarGames()
+    profiles = {"a": {"title": "A"}, "b": {"title": "B"}}
     try:
-        sidebar.set_profiles({"a": {"title": "A"}}, {"a": Status("installed")})
-        assert sidebar.row("a") is not None
+        sidebar.set_profiles(
+            profiles, {"a": Status("running", running=True), "b": Status("installed")}
+        )
+        assert sidebar.profiles() == ["a", "b"]
+        assert not sidebar.row("a").dot.isHidden()
 
-        # Removed with statuses=None: the stale status must be dropped as well.
-        sidebar.set_profiles({})
-        sidebar.set_profiles({"a": {"title": "A"}})
-        assert sidebar.row("a") is None
+        # Removed with statuses=None: the stale "running" status must be dropped as well,
+        # so the re-added game neither keeps its running rank nor its running dot.
+        sidebar.set_profiles({"b": profiles["b"]})
+        sidebar.set_profiles(profiles)
+        assert sidebar.profiles() == ["b", "a"]
+        assert sidebar.row("a").dot.isHidden()
     finally:
         sidebar.deleteLater()
         qapp.processEvents()

@@ -216,6 +216,29 @@ class TestGuiWiring:
             view.deleteLater()
             qapp.processEvents()
 
+    def test_hoyo_sophon_version_bump_shows_update_badge_headless(self, tmp_path, qapp):
+        from nadare.backends.direct import StarRailBackend
+        from nadare.gui.game_view import GameView
+
+        backend = StarRailBackend(
+            make_context(tmp_path, "direct-hsr", {"title": "Honkai: Star Rail"})
+        )
+        write_exe(backend.direct_target(), "MZ")
+        backend._write_version_file("4.6.0", "hsr")
+        backend._write_latest("4.6.1")
+
+        status = backend.status()
+        view = GameView()
+        try:
+            view.set_profile("hsr", {"backend": "direct-hsr", "title": "Honkai: Star Rail"})
+            view.set_status(status)
+            assert status.data["update_available"] is True
+            assert view.primary.text() == "UPDATE"
+            assert view.primary.isEnabled()
+        finally:
+            view.deleteLater()
+            qapp.processEvents()
+
     def _window(self, tmp_path):
         from nadare.gui.main_window import MainWindow
 

@@ -70,7 +70,15 @@ def test_decode_claims_and_garbage():
 
 def test_looks_like_token():
     assert nm.looks_like_token(make_jwt())
-    for bad in ("", "short", "a.b", "has space.in.it", "x" * 9000, "a.b.c" + "\n", "/redirectLauncher"):
+    for bad in (
+        "",
+        "short",
+        "a.b",
+        "has space.in.it",
+        "x" * 9000,
+        "a.b.c" + "\n",
+        "/redirectLauncher",
+    ):
         assert not nm.looks_like_token(bad)
 
 
@@ -94,7 +102,14 @@ def test_extract_token_accepts_the_usual_forms(wrap):
 
 @pytest.mark.parametrize(
     "junk",
-    ["", "hello", "/redirectLauncher", "http://x/y?accessToken=short", '{"accessToken": 5}', "a b c" * 10],
+    [
+        "",
+        "hello",
+        "/redirectLauncher",
+        "http://x/y?accessToken=short",
+        '{"accessToken": 5}',
+        "a b c" * 10,
+    ],
 )
 def test_extract_token_rejects_junk(junk):
     assert nm.extract_token(junk) is None
@@ -104,7 +119,13 @@ def test_session_from_token_and_expiry():
     now = 1_800_000_000
     t = make_jwt("P1", now + 3600)
     s = nm.session_from_token(t, DK, now=now, name="Cat")
-    assert (s.token, s.expires_at, s.player_id, s.device_key, s.name) == (t, now + 3600, "P1", DK, "Cat")
+    assert (s.token, s.expires_at, s.player_id, s.device_key, s.name) == (
+        t,
+        now + 3600,
+        "P1",
+        DK,
+        "Cat",
+    )
     assert not nm.is_expired(s, now) and nm.is_expired(s, now + 3600 - 100)  # inside the skew
     with pytest.raises(nm.NetmarbleError):
         nm.session_from_token(make_jwt(exp=now - 5), DK, now=now)
@@ -147,7 +168,9 @@ def test_server_ignores_everything_that_is_not_the_redirect():
         assert get(srv.port, "/favicon.ico")[0] == 404
         assert get(srv.port, "/redirectLauncher")[0] in (400, 404)
         assert get(srv.port, "/redirectLauncher?accessToken=short")[0] == 400
-        assert get(srv.port, f"/redirectLauncher?accessToken={token}", host="evil.example")[0] == 403
+        assert (
+            get(srv.port, f"/redirectLauncher?accessToken={token}", host="evil.example")[0] == 403
+        )
         assert get(srv.port, f"/redirectLauncher?accessToken={token}", host="127.0.0.1:1")[0] == 403
         with pytest.raises(nm.NetmarbleError):
             srv.wait(0.3)  # none of the above was accepted
@@ -159,7 +182,9 @@ def test_server_ignores_everything_that_is_not_the_redirect():
 def test_server_accepts_localhost_as_host_header():
     token = make_jwt()
     with nm.CallbackServer(0) as srv:
-        status, _ = get(srv.port, f"/redirectLauncher?accessToken={token}", host=f"localhost:{srv.port}")
+        status, _ = get(
+            srv.port, f"/redirectLauncher?accessToken={token}", host=f"localhost:{srv.port}"
+        )
         assert status == 200 and srv.wait(2) == token
 
 
@@ -254,17 +279,27 @@ def test_fetch_user_name():
 
     def fake(url, headers=None):
         calls.append((url, dict(headers or {})))
-        return json.dumps({"code": 0, "data": {"nickname": "Mongil Fan", "mailAddress": "a@b.c"}}).encode()
+        return json.dumps(
+            {"code": 0, "data": {"nickname": "Mongil Fan", "mailAddress": "a@b.c"}}
+        ).encode()
 
     assert nm.fetch_user_name(token, fake) == "Mongil Fan"
     url, headers = calls[0]
     assert url == f"{nm.API_BASE}/netmarble-auth/user"
-    assert headers["Authorization"] == f"Bearer {token}" and headers["X-NM-LAUNCHER-CH"] == nm.LAUNCHER_CH
+    assert (
+        headers["Authorization"] == f"Bearer {token}"
+        and headers["X-NM-LAUNCHER-CH"] == nm.LAUNCHER_CH
+    )
 
 
 @pytest.mark.parametrize(
     "body",
-    [b"not json", b'{"code": 1, "msg": "no"}', b'{"code": 0, "data": null}', b'{"code": 0, "data": {"mailAddress": "x@y.z"}}'],
+    [
+        b"not json",
+        b'{"code": 1, "msg": "no"}',
+        b'{"code": 0, "data": null}',
+        b'{"code": 0, "data": {"mailAddress": "x@y.z"}}',
+    ],
 )
 def test_fetch_user_name_never_raises_and_never_leaks_the_email(body):
     assert nm.fetch_user_name(make_jwt(), lambda u, h=None: body) == ""
@@ -299,10 +334,11 @@ def test_launch_args_and_env():
 
 # ------------------------------------------------------------------ wine registry
 REG = (
-    "WINE REGISTRY Version 2\n;; All keys relative to \\\\User\\\\S-1-5-21-0-0-0-1000\n\n#arch=win64\n\n"
-    "[Software\\\\Wine\\\\Drivers] 1700000000\n#time=1d0000000000000\n\"Audio\"=\"alsa\"\n\n"
+    "WINE REGISTRY Version 2\n"
+    ";; All keys relative to \\\\User\\\\S-1-5-21-0-0-0-1000\n\n#arch=win64\n\n"
+    '[Software\\\\Wine\\\\Drivers] 1700000000\n#time=1d0000000000000\n"Audio"="alsa"\n\n'
     "{netmarble}"
-    "[Software\\\\Zeta] 1700000001\n#time=1d0000000000001\n\"k\"=\"v\"\n"
+    '[Software\\\\Zeta] 1700000001\n#time=1d0000000000001\n"k"="v"\n'
 )
 SECTION = "[Software\\\\Netmarble\\\\NetmarbleSDK]"
 
@@ -324,7 +360,9 @@ def test_registry_adds_a_missing_section(tmp_path):
 
 
 def test_registry_updates_an_existing_value(tmp_path):
-    sec = f'{SECTION} 1700000002\n#time=1d0000000000002\n"NMDeviceKey"="old-key"\n"Other"="keep"\n\n'
+    sec = (
+        f'{SECTION} 1700000002\n#time=1d0000000000002\n"NMDeviceKey"="old-key"\n"Other"="keep"\n\n'
+    )
     reg = write_reg(tmp_path, sec)
     assert nm.ensure_wine_device_key(tmp_path, DK) is True
     text = reg.read_text()
@@ -381,7 +419,10 @@ def test_a_server_with_a_state_rejects_requests_that_lack_it():
     good = "s3cr3t-state-value1"
     with nm.CallbackServer(0, state=good) as srv:
         assert get(srv.port, f"/redirectLauncher?accessToken={token}")[0] == 403
-        assert get(srv.port, f"/redirectLauncher?accessToken={token}&state=wrong-state-value-x")[0] == 403
+        assert (
+            get(srv.port, f"/redirectLauncher?accessToken={token}&state=wrong-state-value-x")[0]
+            == 403
+        )
         assert get(srv.port, f"/redirectLauncher?state={good}")[0] == 400  # right state, no token
         with pytest.raises(nm.NetmarbleError):
             srv.wait(0.3)

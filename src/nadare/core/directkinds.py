@@ -108,7 +108,8 @@ _DIRECT: dict[str, tuple[str, str, str, str, str]] = {
     ),
 }
 
-#: kind -> (class name in ``nadare.backends.launcher``, title, install root, sub-folder, launcher exe)
+#: kind -> (class name in ``nadare.backends.launcher``, title, install root, sub-folder,
+#: launcher exe)
 _LAUNCHER: dict[str, tuple[str, str, str, str, str]] = {
     "launcher-nikke": (
         "NikkeBackend",

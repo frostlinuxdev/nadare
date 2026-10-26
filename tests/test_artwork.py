@@ -776,3 +776,293 @@ def test_recoding_is_skipped_when_qt_is_unavailable(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(builtins, "__import__", no_qt)
     assert artwork._recode_webp(b"\x89PNGdata", "png") == (b"\x89PNGdata", "png")
+
+
+def test_hoyo_publisher_cover_fills_missing_catalog_art(fake, tmp_path, monkeypatch):
+    cache = tmp_path / "covers"
+    monkeypatch.setattr(artwork, "cache_dir", lambda: cache)
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    page = "https://hsr.hoyoverse.com/en-us/"
+    image = "https://fastcdn.hoyoverse.com/content-v2/hkrpg/share.png"
+    fake.routes[page] = FakeResponse(
+        content=f'<meta property="og:image" content="{image}">'.encode(),
+        headers={"Content-Type": "text/html"},
+    )
+    fake.routes[image] = FakeResponse(content=_png_bytes(), headers={"Content-Type": "image/png"})
+    profile = {"backend": "direct-hsr", "title": "Honkai: Star Rail"}
+
+    found = artwork.fetch_all(profile, kinds=("cover",))
+
+    assert "cover" in found
+    assert profile["art_source"]["cover"] == artwork.SOURCE_OFFICIAL
+    assert artwork.src_sidecar(found["cover"]).read_text(encoding="utf-8") == image
+    assert any(call[1] == page for call in fake.calls)
+    assert any(call[1] == image for call in fake.calls)
+
+
+def test_hoyo_publisher_cover_offline_falls_back_cleanly(fake, tmp_path, monkeypatch):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    page = "https://genshin.hoyoverse.com/en/home"
+    fake.routes[page] = FakeResponse(status_code=503)
+    assert artwork.fetch({"backend": "direct-genshin", "title": "Genshin Impact"}) is None
+
+
+def test_hoyo_publisher_cover_rejects_untrusted_image_host(fake, tmp_path, monkeypatch):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    page = "https://zenless.hoyoverse.com/en-us/"
+    fake.routes[page] = FakeResponse(
+        content=b'<meta property="og:image" content="https://evil.example/image.png">',
+        headers={"Content-Type": "text/html"},
+    )
+    assert artwork.fetch({"backend": "direct-zzz", "title": "Zenless Zone Zero"}) is None
+
+
+def test_hoyo_publisher_cover_never_replaces_user_art(fake, tmp_path, monkeypatch):
+    cache = tmp_path / "covers"
+    monkeypatch.setattr(artwork, "cache_dir", lambda: cache)
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    page = "https://genshin.hoyoverse.com/en/home"
+    image = "https://upload-static.hoyoverse.com/hk4e/share.jpg"
+    fake.routes[page] = FakeResponse(
+        content=f'<meta property="og:image" content="{image}">'.encode(),
+        headers={"Content-Type": "text/html"},
+    )
+    fake.routes[image] = FakeResponse(content=_png_bytes(), headers={"Content-Type": "image/png"})
+    user_cover = _file(tmp_path, "user-cover.png")
+    profile = {
+        "backend": "direct-genshin",
+        "title": "Genshin Impact",
+        "cover": str(user_cover),
+        "art_source": {"cover": artwork.SOURCE_USER},
+    }
+
+    found = artwork.fetch_all(profile, kinds=("cover",))
+
+    assert "cover" not in found
+    assert profile["cover"] == str(user_cover)
+    assert profile["art_source"]["cover"] == artwork.SOURCE_USER
+
+def test_migrate_cached_cover_writes_webp_and_is_idempotent(tmp_path, monkeypatch):
+    source = tmp_path / "game-cover.jpg"
+    source.write_bytes(_png_bytes())
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path)
+    expected, _ = artwork._recode_webp(source.read_bytes(), "jpg")
+
+    assert artwork.migrate_cached_covers() == 1
+    target = tmp_path / "game-cover.webp"
+    assert target.read_bytes() == expected
+    assert not source.exists()
+    assert artwork.migrate_cached_covers() == 0
+
+
+def test_cached_lookup_runs_the_existing_cover_migration(tmp_path, monkeypatch):
+    source = tmp_path / "game-cover.jpg"
+    source.write_bytes(_png_bytes())
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path)
+    started = []
+
+    class DeferredThread:
+        def __init__(self, *, target, **kwargs):
+            self.target = target
+            started.append(self)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(artwork.threading, "Thread", DeferredThread)
+
+    result = artwork.cached("game", "cover")
+
+    assert result == source
+    assert source.exists()
+    assert len(started) == 1
+    started[0].target()
+    assert artwork.cached("game", "cover").suffix == ".webp"
+    assert not source.exists()
+
+
+def test_migrate_cached_covers_skips_corrupt_without_raising(tmp_path, monkeypatch):
+    source = tmp_path / "bad.png"
+    source.write_bytes(b"corrupt")
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(artwork, "_recode_webp", lambda data, ext: (data, ext))
+    assert artwork.migrate_cached_covers() == 0
+    assert source.read_bytes() == b"corrupt"
+
+
+def test_interrupted_cover_migration_keeps_original(tmp_path, monkeypatch):
+    source = tmp_path / "game-cover.jpg"
+    original = _png_bytes()
+    source.write_bytes(original)
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path)
+    encoded, _ = artwork._recode_webp(original, "jpg")
+    monkeypatch.setattr(artwork, "_recode_webp", lambda data, ext: (encoded, "webp"))
+
+    def fail_replace(*_args):
+        raise OSError("simulated interruption")
+
+    monkeypatch.setattr(artwork.os, "replace", fail_replace)
+    assert artwork.migrate_cached_covers() == 0
+    assert source.read_bytes() == original
+    assert not (tmp_path / "game-cover.webp").exists()
+
+
+def test_official_sidecar_precedes_migrated_image_install(tmp_path, monkeypatch):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path)
+    source = tmp_path / "game-official-hero.png"
+    source_sidecar = artwork.src_sidecar(source)
+    target = source.with_suffix(".webp")
+    target_sidecar = artwork.src_sidecar(target)
+    url = "https://publisher.example/hero.png"
+    source.write_bytes(_png_bytes())
+    source_sidecar.write_text(url)
+    real_replace = artwork.os.replace
+
+    def interrupt_image_install(src, dst):
+        if Path(dst) == target:
+            assert target_sidecar.read_text() == url
+            raise OSError("simulated interruption after sidecar install")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(artwork.os, "replace", interrupt_image_install)
+
+    assert artwork.migrate_cached_covers() == 0
+    assert source.is_file() and source_sidecar.is_file()
+    assert target_sidecar.read_text() == url
+    assert not target.exists() or artwork.src_sidecar(target).is_file()
+
+
+def test_startup_sweep_removes_only_old_inactive_cover_parts(tmp_path, monkeypatch):
+    import os
+    import time
+
+    root = tmp_path / "covers"
+    root.mkdir()
+    stale = root / "orphan.part"
+    fresh = root / "fresh.part"
+    active = root / f"cover.webp.{os.getpid()}.0123456789abcdef0123456789abcdef.part"
+    stale.write_bytes(b"old")
+    fresh.write_bytes(b"fresh")
+    active.write_bytes(b"in use")
+    old_time = time.time() - 2 * 24 * 60 * 60
+    os.utime(stale, (old_time, old_time))
+    os.utime(active, (old_time, old_time))
+    outside = tmp_path / "outside.part"
+    outside.write_bytes(b"outside")
+    os.utime(outside, (old_time, old_time))
+    linked = root / "linked.part"
+    linked.symlink_to(outside)
+    os.utime(linked, (old_time, old_time), follow_symlinks=False)
+    monkeypatch.setattr(artwork, "cache_dir", lambda: root)
+
+    class ImmediateThread:
+        def __init__(self, *, target, **kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr(artwork.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(artwork, "migrate_cached_covers", lambda: 0)
+
+    artwork.cached("game", "cover")
+
+    assert not stale.exists()
+    assert fresh.exists()
+    assert active.exists()
+    assert linked.is_symlink()
+    assert outside.read_bytes() == b"outside"
+
+
+def test_migrated_cache_paths_keep_resolving_profile_art(tmp_path, monkeypatch):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path)
+    hero = tmp_path / "genshin-official-hero.png"
+    cover = tmp_path / "genshin-cover.png"
+    hero.write_bytes(_png_bytes())
+    cover.write_bytes(_png_bytes())
+    artwork.src_sidecar(hero).write_text("https://cdn.example/hero.png")
+    profile = {
+        "hero": str(hero),
+        "cover": str(cover),
+        "art_source": {"hero": artwork.SOURCE_OFFICIAL, "cover": artwork.SOURCE_THIRDPARTY},
+    }
+
+    assert artwork.migrate_cached_covers() == 2
+
+    migrated_hero = tmp_path / "genshin-official-hero.webp"
+    migrated_cover = tmp_path / "genshin-cover.webp"
+    assert artwork.resolve(profile) == migrated_hero
+    assert artwork.resolve_kind(profile, "hero") == migrated_hero
+    assert artwork.ordered_paths(profile) == [str(migrated_hero), str(migrated_cover)]
+
+
+def test_migration_moves_official_sidecar_before_removing_source(tmp_path, monkeypatch):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path)
+    source = tmp_path / "genshin-official-hero.png"
+    url = "https://cdn.example/hero.png"
+    source.write_bytes(_png_bytes())
+    artwork.src_sidecar(source).write_text(url)
+
+    assert artwork.migrate_cached_covers() == 1
+
+    target = tmp_path / "genshin-official-hero.webp"
+    assert artwork.is_official_file(target)
+    assert artwork.src_sidecar(target).read_text() == url
+    assert artwork._cached_official("genshin-official", "hero", url) == target
+    assert not artwork.src_sidecar(source).exists()
+
+
+def test_migration_sidecar_failure_preserves_original_pair(tmp_path, monkeypatch):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path)
+    source = tmp_path / "genshin-official-hero.png"
+    url = "https://cdn.example/hero.png"
+    original = _png_bytes()
+    source.write_bytes(original)
+    artwork.src_sidecar(source).write_text(url)
+    real_replace = artwork.os.replace
+
+    def fail_webp_sidecar(src, dst):
+        if Path(dst) == artwork.src_sidecar(source.with_suffix(".webp")):
+            raise OSError("simulated sidecar interruption")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(artwork.os, "replace", fail_webp_sidecar)
+
+    assert artwork.migrate_cached_covers() == 0
+    assert source.read_bytes() == original
+    assert artwork.src_sidecar(source).read_text() == url
+
+
+def test_migrate_cached_jpeg_extension(tmp_path, monkeypatch):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path)
+    source = tmp_path / "game-cover.jpeg"
+    source.write_bytes(_png_bytes())
+
+    assert artwork.migrate_cached_covers() == 1
+    assert (tmp_path / "game-cover.webp").is_file()
+    assert not source.exists()
+
+
+def test_cached_lookup_schedules_one_background_migration(tmp_path, monkeypatch):
+    source = tmp_path / "game-cover.jpg"
+    source.write_bytes(_png_bytes())
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path)
+    started = []
+
+    class FakeThread:
+        def __init__(self, *, target, **kwargs):
+            self.target = target
+            started.append(self)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(artwork.threading, "Thread", FakeThread)
+
+    artwork.cached("game", "cover")
+    artwork.cached("game", "hero")
+
+    assert len(started) == 1
+    assert started[0].target is not None

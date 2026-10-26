@@ -28,6 +28,7 @@ class LauncherBackend(ArknightsBackend):
     """Base for the per-game classes below; never registered on its own."""
 
     kind = "launcher"
+    #: Each game below sets its own; this is only a fallback for a new launcher kind.
     install_size_hint = 100 * 1024**3
     unofficial_notice = True
     news_source = None
@@ -106,6 +107,8 @@ def _subdir(root: str, name: str) -> Path:
 
 class NikkeBackend(LauncherBackend):
     kind = "launcher-nikke"
+    #: Measured on a real install (launcher, game and Wine prefix): 27 GiB.
+    install_size_hint = 27 * 1024**3
     game_tag = "nikke"
     display_name = "NIKKE: Goddess of Victory"
     install_subdir = _subdir("drive_c", "NIKKE")
@@ -114,9 +117,10 @@ class NikkeBackend(LauncherBackend):
     default_installer_url = "https://nikke-en.com/nikkeminiloader0.0.6.346.exe"
     trusted_hosts = ("nikke-en.com", "nikke-kr.com", "jupiterlauncher.com")
     page_notice = (
-        "NIKKE ships Tencent's kernel anti-cheat (ACE). Nadare can install and open the "
-        "official launcher under DW-Proton, but whether the game then starts depends on "
-        "ACE, so this is experimental. The launcher downloads the game itself.",
+        "After Nadare installs the NIKKE miniloader, click INSTALL in its window, then click "
+        "INSTALL again in the installer window that opens. The launcher downloads the game. "
+        "Tencent's kernel anti-cheat (ACE) may prevent it from starting under Wine, so support "
+        "is experimental.",
         "https://nikke-en.com/",
         "Official site",
     )
@@ -145,6 +149,8 @@ class NikkeBackend(LauncherBackend):
 
 class NteBackend(LauncherBackend):
     kind = "launcher-nte"
+    #: The launcher installs the same game as ``direct-nte``.
+    install_size_hint = int(98.0 * 10**9)
     game_tag = "nte-launcher"
     display_name = "Neverness to Everness (publisher's launcher)"
     install_subdir = _subdir("drive_c/Program Files", "Neverness To Everness")
@@ -165,6 +171,8 @@ class Gfl2HaoplayBackend(LauncherBackend):
     """Girls' Frontline 2: Exilium, global build by Haoplay (the other build is ``direct-gfl2``)."""
 
     kind = "launcher-gfl2-haoplay"
+    #: A small launcher; the game downloads about 60 GB inside itself.
+    install_size_hint = 60 * 10**9
     game_tag = "gfl2-haoplay"
     display_name = "Girls' Frontline 2 (Haoplay global build)"
     install_subdir = _subdir("drive_c/Program Files", "GF2")

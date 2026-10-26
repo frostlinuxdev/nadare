@@ -52,7 +52,9 @@ def test_known_sizes_skip_the_head_request(server):
     assert not any(q.startswith("HEAD") for q in s.requests)
 
 
-@pytest.mark.parametrize("pos,n", [(0, 1), (4095, 2), (4096, 4096), (123_456, 30_000), (199_990, 100)])
+@pytest.mark.parametrize(
+    "pos,n", [(0, 1), (4095, 2), (4096, 4096), (123_456, 30_000), (199_990, 100)]
+)
 def test_seek_and_read_at_arbitrary_places(server, pos, n):
     s = server({"/a": DATA})
     with reader(s, "/a") as r:
@@ -114,7 +116,7 @@ def test_a_server_without_range_support_is_reported(server):
 def test_flaky_responses_are_retried(server):
     s = server({"/a": DATA})
     with reader(s, "/a", retries=3) as r:
-        r.size  # HEAD happens at construction
+        assert r.size  # HEAD happens at construction
         s.fail_next = 2
         assert r.read(100) == DATA[:100]
 
@@ -135,7 +137,9 @@ def test_a_missing_object_fails_at_once(server):
 
 def test_headers_are_sent_on_every_request(server):
     s = server({"/a": DATA})
-    with RangeReader([s.url + "/a"], headers={"Referer": "https://x.example/"}, block_size=4096) as r:
+    with RangeReader(
+        [s.url + "/a"], headers={"Referer": "https://x.example/"}, block_size=4096
+    ) as r:
         r.read(10)
     assert all(h.get("referer") == "https://x.example/" for h in s.headers)
 
@@ -161,7 +165,9 @@ def test_closed_reader_raises(server):
 
 
 def test_zipfile_reads_members_through_it_with_few_requests(server):
-    blobs = {f"dir/file{i}.bin": os.urandom(40_000) if i % 2 else bytes([i]) * 40_000 for i in range(10)}
+    blobs = {
+        f"dir/file{i}.bin": os.urandom(40_000) if i % 2 else bytes([i]) * 40_000 for i in range(10)
+    }
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for name, data in blobs.items():
@@ -237,7 +243,7 @@ def test_readahead_stops_at_the_part_boundary(server):
         backoff=0,
     ) as r:
         assert r.read() == BIG
-    for path, st, e in s.ranges:
+    for path, _start, e in s.ranges:
         assert e < {"/a": len(a), "/b": len(b)}[path]
 
 

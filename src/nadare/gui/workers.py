@@ -19,6 +19,7 @@ from datetime import datetime
 
 from PyQt6.QtCore import QObject, QRunnable, QThread, pyqtSignal
 
+from .. import __version__
 from ..core import paths
 from ..core.backends import BackendError, BackendUnsupported, create
 from ..core.config import Config
@@ -148,7 +149,16 @@ class BackendWorker(QThread):
             backend = create(
                 self._profile, self._config, emit=self._on_event, cancel=self._cancel_token
             )
-            code = self._dispatch(backend)
+            if self._operation == "status":
+                from ..core.process import ProcessScanRound, use_process_scan_round
+
+                if isinstance(self._payload, ProcessScanRound):
+                    with use_process_scan_round(self._payload):
+                        code = self._dispatch(backend)
+                else:
+                    code = self._dispatch(backend)
+            else:
+                code = self._dispatch(backend)
         except Cancelled:
             self._note("cancelled by user")
             self.cancelled.emit()
@@ -300,7 +310,7 @@ class BackendWorker(QThread):
             self._log = os.fdopen(fd, "a", encoding="utf-8")
             self._log.write(
                 f"\n===== {datetime.now().isoformat(timespec='seconds')} "
-                f"{self._operation} ({self._profile}) =====\n"
+                f"{self._operation} ({self._profile}) | nadare {__version__} =====\n"
             )
             self._log.flush()
         except OSError:

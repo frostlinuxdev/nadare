@@ -1107,11 +1107,14 @@ class ArknightsBackend(GameBackend):
             self._run_vcredist(created=False)
         installer = self._download_installer(url)
         argv, env = self._prefix_command([str(installer), *self._extra_args("installer_args")])
-        self.ctx.emit(Event("step", f"Running the {self.display_name} installer in {self.prefix()}"))
+        self.ctx.emit(
+            Event("step", f"Running the {self.display_name} installer in {self.prefix()}")
+        )
         self.ctx.emit(
             Event(
                 "step",
-                f"Finish the installer window; the {self.display_name} launcher will then download the game",
+                f"Finish the installer window; the {self.display_name} launcher "
+                "will then download the game",
             )
         )
         self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
@@ -1122,7 +1125,8 @@ class ArknightsBackend(GameBackend):
             self.info(f"{self.display_name} installer exited with code {code} and left no launcher")
             raise BackendError(
                 self._watch.explain(
-                    f"The {self.display_name} installer did not finish. Try Install again. If it still "
+                    f"The {self.display_name} installer did not finish. Try Install again. "
+                    "If it still "
                     "fails, open Settings → Runner and choose Proton-CachyOS."
                 )
             )
@@ -1138,7 +1142,9 @@ class ArknightsBackend(GameBackend):
             return
         if self.find_launcher() is None:
             raise BackendError("the game is not installed")
-        self.ctx.emit(Event("step", f"Starting the {self.display_name} launcher (it checks for updates)"))
+        self.ctx.emit(
+            Event("step", f"Starting the {self.display_name} launcher (it checks for updates)")
+        )
         code = self.launch()
         if code != 0:
             raise BackendError(

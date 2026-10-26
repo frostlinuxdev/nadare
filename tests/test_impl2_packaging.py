@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -99,6 +100,10 @@ def test_read_only_state_dir_logs_to_stderr_once(tmp_path, capsys):
     logs = tmp_path / "logs"
     logs.mkdir()
     logs.chmod(0o500)
+    if os.access(logs, os.W_OK):
+        # root (as in CI containers) ignores directory permissions: nothing is read-only.
+        logs.chmod(0o700)
+        pytest.skip("directory permissions do not apply to this user")
     nadare_logging.reset()
     try:
         logger = nadare_logging.setup(filename=logs / "nadare.log")
