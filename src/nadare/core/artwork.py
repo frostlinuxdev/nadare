@@ -75,7 +75,9 @@ ANILIST_QUERY = (
 )
 
 # Stable publisher pages and their distinct image hosts. The OGP image URLs are
-# intentionally resolved from page metadata because HoYoverse rotates hashed paths.
+# intentionally resolved from page metadata because publishers rotate hashed paths.
+# Pages are fetched without following redirects, so each entry names the final URL.
+# These are social-share images (card-sized art), not heroes.
 _PUBLISHER_OGP: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
     "direct-genshin": (
         "https://genshin.hoyoverse.com/en/home",
@@ -92,7 +94,45 @@ _PUBLISHER_OGP: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
         ("zenless.hoyoverse.com",),
         ("fastcdn.hoyoverse.com",),
     ),
+    "direct-bd2": (
+        "https://www.browndust2.com/en-us/",
+        ("www.browndust2.com",),
+        ("www.browndust2.com",),
+    ),
+    "direct-aethergazer": (
+        "https://www.aethergazer.com/",
+        ("www.aethergazer.com",),
+        ("aethergazer.com", "www.aethergazer.com"),
+    ),
+    "direct-mongil": (
+        "https://stardive.netmarble.com/en",
+        ("stardive.netmarble.com",),
+        ("sgimage.netmarble.com",),
+    ),
+    "launcher-nikke": (
+        "https://nikke-en.com/",
+        ("nikke-en.com",),
+        ("nikke-en.com",),
+    ),
+    "direct-endfield": (
+        "https://endfield.gryphline.com/en-us",
+        ("endfield.gryphline.com",),
+        ("web-static.hg-cdn.com",),
+    ),
+    # Arknights, Stella Sora and CZN are left out on purpose: Arknights' page advertises a dead
+    # image, Stella Sora's is a favicon, and CZN's /en redirects to a rotating promo page (the
+    # fetch never follows redirects), which would all be worse than the placeholder.
+    "fgo-lepton": (
+        "https://fate-go.us/",
+        ("fate-go.us",),
+        ("fate-go.us",),
+    ),
 }
+
+
+def publisher_art_kinds() -> frozenset[str]:
+    """Backend kinds whose cover can come from their publisher's page."""
+    return frozenset(_PUBLISHER_OGP)
 
 SEARCH_TIMEOUT = 20
 DOWNLOAD_TIMEOUT = 60
@@ -645,8 +685,8 @@ def _sgdb_key(profile: dict) -> str | None:
     return str(key) if key else None
 
 
-def _catalog_art(profile: dict) -> tuple[str, int | None] | None:
-    """The (site image folder, Steam app id) a catalog game ships with, if it is one."""
+def _catalog_appid(profile: dict) -> int | None:
+    """The Steam app id a catalog game ships with, if it has one."""
     from . import directkinds
 
     return directkinds.ART.get(str(profile.get("backend") or ""))
@@ -655,32 +695,11 @@ def _catalog_art(profile: dict) -> tuple[str, int | None] | None:
 def _steam_candidates(profile: dict, kind: str = "cover") -> Iterator[str]:
     appid = profile.get("steam_appid")
     if not appid:
-        catalog = _catalog_art(profile)
-        appid = catalog[1] if catalog else None
+        appid = _catalog_appid(profile)
     if not appid:
         return
     for name in _STEAM_FILES.get(kind, _STEAM_FILES["cover"]):
         yield STEAM_CDN.format(appid=appid, name=name)
-
-
-#: Image names on the FrostLinux site to try for each art kind, best first.
-_SITE_FILES: dict[str, tuple[str, ...]] = {
-    "cover": ("cover", "thumb", "hero"),
-    "thumb": ("thumb",),
-    "hero": ("hero", "thumb"),
-    "icon": ("thumb",),
-}
-
-
-def _site_candidates(profile: dict, kind: str = "cover") -> Iterator[str]:
-    """The FrostLinux site's own images for a catalog game (``hero.webp`` / ``thumb.webp``)."""
-    from . import directkinds
-
-    catalog = _catalog_art(profile)
-    if not catalog:
-        return
-    for name in _SITE_FILES.get(kind, ()):
-        yield f"{directkinds.SITE_IMAGES}/{catalog[0]}/{name}.webp"
 
 
 class _OgImageParser(HTMLParser):
@@ -688,15 +707,24 @@ class _OgImageParser(HTMLParser):
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
-        self.image: str | None = None
+        self._og: str | None = None
+        self._twitter: str | None = None
+
+    @property
+    def image(self) -> str | None:
+        """The Open Graph image, else the Twitter card image (some pages leave og empty)."""
+        return self._og or self._twitter
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() != "meta" or self.image:
+        if tag.lower() != "meta":
             return
         values = {key.lower(): value for key, value in attrs}
         marker = (values.get("property") or values.get("name") or "").lower()
-        if marker in {"og:image", "og:image:url"}:
-            self.image = values.get("content")
+        content = (values.get("content") or "").strip()
+        if marker in {"og:image", "og:image:url"} and not self._og:
+            self._og = content or None
+        elif marker == "twitter:image" and not self._twitter:
+            self._twitter = content or None
 
 
 def _publisher_og_image(profile: dict, kind: str) -> tuple[str, tuple[str, ...]] | None:
@@ -805,7 +833,6 @@ def _anilist_candidates(term: str) -> Iterator[str]:
 
 def _catalog_candidates(profile: dict, kind: str) -> Iterator[str]:
     yield from _steam_candidates(profile, kind)
-    yield from _site_candidates(profile, kind)
 
 
 def _optional_candidates(profile: dict, title: str | None) -> Iterator[str]:

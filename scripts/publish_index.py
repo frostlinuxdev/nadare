@@ -362,11 +362,10 @@ def publish_vcredist(out: Path, env: dict[str, str], opener: Any = None) -> bool
 
 
 class CatalogGame(NamedTuple):
-    """One catalog game: its title, resolver, cover-art folder and Steam id."""
+    """One catalog game: its title, resolver and Steam id."""
 
     title: str
     resolve: Callable[[], object]
-    image_base: str
     steam_appid: int | None
 
 
@@ -408,7 +407,7 @@ def default_catalog_games() -> dict[str, CatalogGame]:
         "nte": nte,
     }
     games: dict[str, CatalogGame] = {}
-    for kind, (folder, steam_appid) in dk.ART.items():
+    for kind, steam_appid in dk.ART.items():
         if not kind.startswith("direct-"):
             continue
         if kind in dk.HOYO_KINDS and not dk.hoyo_visible():
@@ -432,20 +431,9 @@ def default_catalog_games() -> dict[str, CatalogGame]:
         games[tag] = CatalogGame(
             title=dk._DIRECT[kind][1],
             resolve=resolve,
-            image_base=f"{dk.SITE_IMAGES}/{folder}",
             steam_appid=steam_appid,
         )
     return games
-
-
-def default_check(url: str) -> int:
-    """The HTTP status of a HEAD request for ``url`` (``HTTPError`` included)."""
-    request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "nadare-index"})
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            return response.status
-    except urllib.error.HTTPError as exc:
-        return exc.code
 
 
 def _differs_stable(path: Path, data: bytes) -> bool:
@@ -498,7 +486,6 @@ def publish_catalog(
     env: dict[str, str],
     *,
     games: dict[str, CatalogGame] | None = None,
-    check: Callable[[str], int] | None = None,
     now: float | None = None,
     deadline: float = 300.0,
     clock: Callable[[], float] = time.monotonic,
@@ -516,7 +503,6 @@ def publish_catalog(
     Returns True only when a file was written.
     """
     games = default_catalog_games() if games is None else games
-    check = default_check if check is None else check
     now = time.time() if now is None else now
     generated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
     index_path = out / "index.json"
@@ -563,30 +549,11 @@ def publish_catalog(
         if failures_state is not None:
             failures.pop(tag, None)
         media_path = out / f"{tag}.media.json"
-        previous: dict[str, Any] = {}
-        if media_path.exists():
-            try:
-                value = json.loads(media_path.read_text(encoding="utf-8"))
-            except ValueError:
-                value = None
-            if isinstance(value, dict):
-                previous = value
         media: dict[str, Any] = {
             "game_tag": tag,
             "title": game.title,
             "generated_at": generated_at,
         }
-        for name in ("hero", "thumb"):
-            url = f"{game.image_base}/{name}.webp"
-            try:
-                status = check(url)
-            except OSError:
-                status = 503  # unreachable right now: same as a transient server error
-            if status == 200:
-                media[name] = url
-            elif name in previous:
-                # A 404 can be a deploy in flight and a 5xx/429 a hiccup: keep the last good value.
-                media[name] = previous[name]
         if game.steam_appid is not None:
             media["steam_appid"] = game.steam_appid
         data = (json.dumps(media, indent=2, sort_keys=True) + "\n").encode("utf-8")

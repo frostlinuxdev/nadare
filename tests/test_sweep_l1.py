@@ -187,9 +187,9 @@ def test_readme_and_testers_agree_about_amd() -> None:
 # ---------------------------------------------------------------------------
 @maintainer_docs
 def test_fgo_prerequisites_include_zstd() -> None:
-    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    readme = (REPO / "docs" / "SOURCE-INSTALL.md").read_text(encoding="utf-8")
     start = readme.index("**For Fate/Grand Order (NA)**")
-    paragraph = readme[start : readme.index("### Install system packages", start)]
+    paragraph = readme[start : readme.index("## Install system packages", start)]
 
     assert "`zstd`" in paragraph
     testers = (REPO / "docs" / "TESTERS.md").read_text(encoding="utf-8")

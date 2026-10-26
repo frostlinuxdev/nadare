@@ -258,7 +258,7 @@ def test_card_art_survives_search_and_filter_changes(monkeypatch, qapp, tmp_path
         page.wait_for_images()
 
         def with_art():
-            return [card for card in page._cards.values() if card.entry.art_folder]
+            return [card for card in page._cards.values() if card.entry.has_art]
 
         assert with_art() and all(_card_is_red(card) for card in with_art())
         fetched_once = sorted(fetches)

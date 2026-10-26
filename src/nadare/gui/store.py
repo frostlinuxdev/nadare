@@ -313,7 +313,7 @@ class StorePage(QWidget):
 
         pool = QThreadPool.globalInstance()
         for kind, card in tuple(self._cards.items()):
-            if not card.entry.art_folder or kind in self._art_requested:
+            if not card.entry.has_art or kind in self._art_requested:
                 continue
             self._art_requested.add(kind)
             pool.start(_FetchArt(kind, card.entry.title, self._art_signals))

@@ -404,7 +404,37 @@ def default_collection_exists() -> bool | None:
     return _secret_service_collection(backend)
 
 
-def keyring_diagnosis() -> tuple[bool, str]:
+#: How long ``doctor`` waits for the Secret Service before saying it is not responding. A D-Bus
+#: service that is advertised but cannot start (a headless or SSH session) otherwise blocks for the
+#: bus daemon's own two-minute activation timeout.
+KEYRING_PROBE_TIMEOUT = 8.0
+
+
+def keyring_diagnosis(timeout: float | None = None) -> tuple[bool, str]:
+    """Why the OS keyring is (not) usable, in one line; gives up after ``timeout`` seconds."""
+    import threading
+
+    limit = KEYRING_PROBE_TIMEOUT if timeout is None else timeout
+    box: list[tuple[bool, str]] = []
+
+    def probe() -> None:
+        try:
+            box.append(_keyring_diagnosis_unbounded())
+        except Exception as exc:  # noqa: BLE001 - a probe must never take doctor down
+            box.append((False, f"keyring probe failed ({exc.__class__.__name__}: {exc})"))
+
+    worker = threading.Thread(target=probe, name="nadare-keyring-probe", daemon=True)
+    worker.start()
+    worker.join(limit)
+    if box:
+        return box[0]
+    return False, (
+        f"Secret Service not responding after {limit:g} s "
+        "(is a keyring daemon running and unlocked in this session?)"
+    )
+
+
+def _keyring_diagnosis_unbounded() -> tuple[bool, str]:
     """Why the OS keyring is (not) usable, in one line for ``doctor``/bug reports.
 
     Distinguishes the cases users hit: the package missing from the bundle, no

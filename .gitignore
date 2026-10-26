@@ -59,3 +59,4 @@ czn_qr.png
 packaging/flatpak/staging/
 build/flatpak/
 !src/nadare/assets/czn_pcsdk_stub.exe
+src/nadare/assets/7zzs

@@ -174,18 +174,18 @@ class Gfl2HaoplayBackend(LauncherBackend):
     #: A small launcher; the game downloads about 60 GB inside itself.
     install_size_hint = 60 * 10**9
     game_tag = "gfl2-haoplay"
-    display_name = "Girls' Frontline 2 (Haoplay global build)"
+    display_name = "Girls' Frontline 2 (Haoplay global build, publisher's launcher)"
     install_subdir = _subdir("drive_c/Program Files", "GF2")
     launcher_names = ("PCLauncher.exe",)
     direct_exe = "PCLauncher.exe"
     default_installer_url = "https://gf2-dl.haoplay.com/pc/GF2_v1.0.3.exe"
     trusted_hosts = ("haoplay.com",)
     page_notice = (
-        "This is the global build run by Haoplay; its launcher needs the .NET and Visual C++ "
-        "runtimes the installer bundles, and signs you in with an embedded web view. Choose "
-        "an install folder on C: in the installer. The launcher then downloads the game "
-        "(about 31 GB). On Wayland, set the profile's Display backend to Auto or Wayland if "
-        "the sign-in page misbehaves.",
+        "This is the Haoplay global build (the Darkwinter build is a separate listing); its "
+        "launcher needs the .NET and Visual C++ runtimes the installer bundles, and signs you "
+        "in with an embedded web view. Choose an install folder on C: in the installer. The "
+        "launcher then downloads the game (about 31 GB). On Wayland, set the profile's Display "
+        "backend to Auto or Wayland if the sign-in page misbehaves.",
         "https://gf2.haoplay.com/",
         "Official site",
     )

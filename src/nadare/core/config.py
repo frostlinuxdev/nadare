@@ -120,6 +120,8 @@ TOP_DEFAULTS: dict[str, Any] = {
     "active_profile": "",
     "lock_to_single_instance": True,
     "check_updates": True,
+    "dismissed_update": "",  # release version whose banner the user closed
+    "dismissed_notices": [],  # ids of notices the user closed
     "language": "en",
     "telemetry": False,  # always false; kept explicit for the record
 }

@@ -169,9 +169,9 @@ def test_publishing_the_catalog_never_touches_the_kuro_tokens(tmp_path: Path) ->
     before = tokens.read_bytes()
     # An unreadable index makes publish_catalog rebuild it from that run.
     (out / "index.json").write_text("{broken", encoding="utf-8")
-    game = pi.CatalogGame("Alpha Game", lambda: "1.2", "https://site.example/images/alpha", None)
-    pi.publish_catalog(out, {}, games={"alpha": game}, check=lambda url: 200)
-    pi.publish_catalog(out, {}, games={"alpha": game}, check=lambda url: 200)
+    game = pi.CatalogGame("Alpha Game", lambda: "1.2", None)
+    pi.publish_catalog(out, {}, games={"alpha": game})
+    pi.publish_catalog(out, {}, games={"alpha": game})
     assert tokens.exists()
     assert tokens.read_bytes() == before
 

@@ -23,6 +23,7 @@ from typing import Any
 from ..core import directdl, endfield_shim, graphics, nte_launcher
 from ..core.backends import BackendError, Option
 from ..core.sources import Fetch, aethergazer, bd2, endfield, gfl2, hoyo, mongil, nte, pgr, wuwa
+from . import hoyo_news
 from .arknights import INSTALLED_PREFIX_KEY, ArknightsBackend
 from .nmlogin import NetmarbleLoginMixin
 from .wine import profile_setting
@@ -275,12 +276,19 @@ class WutheringWavesBackend(DirectBackend):
 class Gfl2Backend(DirectBackend):
     kind = "direct-gfl2"
     game_tag = "gfl2"
-    display_name = "Girls' Frontline 2: Exilium"
+    display_name = "Girls' Frontline 2: Exilium (Darkwinter build)"
     install_subdir = _subdir("GF2Exilium")
     direct_exe = "GF2_Exilium.exe"
     launcher_names = (direct_exe,)
     install_size_hint = int(88.2 * GB)
     plan_factory = staticmethod(gfl2.resolve)
+    page_notice = (
+        "This is the Darkwinter build, downloaded from Sunborn's CDN. Girls' Frontline 2 also "
+        "has a separate Haoplay global build, listed on its own; the two are different "
+        "installs, so pick the one you play.",
+        "https://store.steampowered.com/app/3347400/",
+        "Steam page",
+    )
 
 
 class Gfl2HaoplayBackend(Gfl2Backend):
@@ -356,7 +364,8 @@ class Gfl2HaoplayBackend(Gfl2Backend):
         return argv, env
 
     page_notice = (
-        "Nadare installs only the small Haoplay global client straight from Haoplay's servers "
+        "This is the Haoplay global build; the Darkwinter build is a separate listing. Nadare "
+        "installs only the small Haoplay client straight from Haoplay's servers "
         "(no launcher); the game downloads and updates its ~60 GB itself on first start. "
         "Nadare installs Microsoft's WebView2 Runtime into this game's prefix for sign-in. "
         "If the sign-in page misbehaves, try the other Display backend in Settings.",
@@ -380,7 +389,7 @@ class EndfieldBackend(DirectBackend):
         "server. The game only starts when Hypergryph's launcher is its parent process, so "
         "Nadare starts it through a small helper (built from source with mingw-w64) that sets "
         "the launcher's Games.exe as the parent; the launcher itself never runs. Needs "
-        "mingw-w64 and 7-Zip installed. Steam installs start directly.",
+        "mingw-w64 installed. Steam installs start directly.",
         "https://endfield.gryphline.com/",
         "Official site",
     )
@@ -444,6 +453,8 @@ class GenshinBackend(DirectBackend):
     direct_exe = "GenshinImpact.exe"
     launcher_names = (direct_exe,)
     install_size_hint = int(100.8 * GB)
+    news_source = staticmethod(hoyo_news.fetch_genshin_news)
+    official_image_hosts = hoyo_news.IMAGE_HOSTS
     plan_factory = staticmethod(lambda fetch=None: hoyo.resolve("hk4e_global", fetch))
 
 
@@ -489,6 +500,8 @@ class StarRailBackend(DirectBackend):
     direct_exe = "StarRail.exe"
     launcher_names = (direct_exe,)
     install_size_hint = int(107.6 * GB)
+    news_source = staticmethod(hoyo_news.fetch_hsr_news)
+    official_image_hosts = hoyo_news.IMAGE_HOSTS
     plan_factory = staticmethod(lambda fetch=None: hoyo.resolve("hkrpg_global", fetch))
 
 
@@ -500,6 +513,8 @@ class Hi3Backend(DirectBackend):
     direct_exe = "BH3.exe"
     launcher_names = (direct_exe,)
     install_size_hint = int(36.7 * GB)
+    news_source = staticmethod(hoyo_news.fetch_hi3_news)
+    official_image_hosts = hoyo_news.IMAGE_HOSTS
     plan_factory = staticmethod(lambda fetch=None: hoyo.resolve("bh3_global", fetch))
 
 
@@ -511,6 +526,8 @@ class ZenlessBackend(DirectBackend):
     direct_exe = "ZenlessZoneZero.exe"
     launcher_names = (direct_exe,)
     install_size_hint = int(85.9 * GB)
+    news_source = staticmethod(hoyo_news.fetch_zzz_news)
+    official_image_hosts = hoyo_news.IMAGE_HOSTS
     plan_factory = staticmethod(lambda fetch=None: hoyo.resolve("nap_global", fetch))
 
 

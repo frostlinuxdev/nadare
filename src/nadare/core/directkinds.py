@@ -45,7 +45,7 @@ _DIRECT: dict[str, tuple[str, str, str, str, str]] = {
     ),
     "direct-gfl2": (
         "Gfl2Backend",
-        "Girls' Frontline 2: Exilium",
+        "Girls' Frontline 2: Exilium (Darkwinter build)",
         "drive_c/Games",
         "GF2Exilium",
         "GF2_Exilium.exe",
@@ -127,35 +127,33 @@ _LAUNCHER: dict[str, tuple[str, str, str, str, str]] = {
     ),
     "launcher-gfl2-haoplay": (
         "Gfl2HaoplayBackend",
-        "Girls' Frontline 2 (Haoplay global build)",
+        "Girls' Frontline 2 (Haoplay global build, publisher's launcher)",
         "drive_c/Program Files",
         "GF2",
         "PCLauncher.exe",
     ),
 }
 
-#: Where the catalog games' cover art comes from: kind -> (image folder on the FrostLinux site,
-#: Steam app id or ``None``). The site (``SITE_IMAGES``/<folder>/{hero,thumb}.webp) is the reliable
-#: source; the Steam CDN only still serves art for some of these apps, so it is a fallback. Both ids
-#: and folders are the ones the site's guides use (the PGR id is from the Steam library).
-SITE_IMAGES = "https://frostlinuxdev.github.io/images"
-ART: dict[str, tuple[str, int | None]] = {
-    "direct-bd2": ("brown-dust-2", None),
-    "direct-aethergazer": ("ag", None),
-    "direct-mongil": ("mongil-star-dive", None),
-    "direct-wuwa": ("wuwa", 3513350),
-    "direct-pgr": ("pgr", 4125930),
-    "direct-gfl2": ("girls-frontline-2", 3347400),
-    "direct-endfield": ("arknights-endfield", 4732690),
-    "direct-nte": ("neverness-to-everness", 4508340),
-    "direct-gfl2-haoplay": ("girls-frontline-2", 3308670),
-    "direct-genshin": ("genshin-impact", None),
-    "direct-hsr": ("honkai-star-rail", None),
-    "direct-hi3": ("honkai-impact-3rd", None),
-    "direct-zzz": ("zenless-zone-zero", 4162040),
-    "launcher-nikke": ("nikke", None),
-    "launcher-nte": ("neverness-to-everness", 4508340),
-    "launcher-gfl2-haoplay": ("girls-frontline-2", 3308670),
+#: Steam app id (or ``None``) whose store art a catalog game uses; the publisher's own page
+#: supplies the cover when there is none (see ``artwork._PUBLISHER_OGP``). Every catalog kind
+#: has a key.
+ART: dict[str, int | None] = {
+    "direct-bd2": None,
+    "direct-aethergazer": None,
+    "direct-mongil": None,
+    "direct-wuwa": 3513350,
+    "direct-pgr": 4125930,
+    "direct-gfl2": 3347400,
+    "direct-endfield": 4732690,
+    "direct-nte": 4508340,
+    "direct-gfl2-haoplay": 3308670,
+    "direct-genshin": None,
+    "direct-hsr": None,
+    "direct-hi3": None,
+    "direct-zzz": 4162040,
+    "launcher-nikke": None,
+    "launcher-nte": 4508340,
+    "launcher-gfl2-haoplay": 3308670,
 }
 
 DIRECT_KINDS = frozenset(_DIRECT)

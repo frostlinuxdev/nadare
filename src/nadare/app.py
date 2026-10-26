@@ -11,11 +11,14 @@ into a headless process.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import logging
 import os
 import signal
 import sys
 from collections.abc import Sequence
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +62,7 @@ COMMANDS = (
     "gui",
     "list",
     "doctor",
+    "report",
     "status",
     "install",
     "update",
@@ -139,6 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
         "gui": "open the graphical launcher",
         "list": "list configured profiles",
         "doctor": "report GPU/Vulkan, DXVK readiness and runner freshness",
+        "report": "build a redacted local support report",
         "status": "show a profile's status",
         "install": "install the game for a profile",
         "update": "update the game for a profile",
@@ -197,6 +202,11 @@ def build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="check whether this system's CA store trusts forged certificate chains",
             )
+        if command == "report":
+            sp.add_argument(
+                "-o", "--output", type=Path, default=None, help="write report to this file"
+            )
+            sp.add_argument("--stdout", action="store_true", help="print only the report")
 
     art = sub.add_parser("fetch-art", help="download cached cover art for a profile")
     art.add_argument("-p", "--profile", default=None, help="profile name (default: active profile)")
@@ -397,6 +407,27 @@ def _print_tls_diagnosis() -> None:
     print("       For Node, pass --use-openssl-ca so it uses the system CA store.")
 
 
+def _print_optional_tools(which) -> None:
+    """Informational lines for host tools only a few games need; never a doctor failure."""
+    from .core import sevenzip
+
+    kind, path = sevenzip.describe()
+    games = "Arknights: Endfield and Neverness to Everness installs"
+    if kind == "missing":
+        print(f"7-Zip: not found (needed by {games})")
+    else:
+        print(f"7-Zip: {kind} {path}")
+    compiler = os.environ.get("CC") or "x86_64-w64-mingw32-gcc"
+    found = which(compiler)
+    if found:
+        print(f"mingw-w64: {found}")
+    else:
+        print(
+            f"mingw-w64: not found ({compiler}; only Arknights: Endfield needs it, to build its "
+            "launch helper)"
+        )
+
+
 def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
     """Print GPU/Vulkan capability, DXVK readiness and runner freshness."""
     from .core import backends, graphics, hostlibs, process, runners, sandbox, umu, userns
@@ -540,6 +571,7 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
     ok, why = _secrets.keyring_diagnosis()
     print(f"keyring: {'OK' if ok else 'unavailable'} ({why})")
     print(f"tls: CA list = {tls.ca_source()}")
+    _print_optional_tools(process.which)
     unavailable = backends.unavailable()
     # A backend a build leaves out on purpose is not a fault; only report the
     # others as MISSING.
@@ -601,6 +633,17 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
             print(f"  suggestion: {hint}")
     _print_fgo_readiness(config, args)
     return finish()
+
+
+def _doctor_text(config: Config) -> str:
+    """Capture the doctor output for embedding in a support report."""
+    capture = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(capture):
+            _run_doctor(config)
+    except Exception as exc:  # noqa: BLE001 - a partial report is still useful
+        return f"unavailable: {exc}"
+    return capture.getvalue().strip()
 
 
 def _run_backend_command(
@@ -943,6 +986,33 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
             log.debug("doctor failed", exc_info=True)
             print(i18n.translate("operation failed: {message}", message=exc), file=sys.stderr)
             return 1
+
+    if args.command == "report":
+        from .core.report import build_report
+
+        report = build_report(
+            config.data,
+            profile_name=args.profile,
+            doctor_text=_doctor_text(config),
+        )
+        if args.stdout:
+            print(report)
+            return 0
+        target = args.output or Path.cwd() / (
+            f"nadare-report-{args.profile or config.active or 'system'}-"
+            f"{date.today().isoformat()}.txt"
+        )
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(report)
+            os.chmod(target, 0o600)
+        except OSError as exc:
+            print(f"[error] cannot write report: {exc}", file=sys.stderr)
+            return 1
+        print(target)
+        return 0
 
     if args.command == "fetch-art":
         try:

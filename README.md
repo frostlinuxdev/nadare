@@ -21,10 +21,12 @@ Raven and more) from one window, with safe updates and one profile per game.
 
 **1. Check your system.** x86_64 Linux with glibc 2.35 or newer (Ubuntu 22.04+,
 Debian 12+, Fedora 36+, current Arch/CachyOS, Mint 22). For Chaos Zero Nightmare
-you need a working Vulkan driver with its 32-bit libraries (`vulkaninfo --summary`
+you need a working Vulkan driver including its 32-bit Vulkan support (`vulkaninfo --summary`
 should show your real GPU), about 15 GB free and, for *Remember me*, a Secret
-Service keyring (GNOME Keyring or KWallet). Installing `umu-launcher` is
-recommended, and on stock Debian/Ubuntu it is effectively required. Distro-specific
+Service keyring (GNOME Keyring or KWallet). Most systems need no other 32-bit
+libraries: the runtime Nadare downloads brings them, and `nadare doctor` says what is
+missing if it cannot be used. Installing `umu-launcher` is recommended, and on stock
+Debian/Ubuntu it is effectively required. Distro-specific
 commands are in [docs/TESTERS.md](docs/TESTERS.md).
 
 **2. Download and run.** Get `Nadare-<version>-x86_64.AppImage` from the
@@ -52,8 +54,9 @@ with the STOVE mobile app; most catalog games log in inside the game or the publ
 Games download from the publisher's own servers into Nadare's folders, or into a
 folder you choose in the game's settings.
 
-**Updating:** download the new AppImage and replace the old one; the games update
-themselves from inside Nadare. **Removing:** delete the AppImage and see
+**Updating:** when a newer Nadare exists, a banner at the top offers **Download**;
+replace the old AppImage with the new one. The games update themselves from inside
+Nadare. **Removing:** delete the AppImage and see
 [Uninstall](#uninstall) for the data folders.
 
 | Game page | Settings |
@@ -157,15 +160,18 @@ Commands like `nadare doctor` or `nadare login -p <profile>` run as
 | Arknights / Stella Sora freezes on the first frame (window drawn, CPU idle), native Wayland, NVIDIA | DXVK 3.1.1 (bundled with DW-Proton 11.0-14, Proton-CachyOS 20261005, GE-Proton11-9) can hang a game on its first present through its `VK_EXT_present_timing` path. Arknights sets `DXVK_CONFIG="dxvk.enablePresentTiming = False"` by default, so it is not affected; for another DXVK game add `"extra_env": {"DXVK_CONFIG": "dxvk.enablePresentTiming = False"}` to the profile, or pin a runner with DXVK 3.1 (DW-Proton 11.0-13, GE-Proton11-7, Proton-CachyOS 20260703). `"display": "x11"` also avoids it. The launch log line `runner: <build>, display: <driver>` shows what is in use. Do not point a profile at a moving `... Latest` runner directory: it can change under you. |
 | Stella Sora: the gacha swipe (mouse drag) does nothing on Wayland | Wine's native Wayland driver does not deliver that drag; XWayland does. Stella Sora therefore defaults to XWayland (`PROTON_ENABLE_WAYLAND=0`). To go back to native Wayland set `"display": "wayland"` on the profile in `~/.config/nadare/config.json`; `"x11"` / `"auto"` keep XWayland. Arknights defaults to native Wayland. The launch log line `runner: <build>, display: <driver>` shows which is in use. |
 | Chaos Zero Nightmare shows only a flat colour with *Display backend* set to X11 (XWayland) | Known problem on NVIDIA with KDE Plasma 6.8 (not seen on other setups yet). CZN is tested on native Wayland; leave *Display backend* on Auto. |
+| Arknights: Endfield stops with "cannot prepare the Endfield launch helper" | The message names the step. *build*: install `mingw-w64`. *fetch*: check your network. *extract* (or "publisher may have changed its launcher"): report it. |
 | Stub build fails | Install `mingw-w64` (`gcc-mingw-w64-x86-64` / `mingw-w64-gcc`). |
 | WebView2 install fails | Delete `~/.cache/nadare/czn/MicrosoftEdgeWebView2RuntimeInstallerX64.exe` and retry; the prefix must be writable. |
 | FGO host check fails | Run `lepton-fgo`'s `check-host.sh` and install what it lists. |
 | FGO + SELinux | Run the printed one-time `sudo .../setup-host-selinux.sh` as root, then retry. |
 | "keyring unavailable" notice | Account logins are keyring-only. Install the `keyring` extra plus a Secret Service provider (gnome-keyring, KWallet) to enable **Remember me**; otherwise log in again each session — tokens are never written in plaintext. See [PRIVACY.md](PRIVACY.md). |
 
-When reporting a problem, include Nadare version (`nadare --version`), distro,
-kernel, GPU/driver, runtime stack versions, and a **redacted** log. Never attach
-tokens or QR codes.
+To report a problem, press **Report a problem** on the game page (or run
+`./Nadare-*.AppImage report`). It builds a text report you can read first: Nadare
+version, distro, kernel, GPU, `doctor` output, the game's settings and recent logs, with
+your user name, home folder, e-mail addresses, public IP addresses and host name
+removed. Nothing is uploaded; paste it into an issue. Never attach tokens or QR codes.
 
 ---
 

@@ -211,3 +211,123 @@ def test_a_gzip_compressed_api_body_is_decoded() -> None:
     assert canary.decode_body(gzip.compress(body.encode())) == body
     assert canary.decode_body(body.encode()) == body
     assert canary.decode_body(b"\x1f\x8bnot really gzip") != ""  # never raises
+
+
+# ------------------------------------------------ #527: does the installer still hold Games.exe?
+URL = "https://launcher.hg-cdn.com/CNKz/GryphlineLauncher.exe"
+DAY = 24 * 3600.0
+
+
+class _Deep:
+    """The injected pieces of the deep check, counting what they were asked to do."""
+
+    def __init__(self, tmp_path, *, extract_error=None, download_error=None, have_7zip=True):
+        self.state = tmp_path / "state" / "installer-canary.json"
+        self.downloads: list[str] = []
+        self.extracts = 0
+        self.extract_error = extract_error
+        self.download_error = download_error
+        self.have_7zip = have_7zip
+
+    def download(self, url, dest):
+        self.downloads.append(url)
+        if self.download_error:
+            raise self.download_error
+        Path(dest).write_bytes(b"installer")
+
+    def extract(self, installer, dest):
+        self.extracts += 1
+        assert Path(installer).is_file()
+        if self.extract_error:
+            raise self.extract_error
+        Path(dest).write_bytes(b"MZ")
+        return dest
+
+    def run(self, canary, now, data=None):
+        get_json, _calls = fake_json({"exe_url": URL} if data is None else data)
+        return canary.check_endfield_games_exe(
+            get_json,
+            self.download,
+            self.extract,
+            state_path=self.state,
+            now=now,
+            find_7zip=lambda: "/usr/bin/7z" if self.have_7zip else None,
+        )
+
+
+def test_an_installer_that_yields_games_exe_is_fine_and_is_not_rechecked_for_a_day(tmp_path):
+    canary = _canary()
+    deep = _Deep(tmp_path)
+    assert deep.run(canary, 1000.0) == []
+    assert deep.downloads == [URL] and deep.extracts == 1
+    assert deep.run(canary, 1000.0 + DAY - 1) == []
+    assert len(deep.downloads) == 1  # inside the day: no new 124 MiB download
+    assert deep.run(canary, 1000.0 + DAY + 1) == []
+    assert len(deep.downloads) == 2
+
+
+def test_an_installer_without_games_exe_is_a_problem_that_names_the_step(tmp_path):
+    canary = _canary()
+    error = canary.endfield_shim.ShimError(
+        "the launcher installer does not contain Games.exe", step="extract", hint="report"
+    )
+    deep = _Deep(tmp_path, extract_error=error)
+    problems = deep.run(canary, 1000.0)
+    assert len(problems) == 1
+    assert "Games.exe" in problems[0] and "extract" in problems[0]
+
+
+def test_a_known_problem_is_repeated_without_downloading_until_the_hour_is_up(tmp_path):
+    canary = _canary()
+    error = canary.endfield_shim.ShimError("no Games.exe", step="extract")
+    deep = _Deep(tmp_path, extract_error=error)
+    first = deep.run(canary, 1000.0)
+    assert len(deep.downloads) == 1
+    again = deep.run(canary, 1000.0 + 600)  # ten minutes later: same alarm, no download
+    assert again == first and len(deep.downloads) == 1
+    deep.extract_error = None  # the publisher fixed it
+    assert deep.run(canary, 1000.0 + 3601) == []
+    assert len(deep.downloads) == 2
+
+
+def test_a_network_failure_is_only_a_note_and_retries_after_an_hour(tmp_path, capsys):
+    canary = _canary()
+    deep = _Deep(tmp_path, download_error=OSError("connection reset"))
+    assert deep.run(canary, 1000.0) == []
+    assert "Games.exe" in capsys.readouterr().err
+    assert deep.run(canary, 1000.0 + 600) == [] and len(deep.downloads) == 1
+    assert deep.run(canary, 1000.0 + 3601) == [] and len(deep.downloads) == 2
+
+
+def test_without_7zip_the_deep_check_is_skipped_with_a_note(tmp_path, capsys):
+    canary = _canary()
+    deep = _Deep(tmp_path, have_7zip=False)
+    assert deep.run(canary, 1000.0) == []
+    assert deep.downloads == []  # never download 124 MiB it cannot open
+    assert "7-Zip" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("data", [{}, {"exe_url": None}, {"exe_url": "https://evil.example/x.exe"}])
+def test_no_usable_installer_url_means_nothing_to_download(tmp_path, data):
+    canary = _canary()
+    deep = _Deep(tmp_path)
+    assert deep.run(canary, 1000.0, data=data) == []  # check_endfield reports these
+    assert deep.downloads == []
+
+
+def test_a_corrupt_state_file_just_means_the_check_runs(tmp_path):
+    canary = _canary()
+    deep = _Deep(tmp_path)
+    deep.state.parent.mkdir(parents=True)
+    deep.state.write_text("{nope")
+    assert deep.run(canary, 1000.0) == []
+    assert len(deep.downloads) == 1
+
+
+def test_main_runs_the_deep_check_and_reports_its_problem(tmp_path, monkeypatch, capsys):
+    canary = _canary()
+    monkeypatch.setattr(canary, "check_nte", lambda head: [])
+    monkeypatch.setattr(canary, "check_endfield", lambda get_json: [])
+    monkeypatch.setattr(canary, "check_endfield_games_exe", lambda *a, **k: ["Games.exe is gone"])
+    assert canary.main(["--state", str(tmp_path / "s.json")]) == canary.PROBLEM
+    assert "CANARY: Games.exe is gone" in capsys.readouterr().out

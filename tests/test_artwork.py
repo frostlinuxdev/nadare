@@ -684,28 +684,17 @@ def _urls(profile: dict, kind: str = "cover") -> list[str]:
     return list(artwork._candidates(profile, None, kind))
 
 
-def test_a_catalog_game_gets_its_steam_app_and_the_site_images() -> None:
+def test_a_catalog_game_gets_its_steam_app_art_and_no_site_images() -> None:
     urls = _urls({"backend": "direct-nte"})
-    steam = [u for u in urls if "steamstatic" in u]
-    site = [u for u in urls if "frostlinuxdev.github.io" in u]
-    assert steam and all("/apps/4508340/" in u for u in steam)
-    assert site == [
-        "https://frostlinuxdev.github.io/images/neverness-to-everness/cover.webp",
-        "https://frostlinuxdev.github.io/images/neverness-to-everness/thumb.webp",
-        "https://frostlinuxdev.github.io/images/neverness-to-everness/hero.webp",
-    ]
-    assert urls.index(steam[0]) < urls.index(site[0])  # publisher store art first
+    assert urls and all("steamstatic" in u and "/apps/4508340/" in u for u in urls)
+    assert not [u for u in urls if "github.io" in u]
+    assert not hasattr(artwork, "_site_candidates")
 
 
-def test_hero_art_prefers_the_hero_image_and_falls_back_to_the_thumb() -> None:
-    site = [u for u in _urls({"backend": "direct-endfield"}, "hero") if "github.io" in u]
-    assert [u.rsplit("/", 1)[1] for u in site] == ["hero.webp", "thumb.webp"]
-
-
-def test_a_game_without_a_steam_id_still_gets_site_images() -> None:
-    urls = _urls({"backend": "direct-genshin"})
-    assert not [u for u in urls if "steamstatic" in u]
-    assert [u for u in urls if "github.io" in u]
+def test_a_game_without_a_steam_id_has_no_catalog_candidates() -> None:
+    for kind in ("direct-genshin", "direct-bd2", "launcher-nikke"):
+        assert _urls({"backend": kind}) == []
+        assert _urls({"backend": kind}, "hero") == []
 
 
 def test_a_profile_steam_id_wins_over_the_catalog_default() -> None:
@@ -722,6 +711,8 @@ def test_the_art_table_covers_every_catalog_kind_and_only_https_public_hosts() -
     from nadare.core import directkinds as dk
 
     assert set(dk.ART) == set(dk.CATALOG_KINDS)
+    assert all(value is None or isinstance(value, int) for value in dk.ART.values())
+    assert not hasattr(dk, "SITE_IMAGES")
     for kind in dk.ART:
         for u in _urls({"backend": kind}, "cover") + _urls({"backend": kind}, "hero"):
             assert artwork.host_allowed(u, ()), u
@@ -1066,3 +1057,122 @@ def test_cached_lookup_schedules_one_background_migration(tmp_path, monkeypatch)
 
     assert len(started) == 1
     assert started[0].target is not None
+
+
+# ------------------------------------------------------------ publisher og:image, more games
+_PAGES = {
+    "direct-bd2": (
+        "https://www.browndust2.com/en-us/",
+        "https://www.browndust2.com/img/seo/OGimg_EN_740x340_v5.jpg",
+    ),
+    "direct-mongil": (
+        "https://stardive.netmarble.com/en",
+        "https://sgimage.netmarble.com/images/netmarble/monster2/20260305/m.jpg",
+    ),
+    "launcher-nikke": (
+        "https://nikke-en.com/",
+        "https://nikke-en.com/pc/ossweb-img/og_image.jpg",
+    ),
+    "direct-endfield": (
+        "https://endfield.gryphline.com/en-us",
+        "https://web-static.hg-cdn.com/endfield/official-v4/_next/static/media/share.jpg",
+    ),
+    "fgo-lepton": ("https://fate-go.us/", "https://fate-go.us/images/fate_card_1800.png"),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_PAGES))
+def test_other_publishers_cover_comes_from_their_official_page(fake, tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    page, image = _PAGES[kind]
+    fake.routes[page] = FakeResponse(
+        content=f'<meta property="og:image" content="{image}">'.encode(),
+        headers={"Content-Type": "text/html"},
+    )
+    fake.routes[image] = FakeResponse(content=_png_bytes(), headers={"Content-Type": "image/png"})
+    profile = {"backend": kind, "title": "T"}
+    found = artwork.fetch_all(profile, kinds=("cover",))
+    assert "cover" in found and profile["art_source"]["cover"] == artwork.SOURCE_OFFICIAL
+    assert artwork.src_sidecar(found["cover"]).read_text(encoding="utf-8") == image
+
+
+def test_a_relative_og_image_resolves_against_the_page(fake, tmp_path, monkeypatch):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    page = "https://www.browndust2.com/en-us/"
+    fake.routes[page] = FakeResponse(
+        content=b'<meta property="og:image" content="/img/seo/a.jpg">',
+        headers={"Content-Type": "text/html"},
+    )
+    fake.routes["https://www.browndust2.com/img/seo/a.jpg"] = FakeResponse(
+        content=_png_bytes(), headers={"Content-Type": "image/png"}
+    )
+    assert artwork.fetch({"backend": "direct-bd2", "title": "BD2"}) is not None
+
+
+def test_aether_gazer_uses_its_twitter_image_when_og_image_is_empty(fake, tmp_path, monkeypatch):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    page = "https://www.aethergazer.com/"
+    image = "https://aethergazer.com/twitter_share.png"
+    fake.routes[page] = FakeResponse(
+        content=(
+            b'<meta property="og:image" content="" />'
+            b'<meta name="twitter:image" content="' + image.encode() + b'" />'
+        ),
+        headers={"Content-Type": "text/html"},
+    )
+    fake.routes[image] = FakeResponse(content=_png_bytes(), headers={"Content-Type": "image/png"})
+    assert artwork.fetch({"backend": "direct-aethergazer", "title": "AG"}) is not None
+
+
+def test_an_og_image_on_another_host_is_rejected_for_every_publisher(fake, tmp_path, monkeypatch):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    for kind, (page, _image) in _PAGES.items():
+        fake.routes[page] = FakeResponse(
+            content=b'<meta property="og:image" content="https://evil.example/x.png">',
+            headers={"Content-Type": "text/html"},
+        )
+        assert artwork.fetch({"backend": kind, "title": "T"}) is None, kind
+
+
+def test_an_og_page_that_redirects_is_not_followed(fake, tmp_path, monkeypatch):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    fake.routes["https://nikke-en.com/"] = FakeResponse(
+        status_code=301, headers={"Location": "http://evil.example/"}
+    )
+    assert artwork.fetch({"backend": "launcher-nikke", "title": "N"}) is None
+    assert not any("evil.example" in call[1] for call in fake.calls)
+
+
+def test_the_publisher_kinds_are_exactly_the_og_table_and_include_fgo() -> None:
+    kinds = artwork.publisher_art_kinds()
+    assert kinds == frozenset(artwork._PUBLISHER_OGP)
+    assert {"fgo-lepton", "direct-bd2"} <= kinds
+    for left_out in ("arknights-yostar", "stellasora-yostar", "stove-czn"):
+        assert left_out not in kinds
+
+
+def test_a_fgo_profile_with_its_own_art_never_has_it_replaced(
+    fake, tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    page, image = _PAGES["fgo-lepton"]
+    fake.routes[page] = FakeResponse(
+        content=f'<meta property="og:image" content="{image}">'.encode(),
+        headers={"Content-Type": "text/html"},
+    )
+    fake.routes[image] = FakeResponse(content=_png_bytes(), headers={"Content-Type": "image/png"})
+    user_cover = _file(tmp_path, "mine.png")
+    profile = {
+        "backend": "fgo-lepton",
+        "title": "FGO",
+        "cover": str(user_cover),
+        "art_source": {"cover": artwork.SOURCE_USER},
+    }
+    artwork.fetch_all(profile, kinds=("cover",))
+    assert profile["cover"] == str(user_cover)

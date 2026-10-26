@@ -36,7 +36,7 @@ def main() -> None:
     window.store.grid.show()
     app.processEvents()
     window.grab().save(str(out / "store-grid.png"))
-    verified = next(e for e in entries() if e.tier == "Verified" and e.art_folder)
+    verified = next(e for e in entries() if e.tier == "Verified" and e.has_art)
     window.store.show_detail(verified.kind)
     app.processEvents()
     window.grab().save(str(out / "store-detail-verified.png"))

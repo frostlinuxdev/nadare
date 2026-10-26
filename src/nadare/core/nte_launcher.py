@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from . import download as _dl
+from . import sevenzip
 
 #: Official Perfect World installer carrying the launcher payload.
 INSTALLER_URL = (
@@ -145,7 +146,7 @@ def ensure_launcher(
     if installed.is_file():
         return installed
 
-    sevenz = which("7z") or which("7zz") or which("7za")
+    sevenz = sevenzip.find(which=which)
     if not sevenz:
         raise NteLauncherError(
             "7-Zip not found; install p7zip or 7zip so the Neverness to "

@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from .. import __version__
 from ..core import backends as core_backends
 from ..core import diskspace, paths, secrets, shortcuts
 from ..core import runners as core_runners
@@ -58,6 +59,7 @@ from ..core.events import Event
 from ..core.news import NewsResult
 from . import i18n
 from .add_game import AddGameDialog
+from .banner import InfoBanner
 from .game_view import OPERATION_TITLES, GameSnapshot, GameView
 from .library import LibraryPage, count_text, profile_title
 from .notice import AccountNoticeDialog
@@ -141,6 +143,7 @@ class MainWindow(QMainWindow):
 
     #: A newer release was found by the background update check.
     update_found = pyqtSignal(object)
+    notices_found = pyqtSignal(object)
     #: Unused old runners measured in the background: a list of ``(path, bytes)``.
     runner_cleanup_ready = pyqtSignal(object)
     runner_cleanup_done = pyqtSignal(int, int, int)  # deleted, bytes freed, failed
@@ -201,9 +204,11 @@ class MainWindow(QMainWindow):
         self.controller = BackendController(config, self)
         self._wire_controller()
         self.update_found.connect(self._show_update)
+        self.notices_found.connect(self._show_notice)
         self.runner_cleanup_ready.connect(self._offer_runner_cleanup)
         self.runner_cleanup_done.connect(self._runner_cleanup_finished)
         self._start_update_check()
+        self._start_notices_check()
 
         self.refresh_library()
         if profile and profile in self.config.profiles:
@@ -313,7 +318,21 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.game)
         self.stack.addWidget(self.settings)
         self.stack.addWidget(self.store)
-        root.addWidget(self.stack, 1)
+        self.update_banner = InfoBanner()
+        self.update_banner.action_clicked.connect(self._open_update_page)
+        self.update_banner.dismissed.connect(self._dismiss_update)
+        right = QWidget()
+        right_column = QVBoxLayout(right)
+        right_column.setContentsMargins(0, 0, 0, 0)
+        right_column.setSpacing(0)
+        right_column.addWidget(self.update_banner)
+        self.notice_banner = InfoBanner()
+        self.notice_banner.action_clicked.connect(self._open_notice_link)
+        self.notice_banner.dismissed.connect(self._dismiss_notice)
+        self._notice = None
+        right_column.addWidget(self.notice_banner)
+        right_column.addWidget(self.stack, 1)
+        root.addWidget(right, 1)
 
         # UI intent -> controller / navigation.
         self.library.open_game.connect(self.open_game)
@@ -323,10 +342,12 @@ class MainWindow(QMainWindow):
         self.game.cancel_requested.connect(self._on_cancel)
         self.game.remember_toggled.connect(self._on_remember_toggled)
         self.game.settings_requested.connect(self.open_settings)
+        self.game.report_requested.connect(self._show_support_report)
         self.settings.saved.connect(self._on_settings_saved)
         self.settings.cancelled.connect(self.show_library)
         self.settings.remove_requested.connect(self._on_remove_requested)
         self.settings.remake_prefix_requested.connect(self._on_remake_prefix_requested)
+        self.settings.report_requested.connect(self._show_support_report)
         self.sidebar_games.open_game.connect(self.open_game)
 
     def _build_sidebar(self) -> QWidget:
@@ -379,6 +400,7 @@ class MainWindow(QMainWindow):
         self.update_button.setVisible(False)
         self.update_button.clicked.connect(self._open_update_page)
         self._update_url = ""
+        self._update_version = ""
         side.addSpacing(8)
         side.addWidget(self.update_button)
         side.addSpacing(26)
@@ -567,6 +589,17 @@ class MainWindow(QMainWindow):
         self._set_active_nav("settings")
         self.sidebar_games.set_active("")
         self._set_side_status(f"Settings · {self._game_title(profile)}")
+
+    def _show_support_report(self, profile: str) -> None:
+        from .support_report import ReportDialog, ReportTask
+
+        if profile not in self.config.profiles:
+            profile = self.config.active
+        self._report_dialog = ReportDialog(self, profile)
+        self._report_dialog.show()
+        task = ReportTask(dict(self.config.data), profile)
+        task.signals.finished.connect(self._report_dialog.set_report)
+        QThreadPool.globalInstance().start(task)
 
     def _on_remove_requested(self, profile: str) -> None:
         """Confirm, then remove ``profile`` from the library (files kept by default)."""
@@ -1448,11 +1481,73 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=run, name="nadare-update-check", daemon=True).start()
 
+    def _start_notices_check(self) -> None:
+        """Read the project's notices feed once per start, off the GUI thread."""
+        if not self.config.data.get("check_updates", True):
+            return
+        from ..core import notices
+
+        def run() -> None:
+            try:
+                self.notices_found.emit(notices.load())
+            except RuntimeError:
+                pass  # the window closed before the feed arrived
+            except Exception:  # noqa: BLE001 - a background check must never die
+                log.debug("notices check failed", exc_info=True)
+
+        threading.Thread(target=run, name="nadare-notices", daemon=True).start()
+
+    def _show_notice(self, items: Any) -> None:
+        from ..core import notices
+
+        kinds = {str(p.get("backend") or "") for p in self.config.profiles.values()}
+        dismissed = self.config.data.get("dismissed_notices") or []
+        self._notice = notices.pick(items, __version__, kinds, dismissed=dismissed)
+        if self._notice is None:
+            self.notice_banner.hide_banner()
+            return
+        self.notice_banner.show_message(
+            self._notice.text,
+            "Learn more" if self._notice.link else "",
+            dismissible=self._notice.severity != "block",
+        )
+
+    def _open_notice_link(self) -> None:
+        link = self._notice.link if self._notice is not None else None
+        if link and link.startswith("https://"):
+            QDesktopServices.openUrl(QUrl(link))
+
+    def _dismiss_notice(self) -> None:
+        if self._notice is None:
+            return
+        self.notice_banner.hide_banner()
+        seen = [str(x) for x in (self.config.data.get("dismissed_notices") or [])]
+        self.config.data["dismissed_notices"] = [*seen, self._notice.id][-100:]
+        try:
+            self.config.save()
+        except OSError:
+            log.debug("could not remember the dismissed notice", exc_info=True)
+
     def _show_update(self, info: Any) -> None:
         self._update_url = str(info.url)
         self.update_button.setText(f"Update available: v{info.version}")
         self.update_button.setToolTip(f"{info.name}\n{info.url}")
         self.update_button.setVisible(True)
+        self._update_version = str(info.version)
+        if self.config.data.get("dismissed_update") != self._update_version:
+            self.update_banner.show_message(
+                f"Nadare v{info.version} is available (you have v{__version__}).",
+                "Download",
+            )
+
+    def _dismiss_update(self) -> None:
+        """Hide the banner for this release; the sidebar button stays."""
+        self.update_banner.hide_banner()
+        self.config.data["dismissed_update"] = self._update_version
+        try:
+            self.config.save()
+        except OSError:
+            log.debug("could not remember the dismissed update", exc_info=True)
 
     def _open_update_page(self) -> None:
         if self._update_url.startswith("https://"):

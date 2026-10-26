@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from . import download as _dl
+from . import sevenzip
 
 #: Endpoint returning the current Gryphline launcher installer (``exe_url``).
 LAUNCHER_API = (
@@ -41,7 +42,26 @@ _STAGE_PARTS = ("drive_c", "Games", ".nadare", "endfield-shim")
 
 
 class ShimError(RuntimeError):
-    """The shim could not be built, or the launcher could not be obtained."""
+    """The shim could not be built, or the launcher could not be obtained.
+
+    ``step`` names what failed (``build``, ``fetch`` or ``extract``) and ``hint`` says what
+    to do; both end up in the text the user sees.
+    """
+
+    def __init__(self, message: str, *, step: str = "", hint: str = "") -> None:
+        text = f"{message} (step: {step})" if step else message
+        if hint:
+            text = f"{text}. {hint}"
+        super().__init__(text)
+        self.step = step
+        self.hint = hint
+
+
+_REPORT_HINT = (
+    "The publisher may have changed its launcher; please report this "
+    "(Report a problem, or `nadare report`)"
+)
+_NETWORK_HINT = "Check your network connection and try again"
 
 
 @dataclass(frozen=True)
@@ -128,9 +148,10 @@ def build_shim(
     resolved = which(compiler)
     if not resolved:
         raise ShimError(
-            f"mingw-w64 compiler {compiler!r} not found; install mingw-w64 "
-            "(mingw-w64-gcc on Arch, gcc-mingw-w64-x86-64 on Debian/Ubuntu) "
-            "or set CC to a mingw-w64 gcc"
+            f"mingw-w64 compiler {compiler!r} not found",
+            step="build",
+            hint="Install mingw-w64 (mingw-w64-gcc on Arch, gcc-mingw-w64-x86-64 on "
+            "Debian/Ubuntu) or set CC to a mingw-w64 gcc",
         )
 
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -139,7 +160,11 @@ def build_shim(
     result = run(argv, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         tmp.unlink(missing_ok=True)
-        raise ShimError(f"cannot build {out.name} with {resolved}: {result.stderr.strip()}")
+        raise ShimError(
+            f"cannot build {out.name} with {resolved}: {result.stderr.strip()}",
+            step="build",
+            hint=_REPORT_HINT,
+        )
     os.replace(tmp, out)
     stamp.write_text(digest + "\n", encoding="ascii")
     return out
@@ -165,11 +190,12 @@ def extract_games_exe(
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> Path:
     """Extract ``Games.exe`` from a launcher installer and copy it to ``dest``."""
-    sevenz = which("7z") or which("7zz") or which("7za")
+    sevenz = sevenzip.find(which=which)
     if not sevenz:
         raise ShimError(
-            "7-Zip not found; install p7zip or 7zip so Games.exe can be "
-            "extracted from the launcher installer"
+            "7-Zip not found",
+            step="extract",
+            hint="Install p7zip or 7zip so Games.exe can be extracted from the launcher installer",
         )
 
     with tempfile.TemporaryDirectory(prefix="endfield-7z-") as tmpdir:
@@ -180,14 +206,26 @@ def extract_games_exe(
             check=False,
         )
         if result.returncode != 0:
-            raise ShimError(f"cannot extract Games.exe with {sevenz}: {result.stderr.strip()}")
+            raise ShimError(
+                f"cannot extract Games.exe with {sevenz}: {result.stderr.strip()}",
+                step="extract",
+                hint=_REPORT_HINT,
+            )
         candidates = [path for path in Path(tmpdir).rglob("Games.exe") if path.is_file()]
         if not candidates:
-            raise ShimError("the launcher installer does not contain Games.exe")
+            raise ShimError(
+                "the launcher installer does not contain Games.exe",
+                step="extract",
+                hint=_REPORT_HINT,
+            )
         extracted = candidates[0]
         with open(extracted, "rb") as fh:
             if fh.read(2) != b"MZ":
-                raise ShimError(f"{extracted.name} is not a Windows executable")
+                raise ShimError(
+                    f"{extracted.name} is not a Windows executable",
+                    step="extract",
+                    hint=_REPORT_HINT,
+                )
         _atomic_copy(extracted, dest)
     return dest
 
@@ -210,17 +248,35 @@ def _obtain_games(
         _atomic_copy(installed, cache)
         return cache
 
-    data = fetch_json(LAUNCHER_API)
+    try:
+        data = fetch_json(LAUNCHER_API)
+    except Exception as exc:  # noqa: BLE001 - network, TLS, HTTP and JSON errors all land here
+        raise ShimError(
+            f"cannot ask the launcher API for the installer: {exc}",
+            step="fetch",
+            hint=_NETWORK_HINT,
+        ) from exc
     url = data.get("exe_url") if isinstance(data, dict) else None
     if not isinstance(url, str) or not installer_host_allowed(url):
-        raise ShimError("the launcher API did not return an exe_url on an allowed host")
+        raise ShimError(
+            "the launcher API did not return an exe_url on an allowed host",
+            step="fetch",
+            hint=_REPORT_HINT,
+        )
 
     cache.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix="launcher-", suffix=".exe", dir=cache.parent)
     os.close(fd)
     installer = Path(name)
     try:
-        download(url, installer)
+        try:
+            download(url, installer)
+        except Exception as exc:  # noqa: BLE001
+            raise ShimError(
+                f"cannot download the launcher installer: {exc}",
+                step="fetch",
+                hint=_NETWORK_HINT,
+            ) from exc
         extract_games_exe(installer, cache, which=which, run=extract_run)
     finally:
         installer.unlink(missing_ok=True)

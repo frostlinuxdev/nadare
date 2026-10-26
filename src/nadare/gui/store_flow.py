@@ -88,7 +88,7 @@ class StoreFlow(QStackedWidget):
         else:
             self.detail.set_entry(entry)
         self.setCurrentWidget(self.detail)
-        if entry.art_folder:
+        if entry.has_art:
             QThreadPool.globalInstance().start(
                 _FetchHero(self._generation, kind, entry.title, self._hero_signals)
             )

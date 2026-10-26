@@ -149,6 +149,7 @@ class SettingsPage(QWidget):
     cancelled = pyqtSignal()
     remove_requested = pyqtSignal(str)  # profile name
     remake_prefix_requested = pyqtSignal(str)  # profile name
+    report_requested = pyqtSignal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -347,6 +348,10 @@ class SettingsPage(QWidget):
         )
         self.remove_button.clicked.connect(self._request_remove)
         footer.addWidget(self.remove_button)
+        self.report_button = QPushButton("Report a problem")
+        self.report_button.setObjectName("GhostButton")
+        self.report_button.clicked.connect(lambda: self.report_requested.emit(self._profile))
+        footer.addWidget(self.report_button)
         self.note = QLabel("")
         self.note.setObjectName("Muted")
         footer.addWidget(self.note, 1)

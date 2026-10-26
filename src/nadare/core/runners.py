@@ -57,6 +57,8 @@ class RunnerSpec:
     repo: str
     asset: str  # regex matching the x86_64 tarball
     tested: tuple[str, str] | None  # (tag, sha256) proven in-game, else None
+    #: (asset file name, size) of the tested release, so installing it needs no API lookup.
+    pinned_asset: tuple[str, int] | None = None
 
 
 #: Tested tags/sha256s come from czn-linux; ``--latest`` is the only option for
@@ -71,6 +73,7 @@ RUNNERS: dict[str, RunnerSpec] = {
             "cachyos-11.0-20260703-slr",
             "62ff4b2750180723cc00538608fe687e21d1d91a31ef64ce1a7c9f46c3db310b",
         ),
+        ("proton-cachyos-11.0-20260703-slr-x86_64.tar.xz", 335059640),
     ),
     "dwproton": RunnerSpec(
         "dwproton",
@@ -78,6 +81,7 @@ RUNNERS: dict[str, RunnerSpec] = {
         "dawn-winery/dwproton-mirror",
         r"dwproton-[A-Za-z0-9._-]+-x86_64\.tar\.xz",
         ("dwproton-11.0-15", "8066dec3d7f532d55e5b6d697a61d6d4a3091f859a1ef9b2943895aa1b947afd"),
+        ("dwproton-11.0-15-x86_64.tar.xz", 339563992),
     ),
     "ge": RunnerSpec(
         "ge",
@@ -85,6 +89,7 @@ RUNNERS: dict[str, RunnerSpec] = {
         "GloriousEggroll/proton-ge-custom",
         r"GE-Proton[A-Za-z0-9._-]+-x86_64\.tar\.gz",
         ("GE-Proton11-7", "c5448b76a230384e2d7bc6beb5ccb97bafb7e2c3b6c527cb03a1a546bbcb00a0"),
+        ("GE-Proton11-7-x86_64.tar.gz", 563784602),
     ),
 }
 
@@ -285,6 +290,23 @@ def _release(spec: RunnerSpec, tag: str | None, *, timeout: int = 30) -> dict[st
         "published_at": rel.get("published_at"),
         "tar": tar,
         "sum": assets.get(stem + ".sha512sum"),
+    }
+
+
+def _pinned_release(spec: RunnerSpec) -> dict[str, Any]:
+    """The tested release, built from the pin alone: no API call, so no rate limit."""
+    assert spec.tested is not None and spec.pinned_asset is not None
+    tag = spec.tested[0]
+    name, size = spec.pinned_asset
+    return {
+        "tag": tag,
+        "published_at": None,
+        "tar": {
+            "name": name,
+            "size": size,
+            "browser_download_url": f"https://github.com/{spec.repo}/releases/download/{tag}/{name}",
+        },
+        "sum": None,
     }
 
 
@@ -547,7 +569,8 @@ def install(
         raise RunnerError(f"{spec.name} has no tested release yet; use latest=True")
     tag, pinned = (None, None) if latest else spec.tested
 
-    rel = _release(spec, tag)
+    use_pin = not latest and spec.pinned_asset is not None
+    rel = _pinned_release(spec) if use_pin else _release(spec, tag)
     tar = rel["tar"]
     size = int(tar.get("size") or 0)
     say(

@@ -553,3 +553,42 @@ def test_gfl2_haoplay_pins_umu_id_zero_unless_the_profile_overrides_it(tmp_path,
     assert env["UMU_ID"] == "0" and env["GAMEID"] == "0"
     custom = env_for({"extra_env": {"UMU_ID": "umu-7", "GAMEID": "umu-7"}})
     assert custom["UMU_ID"] == "umu-7" and custom["GAMEID"] == "umu-7"
+
+
+GFL2_KINDS = ("direct-gfl2", "direct-gfl2-haoplay", "launcher-gfl2-haoplay")
+
+
+def test_the_gfl2_builds_have_names_that_tell_them_apart():
+    from nadare.core import directkinds as dk
+
+    titles = {
+        kind: (dk._DIRECT.get(kind) or dk._LAUNCHER[kind])[1] for kind in GFL2_KINDS
+    }
+    assert "Darkwinter" in titles["direct-gfl2"] and "Haoplay" not in titles["direct-gfl2"]
+    assert all("Haoplay" in titles[k] and "Darkwinter" not in titles[k] for k in GFL2_KINDS[1:])
+    assert titles["direct-gfl2"] != titles["direct-gfl2-haoplay"]
+
+
+def test_the_backend_display_names_match_the_catalog_titles():
+    from nadare.core import directkinds as dk
+
+    for kind in GFL2_KINDS:
+        row = dk._DIRECT.get(kind) or dk._LAUNCHER[kind]
+        assert get(kind).display_name == row[1], kind
+
+
+def test_both_gfl2_direct_pages_say_which_build_they_are_and_name_the_other():
+    from nadare.core import backends
+
+    darkwinter = backends.page_notice("direct-gfl2")
+    haoplay = backends.page_notice("direct-gfl2-haoplay")
+    assert darkwinter and "Darkwinter" in darkwinter[0] and "Haoplay" in darkwinter[0]
+    assert haoplay and "Haoplay" in haoplay[0] and "Darkwinter" in haoplay[0]
+    assert darkwinter[1].startswith("https://") and haoplay[1].startswith("https://")
+
+
+def test_the_gfl2_store_entries_have_distinct_titles():
+    from nadare.core.storecatalog import entries
+
+    titles = [e.title for e in entries() if "gfl2" in e.kind]
+    assert len(titles) == len(set(titles)) >= 2

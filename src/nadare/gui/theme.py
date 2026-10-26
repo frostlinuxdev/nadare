@@ -301,6 +301,10 @@ QPushButton:disabled {{
     background: {DISABLED_BG};
     border-color: {LINE};
 }}
+QFrame#Banner {{
+    background: {PANEL_2};
+    border-bottom: 1px solid {LINE};
+}}
 QPushButton#GhostButton {{
     background: transparent;
     border: 1px solid {LINE};

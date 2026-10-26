@@ -10,6 +10,13 @@ from pathlib import Path
 import pytest
 
 from nadare.core import nte_launcher as nl
+from nadare.core import sevenzip
+
+
+@pytest.fixture(autouse=True)
+def no_bundled_7zip(tmp_path, monkeypatch):
+    """Unit tests must never pick up the real bundled 7-Zip a release build fetched."""
+    monkeypatch.setattr(sevenzip, "BUNDLED", tmp_path / "no-bundled-7zzs")
 
 MZ = b"MZ" + b"\0" * 64
 INSTALLER_BYTES = b"nsis"
@@ -54,6 +61,8 @@ def _dl(urls, data=INSTALLER_BYTES):
     return download
 
 
+
+
 def test_launcher_path():
     assert nl.launcher_path(Path("/g/NTE")) == Path("/g/NTE/NTEGlobal/NTEGlobalLauncher.exe")
 
@@ -91,12 +100,19 @@ def test_ensure_launcher_downloads_unpacks_and_copies_ntegloba(tmp_path):
     )
     assert got == root / "NTEGlobal" / "NTEGlobalLauncher.exe" and got.read_bytes() == MZ
     assert (root / "NTEGlobal" / "Config" / "a.ini").read_text() == "x"
-    assert (root / "Client" / "keep.txt").read_text() == "game"  # the game files are untouched
+    assert (root / "Client" / "keep.txt").read_text() == "game"
     assert urls == [nl.INSTALLER_URL] and len(calls) == 2
     assert calls[0][0] == "/usr/bin/7z" and calls[0][1] == "x"
-    assert not (
-        root / "uninst.exe"
-    ).exists()  # only NTEGlobal/ is taken, not the installer's extras
+    assert not (root / "uninst.exe").exists()
+
+
+def test_ensure_launcher_uses_bundled_7zip_when_system_missing(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(nl.sevenzip, "find", lambda *, which: "/cache/bin/7zzs-test")
+    got = nl.ensure_launcher(tmp_path / "NTE", data_dir=tmp_path / "d", download=_dl([]),
+                             which=lambda _: None, run=_fake_7z(calls))
+    assert got.is_file() and len(calls) == 2
+    assert all(call[0] == "/cache/bin/7zzs-test" for call in calls)
 
 
 def test_installer_is_cached_between_runs(tmp_path):

@@ -357,6 +357,15 @@ def _profile_setting(profile: dict[str, Any], key: str) -> Any:
 GAME_HELPER_EXES = frozenset({"crashpad_handler.exe"})
 
 
+def stub_identity(path: Path) -> tuple[str | None, bool]:
+    """``(sha256[:12], is the shipped stub)`` of ``path``; ``(None, False)`` if unreadable."""
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None, False
+    return digest[:12], digest == STUB_PREBUILT_SHA256
+
+
 def _cmdline_has_exe(raw: bytes, prefix: str, *, exclude: frozenset[str] = frozenset()) -> bool:
     """Whether any NUL-separated argv token names an exe under ``prefix``.
 
@@ -1707,8 +1716,9 @@ class CznBackend(GameBackend):
     def _ensure_stub(self) -> Path:
         stub = self._stub()
         if stub.is_file():
-            return stub
+            return self._refresh_stub(stub)
         if self._install_prebuilt_stub(stub):
+            self._note_stub(stub)
             return stub
         script = Path(__file__).with_name("build_stub.sh")
         if not script.is_file():
@@ -1720,6 +1730,47 @@ class CznBackend(GameBackend):
         code = self._stream(["bash", str(script)], env)
         if code != 0 or not stub.is_file():
             raise BackendError("PCSDK stub build failed (install mingw-w64)", 1)
+        self._note_stub(stub)
+        return stub
+
+    def _note_stub(self, stub: Path) -> None:
+        """Log which stub this profile runs; the log header names the build, this names the stub."""
+        sha, shipped = stub_identity(stub)
+        if sha is not None:
+            kind = "the shipped one" if shipped else "not the shipped one"
+            self.info(f"PCSDK stub: sha256 {sha}… ({kind})")
+
+    def _refresh_stub(self, stub: Path) -> Path:
+        """Keep a profile's stub in step with the shipped one, never losing the old copy.
+
+        A copy made by an older Nadare (or swapped in by hand) would otherwise run forever.
+        """
+        sha, shipped = stub_identity(stub)
+        if sha is None:
+            return stub  # unreadable: let the launch report whatever is wrong with it
+        if shipped:
+            self._note_stub(stub)
+            return stub
+        backup = stub.with_name(stub.name + ".old")
+        try:
+            os.replace(stub, backup)
+        except OSError:
+            self._note_stub(stub)
+            return stub
+        if self._install_prebuilt_stub(stub):
+            self.info(
+                f"PCSDK stub: sha256 {sha}… differed from the shipped one; replaced it "
+                f"(the old copy is kept as {backup.name})"
+            )
+            return stub
+        try:
+            os.replace(backup, stub)
+        except OSError as exc:
+            raise BackendError(f"could not restore the PCSDK stub: {exc}", 1) from exc
+        self.info(
+            f"PCSDK stub: sha256 {sha}… differs from the shipped one; kept "
+            "(no verified copy to replace it)"
+        )
         return stub
 
     @staticmethod

@@ -428,3 +428,21 @@ def test_the_appimage_spec_ships_the_endfield_helper_source():
         "packaging/nadare.spec must ship nadare/core/shim_src (the AppImage lacked it in 0.1.0b7)"
     )
     assert (_REPO_ROOT / "src/nadare/core/shim_src/suspend_start.c").is_file()
+
+
+def test_fetch_7zip_script_pins_source_and_digest():
+    script = _text("scripts/fetch_7zip.sh")
+    assert "22cf82fcc6eb7474f1d5bb4f02c0f8ebd573a718089d6833dc30f8350a3b232e" in script
+    assert "https://github.com/ip7z/7zip/releases/download/26.05/7z2605-linux-x64.tar.xz" in script
+
+
+def test_fetch_7zip_script_is_executable_and_called_through_bash():
+    """The build once died with "Permission denied": the script had no execute bit."""
+    import os
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    script = root / "scripts" / "fetch_7zip.sh"
+    assert os.access(script, os.X_OK), "scripts/fetch_7zip.sh must be executable"
+    build = (root / "scripts" / "build_appimage.sh").read_text(encoding="utf-8")
+    assert "bash scripts/fetch_7zip.sh" in build

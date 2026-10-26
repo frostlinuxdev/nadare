@@ -560,6 +560,7 @@ class GameView(QWidget):
     cancel_requested = pyqtSignal()
     back_requested = pyqtSignal()
     settings_requested = pyqtSignal()
+    report_requested = pyqtSignal(str)
     remember_toggled = pyqtSignal(bool)  # the user ticked/unticked Remember me
 
     #: Text shown under the login QR for each coarse auth state.
@@ -714,6 +715,9 @@ class GameView(QWidget):
         self.logs = QPushButton("Open logs")
         self.logs.setObjectName("GhostButton")
         self.logs.clicked.connect(self._open_logs)
+        self.report = QPushButton("Report a problem")
+        self.report.setObjectName("GhostButton")
+        self.report.clicked.connect(lambda: self.report_requested.emit(self._profile))
         for button in (
             self.login,
             self.logout,
@@ -721,6 +725,7 @@ class GameView(QWidget):
             self.verify,
             self.repair_btn,
             self.logs,
+            self.report,
         ):
             secondary.addWidget(button)
         secondary.addStretch(1)

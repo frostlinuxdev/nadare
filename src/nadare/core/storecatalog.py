@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import backends
+from .artwork import publisher_art_kinds
 from .directkinds import (
     ART,
     DIRECT_LABEL,
@@ -43,7 +44,7 @@ class StoreEntry:
     tier_help: str
     delivery_label: str
     size_bytes: int | None
-    art_folder: str | None
+    has_art: bool
     notice: tuple[str, str] | tuple[str, str, str] | None
     installed: bool = False
 
@@ -83,7 +84,6 @@ def entries(
             continue
         if needle and needle not in title.casefold():
             continue
-        art = ART.get(kind)
         result.append(
             StoreEntry(
                 kind=kind,
@@ -92,7 +92,7 @@ def entries(
                 tier_help=TIER_HELP[game_tier],
                 delivery_label=delivery,
                 size_bytes=backends.install_size_hint(kind),
-                art_folder=art[0] if art else None,
+                has_art=kind in ART or kind in publisher_art_kinds(),
                 notice=backends.page_notice(kind),
                 installed=kind in installed_kinds,
             )

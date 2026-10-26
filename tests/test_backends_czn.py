@@ -2062,6 +2062,106 @@ class TestPrebuiltStub:
         assert hashlib.sha256(data).hexdigest() == czn_backend.STUB_PREBUILT_SHA256
 
 
+class TestStubRefresh:
+    """#528: a profile's stub is compared with the shipped one on every launch."""
+
+    SHIPPED = b"MZ-shipped-stub"
+
+    def _backend(self, make_backend_context, monkeypatch, tmp_path, *, valid=True):
+        import hashlib
+
+        src = tmp_path / "assets" / "czn_pcsdk_stub.exe"
+        src.parent.mkdir()
+        src.write_bytes(self.SHIPPED)
+        digest = hashlib.sha256(self.SHIPPED).hexdigest() if valid else "0" * 64
+        monkeypatch.setattr(czn_backend, "STUB_PREBUILT", src)
+        monkeypatch.setattr(czn_backend, "STUB_PREBUILT_SHA256", digest)
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        messages: list[str] = []
+        monkeypatch.setattr(backend, "info", lambda message, **data: messages.append(message))
+        return backend, messages
+
+    def test_a_missing_stub_is_installed_and_reported_as_shipped(
+        self, make_backend_context, monkeypatch, tmp_path
+    ):
+        backend, messages = self._backend(make_backend_context, monkeypatch, tmp_path)
+        stub = backend._ensure_stub()
+        assert stub.read_bytes() == self.SHIPPED
+        assert any("shipped" in m and "sha256" in m for m in messages)
+
+    def test_the_shipped_stub_is_left_untouched(self, make_backend_context, monkeypatch, tmp_path):
+        backend, messages = self._backend(make_backend_context, monkeypatch, tmp_path)
+        stub = backend._ensure_stub()
+        before = stub.stat().st_ino
+        messages.clear()
+        assert backend._ensure_stub() == stub
+        assert stub.stat().st_ino == before
+        assert not stub.with_name(stub.name + ".old").exists()
+        assert any("shipped" in m and "differs" not in m for m in messages)
+
+    def test_a_different_stub_is_replaced_and_the_old_one_kept(
+        self, make_backend_context, monkeypatch, tmp_path
+    ):
+        backend, messages = self._backend(make_backend_context, monkeypatch, tmp_path)
+        stub = backend._stub()
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_bytes(b"MZ-go-spike")
+        assert backend._ensure_stub() == stub
+        assert stub.read_bytes() == self.SHIPPED
+        assert stub.with_name(stub.name + ".old").read_bytes() == b"MZ-go-spike"
+        assert any("replaced" in m and ".old" in m for m in messages)
+
+    def test_the_backup_is_overwritten_not_accumulated(
+        self, make_backend_context, monkeypatch, tmp_path
+    ):
+        backend, _ = self._backend(make_backend_context, monkeypatch, tmp_path)
+        stub = backend._stub()
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        old = stub.with_name(stub.name + ".old")
+        old.write_bytes(b"ancient")
+        stub.write_bytes(b"second")
+        backend._ensure_stub()
+        assert old.read_bytes() == b"second"
+        assert sorted(p.name for p in stub.parent.iterdir()) == sorted([stub.name, old.name])
+
+    def test_without_a_verified_shipped_stub_the_profile_copy_is_kept(
+        self, make_backend_context, monkeypatch, tmp_path
+    ):
+        backend, messages = self._backend(make_backend_context, monkeypatch, tmp_path, valid=False)
+        stub = backend._stub()
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_bytes(b"locally built")
+        assert backend._ensure_stub() == stub
+        assert stub.read_bytes() == b"locally built"
+        assert not stub.with_name(stub.name + ".old").exists()
+        assert any("differs from the shipped" in m for m in messages)
+
+    def test_an_unreadable_stub_does_not_crash_the_launch(
+        self, make_backend_context, monkeypatch, tmp_path
+    ):
+        backend, _ = self._backend(make_backend_context, monkeypatch, tmp_path)
+        stub = backend._stub()
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_bytes(b"x")
+        stub.chmod(0)
+        try:
+            assert backend._ensure_stub() == stub
+        finally:
+            stub.chmod(0o755)
+
+    def test_stub_identity_reports_prefix_and_shipped_flag(self, monkeypatch, tmp_path):
+        import hashlib
+
+        path = tmp_path / "stub.exe"
+        path.write_bytes(self.SHIPPED)
+        digest = hashlib.sha256(self.SHIPPED).hexdigest()
+        monkeypatch.setattr(czn_backend, "STUB_PREBUILT_SHA256", digest)
+        assert czn_backend.stub_identity(path) == (digest[:12], True)
+        path.write_bytes(b"other")
+        assert czn_backend.stub_identity(path) == (hashlib.sha256(b"other").hexdigest()[:12], False)
+        assert czn_backend.stub_identity(tmp_path / "missing.exe") == (None, False)
+
+
 class TestProtonWithoutUmu:
     def _backend(self, make_backend_context, tmp_path, monkeypatch):
         proton = tmp_path / "MyProton"

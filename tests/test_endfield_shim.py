@@ -11,6 +11,13 @@ from pathlib import Path
 import pytest
 
 from nadare.core import endfield_shim as es
+from nadare.core import sevenzip
+
+
+@pytest.fixture(autouse=True)
+def no_bundled_7zip(tmp_path, monkeypatch):
+    """Unit tests must never pick up the real bundled 7-Zip a release build fetched."""
+    monkeypatch.setattr(sevenzip, "BUNDLED", tmp_path / "no-bundled-7zzs")
 
 MZ = b"MZ" + b"\0" * 2048
 
@@ -29,6 +36,8 @@ MZ = b"MZ" + b"\0" * 2048
         ("file:///tmp/hg-cdn.com/x.exe", False),
     ],
 )
+
+
 def test_installer_host_allowed_checks_the_real_hostname(url, allowed):
     assert es.installer_host_allowed(url) is allowed
 
@@ -153,9 +162,18 @@ def test_extract_games_exe_pulls_only_that_file_and_checks_it_is_a_pe(tmp_path):
         inst, dest, which=lambda c: "/usr/bin/7z" if c == "7z" else None, run=_fake_7z(calls)
     )
     assert got == dest and dest.read_bytes() == MZ
-    assert (
-        calls[0][:2] == ["/usr/bin/7z", "x"] and "Games.exe" in calls[0] and str(inst) in calls[0]
-    )
+    assert calls[0][:2] == ["/usr/bin/7z", "x"]
+    assert "Games.exe" in calls[0] and str(inst) in calls[0]
+
+
+def test_extract_games_exe_uses_bundled_7zip_when_system_missing(tmp_path, monkeypatch):
+    inst = tmp_path / "GryphlineLauncher.exe"
+    inst.write_bytes(b"nsis")
+    calls = []
+    monkeypatch.setattr(es.sevenzip, "find", lambda *, which: "/cache/bin/7zzs-test")
+    got = es.extract_games_exe(inst, tmp_path / "Games.exe", which=lambda _: None,
+                               run=_fake_7z(calls))
+    assert got.read_bytes() == MZ and calls[0][0] == "/cache/bin/7zzs-test"
 
 
 def test_extract_games_exe_rejects_non_pe_and_missing_7z_and_missing_file(tmp_path):
@@ -353,3 +371,92 @@ int main(void)
     assert built.returncode == 0, built.stderr
     ran = subprocess.run([str(exe)], capture_output=True, text=True, check=False)
     assert ran.returncode == 0, ran.stderr
+
+
+# ------------------------------------------------ #527: errors name the failing step
+def test_shim_error_carries_a_step_and_a_hint_in_its_text():
+    err = es.ShimError("boom", step="extract", hint="try this")
+    assert err.step == "extract" and err.hint == "try this"
+    assert str(err) == "boom (step: extract). try this"
+    assert str(es.ShimError("plain")) == "plain" and es.ShimError("plain").step == ""
+
+
+def test_a_missing_compiler_is_the_build_step_with_install_advice(tmp_path):
+    src = tmp_path / "s.c"
+    src.write_text("x")
+    with pytest.raises(es.ShimError) as caught:
+        es.build_shim(
+            tmp_path / "o.exe", source=src, cc=None, which=lambda c: None, run=_fake_cc([])
+        )
+    assert caught.value.step == "build" and "install mingw-w64" in str(caught.value).lower()
+
+
+def test_a_compiler_failure_is_the_build_step(tmp_path):
+    src = tmp_path / "s.c"
+    src.write_text("x")
+    with pytest.raises(es.ShimError) as caught:
+        es.build_shim(
+            tmp_path / "o.exe", source=src, cc="g", which=lambda c: c, run=_fake_cc([], fail=True)
+        )
+    assert caught.value.step == "build" and "boom" in str(caught.value)
+
+
+def test_a_launcher_api_network_failure_is_the_fetch_step_and_mentions_the_network(tmp_path):
+    prefix = tmp_path / "pfx"
+    (prefix / "drive_c").mkdir(parents=True)
+
+    def down(_url):
+        raise OSError("connection refused")
+
+    with pytest.raises(es.ShimError) as caught:
+        es._obtain_games(
+            prefix,
+            tmp_path / "data" / "Games.exe",
+            fetch_json=down,
+            download=lambda u, d: None,
+            which=lambda c: "/x/7z",
+            extract_run=_fake_7z([]),
+        )
+    text = str(caught.value).lower()
+    assert caught.value.step == "fetch" and "connection refused" in text and "network" in text
+
+
+def test_an_installer_download_failure_is_the_fetch_step(tmp_path):
+    def broken(url, dest):
+        raise es._dl.DownloadError("HTTP 404")
+
+    with pytest.raises(es.ShimError) as caught:
+        _obtain(tmp_path, "https://launcher.hg-cdn.com/x.exe", broken)
+    assert caught.value.step == "fetch" and "404" in str(caught.value)
+    assert not list((tmp_path / "data").glob("launcher-*.exe"))  # no temp file left behind
+
+
+def test_an_unexpected_api_answer_is_the_fetch_step_and_says_the_publisher_changed(tmp_path):
+    prefix = tmp_path / "pfx"
+    (prefix / "drive_c").mkdir(parents=True)
+    with pytest.raises(es.ShimError) as caught:
+        es._obtain_games(
+            prefix,
+            tmp_path / "data" / "Games.exe",
+            fetch_json=lambda _u: {"nothing": 1},
+            download=lambda u, d: None,
+            which=lambda c: "/x/7z",
+            extract_run=_fake_7z([]),
+        )
+    assert caught.value.step == "fetch" and "report" in str(caught.value).lower()
+
+
+def test_missing_7zip_is_the_extract_step_with_install_advice(tmp_path):
+    with pytest.raises(es.ShimError) as caught:
+        es.extract_games_exe(tmp_path / "i.exe", tmp_path / "o.exe", which=lambda c: None)
+    assert caught.value.step == "extract" and "7" in str(caught.value)
+
+
+def test_an_installer_without_games_exe_is_the_extract_step_and_says_to_report_it(tmp_path):
+    installer = tmp_path / "i.exe"
+    installer.write_bytes(b"nsis")
+    with pytest.raises(es.ShimError) as caught:
+        es.extract_games_exe(
+            installer, tmp_path / "o.exe", which=lambda c: "/x/7z", run=_fake_7z([], place=False)
+        )
+    assert caught.value.step == "extract" and "report" in str(caught.value).lower()

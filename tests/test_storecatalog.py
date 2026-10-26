@@ -66,7 +66,7 @@ def test_entries_include_backend_facts_and_installed_marker(monkeypatch) -> None
     assert result["direct-bd2"].installed is False
     assert result["direct-pgr"].size_bytes == backends.install_size_hint("direct-pgr")
     assert result["direct-bd2"].size_bytes is None
-    assert result["direct-pgr"].art_folder == "pgr"
+    assert result["direct-pgr"].has_art is True
     assert isinstance(result["direct-pgr"], StoreEntry)
 
 
@@ -97,7 +97,9 @@ def test_older_games_get_their_tiers_and_delivery_labels() -> None:
     for kind in ("stove-czn", "arknights-yostar", "stellasora-yostar"):
         assert by_kind[kind].tier == TIER_VERIFIED
         assert by_kind[kind].tier_help == TIER_HELP[TIER_VERIFIED]
-        assert by_kind[kind].art_folder is None
+    assert by_kind["stove-czn"].has_art is False
+    assert by_kind["arknights-yostar"].has_art is False
+    assert by_kind["stellasora-yostar"].has_art is False
     assert by_kind["stove-czn"].title == "Chaos Zero Nightmare"
     assert by_kind["stove-czn"].delivery_label == DIRECT_LABEL
     assert by_kind["arknights-yostar"].title == "Arknights"

@@ -11,15 +11,18 @@ by injecting ``fetch``, so the whole check is testable without a network.
 from __future__ import annotations
 
 import inspect
+import json
 import logging
 import os
 import re
+import time
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
-from . import download, hosting, sandbox
+from . import download, hosting, paths, sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,16 @@ _VERSION_WIDTH = 8
 
 #: Release-page hosts a known API host may legitimately link to.
 _RELEASE_SITE_ALIASES = {"api.github.com": "github.com"}
+
+#: How long a good answer is reused, and how long to leave the network alone after a failure
+#: (GitHub's anonymous API allows 60 requests an hour per IP, which a shared IP or VPN exhausts).
+CACHE_NAME = "update-check.json"
+FRESH_SECONDS = 6 * 3600
+BACKOFF_SECONDS = 3600
+_PAYLOAD_KEYS = ("tag_name", "html_url", "name", "prerelease", "draft")
+_GITHUB_LATEST_API = re.compile(
+    r"https://api\.github\.com/repos/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)/releases/latest"
+)
 
 #: Position of the "plain release" flag in the three-slot tail of a
 #: :func:`version_key` tuple: ``1`` for a final release, ``0`` for a pre-release.
@@ -175,6 +188,115 @@ def _default_fetch(url: str, timeout: int) -> Any:
     return download.fetch_json(url, timeout=timeout)
 
 
+class _Redirect(Exception):
+    """Carries the ``Location`` of a redirect that was deliberately not followed."""
+
+    def __init__(self, url: str) -> None:
+        super().__init__(url)
+        self.url = url
+
+
+class _StopAtRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        if fp is not None:
+            fp.close()
+        raise _Redirect(urljoin(req.full_url, newurl))
+
+
+def _github_latest_redirect(page: str, timeout: int = 10) -> str | None:
+    """Where GitHub's ``releases/latest`` page redirects to, without following it.
+
+    The web page is not behind the API's rate limit.
+    """
+    opener = urllib.request.build_opener(_StopAtRedirect())
+    try:
+        with opener.open(download._request(page), timeout=timeout):  # noqa: S310
+            return None
+    except _Redirect as found:
+        return found.url
+    except Exception:  # noqa: BLE001 - this is only a fallback
+        return None
+
+
+def _payload_from_redirect(url: str, redirect: Callable[[str], str | None]) -> dict | None:
+    """A minimal release payload from the ``releases/latest`` redirect, GitHub URLs only."""
+    match = _GITHUB_LATEST_API.fullmatch(url)
+    if not match:
+        return None
+    owner, repo = match.groups()
+    location = redirect(f"https://github.com/{owner}/{repo}/releases/latest")
+    if not location:
+        return None
+    tag_match = re.fullmatch(
+        rf"https://github\.com/{re.escape(owner)}/{re.escape(repo)}/releases/tag/([A-Za-z0-9._+-]+)",
+        location,
+        re.IGNORECASE,
+    )
+    if not tag_match or version_key(tag_match.group(1)) is None:
+        return None
+    return {"tag_name": tag_match.group(1), "html_url": location, "name": tag_match.group(1)}
+
+
+def _read_cache(url: str) -> dict[str, Any] | None:
+    try:
+        entry = json.loads((paths.cache_dir() / CACHE_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(entry, dict) or entry.get("url") != url:
+        return None
+    return entry
+
+
+def _write_cache(entry: dict[str, Any]) -> None:
+    path = paths.cache_dir() / CACHE_NAME
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        part = path.with_name(f"{path.name}.{os.getpid()}.part")
+        part.write_text(json.dumps(entry), encoding="utf-8")
+        os.replace(part, path)
+    except OSError:
+        logger.debug("could not write the update-check cache", exc_info=True)
+
+
+def _within(stamp: Any, now: float, seconds: float) -> bool:
+    return isinstance(stamp, (int, float)) and 0 <= now - stamp < seconds
+
+
+def _cached_payload(
+    url: str,
+    timeout: int,
+    fetch: Callable[[str, int], Any],
+    redirect: Callable[[str], str | None],
+    now: float,
+) -> Any:
+    """The release payload, from the disk cache while fresh and during a failure backoff."""
+    entry = _read_cache(url) or {}
+    last_good = entry.get("payload") if isinstance(entry.get("payload"), dict) else None
+    if last_good is not None and _within(entry.get("ok_at"), now, FRESH_SECONDS):
+        return last_good
+    if _within(entry.get("failed_at"), now, BACKOFF_SECONDS):
+        return last_good
+    try:
+        payload = fetch(url, timeout)
+    except Exception:  # noqa: BLE001 - rate limits and outages are expected here
+        logger.debug("update check failed for %s", url, exc_info=True)
+        payload = None
+    if not isinstance(payload, dict):
+        payload = _payload_from_redirect(url, redirect)
+    if isinstance(payload, dict):
+        _write_cache(
+            {
+                "url": url,
+                "ok_at": now,
+                "failed_at": None,
+                "payload": {k: payload[k] for k in _PAYLOAD_KEYS if k in payload},
+            }
+        )
+        return payload
+    _write_cache({"url": url, "ok_at": entry.get("ok_at"), "failed_at": now, "payload": last_good})
+    return last_good
+
+
 def managed_updates() -> bool:
     """True when a package manager (AUR, Flatpak) installs and updates Nadare.
 
@@ -191,8 +313,17 @@ def check_latest(
     url: str | None = None,
     timeout: int = 10,
     fetch: Callable[[str, int], Any] | None = None,
+    cached_fetch: Callable[[str, int], Any] | None = None,
+    redirect: Callable[[str], str | None] | None = None,
+    now: float | None = None,
 ) -> UpdateInfo | None:
-    """Return the latest release when it is newer than ``current``, else ``None``."""
+    """Return the latest release when it is newer than ``current``, else ``None``.
+
+    By default the answer is cached on disk (six hours, one-hour backoff after a failure) and,
+    for a GitHub API URL, falls back to the ``releases/latest`` page redirect when the API
+    refuses. An injected ``fetch`` bypasses all of that; ``cached_fetch`` is the same with the
+    cache on (for tests).
+    """
     if current is None:
         import nadare
 
@@ -203,14 +334,20 @@ def check_latest(
     if not url or not url.startswith("https://"):
         return None
 
-    if fetch is None:
-        fetch = _default_fetch
-
-    try:
-        payload = fetch(url, timeout)
-    except Exception:  # noqa: BLE001 - an update check must never break startup
-        logger.debug("update check failed for %s", url, exc_info=True)
-        return None
+    if fetch is not None:
+        try:
+            payload = fetch(url, timeout)
+        except Exception:  # noqa: BLE001 - an update check must never break startup
+            logger.debug("update check failed for %s", url, exc_info=True)
+            return None
+    else:
+        payload = _cached_payload(
+            url,
+            timeout,
+            cached_fetch or _default_fetch,
+            redirect or _github_latest_redirect,
+            time.time() if now is None else now,
+        )
 
     if not isinstance(payload, dict):
         return None

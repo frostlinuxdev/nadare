@@ -192,6 +192,7 @@ mkdir -p "$output_dir"
 image="$(cd "$output_dir" && pwd)/Nadare-${version}-x86_64.AppImage"
 
 echo "[*] Nadare ${version}: building PyInstaller onedir bundle (${PY})"
+bash scripts/fetch_7zip.sh
 "$PY" -m PyInstaller --clean -y packaging/nadare.spec
 
 # --- stage the AppDir -------------------------------------------------------
