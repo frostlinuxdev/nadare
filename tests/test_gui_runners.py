@@ -132,7 +132,7 @@ def test_runner_size_counts_files_and_ignores_symlinks(tmp_path):
 
 def test_human_size_and_status_text():
     assert human_size(512) == "512 B"
-    assert human_size(1536 * 1024 * 1024) == "1.5 GB"
+    assert human_size(1536 * 1024 * 1024) == "1.5 GiB"
     assert status_text(Path("dwproton-11.0-15-x86_64")) == "recommended (tested)"
     assert status_text(Path("dwproton-11.0-13-x86_64")) == "untested"
     assert status_text(Path("Custom")) == "custom"

@@ -96,7 +96,7 @@ def test_plan_missing_without_verify_checks_sizes_only(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        dd, "hash_file", lambda *a, **k: (_ for _ in ()).throw(AssertionError("hashed"))
+        dd, "_digest_pass", lambda *a, **k: (_ for _ in ()).throw(AssertionError("hashed"))
     )
     files, _ = dd.plan_missing(plan, tmp_path, verify=False)
     assert sorted(f.path for f in files) == ["gone.bin", "short.bin"]

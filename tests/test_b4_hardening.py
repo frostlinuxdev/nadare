@@ -283,3 +283,18 @@ def test_the_gui_exits_cleanly_without_a_display(monkeypatch):
     monkeypatch.delenv("QT_QPA_PLATFORM")
     monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
     gui._require_display()
+
+
+def test_operation_log_lines_are_masked(tmp_path, monkeypatch):
+    pytest.importorskip("PyQt6.QtWidgets")
+    from nadare.gui import workers
+
+    monkeypatch.setattr(workers.paths, "logs_dir", lambda: tmp_path / "logs")
+    holder = type("T", (), {"_log": None, "_profile": "p", "_operation": "login"})()
+    holder._open_log = lambda: workers.BackendWorker._open_log(holder)  # type: ignore[attr-defined]
+    workers.BackendWorker._note(holder, "[info] token=abcdef0123456789abcdef0123456789 ok")  # type: ignore[attr-defined]
+    workers.BackendWorker._note(holder, "Authorization: Bearer abcdef0123456789abcdef01234567")  # type: ignore[attr-defined]
+    holder._log.close()
+    text = (tmp_path / "logs" / "p-login.log").read_text(encoding="utf-8")
+    assert "abcdef0123456789" not in text
+    assert "ok" in text

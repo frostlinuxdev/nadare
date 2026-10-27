@@ -23,7 +23,7 @@ from typing import Any
 from ..core import directdl, endfield_shim, graphics, nte_launcher
 from ..core.backends import BackendError, Option
 from ..core.sources import Fetch, aethergazer, bd2, endfield, gfl2, hoyo, mongil, nte, pgr, wuwa
-from . import bd2_news, endfield_news, hoyo_news, kuro_news, nte_news
+from . import bd2_news, endfield_news, hoyo_art, hoyo_news, kuro_news, nte_news
 from .arknights import INSTALLED_PREFIX_KEY, ArknightsBackend
 from .nmlogin import NetmarbleLoginMixin
 from .wine import profile_setting
@@ -137,6 +137,9 @@ class DirectBackend(ArknightsBackend):
         )
         marker = self._install_marker_path()
         marker.parent.mkdir(parents=True, exist_ok=True)
+        # An install that finished before (a version is recorded, no marker) stays usable if
+        # this update fails or is cancelled: its files are only replaced one by one, verified.
+        was_complete = not marker.exists() and self._read_version_file() is not None
         marker.write_text("sync in progress\n", encoding="utf-8")
         from ..core.events import Event
 
@@ -150,9 +153,15 @@ class DirectBackend(ArknightsBackend):
                 workers=workers,
             )
         except directdl.DirectError as exc:
+            if was_complete:
+                marker.unlink(missing_ok=True)
             raise BackendError(
                 f"{self.display_name}: {exc}. Nothing was left half-installed; try again."
             ) from exc
+        except BaseException:
+            if was_complete:
+                marker.unlink(missing_ok=True)
+            raise
         marker.unlink(missing_ok=True)
         self._record_synced_version(plan)
         self.info(
@@ -393,9 +402,9 @@ class EndfieldBackend(DirectBackend):
     page_notice = (
         "Nadare downloads Arknights: Endfield (62 GB, 68 GB installed) straight from the "
         "server. The game only starts when Hypergryph's launcher is its parent process, so "
-        "Nadare starts it through a small helper (built from source with mingw-w64) that sets "
-        "the launcher's Games.exe as the parent; the launcher itself never runs. Needs "
-        "mingw-w64 installed. Steam installs start directly.",
+        "Nadare starts it through a small bundled helper (source in the repository, built with "
+        "mingw-w64) that sets the launcher's Games.exe as the parent; the launcher itself "
+        "never runs. Steam installs start directly.",
         "https://endfield.gryphline.com/",
         "Official site",
     )
@@ -463,6 +472,8 @@ class GenshinBackend(DirectBackend):
     install_size_hint = int(100.8 * GB)
     news_source = staticmethod(hoyo_news.fetch_genshin_news)
     official_image_hosts = hoyo_news.IMAGE_HOSTS
+    art_source = staticmethod(hoyo_art.fetch_genshin_art)
+    art_image_hosts = hoyo_art.IMAGE_HOSTS
     plan_factory = staticmethod(lambda fetch=None: hoyo.resolve("hk4e_global", fetch))
 
 
@@ -512,6 +523,8 @@ class StarRailBackend(DirectBackend):
     install_size_hint = int(107.6 * GB)
     news_source = staticmethod(hoyo_news.fetch_hsr_news)
     official_image_hosts = hoyo_news.IMAGE_HOSTS
+    art_source = staticmethod(hoyo_art.fetch_hsr_art)
+    art_image_hosts = hoyo_art.IMAGE_HOSTS
     plan_factory = staticmethod(lambda fetch=None: hoyo.resolve("hkrpg_global", fetch))
 
 
@@ -525,6 +538,8 @@ class Hi3Backend(DirectBackend):
     install_size_hint = int(36.7 * GB)
     news_source = staticmethod(hoyo_news.fetch_hi3_news)
     official_image_hosts = hoyo_news.IMAGE_HOSTS
+    art_source = staticmethod(hoyo_art.fetch_hi3_art)
+    art_image_hosts = hoyo_art.IMAGE_HOSTS
     plan_factory = staticmethod(lambda fetch=None: hoyo.resolve("bh3_global", fetch))
 
 
@@ -538,6 +553,8 @@ class ZenlessBackend(DirectBackend):
     install_size_hint = int(85.9 * GB)
     news_source = staticmethod(hoyo_news.fetch_zzz_news)
     official_image_hosts = hoyo_news.IMAGE_HOSTS
+    art_source = staticmethod(hoyo_art.fetch_zzz_art)
+    art_image_hosts = hoyo_art.IMAGE_HOSTS
     plan_factory = staticmethod(lambda fetch=None: hoyo.resolve("nap_global", fetch))
 
 

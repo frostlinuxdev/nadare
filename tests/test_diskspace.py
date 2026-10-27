@@ -44,7 +44,7 @@ def test_check_space_raises_with_mount_and_sizes(tmp_path, monkeypatch):
         diskspace.check_space(tmp_path, 1000, margin=0.05)
 
     assert excinfo.value.code == 4
-    assert excinfo.value.message == ("Not enough disk space on /mnt/games: need 1.0 KiB, 0 B free")
+    assert excinfo.value.message == ("Not enough disk space on /mnt/games: need 1 KiB, 0 B free")
 
 
 def test_check_space_accepts_when_enough(tmp_path, monkeypatch):
@@ -89,3 +89,34 @@ def test_disk_space_report_degrades_on_statvfs_failure(tmp_path, monkeypatch):
     # ``paths.data_dir()`` and the profile's install_dir share the fake mount;
     # the first candidate emits the unknown hint, the second is deduplicated.
     assert _disk_space_report(cfg) == ["  unknown free on /mnt/games"]
+
+
+def test_human_size_uses_three_significant_digits_and_trims_a_zero_decimal():
+    h = diskspace.human_size
+    assert h(1 << 30) == "1 GiB"
+    assert h(int(1.5 * (1 << 30))) == "1.5 GiB"  # was rounded to "2 GiB"
+    assert h(int(1.04 * (1 << 30))) == "1 GiB"
+    assert h(int(9.96 * (1 << 20))) == "10 MiB"  # never "10.0"
+    assert h(int(12.6 * (1 << 20))) == "13 MiB"
+    assert h(1023) == "1023 B"
+    assert h(1024 * 1024 - 1) == "1 MiB"  # rounds up into the next unit, not "1024 KiB"
+    assert h(1 << 40) == "1 TiB"
+    assert h(-5) == "0 B"
+
+
+def test_human_speed():
+    assert diskspace.human_speed(0) == "-- MiB/s"
+    assert diskspace.human_speed(52 * (1 << 20)) == "52 MiB/s"
+    assert diskspace.human_speed(int(2.5 * (1 << 20))) == "2.5 MiB/s"
+    assert diskspace.human_speed(300) == "300 B/s"
+
+
+def test_every_ui_size_formatter_is_the_shared_one():
+    from nadare.core import yostar
+    from nadare.gui import logs_dialog, runners_dialog
+
+    for size in (0, 700, 1536, 5 << 20, int(1.5 * (1 << 30)), 88 << 30):
+        expected = diskspace.human_size(size)
+        assert runners_dialog.human_size(size) == expected
+        assert logs_dialog._human_size(size) == expected
+        assert yostar._format_size(size) == expected

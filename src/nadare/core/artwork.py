@@ -143,13 +143,31 @@ _PUBLISHER_FIXED: dict[str, tuple[str, tuple[str, ...]]] = {
 _PUBLISHER_NEWS: frozenset[str] = frozenset({"arknights-yostar", "stellasora-yostar"})
 
 
+#: HoYoverse games, whose backend class carries ``art_source`` (the launcher games feed: a cover
+#: and a hero per game) and ``art_image_hosts``.
+_PUBLISHER_HOYO: frozenset[str] = frozenset(
+    {"direct-genshin", "direct-hsr", "direct-zzz", "direct-hi3"}
+)
+
+
 def publisher_art_kinds() -> frozenset[str]:
     """Backend kinds whose cover can come from their publisher."""
-    return frozenset(_PUBLISHER_OGP) | frozenset(_PUBLISHER_FIXED) | _PUBLISHER_NEWS
+    return (
+        frozenset(_PUBLISHER_OGP)
+        | frozenset(_PUBLISHER_FIXED)
+        | _PUBLISHER_NEWS
+        | _PUBLISHER_HOYO
+    )
 
 
 def _publisher_image_hosts(backend: str) -> tuple[str, ...] | None:
     """Hosts an official cover of ``backend`` may be served from, or ``None``."""
+    if backend in _PUBLISHER_HOYO:
+        from . import backends
+
+        feed_hosts = tuple(getattr(backends.get(backend), "art_image_hosts", ()) or ())
+        page_hosts = _PUBLISHER_OGP[backend][2] if backend in _PUBLISHER_OGP else ()
+        return tuple(dict.fromkeys((*feed_hosts, *page_hosts)))
     if backend in _PUBLISHER_OGP:
         return _PUBLISHER_OGP[backend][2]
     if backend in _PUBLISHER_FIXED:
@@ -781,11 +799,35 @@ class _OgImageParser(HTMLParser):
             self._twitter = content or None
 
 
+def _hoyo_covers(backend: str, kind: str) -> list[tuple[str, tuple[str, ...]]]:
+    """The launcher-feed image of ``kind`` ("cover" or "hero") for a HoYoverse game."""
+    from . import backends
+
+    cls = backends.get(backend)
+    source = getattr(cls, "art_source", None)
+    hosts = tuple(getattr(cls, "art_image_hosts", ()) or ())
+    if source is None or not hosts:
+        return []
+    try:
+        url = source().get(kind)
+    except Exception as exc:  # noqa: BLE001 - the launcher feed is an optional source
+        log.debug("HoYoverse art lookup failed (%s): %s", backend, exc)
+        return []
+    return [(url, hosts)] if url else []
+
+
 def _publisher_covers(profile: dict, kind: str) -> list[tuple[str, tuple[str, ...]]]:
     """Every official cover URL worth trying for ``profile``, best first."""
+    backend = str(profile.get("backend") or "")
+    if backend in _PUBLISHER_HOYO and kind in ("cover", "hero"):
+        found = _hoyo_covers(backend, kind)
+        if kind == "cover":
+            single = _publisher_og_image(profile, kind)  # the page image if the feed is down
+            if single:
+                found.append(single)
+        return found
     if kind != "cover":
         return []
-    backend = str(profile.get("backend") or "")
     if backend in _PUBLISHER_NEWS:
         return _news_covers(backend)
     single = _publisher_og_image(profile, kind)

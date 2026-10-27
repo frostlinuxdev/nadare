@@ -210,8 +210,73 @@ def redacted(text: str) -> str:
     return events.mask_known(report.redact(text, mask=False))
 
 
+#: Each log in a bundle is cut to its last 2 MiB (read_tail keeps whole lines), so a bundle
+#: stays small enough to attach to an issue.
+BUNDLE_FILE_BYTES = 2 * 1024 * 1024
+
+
+def bundle(
+    profiles: Iterable[str],
+    directory: Path | str | None,
+    dest: Path | str,
+    *,
+    profile: str | None = None,
+    redact: bool = True,
+    max_bytes_per_file: int = BUNDLE_FILE_BYTES,
+) -> int:
+    """Write every listed log (see :func:`list_logs`) into one zip at ``dest``.
+
+    Returns how many logs went in. Names are flat (a log's file name), each log is cut to its
+    end and, with ``redact``, has the username, paths and addresses hidden. A ``README.txt``
+    says what the bundle holds. The zip is written beside ``dest`` and moved into place, so a
+    failure leaves no partial file.
+    """
+    import tempfile
+    import zipfile
+    from datetime import datetime
+
+    from .. import __version__
+
+    target = Path(dest)
+    logs = list_logs(profiles, directory, profile=profile)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=target.name + ".", suffix=".tmp", dir=target.parent)
+    os.close(fd)
+    tmp = Path(temporary)
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
+            count = 0
+            for log in logs:
+                text = read_tail(log.path, max_bytes_per_file)
+                zf.writestr(log.path.name, redacted(text) if redact else text)
+                count += 1
+            hidden = (
+                "Your username, home path, host name and public addresses are hidden."
+                if redact
+                else "Your username and paths are NOT hidden: check before you share it."
+            )
+            noun = "log file" if count == 1 else "log files"
+            readme = (
+                f"Nadare log bundle\n"
+                f"Created: {datetime.now().astimezone().isoformat(timespec='seconds')}\n"
+                f"Nadare version: {__version__}\n"
+                f"{count} {noun}"
+                f"{f' for {profile}' if profile else ''}, each cut to its last "
+                f"{max_bytes_per_file // 1024} KiB.\n"
+                f"{hidden}\n"
+            )
+            zf.writestr("README.txt", readme)
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return count
+
+
 __all__ = [
+    "BUNDLE_FILE_BYTES",
     "LogFile",
+    "bundle",
     "filter_lines",
     "list_logs",
     "read_tail",

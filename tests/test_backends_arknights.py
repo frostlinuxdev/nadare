@@ -511,18 +511,21 @@ class TestVerifyAndLogin:
 
         assert target.exists()
 
-    def test_uninstall_removes_recorded_symlinked_prefix(self, tmp_path):
-        """A recorded symlinked prefix removes the resolved tree and the link."""
-        target = tmp_path / "real-prefix"
-        _install_launcher(target)
-        link = tmp_path / "linked"
-        link.symlink_to(target, target_is_directory=True)
-        backend = _backend(tmp_path, {"prefix": str(link), "installed_prefix": str(link)})
+    def test_uninstall_through_a_symlinked_prefix_removes_only_the_link(self, tmp_path):
+        """#614: a prefix that is a link (moved to another disk, or swapped for a
+        link after install) may point at a folder holding other data. Only the
+        link goes; the folder it points at is left alone."""
+        victim = tmp_path / "victim"
+        _install_launcher(victim)
+        (victim / "user-data.txt").write_text("keep")
+        prefix = tmp_path / "prefix"
+        prefix.symlink_to(victim, target_is_directory=True)
+        backend = _backend(tmp_path, {"prefix": str(prefix), "installed_prefix": str(prefix)})
 
         backend.uninstall()
 
-        assert not target.exists()
-        assert not link.exists()
+        assert not prefix.is_symlink()
+        assert (victim / "user-data.txt").exists()
 
     def test_uninstall_purge_on_symlinked_profile_dir(self, tmp_path):
         """Purging a profile whose data dir is a symlink removes the tree and

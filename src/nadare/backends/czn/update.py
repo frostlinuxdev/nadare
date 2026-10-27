@@ -663,7 +663,18 @@ def _write_local_version(manifest: dict, target: int) -> None:
         upf["local_version"] = int(manifest.get("version_no", target))
         upf.setdefault("game_id", SERVICE)
         UPF.parent.mkdir(parents=True, exist_ok=True)
-        UPF.write_text(json.dumps(upf, indent=4))
+        # Write a sibling file and swap it in: a full disk or a kill mid-write
+        # must not leave the game's manifest truncated.
+        fd, tmp = tempfile.mkstemp(dir=str(UPF.parent), prefix=f".{UPF.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(upf, indent=4))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, UPF)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
     except Exception as e:
         print(f"[!] could not update {UPF.name}: {e}")
 

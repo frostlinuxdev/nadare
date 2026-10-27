@@ -11,6 +11,7 @@ a server that supports ``Range`` lets an interrupted download resume with
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import errno
 import hashlib
@@ -520,7 +521,7 @@ def remote_size(
     timeout: int = DEFAULT_TIMEOUT,
     redirect_allowed: Callable[[str], bool] | None = None,
 ) -> int | None:
-    """Best-effort ``Content-Length`` for ``url`` via HEAD; ``None`` if unknown.
+    """Best-effort size of ``url`` via HEAD (or a one-byte ranged GET); ``None`` if unknown.
 
     Used to run a disk-space check before a large download. Servers that
     reject HEAD, hide the length, or are unreachable simply yield ``None`` and
@@ -529,12 +530,22 @@ def remote_size(
     enforced per hop and credentials never follow a cross-origin/downgrade hop
     (N1).
     """
-    request = _request(url, headers)
-    request.method = "HEAD"
     opener = _build_opener(redirect_allowed)
+    size = _size_from(opener, _request(url, headers), "HEAD", timeout)
+    if size is not None:
+        return size
+    # Signing CDNs often answer HEAD with 403/405 while GET works: ask for one byte and
+    # read the total from Content-Range instead.
+    ranged = _request(url, {**(headers or {}), "Range": "bytes=0-0"})
+    return _size_from(opener, ranged, "GET", timeout)
+
+
+def _size_from(opener, request, method: str, timeout: int) -> int | None:
+    request.method = method
     try:
         with opener.open(request, timeout=timeout) as response:
-            length = response.headers.get("Content-Length")
+            total = response.headers.get("Content-Range", "").rpartition("/")[2]
+            length = total if total.isdigit() else response.headers.get("Content-Length")
     except Exception:  # noqa: BLE001 - an unknown size is not an error
         return None
     try:
@@ -667,12 +678,21 @@ class HttpClientPool:
         conn = store.get(key)
         if conn is not None:
             return conn
+        proxy = _proxy_for(scheme, host)
         if scheme == "https":
-            conn = http.client.HTTPSConnection(
-                host, port, timeout=timeout, context=tls.ssl_context()
-            )
-        else:
+            if proxy is None:
+                conn = http.client.HTTPSConnection(
+                    host, port, timeout=timeout, context=tls.ssl_context()
+                )
+            else:
+                conn = http.client.HTTPSConnection(
+                    proxy[0], proxy[1], timeout=timeout, context=tls.ssl_context()
+                )
+                conn.set_tunnel(host, port, headers=proxy[2])
+        elif proxy is None:
             conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        else:
+            conn = http.client.HTTPConnection(proxy[0], proxy[1], timeout=timeout)
         store[key] = conn
         with self._lock:
             self._all.append(conn)
@@ -716,15 +736,21 @@ class HttpClientPool:
             scheme, host, port, path = _split_url(current)
             deadline = timeout or self.timeout
             conn = self._connection(scheme, host, port, deadline)
+            proxy = _proxy_for(scheme, host)
+            send_headers = request_headers
+            if proxy is not None and scheme == "http":
+                # A plain-HTTP proxy wants the absolute URL and its own credentials.
+                path = current
+                send_headers = {**request_headers, **proxy[2]}
             try:
-                conn.request("GET", path, headers=request_headers)
+                conn.request("GET", path, headers=send_headers)
                 response = conn.getresponse()
             except (http.client.HTTPException, OSError):
                 # A pooled keep-alive connection may have been closed by the
                 # peer; drop it and retry once on a fresh socket.
                 self._forget(scheme, host, port)
                 conn = self._connection(scheme, host, port, deadline)
-                conn.request("GET", path, headers=request_headers)
+                conn.request("GET", path, headers=send_headers)
                 response = conn.getresponse()
             if response.status in (301, 302, 303, 307, 308):
                 location = response.getheader("Location")
@@ -767,6 +793,33 @@ class HttpClientPool:
                 conn.close()
             except OSError:
                 pass
+
+
+def _proxy_for(scheme: str, host: str) -> tuple[str, int, dict[str, str]] | None:
+    """The ``http://`` proxy the environment names for ``scheme``/``host``, if any.
+
+    Honours ``http_proxy``/``https_proxy``/``no_proxy`` like the urllib paths do.
+    Returns ``(proxy_host, proxy_port, proxy_headers)``.
+    """
+    try:
+        proxies = urllib.request.getproxies()
+        value = proxies.get(scheme)
+        if not value or urllib.request.proxy_bypass(host):
+            return None
+        parsed = urllib.parse.urlparse(value if "//" in value else f"http://{value}")
+        if parsed.scheme != "http" or not parsed.hostname:
+            return None
+        port = parsed.port or 80
+    except ValueError:
+        return None
+    headers: dict[str, str] = {}
+    if parsed.username is not None:
+        token = base64.b64encode(
+            f"{urllib.parse.unquote(parsed.username)}:"
+            f"{urllib.parse.unquote(parsed.password or '')}".encode()
+        ).decode("ascii")
+        headers["Proxy-Authorization"] = f"Basic {token}"
+    return parsed.hostname, port, headers
 
 
 def _split_url(url: str) -> tuple[str, str, int, str]:

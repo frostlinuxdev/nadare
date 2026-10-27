@@ -37,6 +37,13 @@ LAUNCHER_API = (
 #: Hosts (and their subdomains) allowed to serve the launcher installer.
 ALLOWED_INSTALLER_HOSTS = ("hg-cdn.com", "gryphline.com")
 
+#: The helper also ships prebuilt (compiled from ``shim_src/suspend_start.c`` with mingw-w64), so
+#: users without a compiler can still play. It is only used when it matches this digest, and
+#: ``SHIM_PREBUILT_SOURCE_SHA256`` pins the source it was built from (a test keeps them in step).
+SHIM_PREBUILT = Path(__file__).resolve().parents[1] / "assets" / "endfield_suspend_start.exe"
+SHIM_PREBUILT_SHA256 = "a5e7e29c3996f80ce6f68a257ffb00651bd83672d8b946a1b896bd5c3a5b8fb2"
+SHIM_PREBUILT_SOURCE_SHA256 = "f4283acd84c5820d3d83071b12775ed4d521b470cd908bbd2eb7d5b9ce923d5d"
+
 #: Prefix-relative directory where the staged shim and launcher live.
 _STAGE_PARTS = ("drive_c", "Games", ".nadare", "endfield-shim")
 
@@ -125,6 +132,24 @@ def find_games_exe(prefix: Path) -> Path | None:
     return max(found, key=lambda item: item[0])[1]
 
 
+def _install_prebuilt(out: Path, prebuilt: Path, expected_sha256: str) -> bool:
+    """Copy the shipped helper to ``out`` when it exists and matches ``expected_sha256``."""
+    try:
+        data = prebuilt.read_bytes()
+    except OSError:
+        return False
+    if hashlib.sha256(data).hexdigest() != expected_sha256:
+        return False
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_name(out.name + ".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, out)
+    except OSError:
+        return False
+    return True
+
+
 def build_shim(
     out: Path,
     *,
@@ -132,8 +157,14 @@ def build_shim(
     cc: str | None = None,
     which: Callable[[str], str | None] = shutil.which,
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    prebuilt: Path | None = None,
+    prebuilt_sha256: str | None = None,
 ) -> Path:
-    """Compile ``suspend_start.exe`` to ``out``, reusing a matching build."""
+    """Compile ``suspend_start.exe`` to ``out``, reusing a matching build.
+
+    With no mingw-w64 compiler the shipped prebuilt helper is copied instead, when it still
+    matches its pinned digest.
+    """
     src = source if source is not None else Path(__file__).with_name("shim_src") / "suspend_start.c"
     stamp = out.with_name(out.name + ".src-sha256")
     digest = hashlib.sha256(src.read_bytes()).hexdigest()
@@ -147,6 +178,13 @@ def build_shim(
     compiler = cc or os.environ.get("CC") or "x86_64-w64-mingw32-gcc"
     resolved = which(compiler)
     if not resolved:
+        if _install_prebuilt(
+            out,
+            prebuilt if prebuilt is not None else SHIM_PREBUILT,
+            prebuilt_sha256 if prebuilt_sha256 is not None else SHIM_PREBUILT_SHA256,
+        ):
+            stamp.write_text(digest + "\n", encoding="ascii")
+            return out
         raise ShimError(
             f"mingw-w64 compiler {compiler!r} not found",
             step="build",

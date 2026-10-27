@@ -19,24 +19,18 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
-from ..core import logview, paths
+from ..core import diskspace, logview, paths
 
 
 def _human_size(size: int) -> str:
-    value = float(size)
-    for unit in ("B", "KB", "MB", "GB"):
-        if value < 1024 or unit == "GB":
-            if unit in ("B", "KB"):
-                return f"{value:.0f} {unit}"
-            return f"{value:.1f} {unit}"
-        value /= 1024
-    return f"{value:.1f} GB"
+    return diskspace.human_size(size)
 
 
 def _when(timestamp: float) -> str:
@@ -124,6 +118,14 @@ class LogsDialog(QDialog):
         self.save.setObjectName("GhostButton")
         self.save.clicked.connect(self._save_as)
         buttons.addWidget(self.save)
+        self.zip_btn = QPushButton("Save all as zip…")
+        self.zip_btn.setObjectName("GhostButton")
+        self.zip_btn.setToolTip(
+            "Every log listed here in one zip to attach to a bug report; the redaction "
+            "box decides whether your username and paths are hidden."
+        )
+        self.zip_btn.clicked.connect(self._save_zip)
+        buttons.addWidget(self.zip_btn)
         self.folder = QPushButton("Open folder")
         self.folder.setObjectName("GhostButton")
         self.folder.clicked.connect(self._open_folder)
@@ -151,6 +153,7 @@ class LogsDialog(QDialog):
         self.redact_box.toggled.connect(self._render)
 
         self._reload_files()
+        self.zip_btn.setEnabled(self.files.count() > 0)
         self._load_selected()
 
         self._timer = QTimer(self)
@@ -202,6 +205,8 @@ class LogsDialog(QDialog):
             target = 0
         self.files.setCurrentRow(target)
         self.files.blockSignals(False)
+        if hasattr(self, "zip_btn"):
+            self.zip_btn.setEnabled(bool(files))
 
     # ---- content -------------------------------------------------------------
     def _load_selected(self, _row: int = -1) -> None:
@@ -257,6 +262,24 @@ class LogsDialog(QDialog):
         if not name:
             return
         Path(name).write_text(self.current_text(), encoding="utf-8")
+
+    def _save_zip(self) -> None:
+        suggested = str(Path.home() / f"nadare-logs-{datetime.now():%Y%m%d-%H%M}.zip")
+        name, _filter = QFileDialog.getSaveFileName(
+            self, "Save logs as zip", suggested, "Zip files (*.zip);;All files (*)"
+        )
+        if not name:
+            return
+        try:
+            logview.bundle(
+                self._profiles,
+                self._directory,
+                name,
+                profile=self._profile,
+                redact=self.redact_box.isChecked(),
+            )
+        except OSError as exc:
+            QMessageBox.warning(self, "Save logs as zip", f"Could not save the zip: {exc}")
 
     def _open_folder(self) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._directory)))

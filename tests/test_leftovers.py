@@ -202,12 +202,15 @@ def test_sophon_cancelled_sync_keeps_old_ledger_and_dropped_files(
     assert state.read_bytes() == old_ledger
 
 
-def test_successful_direct_sync_removes_part_files_only_inside_install(direct_server, tmp_path):
+def test_successful_direct_sync_removes_only_part_files_nadare_makes(direct_server, tmp_path):
     root = tmp_path / "install"
     root.mkdir()
-    (root / "stale.part").write_bytes(b"stale")
     (root / "nested").mkdir()
-    (root / "nested" / "stale.part").write_bytes(b"stale")
+    (root / "nested" / "x.bin.nadare-new.part").write_bytes(b"abandoned staged copy")
+    (root / ".nadare-dl").mkdir()
+    (root / ".nadare-dl" / "pack.zip.part").write_bytes(b"abandoned archive download")
+    (root / "saves").mkdir()
+    (root / "saves" / "slot1.part").write_bytes(b"the user's own file")
     outside = tmp_path / "outside.part"
     outside.write_bytes(b"outside")
     body = b"valid download"
@@ -236,15 +239,16 @@ def test_successful_direct_sync_removes_part_files_only_inside_install(direct_se
 
     assert (root / "game.bin").read_bytes() == body
     assert (root / "active.part").read_bytes() == active_part
-    assert not (root / "stale.part").exists()
-    assert not (root / "nested" / "stale.part").exists()
+    assert not (root / "nested" / "x.bin.nadare-new.part").exists()
+    assert not (root / ".nadare-dl" / "pack.zip.part").exists()
+    assert (root / "saves" / "slot1.part").read_bytes() == b"the user's own file"
     assert outside.read_bytes() == b"outside"
 
 
 def test_successful_sophon_sync_keeps_manifest_part_files(sophon_servers, tmp_path):
     root = tmp_path / "install"
     root.mkdir()
-    (root / "stale.part").write_bytes(b"stale")
+    (root / "game.bin.nadare-new.part").write_bytes(b"stale")
     active_part = b"a Sophon manifest file whose name ends in .part"
     build = Build({"active.part": active_part})
     sophon_servers(build)
@@ -252,7 +256,7 @@ def test_successful_sophon_sync_keeps_manifest_part_files(sophon_servers, tmp_pa
     dd.sync(plan_for(build), root)
 
     assert (root / "active.part").read_bytes() == active_part
-    assert not (root / "stale.part").exists()
+    assert not (root / "game.bin.nadare-new.part").exists()
 
 
 def test_failed_direct_sync_keeps_part_files(direct_server, tmp_path):
@@ -353,3 +357,34 @@ def test_sophon_marker_write_failure_restores_old_ledger(sophon_servers, tmp_pat
     assert (root / "old.bin").read_bytes() == b"still tracked"
     assert state.read_bytes() == old_ledger
     assert marker.read_text(encoding="utf-8") == "old-manifest"
+
+
+def test_a_zip_member_named_like_a_part_file_survives_the_sweep(direct_server, tmp_path):
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("game.exe", b"exe")
+        z.writestr("data/asset.part", b"a real game file")
+    body = buf.getvalue()
+    server = direct_server({"/g.zip": body})
+    remote = dd.RemoteFile(
+        "g.zip", server.url + "/g.zip", len(body), md5=hashlib.md5(body).hexdigest()
+    )
+    arc = dd.Archive("g", remote)
+    root = tmp_path / "install"
+
+    dd.sync(dd.Plan("T", "1", archives=(arc,)), root)
+    assert (root / "data" / "asset.part").read_bytes() == b"a real game file"
+    second = dd.sync(dd.Plan("T", "1", archives=(arc,)), root)
+    assert second["downloaded"] == 0
+    assert (root / "data" / "asset.part").read_bytes() == b"a real game file"
+
+
+def test_stale_part_sweep_takes_the_part_of_a_managed_file_only(tmp_path):
+    (tmp_path / "game.bin.part").write_bytes(b"ours")
+    (tmp_path / "other.bin.part").write_bytes(b"not in the plan")
+    dd._remove_stale_parts(tmp_path, keep=set(), managed={"game.bin"})
+    assert not (tmp_path / "game.bin.part").exists()
+    assert (tmp_path / "other.bin.part").exists()

@@ -616,3 +616,83 @@ def test_sync_uses_the_requested_number_of_workers_up_to_the_cap(
 def test_default_workers_scale_with_the_number_of_files(files, expected):
     assert dd.default_workers(files) == expected
     assert dd.default_workers(files) <= dd.MAX_WORKERS
+
+
+def test_a_loose_file_under_a_symlinked_subfolder_is_refused(server, tmp_path):
+    body = b"NEW-GAME-DATA"
+    s = server({"/x.bin": body})
+    outside = tmp_path / "user_docs"
+    outside.mkdir()
+    (outside / "x.bin").write_bytes(b"USER-OWNED FILE")
+    dest = tmp_path / "install"
+    dest.mkdir()
+    (dest / "sub").symlink_to(outside)
+    rf = dd.RemoteFile("sub/x.bin", s.url + "/x.bin", len(body), md5=md5(body))
+    with pytest.raises(dd.DirectError, match="symlink"):
+        dd.sync(dd.Plan("T", "1", files=(rf,)), dest)
+    assert (outside / "x.bin").read_bytes() == b"USER-OWNED FILE"
+    assert sorted(p.name for p in outside.iterdir()) == ["x.bin"]
+
+# ---- b14 (#562): Cancel must also stop the scan of files already on disk -------------
+class _CancelAfter(Cancel):
+    """Reports a cancel once ``checks`` cancellation points have been passed."""
+
+    def __init__(self, checks: int) -> None:
+        super().__init__()
+        self.left = checks
+        self.seen = 0
+
+    def raise_if_cancelled(self) -> None:
+        self.seen += 1
+        self.left -= 1
+        if self.left < 0:
+            self.cancel()
+        super().raise_if_cancelled()
+
+
+def _big_plan(tmp_path, count=3, size=10 << 20, **digests):
+    files = []
+    for index in range(count):
+        data = bytes([index + 1]) * size
+        (tmp_path / f"f{index}.bin").write_bytes(data)
+        files.append(
+            dd.RemoteFile(
+                f"f{index}.bin",
+                f"https://example.invalid/f{index}",
+                size,
+                md5=md5(data),
+                **({"crc32": crc32(data)} if digests.get("crc") else {}),
+            )
+        )
+    return dd.Plan("T", "1", files=tuple(files))
+
+
+def test_plan_missing_stops_at_once_when_already_cancelled(tmp_path):
+    plan = _big_plan(tmp_path)
+    cancel = Cancel()
+    cancel.cancel()
+    with pytest.raises(Cancelled):
+        dd.plan_missing(plan, tmp_path, cancel=cancel)
+
+
+@pytest.mark.parametrize("crc", [False, True])
+def test_hashing_a_big_file_stops_between_blocks(tmp_path, crc):
+    plan = _big_plan(tmp_path, count=1, size=40 << 20, crc=crc)
+    cancel = _CancelAfter(3)
+    with pytest.raises(Cancelled):
+        dd.plan_missing(plan, tmp_path, cancel=cancel)
+    assert cancel.seen < 40  # gave up after a few of the 40 one-MiB blocks, not at the end
+
+
+def test_sync_cancelled_during_the_scan_downloads_nothing_and_says_cancelled(tmp_path):
+    plan = _big_plan(tmp_path, count=4, size=8 << 20)
+    cancel = _CancelAfter(5)
+    with pytest.raises(Cancelled):
+        dd.sync(plan, tmp_path, cancel=cancel, check_workers=2)
+
+
+def test_an_uncancelled_scan_still_verifies_good_and_bad_files(tmp_path):
+    plan = _big_plan(tmp_path, count=2, size=2 << 20, crc=True)
+    (tmp_path / "f1.bin").write_bytes(b"\x07" * (2 << 20))  # same size, wrong content
+    missing, _ = dd.plan_missing(plan, tmp_path, cancel=Cancel())
+    assert [rf.path for rf in missing] == ["f1.bin"]

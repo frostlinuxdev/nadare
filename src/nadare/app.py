@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .core import i18n, paths, tls
+from .core import i18n, paths, process, tls
 from .core import logging as nadare_logging
 from .core.backends import BackendError, BackendUnsupported
 from .core.backends import create as create_backend
@@ -423,8 +423,8 @@ def _print_optional_tools(which) -> None:
         print(f"mingw-w64: {found}")
     else:
         print(
-            f"mingw-w64: not found ({compiler}; only Arknights: Endfield needs it, to build its "
-            "launch helper)"
+            f"mingw-w64: not found ({compiler}; only Arknights: Endfield could use it, and it "
+            "falls back to its bundled launch helper)"
         )
 
 
@@ -644,6 +644,26 @@ def _doctor_text(config: Config) -> str:
     except Exception as exc:  # noqa: BLE001 - a partial report is still useful
         return f"unavailable: {exc}"
     return capture.getvalue().strip()
+
+
+#: CLI commands that change an installation; they exclude each other per profile.
+_LOCKED_COMMANDS = frozenset({"install", "update", "repair", "remake-prefix"})
+
+
+@contextlib.contextmanager
+def _operation_lock(command: str, name: str):
+    if command not in _LOCKED_COMMANDS:
+        yield
+        return
+    lock = process.OperationLock(name)
+    try:
+        lock.acquire()
+    except process.ProfileLockError:
+        raise BackendError(process.OPERATION_BUSY.format(name=name)) from None
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _run_backend_command(
@@ -947,6 +967,7 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     except OSError as exc:
         print(f"[error] cannot create data directories: {exc}", file=sys.stderr)
         return 1
+    nadare_logging.install_stack_dump()
     if args.config is not None and not args.config.exists():
         print(f"[error] config file not found: {args.config}", file=sys.stderr)
         return 2
@@ -1082,7 +1103,8 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
     code = 0
     try:
         name = _resolve_profile(args, config)
-        code = _run_backend_command(args, config, name, cancel, printer)
+        with _operation_lock(args.command, name):
+            code = _run_backend_command(args, config, name, cancel, printer)
     except Cancelled:
         print(f"\n[{i18n.translate('cancelled')}]", file=sys.stderr)
         code = 130

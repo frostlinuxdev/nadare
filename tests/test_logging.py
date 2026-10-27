@@ -135,3 +135,42 @@ def test_later_setup_with_level_applies_it(tmp_path):
     nl.setup()
     assert nl.get_logger("x").isEnabledFor(logging.DEBUG)
     nl.reset()
+
+
+# ---- b14 (#562): a stuck GUI can be inspected with ``kill -USR1 <pid>`` ---------------
+def test_sigusr1_dumps_every_thread_into_a_private_file(tmp_path: Path) -> None:
+    import faulthandler
+    import os
+    import signal
+    import threading
+    import time
+
+    if not hasattr(signal, "SIGUSR1"):
+        pytest.skip("no SIGUSR1 on this platform")
+    target = tmp_path / "stacks" / "nadare-stacks.log"
+    release = threading.Event()
+    worker = threading.Thread(target=release.wait, name="stuck-worker", daemon=True)
+    worker.start()
+    try:
+        assert nadare_logging.install_stack_dump(target) == target
+        os.kill(os.getpid(), signal.SIGUSR1)
+        for _ in range(50):
+            if target.exists() and "stuck-worker" in target.read_text(errors="replace"):
+                break
+            time.sleep(0.05)
+        text = target.read_text(errors="replace")
+        assert "release.wait" in text or "wait" in text
+        assert "most recent call first" in text  # all_threads format
+        assert (target.stat().st_mode & 0o777) == 0o600
+    finally:
+        release.set()
+        faulthandler.unregister(signal.SIGUSR1)
+        nadare_logging._stack_dump_file = None
+
+
+def test_the_stack_dump_never_breaks_startup_when_the_folder_is_unwritable(
+    tmp_path: Path,
+) -> None:
+    blocker = tmp_path / "file"
+    blocker.write_text("x")
+    assert nadare_logging.install_stack_dump(blocker / "sub" / "stacks.log") is None

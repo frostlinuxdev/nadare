@@ -846,6 +846,7 @@ class TestUpdateHelpers:
             f"0|F|/a.bin|3|c0|g|{len(data)}|9|{md5}|{'d' * 32}|x"
         )
         assert czn_update.plan(manifest)[0] == []
+        time.sleep(0.05)  # kernels with coarse timestamps (< 6.13) tick every few ms
         (game_dir / "a.bin").write_bytes(b"modified client binary")
         changed, _dirs = czn_update.plan(manifest)
         assert [row[0] for row in changed] == ["/a.bin"]
@@ -867,6 +868,7 @@ class TestUpdateHelpers:
         )
         assert czn_update.plan(manifest)[0] == []
         before = path.stat()
+        time.sleep(0.05)  # coarse-timestamp kernels: the write must land in a later tick
         path.write_bytes(b"tampered data")
         os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
 
@@ -3912,3 +3914,24 @@ class TestRepairForcesFullVerification:
         backend, calls = self._backend(make_backend_context, tmp_path, monkeypatch)
         backend.update()
         assert calls == [["update", "--apply"]]
+
+
+def test_upf_version_marker_is_written_atomically(monkeypatch, tmp_path, capsys):
+    """#616: a failed write must leave the game's manifest as it was."""
+    upf = tmp_path / "upf.json"
+    original = json.dumps({"local_version": 55, "game_id": "STOVE_CHAOSZERO", "pad": "x" * 500})
+    upf.write_text(original)
+    monkeypatch.setattr(czn_update, "UPF", upf)
+
+    def failing_replace(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(czn_update.os, "replace", failing_replace)
+    czn_update._write_local_version({"version_no": 56}, 56)
+    assert upf.read_text() == original
+    assert not list(tmp_path.glob("*.tmp")) and not list(tmp_path.glob(".*"))  # no temp file left
+    assert "could not update" in capsys.readouterr().out
+    monkeypatch.undo()
+    monkeypatch.setattr(czn_update, "UPF", upf)
+    czn_update._write_local_version({"version_no": 56}, 56)
+    assert json.loads(upf.read_text())["local_version"] == 56

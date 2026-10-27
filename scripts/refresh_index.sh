@@ -25,6 +25,9 @@
 # The CZN latest-version probe needs curl_cffi importable by python3
 # (`python3 -m pip install --user curl_cffi`); without it the run fails.
 #
+# Set NADARE_GITHUB_TOKEN (any GitHub token, no scopes needed) on the index nodes so the
+# runtime canary is not rate limited; a rejected token is reported and ignored.
+#
 # Set NADARE_INDEX_CATALOG=1 to also publish catalog/ (latest game versions and cover-art pointers).
 #
 # Set NADARE_HEARTBEAT_URL (e.g. an Uptime Kuma push monitor URL) to be pinged
@@ -58,7 +61,9 @@ lock="${XDG_RUNTIME_DIR:-/tmp}/nadare-refresh-index.lock"
 exec 9>"$lock"
 flock -n 9 || { echo "refresh_index: already running"; exit 0; }
 
-git -C "$index" pull --ff-only --quiet || { echo "refresh_index: git pull failed" >&2; exit 1; }
+# shellcheck source=index_git.sh
+source "$root/scripts/index_git.sh"
+index_pull "$index" || { echo "refresh_index: git pull failed" >&2; exit 1; }
 
 # Runtime canary: warn before a new Proton runner outruns the Steam Runtimes the
 # pinned umu knows. Exit 4 = problem; any other failure is only logged, and a
@@ -154,6 +159,6 @@ else
     heartbeat
     exit 0
 fi
-git -C "$index" push --quiet origin HEAD || exit 1
+index_push "$index" || { echo "refresh_index: git push failed" >&2; exit 1; }
 echo "refresh_index: published"
 heartbeat

@@ -1154,6 +1154,7 @@ def test_the_publisher_kinds_are_exactly_the_og_table_and_include_fgo() -> None:
         frozenset(artwork._PUBLISHER_OGP)
         | frozenset(artwork._PUBLISHER_FIXED)
         | frozenset(artwork._PUBLISHER_NEWS)
+        | frozenset(artwork._PUBLISHER_HOYO)
     )
     assert {"stove-czn", "arknights-yostar", "stellasora-yostar"} <= kinds
     assert {"fgo-lepton", "direct-bd2"} <= kinds
@@ -1283,3 +1284,115 @@ def test_the_news_cover_falls_through_to_the_next_image_when_one_is_too_big(
     fake.routes[small] = FakeResponse(content=_png_bytes(), headers={"Content-Type": "image/png"})
     found = artwork.fetch_all({"backend": "arknights-yostar", "title": "A"}, kinds=("cover",))
     assert artwork.src_sidecar(found["cover"]).read_text(encoding="utf-8") == small
+
+
+# ------------------------------------------------ HoYoverse launcher art (cover + hero)
+HOYO_BG = "https://fastcdn.hoyoverse.com/static-resource-v2/2026/09/22/bg.webp"
+HOYO_THUMB = "https://launcher-webstatic.hoyoverse.com/launcher-public/2026/03/27/thumb.png"
+
+
+def _hoyo_art(monkeypatch, result):
+    from nadare.backends import hoyo_art
+
+    calls = []
+
+    def fetch_art(game_id, *args, **kwargs):
+        calls.append(game_id)
+        if isinstance(result, Exception):
+            raise result
+        return dict(result)
+
+    monkeypatch.setattr(hoyo_art, "fetch_art", fetch_art)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("kind", "game_id"),
+    [
+        ("direct-hi3", "5TIVvvcwtM"),
+        ("direct-hsr", "4ziysqXOQ8"),
+        ("direct-genshin", "gopR6Cufr3"),
+        ("direct-zzz", "U5hbdsT9W7"),
+    ],
+)
+def test_hoyo_games_take_cover_and_hero_from_the_launcher_feed(
+    fake, tmp_path, monkeypatch, kind, game_id
+):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    calls = _hoyo_art(monkeypatch, {"hero": HOYO_BG, "cover": HOYO_THUMB})
+    # No Steam art for these tests: only the publisher feed may serve the images.
+    monkeypatch.setattr(artwork, "_catalog_candidates", lambda *a, **kw: iter(()))
+    for url in (HOYO_BG, HOYO_THUMB):
+        fake.routes[url] = FakeResponse(
+            content=_png_bytes(), headers={"Content-Type": "image/png"}
+        )
+    profile = {"backend": kind, "title": "T"}
+    found = artwork.fetch_all(profile, kinds=("cover", "hero"))
+    assert set(found) == {"cover", "hero"}
+    assert profile["art_source"] == {
+        "cover": artwork.SOURCE_OFFICIAL,
+        "hero": artwork.SOURCE_OFFICIAL,
+    }
+    assert artwork.src_sidecar(found["hero"]).read_text(encoding="utf-8") == HOYO_BG
+    assert artwork.src_sidecar(found["cover"]).read_text(encoding="utf-8") == HOYO_THUMB
+    assert set(calls) == {game_id}
+
+
+def test_the_hoyo_feed_is_only_trusted_for_cover_and_hero(fake, tmp_path, monkeypatch):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    calls = _hoyo_art(monkeypatch, {"hero": HOYO_BG})
+    assert artwork._publisher_covers({"backend": "direct-hi3"}, "logo") == []
+    assert calls == []
+
+
+def test_a_failing_hoyo_feed_leaves_the_placeholder(fake, tmp_path, monkeypatch):
+    from nadare.core.news import NewsError
+
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    monkeypatch.setattr(artwork, "_catalog_candidates", lambda *a, **kw: iter(()))
+    _hoyo_art(monkeypatch, NewsError("503"))
+    assert artwork.fetch({"backend": "direct-hi3", "title": "H"}, kind="hero") is None
+    assert artwork.fetch({"backend": "direct-hi3", "title": "H"}, kind="cover") is None
+
+
+def test_a_hoyo_image_off_the_official_cdn_is_never_fetched(fake, tmp_path, monkeypatch):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    monkeypatch.setattr(artwork, "_catalog_candidates", lambda *a, **kw: iter(()))
+    _hoyo_art(monkeypatch, {"hero": "https://evil.example/a.png"})
+    assert artwork.fetch({"backend": "direct-hi3", "title": "H"}, kind="hero") is None
+    assert not any("evil.example" in call[0] for call in fake.calls)
+
+
+def test_genshin_falls_back_to_its_page_image_when_the_feed_fails(
+    fake, tmp_path, monkeypatch
+):
+    from nadare.core.news import NewsError
+
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    monkeypatch.setattr(artwork, "_catalog_candidates", lambda *a, **kw: iter(()))
+    _hoyo_art(monkeypatch, NewsError("503"))
+    page = "https://genshin.hoyoverse.com/en/home"
+    image = "https://upload-static.hoyoverse.com/og.jpg"
+    fake.routes[page] = FakeResponse(
+        content=f'<meta property="og:image" content="{image}">'.encode(),
+        headers={"Content-Type": "text/html"},
+    )
+    fake.routes[image] = FakeResponse(content=_png_bytes(), headers={"Content-Type": "image/png"})
+    path = artwork.fetch({"backend": "direct-genshin", "title": "G"}, kind="cover")
+    assert path is not None
+    assert artwork.src_sidecar(path).read_text(encoding="utf-8") == image
+
+
+def test_hoyo_art_hosts_cover_both_the_feed_and_the_page_image() -> None:
+    hosts = artwork._publisher_image_hosts("direct-genshin")
+    assert "launcher-webstatic.hoyoverse.com" in hosts
+    assert "upload-static.hoyoverse.com" in hosts
+    assert artwork._publisher_image_hosts("direct-hi3") == (
+        "fastcdn.hoyoverse.com",
+        "launcher-webstatic.hoyoverse.com",
+    )

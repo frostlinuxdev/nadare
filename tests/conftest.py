@@ -113,6 +113,18 @@ def _http_open_follows_patched_urlopen(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_live_hoyo_art_feed(monkeypatch):
+    """The HoYoverse launcher art feed is never fetched for real in tests."""
+    from nadare.backends import hoyo_art
+    from nadare.core.news import NewsError
+
+    def offline(url, **kwargs):
+        raise NewsError("network is disabled in tests")
+
+    monkeypatch.setattr(hoyo_art, "http_get_json", offline)
+
+
+@pytest.fixture(autouse=True)
 def _restore_backend_registry():
     """Tests that ``register()`` a fake backend must not leak it to other tests."""
     from nadare.core import backends

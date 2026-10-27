@@ -214,6 +214,9 @@ class ProcessQuery:
     names: tuple[str, ...] = ()
     match: str = ""
     args: tuple[str, ...] = ()
+    #: When set, an :attr:`args` hit only counts if ``argv[0]``'s basename is one of these
+    #: (an editor that has the script open must not read as the script running).
+    arg_runners: tuple[str, ...] = ()
     _extra: tuple[str, ...] = field(default=(), repr=False)
 
 
@@ -262,7 +265,12 @@ def _query_matches(query: ProcessQuery, argv: list[str], env: dict[str, str]) ->
         basename = os.path.basename(argv[0]).lower()
         belongs = basename in names
     if not belongs and wanted_args:
-        belongs = any(arg in argv for arg in wanted_args)
+        if query.arg_runners:
+            runner = os.path.basename(argv[0]).lower() if argv else ""
+            if runner in {name.lower() for name in query.arg_runners}:
+                belongs = any(arg in argv[1:] for arg in wanted_args)
+        else:
+            belongs = any(arg in argv for arg in wanted_args)
     if not belongs and extra:
         belongs = extra in " ".join(argv)
     return belongs

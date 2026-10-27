@@ -18,7 +18,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import backends, paths, shortcuts
+from . import backends, paths, process, shortcuts
 
 _TREE_KEYS = ("install_dir", "prefix", "wineprefix")
 
@@ -141,20 +141,26 @@ def _created_by_nadare(profile, key: str, path: Path, name: str) -> bool:
     """Whether Nadare made ``path``, so deleting it cannot take anything of the user's.
 
     True for the profile's own folder under Nadare's data dir, for a key the Add game dialog
-    recorded in ``owned_trees`` (the folder was new or empty when the game was added), and for
-    a Wine prefix (a ``drive_c`` folder, dedicated to one game by nature). A folder the user
-    picked, such as a games library holding one game, is never offered for deletion.
+    recorded in ``owned_trees`` (the folder was new or empty when the game was added). The
+    record also holds the folder's path (``owned_paths``); it only counts while the profile
+    still points at that same folder, so a path changed later is not covered by it. A folder
+    the user picked, such as a games library or a shared ``~/.wine``, is never offered for
+    deletion, even when it looks like a Wine prefix.
     """
-    owned = profile.get("owned_trees")
-    if isinstance(owned, list) and key in owned:
-        return True
-    if key in ("prefix", "wineprefix") and (path / "drive_c").is_dir():
-        return True
     try:
         own = (paths.profiles_dir() / name).resolve()
         resolved = path.resolve()
     except OSError:
         return False
+    owned = profile.get("owned_trees")
+    if isinstance(owned, list) and key in owned:
+        recorded = profile.get("owned_paths")
+        if not isinstance(recorded, dict) or key not in recorded:
+            return True  # profile made before paths were recorded (0.1.0b13)
+        try:
+            return Path(str(recorded[key])).resolve() == resolved
+        except (OSError, RuntimeError):
+            return False
     return resolved == own or own in resolved.parents
 
 
@@ -207,6 +213,37 @@ def remove_game(
     if name not in config.profiles:
         raise backends.BackendError(f"no such profile: {name!r}")
 
+    lock = process.OperationLock(name)
+    try:
+        lock.acquire()
+    except process.ProfileLockError:
+        raise backends.BackendError(process.OPERATION_BUSY.format(name=name)) from None
+    try:
+        return _remove_locked(
+            config,
+            name,
+            delete_data=delete_data,
+            delete_trees=delete_trees,
+            applications_dir=applications_dir,
+            desktop_dir=desktop_dir,
+            save=save,
+            drop_profile=drop_profile,
+        )
+    finally:
+        lock.release()
+
+
+def _remove_locked(
+    config,
+    name: str,
+    *,
+    delete_data: bool,
+    delete_trees: Iterable[str],
+    applications_dir,
+    desktop_dir,
+    save: bool,
+    drop_profile: bool,
+) -> RemovalResult:
     result = RemovalResult(profile=name)
 
     # 1. Refuse everything when any requested tree deletion is unsafe: the

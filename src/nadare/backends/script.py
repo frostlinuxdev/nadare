@@ -96,7 +96,11 @@ class ScriptBackend(GameBackend):
             except BackendError:
                 script = None
         args = (str(script),) if script is not None else ()
-        return ProcessQuery(match=str(extra) if extra else "", args=args)
+        return ProcessQuery(
+            match=str(extra) if extra else "",
+            args=args,
+            arg_runners=("bash", "sh", "dash", "zsh", "fish", "ksh"),
+        )
 
     # ---- contract ----------------------------------------------------------
     def status(self) -> Status:

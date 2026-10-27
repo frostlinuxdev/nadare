@@ -23,7 +23,8 @@ from .. import __version__
 from ..core import logview, paths
 from ..core.backends import BackendError, BackendUnsupported, create
 from ..core.config import Config
-from ..core.events import Cancel, Cancelled, Event
+from ..core.events import Cancel, Cancelled, Event, mask
+from ..core.process import OPERATION_BUSY, OperationLock, ProfileLockError
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +46,9 @@ OPERATIONS = (
     "media",
     "check_update",
 )
+
+#: Operations that exclude each other (and Remove) per profile across processes.
+LOCKED_OPERATIONS = frozenset({"install", "update", "repair", "remake_prefix", "uninstall"})
 
 #: Operations that mutate the installation and therefore take a per-profile lock.
 MUTATING = frozenset(
@@ -145,7 +149,14 @@ class BackendWorker(QThread):
 
     def run(self) -> None:  # noqa: D401 - QThread entry point
         code: int | None = None
+        lock = None
         try:
+            if self._operation in LOCKED_OPERATIONS:
+                lock = OperationLock(self._profile)
+                try:
+                    lock.acquire()
+                except ProfileLockError:
+                    raise BackendError(OPERATION_BUSY.format(name=self._profile)) from None
             backend = create(
                 self._profile, self._config, emit=self._on_event, cancel=self._cancel_token
             )
@@ -174,6 +185,8 @@ class BackendWorker(QThread):
             self._fail_exception(exc)
             return
         finally:
+            if lock is not None:
+                lock.release()
             self._close_log()
         self.succeeded.emit(0 if code is None else int(code))
 
@@ -327,7 +340,7 @@ class BackendWorker(QThread):
         if log is None:
             return
         try:
-            log.write(line.rstrip("\n") + "\n")
+            log.write(mask(line.rstrip("\n")) + "\n")
             log.flush()
         except OSError:
             pass
@@ -568,6 +581,14 @@ class BackendController(QObject):
             for name, worker in self._workers.items()
             if worker.isRunning() and worker.operation == "launch"
         ]
+
+    def reopen(self) -> None:
+        """Accept operations again after ``shutdown(keep_launches=True)``.
+
+        Closing the window while a game runs only hides it; showing it again
+        must not leave every operation refused.
+        """
+        self._closed = False
 
     def shutdown(self, wait_ms: int = 4000, *, keep_launches: bool = False) -> None:
         """Ask every live worker to stop and wait within one overall deadline.

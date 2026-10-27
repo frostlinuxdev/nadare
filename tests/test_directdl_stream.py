@@ -414,3 +414,109 @@ def test_a_multi_block_7z_installs_the_same_in_parallel(server, tmp_path, worker
     before = len(s.ranges)
     assert dd.sync(plan7(s.url + "/g.7z", len(blob)), tmp_path, workers=workers)["downloaded"] == 0
     assert len(s.ranges) == before
+
+
+def _old_install(root: Path) -> dict[str, bytes]:
+    old = {}
+    for name in tree7(SEVENZ / "expected"):
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        old[name] = b"old " + name.encode()
+        (root / name).write_bytes(old[name])
+    return old
+
+
+def test_a_corrupt_7z_block_keeps_the_old_files(server, tmp_path):
+    blob = bytearray((SEVENZ / "copy.7z").read_bytes())
+    blob[32] ^= 0xFF  # first byte of the first stored file
+    s = server({"/g.7z": bytes(blob)})
+    old = _old_install(tmp_path)
+    with pytest.raises(dd.DirectError):
+        dd.sync(plan7(s.url + "/g.7z", len(blob)), tmp_path, workers=1)
+    now = tree7(tmp_path)
+    # a zero-byte member is simply written empty; every file with content keeps its old bytes
+    assert now.pop("empty.bin") == b""
+    assert now == {name: data for name, data in old.items() if name != "empty.bin"}
+    assert not list(tmp_path.rglob("*.nadare-new"))
+
+
+def test_a_cancelled_7z_update_keeps_the_old_files(server, tmp_path):
+    blob = (SEVENZ / "copy.7z").read_bytes()
+    s = server({"/g.7z": blob})
+    old = _old_install(tmp_path)
+    cancel = Cancel()
+    cancel.cancel()
+    with pytest.raises(Cancelled):
+        dd.sync(plan7(s.url + "/g.7z", len(blob)), tmp_path, cancel=cancel, workers=1)
+    assert {k: v for k, v in tree7(tmp_path).items() if k != "empty.bin"} == {
+        k: v for k, v in old.items() if k != "empty.bin"
+    }
+
+def _unsized_stream_plan(url, data):
+    import hashlib
+
+    src = dd.RemoteFile("g.zip", url, md5=hashlib.md5(data).hexdigest())  # no size, like GFL2
+    return dd.Plan("T", "1", archives=(dd.Archive("g", src, stream=True),))
+
+
+def test_a_stream_install_works_when_the_cdn_refuses_head(server, tmp_path):
+    data = files()
+    blob = make_zip(data)
+    s = server({"/g.zip": blob})
+    s.refuse_head = True
+    assert dd.sync(_unsized_stream_plan(s.url + "/g.zip", blob), tmp_path)["downloaded"] == 1
+    assert tree(tmp_path) == data
+    assert s.ranges  # it really streamed, it did not fall back to the whole archive
+
+
+def test_an_unsized_stream_without_ranges_falls_back_instead_of_a_raw_error(server, tmp_path):
+    data = files()
+    blob = make_zip(data)
+    s = server({"/g.zip": blob})
+    s.refuse_head = True
+    s.ignore_range = True
+    dd.sync(_unsized_stream_plan(s.url + "/g.zip", blob), tmp_path)
+    assert tree(tmp_path) == data
+
+
+def test_remote_size_reads_the_total_from_a_range_when_head_is_refused(server):
+    from nadare.core import download
+
+    s = server({"/x": b"y" * 1234})
+    s.refuse_head = True
+    assert download.remote_size(s.url + "/x") == 1234
+def _zip_plan(url, blob, stream):
+    import hashlib
+
+    src = dd.RemoteFile("g.zip", url, len(blob), md5=hashlib.md5(blob).hexdigest())
+    return dd.Plan("T", "1", archives=(dd.Archive("g", src, stream=stream),))
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_a_symlinked_download_cache_dir_is_refused_and_nothing_outside_is_touched(
+    server, tmp_path, stream
+):
+    blob = make_zip(files())
+    s = server({"/g.zip": blob})
+    outside = tmp_path / "outside"
+    (outside / "stream").mkdir(parents=True)
+    (outside / "stream" / "hostage.txt").write_text("user data")
+    dest = tmp_path / "install"
+    dest.mkdir()
+    (dest / dd.DL_DIR).symlink_to(outside)
+    with pytest.raises(dd.DirectError, match="symlink"):
+        dd.sync(_zip_plan(s.url + "/g.zip", blob, stream), dest)
+    assert (outside / "stream" / "hostage.txt").read_text() == "user data"
+    assert sorted(p.name for p in outside.iterdir()) == ["stream"]
+
+
+def test_a_symlinked_state_dir_is_refused_and_no_record_lands_outside(server, tmp_path):
+    blob = make_zip(files())
+    s = server({"/g.zip": blob})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    dest = tmp_path / "install"
+    dest.mkdir()
+    (dest / dd.STATE_DIR).symlink_to(outside)
+    with pytest.raises(dd.DirectError, match="symlink"):
+        dd.sync(_zip_plan(s.url + "/g.zip", blob, True), dest)
+    assert list(outside.iterdir()) == []

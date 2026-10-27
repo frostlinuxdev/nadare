@@ -19,6 +19,8 @@ class Server:
         self.bytes_served = 0
         #: Answer 200 with the whole body even when a Range is asked for.
         self.ignore_range = False
+        #: Answer HEAD with 405 (signing CDNs often do) while GET keeps working.
+        self.refuse_head = False
         #: The next N GETs are answered 503 (a flaky CDN).
         self.fail_next = 0
         outer = self
@@ -35,6 +37,11 @@ class Server:
 
             def do_HEAD(self):
                 outer.requests.append("HEAD " + self.path)
+                if outer.refuse_head:
+                    self.send_response(405)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 body = outer.objects.get(self.path)
                 if body is None:
                     self.send_response(404)

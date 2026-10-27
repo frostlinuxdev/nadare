@@ -21,6 +21,7 @@ Start with the log:
 | FGO host check fails | Run `lepton-fgo`'s `check-host.sh` and install what it lists. |
 | FGO + SELinux | Run the printed one-time `sudo .../setup-host-selinux.sh` as root, then retry. |
 | "keyring unavailable" notice | Account logins are keyring-only. Install a Secret Service provider (gnome-keyring, KWallet) to enable **Remember me**; otherwise log in again each session — tokens are never written in plaintext. See [PRIVACY.md](../PRIVACY.md). |
+| A game's login or web-page button does nothing (the game says it opened your browser, but no window appears) | The game asks `xdg-desktop-portal` to open the browser. If that service started before your desktop session (a lingering user manager, or a compositor config that does not export the display), it has no `DISPLAY`/`WAYLAND_DISPLAY` and the browser exits at once with "no DISPLAY environment variable specified". Check with `journalctl --user -b \| grep "no DISPLAY"`, then run `dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY` followed by `systemctl --user restart xdg-desktop-portal`, and click the button again. To make it stick on Hyprland, Sway or niri, put the first command in your compositor's startup section. Plasma and GNOME normally do this for you. |
 
 Until manifest signing lands, Nadare's index and integrity trust ultimately rests
 on the host CA store. Nadare verifies HTTPS with a bundled CA list; set

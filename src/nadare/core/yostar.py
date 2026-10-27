@@ -823,13 +823,7 @@ def base_url_trusted(url: str, allowed_hosts: set[str] | None = None) -> bool:
 
 
 def _format_size(size: float) -> str:
-    if size >= 1 << 30:
-        return f"{size / (1 << 30):.1f} GiB"
-    if size >= 1 << 20:
-        return f"{size / (1 << 20):.0f} MiB"
-    if size >= 1 << 10:
-        return f"{size / (1 << 10):.0f} KiB"
-    return f"{int(size)} B"
+    return diskspace.human_size(size)
 
 
 def _format_eta(seconds: float | None) -> str:
@@ -842,7 +836,7 @@ def _format_eta(seconds: float | None) -> str:
 
 
 def _format_progress(done: int, total: int, speed: float, eta: float | None) -> str:
-    speed_text = f"{speed / (1 << 20):.0f} MiB/s" if speed > 0 else "-- MiB/s"
+    speed_text = diskspace.human_speed(speed)
     return (
         f"sync: {_format_size(done)}/{_format_size(total)} · "
         f"{speed_text} · {_format_eta(eta)}"

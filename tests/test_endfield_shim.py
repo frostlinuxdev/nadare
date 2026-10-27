@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import shutil
 import subprocess
@@ -126,7 +127,12 @@ def test_build_shim_without_a_compiler_explains_what_to_install(tmp_path):
     src.write_text("x")
     with pytest.raises(es.ShimError, match="mingw"):
         es.build_shim(
-            tmp_path / "o.exe", source=src, cc=None, which=lambda c: None, run=_fake_cc([])
+            tmp_path / "o.exe",
+            source=src,
+            cc=None,
+            which=lambda c: None,
+            run=_fake_cc([]),
+            prebuilt=tmp_path / "no-prebuilt.exe",
         )
 
 
@@ -386,7 +392,12 @@ def test_a_missing_compiler_is_the_build_step_with_install_advice(tmp_path):
     src.write_text("x")
     with pytest.raises(es.ShimError) as caught:
         es.build_shim(
-            tmp_path / "o.exe", source=src, cc=None, which=lambda c: None, run=_fake_cc([])
+            tmp_path / "o.exe",
+            source=src,
+            cc=None,
+            which=lambda c: None,
+            run=_fake_cc([]),
+            prebuilt=tmp_path / "no-prebuilt.exe",
         )
     assert caught.value.step == "build" and "install mingw-w64" in str(caught.value).lower()
 
@@ -460,3 +471,72 @@ def test_an_installer_without_games_exe_is_the_extract_step_and_says_to_report_i
             installer, tmp_path / "o.exe", which=lambda c: "/x/7z", run=_fake_7z([], place=False)
         )
     assert caught.value.step == "extract" and "report" in str(caught.value).lower()
+
+
+# ------------------------------------------------ b14: a prebuilt helper when there is no mingw-w64
+def _prebuilt(tmp_path, data=MZ + b"prebuilt"):
+    path = tmp_path / "prebuilt.exe"
+    path.write_bytes(data)
+    return path, hashlib.sha256(data).hexdigest()
+
+
+def test_without_a_compiler_the_pinned_prebuilt_helper_is_used(tmp_path):
+    src = tmp_path / "s.c"
+    src.write_text("x")
+    prebuilt, digest = _prebuilt(tmp_path)
+    calls: list = []
+    out = es.build_shim(
+        tmp_path / "out" / "suspend_start.exe",
+        source=src,
+        cc=None,
+        which=lambda c: None,
+        run=_fake_cc(calls),
+        prebuilt=prebuilt,
+        prebuilt_sha256=digest,
+    )
+    assert out.read_bytes() == prebuilt.read_bytes() and calls == []
+
+
+def test_a_prebuilt_helper_with_the_wrong_digest_is_refused(tmp_path):
+    src = tmp_path / "s.c"
+    src.write_text("x")
+    prebuilt, _digest = _prebuilt(tmp_path)
+    out = tmp_path / "out" / "suspend_start.exe"
+    with pytest.raises(es.ShimError) as caught:
+        es.build_shim(
+            out,
+            source=src,
+            cc=None,
+            which=lambda c: None,
+            run=_fake_cc([]),
+            prebuilt=prebuilt,
+            prebuilt_sha256="0" * 64,
+        )
+    assert caught.value.step == "build" and "mingw" in str(caught.value).lower()
+    assert not out.exists()
+
+
+def test_a_compiler_is_still_preferred_over_the_prebuilt_helper(tmp_path):
+    src = tmp_path / "s.c"
+    src.write_text("x")
+    prebuilt, digest = _prebuilt(tmp_path)
+    calls: list = []
+    out = es.build_shim(
+        tmp_path / "o.exe",
+        source=src,
+        cc="fake-gcc",
+        which=lambda c: "/usr/bin/" + c,
+        run=_fake_cc(calls),
+        prebuilt=prebuilt,
+        prebuilt_sha256=digest,
+    )
+    assert out.read_bytes() == MZ and len(calls) == 1
+
+
+def test_the_shipped_prebuilt_helper_matches_its_pin_and_the_current_source():
+    data = es.SHIM_PREBUILT.read_bytes()
+    assert data[:2] == b"MZ"
+    assert hashlib.sha256(data).hexdigest() == es.SHIM_PREBUILT_SHA256
+    source = Path(es.__file__).with_name("shim_src") / "suspend_start.c"
+    # editing the C source without rebuilding and re-pinning the helper must fail here
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == es.SHIM_PREBUILT_SOURCE_SHA256

@@ -2239,3 +2239,45 @@ def test_progress_bar_shows_an_eta_once_it_has_enough_samples(qapp, monkeypatch)
     assert "left" in view.progress.format()
     view._clear_busy_progress()
     assert view.progress.format() == "%p%"
+
+
+def test_remove_busy_page_has_no_cancel_button_and_a_busy_bar(qapp):
+    """#583: Remove runs outside the controller, so nothing can cancel it."""
+    from nadare.gui.game_view import GameView
+
+    view = GameView()
+    view.set_profile("sample", {})
+    try:
+        view.set_busy("remove")
+        assert view.primary.isEnabled() is False
+        assert view.primary.text() != "CANCEL"
+        assert (view.progress.minimum(), view.progress.maximum()) == (0, 0)
+        assert view.badge.text() == "UNINSTALLING"
+    finally:
+        view.deleteLater()
+        qapp.processEvents()
+
+
+def test_close_warns_while_a_game_is_being_removed(tmp_path, qapp, monkeypatch):
+    """#583: closing mid-delete leaves files gone but the profile in config."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    from nadare.gui import main_window as mw
+
+    window = MainWindow(_empty_config(tmp_path))
+    try:
+        seen: list[str] = []
+        monkeypatch.setattr(
+            mw.QMessageBox,
+            "warning",
+            lambda *args, **kwargs: seen.append(args[2]) or QMessageBox.StandardButton.Cancel,
+        )
+        monkeypatch.setattr(window.controller, "launching_profiles", lambda: [])
+        window._busy["gone"] = "remove"
+        assert window._confirm_close() is False
+        assert "removed" in seen[0]
+        window._busy.clear()
+        assert window._confirm_close() is True
+    finally:
+        window.close()
+        window.deleteLater()

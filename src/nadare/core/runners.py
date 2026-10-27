@@ -15,6 +15,7 @@ import fcntl
 import os
 import re
 import shutil
+import sys
 import tarfile
 import tempfile
 import threading
@@ -266,10 +267,26 @@ def list_runners() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 def _release(spec: RunnerSpec, tag: str | None, *, timeout: int = 30) -> dict[str, Any]:
     url = GITHUB_API.format(repo=spec.repo) + (f"/tags/{tag}" if tag else "/latest")
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.environ.get("NADARE_GITHUB_TOKEN", "").strip()
     try:
-        rel = download.fetch_json(
-            url, headers={"Accept": "application/vnd.github+json"}, timeout=timeout
-        )
+        if token:
+            try:
+                rel = download.fetch_json(
+                    url, headers={**headers, "Authorization": f"Bearer {token}"}, timeout=timeout
+                )
+            except download.DownloadError as exc:
+                if "HTTP 401" not in str(exc):
+                    raise
+                # A dead token must not break the lookup, but it must not hide either.
+                print(
+                    "nadare: NADARE_GITHUB_TOKEN was rejected by GitHub (expired or revoked); "
+                    "continuing without it",
+                    file=sys.stderr,
+                )
+                rel = download.fetch_json(url, headers=headers, timeout=timeout)
+        else:
+            rel = download.fetch_json(url, headers=headers, timeout=timeout)
     except Exception as exc:  # noqa: BLE001
         raise RunnerError(f"cannot query {spec.repo}: {exc}") from exc
     raw_assets = rel.get("assets", []) if isinstance(rel, dict) else None

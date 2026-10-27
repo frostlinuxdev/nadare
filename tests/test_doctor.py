@@ -190,6 +190,7 @@ def test_doctor_explains_when_7zip_and_mingw_are_missing_but_stays_green(
     out = capsys.readouterr().out
     assert "7-Zip: not found" in out and "Endfield" in out and "Neverness" in out
     assert "mingw-w64: not found" in out and "Endfield" in out
+    assert "bundled launch helper" in out  # the shipped helper means it is not needed
 
 
 def test_doctor_rejects_a_bundled_7zip_with_the_wrong_digest(monkeypatch, capsys, tmp_path) -> None:

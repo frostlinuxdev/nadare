@@ -877,3 +877,72 @@ def test_stream_download_rejects_server_resuming_at_wrong_offset(tmp_path: Path)
 
     assert not dest.exists()
     assert part.read_bytes() == body[:half]  # untouched: no bytes were spliced in
+
+
+def _serve(label: str, log: list):
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            log.append((label, self.path, self.headers.get("Proxy-Authorization")))
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_http_client_pool_goes_through_the_environment_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log: list = []
+    proxy = _serve("proxy", log)
+    try:
+        monkeypatch.setenv("http_proxy", f"http://user:pw@127.0.0.1:{proxy.server_port}")
+        monkeypatch.delenv("no_proxy", raising=False)
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        pool = dl.HttpClientPool()
+        with pool.open("http://origin.invalid/file.bin") as resp:
+            assert resp.read() == b"ok"
+        pool.close()
+    finally:
+        proxy.shutdown()
+    assert log == [("proxy", "http://origin.invalid/file.bin", "Basic dXNlcjpwdw==")]
+
+
+def test_http_client_pool_skips_the_proxy_for_no_proxy_hosts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log: list = []
+    proxy = _serve("proxy", log)
+    origin = _serve("origin", log)
+    try:
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+        monkeypatch.setenv("no_proxy", "127.0.0.1")
+        pool = dl.HttpClientPool()
+        with pool.open(f"http://127.0.0.1:{origin.server_port}/b") as resp:
+            assert resp.read() == b"ok"
+        pool.close()
+    finally:
+        proxy.shutdown()
+        origin.shutdown()
+    assert log == [("origin", "/b", None)]
+
+
+def test_http_client_pool_tunnels_https_through_the_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:3128")
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    pool = dl.HttpClientPool()
+    conn = pool._connection("https", "origin.invalid", 443, 5)
+    assert (conn.host, conn.port) == ("127.0.0.1", 3128)
+    assert (conn._tunnel_host, conn._tunnel_port) == ("origin.invalid", 443)

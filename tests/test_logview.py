@@ -141,3 +141,74 @@ def test_redacted_keeps_timestamps_and_paths_readable_but_masks_known_secrets():
     assert "/opt/games/Some-Long-Directory-Name/Game.exe" in out
     assert "hunter2hunter2" not in out and "user:pw@" not in out
     assert "abcdefghijklmnop" not in out
+
+
+# ---- b14: one zip with every log, for bug reports ---------------------------------------
+def _zip_names(path):
+    import zipfile
+
+    with zipfile.ZipFile(path) as zf:
+        return {name: zf.read(name).decode("utf-8") for name in zf.namelist()}
+
+
+def test_bundle_holds_every_listed_log_redacted_and_a_readme(tmp_path):
+    home = os.path.expanduser("~")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write(logs, "G-launch.log", f"crash at {home}/game\n", 100)
+    write(logs, "nadare.log", "app line\n", 200)
+    out = tmp_path / "out" / "bundle.zip"
+    count = logview.bundle(["G"], logs, out)
+    files = _zip_names(out)
+    assert count == 2
+    assert set(files) == {"README.txt", "G-launch.log", "nadare.log"}
+    assert home not in files["G-launch.log"] and "~/game" in files["G-launch.log"]
+    assert "2 log files" in files["README.txt"] and "hidden" in files["README.txt"]
+
+
+def test_bundle_without_redaction_keeps_the_text_and_says_so(tmp_path):
+    home = os.path.expanduser("~")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write(logs, "G-launch.log", f"at {home}/x\n")
+    out = tmp_path / "b.zip"
+    logview.bundle(["G"], logs, out, redact=False)
+    files = _zip_names(out)
+    assert f"{home}/x" in files["G-launch.log"]
+    assert "NOT hidden" in files["README.txt"]
+
+
+def test_bundle_can_be_limited_to_one_profile_and_caps_each_file(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write(logs, "G-install.log", "x" * 5000 + "\nlast line\n")
+    write(logs, "H-install.log", "other\n")
+    write(logs, "nadare.log", "app\n")
+    out = tmp_path / "b.zip"
+    count = logview.bundle(["G", "H"], logs, out, profile="G", max_bytes_per_file=1000)
+    files = _zip_names(out)
+    assert count == 1 and set(files) == {"README.txt", "G-install.log"}
+    assert "last line" in files["G-install.log"] and len(files["G-install.log"]) < 1500
+
+
+def test_bundle_with_no_logs_still_writes_a_readme_and_no_partial_file_on_error(
+    tmp_path, monkeypatch
+):
+    out = tmp_path / "empty.zip"
+    assert logview.bundle([], tmp_path / "missing", out) == 0
+    assert set(_zip_names(out)) == {"README.txt"}
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write(logs, "G-x.log", "a\n")
+    broken = tmp_path / "broken.zip"
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(logview, "read_tail", boom)
+    try:
+        logview.bundle(["G"], logs, broken)
+    except OSError:
+        pass
+    assert not broken.exists() and not list(tmp_path.glob("broken.zip*"))

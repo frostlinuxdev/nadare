@@ -103,6 +103,7 @@ def test_stop_button_requests_the_stop_operation(qapp):
     view.cancel_requested.connect(lambda: cancels.append(True))
     try:
         assert view.primary.text() == "STOP"
+        view._primary_grace_until = 0.0  # past the double-click guard (#617)
         view.primary.click()
         assert actions == ["stop"]
         assert cancels == [], "STOP must not take the generic cancel path"

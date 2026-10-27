@@ -102,6 +102,7 @@ _BUSY_STATES = {
     "verify": "verifying",
     "stop": "stopping",
     "uninstall": "uninstalling",
+    "remove": "uninstalling",
     "set_remember": "saving",
     "logout": "logging out",
 }
@@ -124,6 +125,9 @@ _BANNER_H = 110
 
 #: A second click right after a button turns into CANCEL must not cancel the new job.
 _CANCEL_GRACE_S = 0.5
+
+#: Operations whose success makes the status shown before them out of date.
+_STATE_CHANGING = frozenset({"install", "update", "repair", "remake_prefix", "uninstall"})
 
 
 #: Under the login QR: what to do, and the one safety rule for QR logins.
@@ -581,6 +585,9 @@ class GameView(QWidget):
         self._profile_data: dict[str, Any] = {}
         self._status: Status | None = None
         self._busy_op: str | None = None
+        #: True between a successful install/update/... and the status that
+        #: follows it, so the stale status cannot offer the same action again.
+        self._awaiting_status = False
         self._primary_grace_until = 0.0
         self._news_shown = False  # intended news visibility (hidden while busy)
         self._started_at = 0.0
@@ -895,6 +902,7 @@ class GameView(QWidget):
         self._timer.stop()
         self._started_at = 0.0
         self._busy_op = None
+        self._awaiting_status = False
         self._primary_grace_until = 0.0
         title = profile_title(name, profile)
         self.title.setText(title)
@@ -979,6 +987,7 @@ class GameView(QWidget):
 
     # ---- status ------------------------------------------------------------
     def set_status(self, status: Status) -> None:
+        self._awaiting_status = False
         self._apply_status(status)
         self._refresh_actions()
 
@@ -1018,7 +1027,7 @@ class GameView(QWidget):
 
     # ---- primary action ----------------------------------------------------
     def _primary_op(self) -> str | None:
-        if self._busy_op is not None:
+        if self._busy_op is not None or self._awaiting_status:
             return None
         status = self._status
         if status is None:
@@ -1043,9 +1052,11 @@ class GameView(QWidget):
             # A launch that is busy means the game process is up: say so and
             # offer Stop; every other busy operation is a cancellable one.
             running = self._busy_op == "launch"
-            self.primary.setText("STOP" if running else "CANCEL")
+            # Remove runs outside the controller: there is nothing to cancel.
+            removing = self._busy_op == "remove"
+            self.primary.setText("REMOVING…" if removing else "STOP" if running else "CANCEL")
             self.primary.setObjectName("Danger")
-            self.primary.setEnabled(True)
+            self.primary.setEnabled(not removing)
             self._polish(self.primary)
             for button in (
                 self.login,
@@ -1069,7 +1080,8 @@ class GameView(QWidget):
             # Even "SET GAME EXE IN SETTINGS" is a real action: it opens Settings.
             self.primary.setEnabled(True)
 
-        status = self._status
+        # The status before the operation is stale until the re-probe lands.
+        status = None if self._awaiting_status else self._status
         installed = bool(status and status.state == "installed")
         running = bool(status and (status.running or status.state == "running"))
         self.login.setEnabled(installed and not running)
@@ -1120,14 +1132,14 @@ class GameView(QWidget):
 
     def _on_primary(self) -> None:
         if self._busy_op is not None:
+            if time.monotonic() < self._primary_grace_until:
+                # The first click of a double-click already started the job; the
+                # button turned into CANCEL/STOP under the user's finger.
+                return
             if self._busy_op == "launch":
                 # The button reads STOP: run the backend's stop operation rather
                 # than the generic cancel path (which is not backend-specific).
                 self.action_requested.emit("stop")
-            elif time.monotonic() < self._primary_grace_until:
-                # The first click of a double-click already started the job; the
-                # button turned into CANCEL under the user's finger.
-                return
             else:
                 self.cancel_requested.emit()
             return
@@ -1143,15 +1155,20 @@ class GameView(QWidget):
     def set_busy(self, operation: str) -> None:
         """Mark ``operation`` as running and start the elapsed clock."""
         self._busy_op = operation
-        self._primary_grace_until = (
-            time.monotonic() + _CANCEL_GRACE_S if operation != "launch" else 0.0
-        )
+        self._primary_grace_until = time.monotonic() + _CANCEL_GRACE_S
         self.news_frame.setVisible(False)
         self._started_at = time.time()
-        self.progress.setRange(0, 100)
+        # Remove sends no progress events: show the busy animation, not a dead 0%.
+        self.progress.setRange(0, 0 if operation == "remove" else 100)
         self.progress.setVisible(operation != "launch")
         self.progress.setValue(0)
-        self.step_label.setText("Running" if operation == "launch" else operation.capitalize())
+        self.step_label.setText(
+            "Running"
+            if operation == "launch"
+            else "Removing…"
+            if operation == "remove"
+            else operation.capitalize()
+        )
         self.elapsed_label.setText("·  0:00")
         self._set_badge(
             "running" if operation == "launch" else _BUSY_STATES.get(operation, "installing"), ""
@@ -1180,6 +1197,7 @@ class GameView(QWidget):
         self._timer.stop()
         self._hide_qr()
         self._tick()
+        self._awaiting_status = exit_code == 0 and operation in _STATE_CHANGING
         self._restore_badge()
         self._refresh_actions()
         if operation == "launch" and exit_code == 0:

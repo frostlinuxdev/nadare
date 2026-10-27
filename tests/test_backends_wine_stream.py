@@ -338,3 +338,24 @@ def test_install_emits_finish_window_step(tmp_path, monkeypatch):
     backend.install()
 
     assert any(e.kind == "step" and "Finish the installer window" in e.message for e in events)
+
+
+def test_a_script_path_in_an_editors_argv_is_not_the_script_running(tmp_path):
+    root = tmp_path / "proc"
+    _fake_pid(root, 101, ["vim", "/games/run.sh"])
+    _fake_pid(root, 102, ["bash", "/games/run.sh"])
+    _fake_pid(root, 103, ["/usr/bin/sh", "-x", "/games/run.sh"])
+    query = ProcessQuery(args=("/games/run.sh",), arg_runners=("bash", "sh"))
+    assert sorted(wine_mod.scan_pids(query, proc_root=root)) == [102, 103]
+
+
+def test_the_script_backend_only_matches_shell_runs(tmp_path):
+    from nadare.backends import script as script_mod
+
+    source = (tmp_path / "run.sh")
+    source.write_text("#!/bin/sh\n")
+    backend = script_mod.ScriptBackend.__new__(script_mod.ScriptBackend)
+    backend.ctx = type("C", (), {"profile": {}})()
+    query = backend._patterns(source)
+    assert "bash" in query.arg_runners and "sh" in query.arg_runners
+    assert "vim" not in query.arg_runners

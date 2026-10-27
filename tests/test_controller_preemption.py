@@ -242,3 +242,15 @@ def test_running_operation_names_what_a_profile_is_doing(controller):
     assert controller.running_operation("a") == "login"
     assert controller.running_operation("b") == ""
     assert controller.running_operation("missing") == ""
+
+
+def test_controller_accepts_work_again_after_the_window_is_reopened(controller):
+    """#619: closing keeps a running game and hides the window; reopening it must
+    not leave the controller refusing every operation."""
+    controller.shutdown(keep_launches=True)
+    spawned: list[str] = []
+    controller._spawn = lambda profile, operation, payload=None: spawned.append(operation)
+    assert controller.start("p", "status") is False
+    controller.reopen()
+    assert controller.start("p", "status") is True
+    assert spawned == ["status"]

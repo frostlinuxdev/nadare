@@ -41,7 +41,7 @@ from typing import Any
 
 from . import diskspace, paths, sevenz, sophon
 from . import download as download_module
-from .download import DownloadError, download, hash_file, remote_size
+from .download import DownloadError, download, remote_size
 from .events import Cancel, Cancelled, Emitter, Event, emitter
 from .rangefile import RangeError, RangePart, RangeReader
 
@@ -289,8 +289,36 @@ def _crc32_file(path: Path) -> str:
     return f"{value & 0xFFFFFFFF:08X}"
 
 
-def _verify_remote(path: Path, rf: RemoteFile, *, hashes: bool = True) -> bool:
+def _digest_pass(
+    path: Path, algorithms: tuple[str, ...], want_crc: bool, cancel: Cancel | None
+) -> tuple[dict[str, str], str]:
+    """One read pass over ``path`` for every wanted digest, checking ``cancel`` per block.
+
+    A resumed install re-hashes every file on disk (tens of GB on a NAS), so Cancel has to be
+    able to stop it between blocks instead of waiting for the scan to end (#562).
+    """
+    hashers = {name: hashlib.new(name) for name in algorithms}
+    crc = 0
+    with open(path, "rb") as fh:
+        while True:
+            if cancel is not None:
+                cancel.raise_if_cancelled()
+            block = fh.read(1 << 20)
+            if not block:
+                break
+            for hasher in hashers.values():
+                hasher.update(block)
+            if want_crc:
+                crc = zlib.crc32(block, crc)
+    return {name: hasher.hexdigest() for name, hasher in hashers.items()}, f"{crc & 0xFFFFFFFF:08X}"
+
+
+def _verify_remote(
+    path: Path, rf: RemoteFile, *, hashes: bool = True, cancel: Cancel | None = None
+) -> bool:
     try:
+        if cancel is not None:
+            cancel.raise_if_cancelled()
         if not path.is_file():
             return False
         if rf.size is not None and path.stat().st_size != rf.size:
@@ -298,26 +326,13 @@ def _verify_remote(path: Path, rf: RemoteFile, *, hashes: bool = True) -> bool:
         if not hashes:
             return True
         algorithms = tuple(name for name in ("md5", "sha256") if getattr(rf, name))
-        if algorithms and rf.crc32:
-            # One read pass for every declared digest.
-            hashers = {name: hashlib.new(name) for name in algorithms}
-            crc = 0
-            with open(path, "rb") as fh:
-                while block := fh.read(1 << 20):
-                    for hasher in hashers.values():
-                        hasher.update(block)
-                    crc = zlib.crc32(block, crc)
-            for name, hasher in hashers.items():
-                if hasher.hexdigest().lower() != getattr(rf, name).lower():
-                    return False
-            return f"{crc & 0xFFFFFFFF:08X}" == rf.crc32.upper()
-        if algorithms:
-            digests = hash_file(path, algorithms)
-            for name in algorithms:
-                expected = getattr(rf, name)
-                if digests[name].lower() != expected.lower():
-                    return False
-        if rf.crc32 and _crc32_file(path) != rf.crc32.upper():
+        if not algorithms and not rf.crc32:
+            return True
+        digests, crc = _digest_pass(path, algorithms, bool(rf.crc32), cancel)
+        for name in algorithms:
+            if digests[name].lower() != getattr(rf, name).lower():
+                return False
+        if rf.crc32 and crc != rf.crc32.upper():
             return False
     except OSError:
         return False
@@ -373,6 +388,10 @@ def _download_remote(
         raise
 
 
+#: Most member names (with size and CRC-32) one ``.done`` record keeps.
+_MAX_RECORDED_MEMBERS = 100_000
+
+
 def _done_record(
     plan: Plan, archive: Archive, members: Sequence[str] | None = None
 ) -> dict[str, Any]:
@@ -383,14 +402,14 @@ def _done_record(
             record[name] = value.lower()
     if members is not None:
         sorted_members = sorted(set(members))
-        recorded_members = sorted_members[:5000]
+        recorded_members = sorted_members[:_MAX_RECORDED_MEMBERS]
         record["members"] = recorded_members
-        if len(sorted_members) > 5000:
+        if len(sorted_members) > _MAX_RECORDED_MEMBERS:
             record["members_truncated"] = True
     return record
 
 
-def _archive_done(plan: Plan, archive: Archive, dest: Path) -> bool:
+def _archive_done(plan: Plan, archive: Archive, dest: Path, *, hashes: bool = False) -> bool:
     name = safe_relative_path(archive.name)
     record_path = dest / STATE_DIR / f"{name}.done"
     try:
@@ -416,6 +435,9 @@ def _archive_done(plan: Plan, archive: Archive, dest: Path) -> bool:
         member_sizes = record.get("member_sizes")
         if member_sizes is not None and not isinstance(member_sizes, dict):
             return False
+        member_crcs = record.get("member_crc32")
+        if member_crcs is not None and not isinstance(member_crcs, dict):
+            return False
         for member in members:
             if not isinstance(member, str):
                 return False
@@ -433,6 +455,13 @@ def _archive_done(plan: Plan, archive: Archive, dest: Path) -> bool:
                         or not isinstance(expected_size, int)
                         or expected_size < 0
                         or path.stat().st_size != expected_size
+                    ):
+                        return False
+                if hashes and member_crcs is not None:
+                    expected_crc = member_crcs.get(member)
+                    if (
+                        not isinstance(expected_crc, str)
+                        or _crc32_file(path) != expected_crc.upper()
                     ):
                         return False
             except OSError:
@@ -507,7 +536,10 @@ def _merge_tree(source: Path, dest: Path) -> None:
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             target = _safe_destination_path(dest, relative)
-            os.replace(path, target)
+            try:
+                os.replace(path, target)
+            except OSError as exc:
+                raise DirectError(f"cannot move {relative} into the install: {exc}") from exc
 
 
 def _extract_zip_into_dest(
@@ -634,6 +666,7 @@ def _write_done(
     plan: Plan, archive: Archive, dest: Path, members: Sequence[str] | None = None
 ) -> None:
     name = safe_relative_path(archive.name)
+    _check_work_dirs(dest)
     record_path = dest / STATE_DIR / f"{name}.done"
     record_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = record_path.with_name(f"{record_path.name}.tmp")
@@ -641,6 +674,10 @@ def _write_done(
     if members is not None:
         record["member_sizes"] = {
             member: (dest / safe_relative_path(member)).stat().st_size
+            for member in record["members"]
+        }
+        record["member_crc32"] = {
+            member: _crc32_file(dest / safe_relative_path(member))
             for member in record["members"]
         }
     temporary.write_text(json.dumps(record), encoding="utf-8")
@@ -713,7 +750,50 @@ def _balanced_runs(
     return runs
 
 
+def _check_work_dirs(dest: Path) -> None:
+    """Refuse an install whose scratch or state folder is a symlink.
+
+    ``.nadare-dl`` and ``.nadare`` hold the archive cache, staging and ``.done`` records, and a
+    cleanup ``rmtree``s inside them: through a link that would write to, and delete from, a
+    folder outside the install root.
+    """
+    for name in (DL_DIR, STATE_DIR):
+        try:
+            mode = (dest / name).lstat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise DirectError(f"cannot inspect {name}: {exc}") from exc
+        if stat.S_ISLNK(mode):
+            raise DirectError(f"{name} in the install folder is a symlink; remove it and retry")
+        if not stat.S_ISDIR(mode):
+            raise DirectError(f"{name} in the install folder is not a folder")
+
+
+#: Prefixes of the per-run staging folders created under ``.nadare-dl``.
+_STAGING_PREFIXES = ("extract-", "slices-", "outer-")
+
+
+def _sweep_stale_staging(root: Path) -> None:
+    """Remove staging folders a killed run left in ``.nadare-dl``.
+
+    Only called while the install lock is held, so nothing else is using them.
+    """
+    dl_dir = root / DL_DIR
+    if dl_dir.is_symlink() or not dl_dir.is_dir():
+        return
+    try:
+        entries = list(dl_dir.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name.startswith(_STAGING_PREFIXES) and not entry.is_symlink() and entry.is_dir():
+            shutil.rmtree(entry, ignore_errors=True)
+
+
 def _cleanup_stream_dir(dest: Path) -> None:
+    if (dest / DL_DIR).is_symlink():
+        return  # never delete through a link
     stream_dir = dest / DL_DIR / "stream"
     shutil.rmtree(stream_dir, ignore_errors=True)
     try:
@@ -892,9 +972,13 @@ def _stream_zip_archive(
     """
     parts: Sequence[RemoteFile] = archive.parts or (archive.source,)
     headers = dict(parts[0].headers) if parts else {}
-    reader = _stream_reader(parts, headers, cancel)
+    reader: RangeReader | None = None
     zf: zipfile.ZipFile | None = None
     try:
+        try:
+            reader = _stream_reader(parts, headers, cancel)
+        except RangeError:
+            return None  # size unknown (HEAD refused) or no ranges: use the normal download
         try:
             zf = zipfile.ZipFile(reader)
         except RangeError as exc:
@@ -929,7 +1013,8 @@ def _stream_zip_archive(
     finally:
         if zf is not None:
             zf.close()
-        reader.close()
+        if reader is not None:
+            reader.close()
 
 
 def _stream_7z_archive(
@@ -953,9 +1038,13 @@ def _stream_7z_archive(
     """
     parts: Sequence[RemoteFile] = archive.parts or (archive.source,)
     headers = dict(parts[0].headers) if parts else {}
-    reader = _stream_reader(parts, headers, cancel)
+    reader: RangeReader | None = None
     say = emitter(emit)
     try:
+        try:
+            reader = _stream_reader(parts, headers, cancel)
+        except RangeError:
+            return None  # size unknown (HEAD refused) or no ranges: use the normal download
         try:
             entries = sevenz.list_entries(reader)
         except RangeError as exc:
@@ -1007,7 +1096,8 @@ def _stream_7z_archive(
     except (RangeError, OSError) as exc:
         raise DirectError(f"cannot stream {archive.name}: {exc}") from exc
     finally:
-        reader.close()
+        if reader is not None:
+            reader.close()
 
 
 def _7z_entry_current(path: Path, entry: sevenz.Entry) -> bool:
@@ -1032,6 +1122,7 @@ def _sync_archive(
     cancel: Cancel | None,
     workers: int = 4,
 ) -> None:
+    _check_work_dirs(dest)
     dl_dir = dest / DL_DIR
     dl_dir.mkdir(parents=True, exist_ok=True)
     source_path = dl_dir / safe_relative_path(archive.source.path)
@@ -1107,14 +1198,28 @@ def _is_https_or_loopback(url: Any) -> bool:
     return url.startswith(("http://127.0.0.1:", "http://localhost:"))
 
 
-def _remove_stale_parts(root: Path, keep: set[str]) -> None:
-    """Best-effort removal of abandoned ``*.part`` files inside a successfully synced root."""
+def _remove_stale_parts(root: Path, keep: set[str], managed: set[str]) -> None:
+    """Best-effort removal of abandoned ``*.part`` files Nadare itself staged in ``root``.
+
+    Only three kinds go: anything inside the download cache, a ``*.nadare-new.part`` (a name
+    only Nadare uses), and the ``.part`` of a file the plan manages. Any other ``*.part`` may be
+    an archive member or the user's own file, so it stays.
+    """
     for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
         for name in filenames:
             if not name.endswith(".part"):
                 continue
             path = Path(dirpath) / name
-            if path.relative_to(root).as_posix() in keep:
+            rel = path.relative_to(root).as_posix()
+            if rel in keep:
+                continue
+            staged = rel[: -len(".part")]
+            ours = (
+                rel.startswith(DL_DIR + "/")
+                or staged.endswith(".nadare-new")
+                or staged in managed
+            )
+            if not ours:
                 continue
             try:
                 path.unlink()
@@ -1170,7 +1275,12 @@ def safe_relative_path(path: str) -> str:
 
 
 def plan_missing(
-    plan: Plan, dest: Path | str, *, verify: bool = True, check_workers: int | None = None
+    plan: Plan,
+    dest: Path | str,
+    *,
+    verify: bool = True,
+    check_workers: int | None = None,
+    cancel: Cancel | None = None,
 ) -> tuple[list[RemoteFile], list[Archive]]:
     """What :func:`sync` would still fetch: files that are absent or whose size/hash
     differ, and archives with no ``.done`` record for this plan's version.
@@ -1186,7 +1296,9 @@ def plan_missing(
     )
 
     def needs_download(rf: RemoteFile) -> bool:
-        return not _verify_remote(root / safe_relative_path(rf.path), rf, hashes=verify)
+        return not _verify_remote(
+            root / safe_relative_path(rf.path), rf, hashes=verify, cancel=cancel
+        )
 
     files: list[RemoteFile] = []
     if workers == 1:
@@ -1202,7 +1314,11 @@ def plan_missing(
                 batch = plan.files[offset : offset + workers]
                 results = pool.map(needs_download, batch)
                 files.extend(rf for rf, missing in zip(batch, results, strict=False) if missing)
-    archives = [archive for archive in plan.archives if not _archive_done(plan, archive, root)]
+    archives = [
+        archive
+        for archive in plan.archives
+        if not _archive_done(plan, archive, root, hashes=verify)
+    ]
     return files, archives
 
 
@@ -1288,8 +1404,11 @@ def _sync(
     say = emitter(emit)
     if cancel is not None:
         cancel.raise_if_cancelled()
+    _sweep_stale_staging(root)
 
-    missing_files, missing_archives = plan_missing(plan, root, check_workers=check_workers)
+    missing_files, missing_archives = plan_missing(
+        plan, root, check_workers=check_workers, cancel=cancel
+    )
     downloaded = 0
     stop = Cancel()
     combined = _CombinedCancel(cancel, stop)
@@ -1300,7 +1419,7 @@ def _sync(
         def fetch(rf: RemoteFile) -> None:
             combined.raise_if_cancelled()
             _download_remote(
-                rf, root / safe_relative_path(rf.path), emit=emit, cancel=combined
+                rf, _safe_destination_path(root, rf.path), emit=emit, cancel=combined
             )
 
         first_error: BaseException | None = None
@@ -1351,7 +1470,7 @@ def _sync(
             can_prune_parts = False
             break
     if can_prune_parts:
-        _remove_stale_parts(root, keep_parts)
+        _remove_stale_parts(root, keep_parts, {safe_relative_path(rf.path) for rf in plan.files})
     try:
         (root / DL_DIR).rmdir()  # only succeeds when nothing is left in it
     except OSError:

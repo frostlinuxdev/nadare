@@ -57,16 +57,38 @@ def mount_point(path: str | os.PathLike[str]) -> str:
     return str(candidate)
 
 
+_UNITS = ("B", "KiB", "MiB", "GiB", "TiB")
+
+
+def _three_digits(value: float) -> str:
+    """``value`` with at most three significant digits and no trailing ``.0``."""
+    text = f"{value:.1f}" if value < 10 else f"{value:.0f}"
+    return text[:-2] if text.endswith(".0") else text
+
+
 def human_size(size: float) -> str:
-    """A short human-readable byte size (``319 GiB``, ``1.5 KiB``)."""
+    """The one byte-size format of the app: ``512 B``, ``1.5 KiB``, ``13 MiB``, ``1.5 GiB``.
+
+    Binary units, labelled as such; three significant digits; a size that rounds up to 1024
+    moves to the next unit (``1 MiB``, never ``1024 KiB``).
+    """
     value = float(max(0, size))
-    if value >= 1 << 30:
-        return f"{value / (1 << 30):.0f} GiB"
-    if value >= 1 << 20:
-        return f"{value / (1 << 20):.0f} MiB"
-    if value >= 1 << 10:
-        return f"{value / (1 << 10):.1f} KiB"
-    return f"{int(value)} B"
+    if value < 1024:
+        return f"{int(value)} B"
+    unit = 0
+    while unit < len(_UNITS) - 1:
+        value /= 1024
+        unit += 1
+        if value < 1024 and float(_three_digits(value)) < 1024:
+            break
+    return f"{_three_digits(value)} {_UNITS[unit]}"
+
+
+def human_speed(bytes_per_second: float) -> str:
+    """A transfer speed in the same format; ``-- MiB/s`` while nothing is known yet."""
+    if bytes_per_second <= 0:
+        return "-- MiB/s"
+    return f"{human_size(bytes_per_second)}/s"
 
 
 def check_space(
@@ -93,4 +115,11 @@ def check_space(
         )
 
 
-__all__ = ["DEFAULT_MARGIN", "check_space", "free_bytes", "human_size", "mount_point"]
+__all__ = [
+    "DEFAULT_MARGIN",
+    "check_space",
+    "free_bytes",
+    "human_size",
+    "human_speed",
+    "mount_point",
+]

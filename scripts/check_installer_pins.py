@@ -48,6 +48,16 @@ DEEP_INTERVAL = 24 * 3600
 RETRY_INTERVAL = 3600
 
 
+#: What this run could not look at. A canary that is blind must say so: "could not check" is
+#: not "fine", so :func:`main` turns every entry into a ``CANARY:`` line (heartbeat down).
+BLIND: list[str] = []
+
+
+def _blind(message: str) -> None:
+    print(f"installer pins: {message}", file=sys.stderr)
+    BLIND.append(message)
+
+
 def check_nte(head: Callable[[str], tuple[int, int | None]]) -> list[str]:
     """Check the pinned NTE installer and list the problems.
 
@@ -59,7 +69,7 @@ def check_nte(head: Callable[[str], tuple[int, int | None]]) -> list[str]:
     try:
         status, length = head(nte_launcher.INSTALLER_URL)
     except Exception as exc:  # noqa: BLE001 - a flaky CDN must not stop the run
-        print(f"installer pins: could not check the NTE installer: {exc}", file=sys.stderr)
+        _blind(f"could not check the NTE installer: {exc}")
         return problems
     if status in (404, 410):
         problems.append(
@@ -68,20 +78,15 @@ def check_nte(head: Callable[[str], tuple[int, int | None]]) -> list[str]:
         )
     elif status == 200:
         if length is None:
-            print(
-                "installer pins: the NTE installer returned no Content-Length, ignored",
-                file=sys.stderr,
-            )
+            _blind("the NTE installer returned no Content-Length")
         elif length != nte_launcher.INSTALLER_SIZE:
             problems.append(
                 f"NTE installer changed size (now {length}, "
                 f"pinned {nte_launcher.INSTALLER_SIZE}); "
                 "re-pin INSTALLER_SHA256 and INSTALLER_SIZE"
             )
-    elif status >= 500:
-        print(f"installer pins: NTE installer returned HTTP {status}, ignored", file=sys.stderr)
     else:
-        print(f"installer pins: NTE installer returned HTTP {status}, ignored", file=sys.stderr)
+        _blind(f"the NTE installer returned HTTP {status}")
     return problems
 
 
@@ -95,7 +100,7 @@ def check_endfield(get_json: Callable[[str], object]) -> list[str]:
     try:
         data = get_json(endfield_shim.LAUNCHER_API)
     except Exception as exc:  # noqa: BLE001 - a flaky API must not stop the run
-        print(f"installer pins: could not check the Endfield installer: {exc}", file=sys.stderr)
+        _blind(f"could not check the Endfield installer: {exc}")
         return problems
     url = data.get("exe_url") if isinstance(data, dict) else None
     if not isinstance(url, str):
@@ -165,10 +170,7 @@ def check_endfield_games_exe(
     try:
         data = get_json(endfield_shim.LAUNCHER_API)
     except Exception as exc:  # noqa: BLE001 - check_endfield reports API trouble
-        print(
-            f"installer pins: could not ask the Endfield API for Games.exe: {exc}",
-            file=sys.stderr,
-        )
+        _blind(f"could not ask the Endfield API for Games.exe: {exc}")
         return []
     url = data.get("exe_url") if isinstance(data, dict) else None
     if not isinstance(url, str) or not endfield_shim.installer_host_allowed(url):
@@ -178,11 +180,7 @@ def check_endfield_games_exe(
         try:
             download(url, installer)
         except Exception as exc:  # noqa: BLE001 - a flaky CDN must not raise a false alarm
-            print(
-                f"installer pins: could not download the Endfield installer to look for "
-                f"Games.exe: {exc}",
-                file=sys.stderr,
-            )
+            _blind(f"could not download the Endfield installer to look for Games.exe: {exc}")
             _write_state(state_path, "unreachable", [], now)
             return []
         try:
@@ -246,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
         help="where the daily Games.exe check remembers its last answer",
     )
     args = parser.parse_args(argv)
+    BLIND.clear()
     problems = check_nte(_head) + check_endfield(_get_json)
     problems += check_endfield_games_exe(
         _get_json,
@@ -255,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         now=time.time(),
         find_7zip=sevenzip.find,
     )
+    problems += [f"installer pins: blind, {note}" for note in BLIND]
     for line in problems:
         print(f"CANARY: {line}")
     if not problems:

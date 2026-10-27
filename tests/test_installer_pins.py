@@ -186,7 +186,7 @@ def test_main_exits_4_for_a_moved_endfield_installer(
     assert "Endfield" in lines[0]
 
 
-def test_main_treats_notes_as_ok(
+def test_main_reports_a_canary_that_could_not_check_anything(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     canary = _canary()
@@ -199,9 +199,9 @@ def test_main_treats_notes_as_ok(
 
     monkeypatch.setattr(canary, "_head", head)
     monkeypatch.setattr(canary, "_get_json", get_json)
-    assert canary.main([]) == 0
+    assert canary.main([]) == 4  # blind is not fine: the heartbeat must go down
     captured = capsys.readouterr()
-    assert "CANARY:" not in captured.out
+    assert "CANARY: installer pins: blind" in captured.out
     assert "installer pins" in captured.err
 
 

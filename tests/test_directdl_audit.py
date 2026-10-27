@@ -182,3 +182,63 @@ def test_a_corrupt_archive_is_deleted_after_a_failed_unpack(server, tmp_path):
     with pytest.raises(dd.DirectError):
         dd.sync(plan, tmp_path)
     assert not list(tmp_path.rglob("g.zip"))
+
+
+def test_a_sync_sweeps_staging_folders_a_killed_run_left_behind(tmp_path):
+    dl = tmp_path / dd.DL_DIR
+    for name in ("extract-abc", "slices-def", "outer-ghi"):
+        (dl / name / "deep").mkdir(parents=True)
+        (dl / name / "deep" / "big.bin").write_bytes(b"x" * 64)
+
+    dd.sync(dd.Plan("T", "1"), tmp_path)
+
+    assert not dl.exists() or not any(dl.iterdir())
+
+
+def test_a_failed_replace_while_merging_is_a_direct_error(tmp_path, monkeypatch):
+    source = tmp_path / "staging"
+    source.mkdir()
+    (source / "a.bin").write_bytes(b"a")
+
+    def refuse(src, dst):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(dd.os, "replace", refuse)
+    with pytest.raises(dd.DirectError, match="cannot move a.bin into the install"):
+        dd._merge_tree(source, tmp_path / "install")
+
+def test_a_same_length_corruption_of_an_archive_member_makes_it_missing_again(server, tmp_path):
+    z = make_zip({"game.exe": b"MZ", "data/x.bin": b"123456"})
+    s = server({"/g.zip": z})
+    arc = dd.Archive("g", dd.RemoteFile("g.zip", s.url + "/g.zip", len(z), md5=md5(z)))
+    plan = dd.Plan("T", "1", archives=(arc,))
+
+    dd.sync(plan, tmp_path)
+    (tmp_path / "data/x.bin").write_bytes(b"XXXXXX")
+
+    assert dd.plan_missing(plan, tmp_path) == ([], [arc])
+    # verify=False is the cheap size-only check run right after a sync
+    assert dd.plan_missing(plan, tmp_path, verify=False) == ([], [])
+
+
+def test_the_done_record_keeps_every_member_of_a_big_archive(tmp_path):
+    plan = dd.Plan("T", "1")
+    arc = dd.Archive("g", dd.RemoteFile("g.zip", "http://x/g.zip", 1))
+    names = [f"d/{i:05d}.bin" for i in range(6000)]
+    record = dd._done_record(plan, arc, names)
+    assert len(record["members"]) == 6000
+    assert "members_truncated" not in record
+
+
+def test_a_done_record_without_member_digests_is_still_accepted(server, tmp_path):
+    z = make_zip({"game.exe": b"MZ"})
+    s = server({"/g.zip": z})
+    arc = dd.Archive("g", dd.RemoteFile("g.zip", s.url + "/g.zip", len(z), md5=md5(z)))
+    plan = dd.Plan("T", "1", archives=(arc,))
+    dd.sync(plan, tmp_path)
+    record_path = tmp_path / dd.STATE_DIR / "g.done"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record.pop("member_crc32")
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    assert dd.plan_missing(plan, tmp_path) == ([], [])

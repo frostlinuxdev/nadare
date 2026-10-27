@@ -1600,6 +1600,8 @@ class MainWindow(QMainWindow):
         # Brought back (second start, activation): stay open after the game ends.
         self._quit_after_games = False
         self._close_requested_by_signal = False
+        if not self._closing:
+            self.controller.reopen()
         QApplication.setQuitOnLastWindowClosed(True)
         self._status_timer.start()
         super().showEvent(event)
@@ -1645,6 +1647,20 @@ class MainWindow(QMainWindow):
         the window keeps it running.
         """
         playing = set(self.controller.launching_profiles())
+        removing = sorted(n for n, op in self._busy.items() if op == "remove")
+        if removing:
+            # Remove runs on the global thread pool, not the controller, and the
+            # profile is only dropped from config when it ends.
+            answer = QMessageBox.warning(
+                self,
+                "Removal in progress",
+                f"{', '.join(removing)} is still being removed.\n\n"
+                "Closing now can leave the game half removed and still listed. "
+                "Close anyway?",
+                QMessageBox.StandardButton.Close | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            return answer == QMessageBox.StandardButton.Close
         active = [n for n in self.controller.mutating_profiles() if n not in playing]
         if not active:
             return True

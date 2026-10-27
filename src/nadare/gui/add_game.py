@@ -457,6 +457,10 @@ class AddGameDialog(QDialog):
         folder_layout.setContentsMargins(0, 0, 0, 0)
         folder_layout.setSpacing(4)
         folder_layout.addWidget(self._with_browse(self.folder, self._browse_folder))
+        self.install_summary = _ElidedLabel()
+        self.install_summary.setObjectName("Muted")
+        self.install_summary.setAccessibleName("Install location")
+        folder_layout.addWidget(self.install_summary)
         self.prefix_summary = _ElidedLabel()
         self.prefix_summary.setObjectName("Muted")
         self.prefix_summary.setAccessibleName("Wine prefix location")
@@ -725,6 +729,7 @@ class AddGameDialog(QDialog):
         if hasattr(self, "prefix_toggle"):
             prefix_controls = show and uses_prefix and not prefix_only and not importing
             self.prefix_summary.setVisible(prefix_controls)
+            self.install_summary.setVisible(show and not prefix_only and not importing)
             self.prefix_toggle.setVisible(prefix_controls)
             self.prefix_toggle.setText(
                 "Use the matching prefix folder"
@@ -778,8 +783,16 @@ class AddGameDialog(QDialog):
 
     def _update_prefix_summary(self) -> None:
         game = self._selected_game()
-        if game is not None and game.kind in PREFIX_KINDS and self.install_new.isChecked():
-            self.prefix_summary.set_full_text(f"Wine prefix: {self.prefix.text()}")
+        fresh = game is not None and self.install_new.isChecked()
+        if fresh and game.kind not in PREFIX_ONLY_KINDS:
+            install_dir, prefix, _owned, _dirs = self._plan_paths(
+                game, self.folder.text().strip(), self.prefix.text().strip(), False
+            )
+            self.install_summary.set_full_text(f"Installs to: {install_dir}")
+        else:
+            prefix = self.prefix.text().strip()
+        if fresh and game.kind in PREFIX_KINDS:
+            self.prefix_summary.set_full_text(f"Wine prefix: {prefix}")
 
     def _update_size_hint(self) -> None:
         """Explain that Install new downloads later, with the known download size."""
@@ -855,6 +868,43 @@ class AddGameDialog(QDialog):
         return info
 
     # ---- creation ----------------------------------------------------------
+    def _plan_paths(
+        self, game: GameType, install_dir: str, prefix_value: str, importing: bool
+    ) -> tuple[str, str, list[str], list[str]]:
+        """The install folder, prefix and ownership records the profile will really get.
+
+        The picked folder is a games library (#560): the game gets
+        ``<folder>/Nadare/<Game>/install`` with its prefix next to it, so nothing of
+        Nadare's ever mixes with the user's own folders. A folder that already holds this
+        game's exe is kept as picked. Nadare may only delete folders it made, so it
+        records which. The preview under the folder field uses this too, so what it
+        shows is what ``create_profile`` stores.
+        """
+        kind = game.kind
+        owned: list[str] = []
+        owned_dirs: list[str] = []
+        if not importing and install_dir and kind not in PREFIX_ONLY_KINDS:
+            chosen = Path(install_dir)
+            default_place = not self._folder_touched or _inside(chosen, self._root())
+            if not default_place and not _holds_game(game, chosen):
+                game_dir = _free_folder(
+                    chosen / "Nadare", _folder_name(game.title), self.config.profiles
+                )
+                owned_dirs.append(str(game_dir))
+                if kind in PREFIX_KINDS:
+                    chosen = game_dir / "install"
+                    if not self._prefix_touched:
+                        prefix_value = str(game_dir / "prefix")
+                else:
+                    chosen = game_dir
+                install_dir = str(chosen)
+            if _new_or_empty(chosen):
+                owned.append("install_dir")
+        if not importing and prefix_value and kind in PREFIX_KINDS:
+            if _new_or_empty(Path(prefix_value)):
+                owned.append("prefix")
+        return install_dir, prefix_value, owned, owned_dirs
+
     def create_profile(self) -> str | None:
         """Validate, write the profile to the config, and accept on success."""
         kind = self.selected_kind()
@@ -905,33 +955,9 @@ class AddGameDialog(QDialog):
             # The prefix is the whole install; never persist a duplicate path.
             install_dir = ""
 
-        owned: list[str] = []
-        owned_dirs: list[str] = []
-        if not importing and install_dir and kind not in PREFIX_ONLY_KINDS:
-            # The picked folder is a games library (#560): the game gets
-            # ``<folder>/Nadare/<Game>/install`` with its prefix next to it, so nothing of
-            # Nadare's ever mixes with the user's own folders. A folder that already holds this
-            # game's exe is kept as picked. Nadare may only delete folders it made, so it
-            # records which.
-            chosen = Path(install_dir)
-            default_place = not self._folder_touched or _inside(chosen, self._root())
-            if not default_place and not _holds_game(game, chosen):
-                game_dir = _free_folder(
-                    chosen / "Nadare", _folder_name(game.title), self.config.profiles
-                )
-                owned_dirs.append(str(game_dir))
-                if kind in PREFIX_KINDS:
-                    chosen = game_dir / "install"
-                    if not self._prefix_touched:
-                        prefix_value = str(game_dir / "prefix")
-                else:
-                    chosen = game_dir
-                install_dir = str(chosen)
-            if _new_or_empty(chosen):
-                owned.append("install_dir")
-        if not importing and prefix_value and kind in PREFIX_KINDS:
-            if _new_or_empty(Path(prefix_value)):
-                owned.append("prefix")
+        install_dir, prefix_value, owned, owned_dirs = self._plan_paths(
+            game, install_dir, prefix_value, importing
+        )
 
         values: dict[str, Any] = {"backend": kind, "title": game.title}
         if install_dir and kind not in PREFIX_ONLY_KINDS:
@@ -942,6 +968,12 @@ class AddGameDialog(QDialog):
             values["owned_trees"] = owned
         if owned_dirs:
             values["owned_dirs"] = owned_dirs
+        if owned:
+            # Bind each record to the folder it was made for: a path edited later is not owned.
+            made = {"install_dir": install_dir, "prefix": prefix_value}
+            values["owned_paths"] = {
+                key: str(Path(made[key]).expanduser().resolve()) for key in owned
+            }
 
         with self.config.locked():
             self.config.add_profile(name, **values)

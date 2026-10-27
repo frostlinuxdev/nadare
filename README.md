@@ -70,9 +70,9 @@ is covered by tests but has not been played end to end, or needs a workaround.
 | Arknights, Stella Sora | Verified |
 | Brown Dust 2, Aether Gazer, Punishing: Gray Raven | Verified |
 | Girls' Frontline 2 (Darkwinter build), Honkai Impact 3rd | Verified |
-| Arknights: Endfield, Neverness to Everness (direct install) | Verified |
+| Arknights: Endfield, Neverness to Everness (direct install), Mongil: Star Dive | Verified |
 | Genshin Impact, Honkai: Star Rail, Zenless Zone Zero | Experimental (checked as far as the login screen) |
-| Wuthering Waves, Mongil: Star Dive, NIKKE | Experimental |
+| Wuthering Waves, NIKKE | Experimental |
 | Girls' Frontline 2 (Haoplay global build), Neverness to Everness (publisher's launcher) | Experimental |
 | Fate/Grand Order (NA) | Experimental, source checkouts only, needs podman and an NVIDIA GPU |
 

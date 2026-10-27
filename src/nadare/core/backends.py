@@ -292,8 +292,14 @@ def kinds() -> list[str]:
     return sorted(set(_REGISTRY) | set(_BUILTINS))
 
 
+#: Builtin kinds whose import failed, with the reason (shown by :func:`get`).
+_FAILED_IMPORTS: dict[str, str] = {}
+
+
 def _load_builtin(kind: str) -> type[GameBackend] | None:
     """Import and register one builtin backend, leaving its siblings untouched."""
+    if not isinstance(kind, str):
+        return None
     with _REGISTRY_LOCK:
         registered = _REGISTRY.get(kind)
         target = _BUILTINS.get(kind)
@@ -303,8 +309,14 @@ def _load_builtin(kind: str) -> type[GameBackend] | None:
     try:
         mod = importlib.import_module(mod_name)
         cls = getattr(mod, attr)
-    except Exception:
-        log.debug("backend %s unavailable", kind, exc_info=True)
+    except Exception as exc:
+        with _REGISTRY_LOCK:
+            first = kind not in _FAILED_IMPORTS
+            _FAILED_IMPORTS[kind] = f"{type(exc).__name__}: {exc}"
+        if first:
+            # A kind left out on purpose is not a fault; anything else is a broken build.
+            level = logging.DEBUG if kind in OPTIONAL_KINDS else logging.WARNING
+            log.log(level, "backend %s failed to load: %s", kind, exc, exc_info=True)
         return None
     with _REGISTRY_LOCK:
         return _REGISTRY.setdefault(kind, cls)
@@ -326,6 +338,8 @@ def unavailable() -> list[str]:
 
 def is_available(kind: str) -> bool:
     """True when ``kind`` resolved to a registered backend (e.g. not omitted)."""
+    if not isinstance(kind, str):
+        return False
     with _REGISTRY_LOCK:
         if kind in _REGISTRY:
             return True
@@ -335,6 +349,9 @@ def is_available(kind: str) -> bool:
 def get(kind: str) -> type[GameBackend]:
     backend = _load_builtin(kind)
     if backend is None:
+        reason = _FAILED_IMPORTS.get(kind) if isinstance(kind, str) else None
+        if reason:
+            raise BackendError(f"backend {kind!r} failed to load: {reason}")
         raise BackendError(f"unknown backend: {kind!r} (have: {', '.join(kinds())})")
     return backend
 

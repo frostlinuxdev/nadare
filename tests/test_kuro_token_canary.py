@@ -185,3 +185,26 @@ def test_a_gzip_compressed_index_body_is_decoded() -> None:
     assert canary._has_default(canary.decode_body(gzip.compress(body.encode())))
     assert canary.decode_body(body.encode()) == body
     assert canary.decode_body(b"\x1f\x8bnot really gzip") != ""  # never raises
+
+
+def test_main_exits_4_when_the_launcher_index_cannot_be_reached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    canary = _canary()
+
+    def fetch(url: str) -> tuple[int, str]:
+        raise TimeoutError("offline")
+
+    monkeypatch.setattr(canary, "_fetch", fetch)
+    assert canary.main(["--index", str(write_tokens(tmp_path))]) == 4
+    assert "CANARY: kuro tokens: blind" in capsys.readouterr().out
+
+
+def test_main_exits_4_when_the_launcher_index_answers_5xx(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    canary = _canary()
+    fetch, _calls = fake_fetch(503, "")
+    monkeypatch.setattr(canary, "_fetch", fetch)
+    assert canary.main(["--index", str(write_tokens(tmp_path))]) == 4
+    assert "blind" in capsys.readouterr().out

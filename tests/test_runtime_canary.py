@@ -143,3 +143,34 @@ def test_load_state_tolerates_garbage(tmp_path: Path, text: str) -> None:
     path.write_text(text)
     assert canary.load_state(path) == {}
     assert canary.load_state(tmp_path / "missing.json") == {}
+
+
+def test_main_exits_4_when_no_runner_release_can_be_looked_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from nadare.core import runners
+
+    canary = _canary()
+
+    def release(spec, tag, **kwargs):
+        raise runners.RunnerError("rate limited")
+
+    monkeypatch.setattr(runners, "_release", release)
+    assert canary.main(["--state", str(tmp_path / "s.json")]) == canary.PROBLEM
+    assert "CANARY: runtime canary blind" in capsys.readouterr().out
+
+
+def test_main_exits_4_when_a_new_runner_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from nadare.core import runners
+
+    canary = _canary()
+    monkeypatch.setattr(runners, "_release", lambda spec, tag, **kw: {"tag": "t9"})
+
+    def fetch(family: str, tag: str):
+        raise OSError("offline")
+
+    monkeypatch.setattr(canary, "_fetch_appid", fetch)
+    assert canary.main(["--state", str(tmp_path / "s.json")]) == canary.PROBLEM
+    assert "blind" in capsys.readouterr().out

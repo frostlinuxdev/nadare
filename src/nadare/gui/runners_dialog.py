@@ -23,19 +23,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import runners
+from ..core import diskspace, runners
 
 COLUMNS = ("Runner", "Status", "Size", "Used by", "")
 
 
 def human_size(size: int) -> str:
-    """``1.6 GB`` style size."""
-    value = float(size)
-    for unit in ("B", "KB", "MB", "GB"):
-        if value < 1024 or unit == "GB":
-            return f"{value:.0f} {unit}" if unit in ("B", "KB") else f"{value:.1f} {unit}"
-        value /= 1024
-    return f"{value:.1f} GB"
+    """``1.6 GiB`` style size (the app-wide format)."""
+    return diskspace.human_size(size)
 
 
 def status_text(path: Path) -> str:

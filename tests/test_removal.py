@@ -520,13 +520,42 @@ def test_ownership_is_per_key(trees_env):
     assert found["prefix"].safe and not found["install_dir"].safe
 
 
-def test_a_real_wine_prefix_is_deletable_without_the_ownership_record(trees_env):
+def test_a_wine_prefix_nadare_did_not_create_is_refused_even_with_drive_c(trees_env):
     cfg, _, tmp = trees_env
-    prefix = _tree(tmp, "Prefixes", "gone")
-    (prefix / "drive_c").mkdir()
-    cfg.profiles["gone"]["prefix"] = str(prefix)
+    shared = _tree(tmp, "home", ".wine")
+    (shared / "drive_c").mkdir()
+    cfg.profiles["gone"]["prefix"] = str(shared)
     found = {t.key: t for t in removal.removable_trees(cfg, "gone")}
-    assert found["prefix"].safe
+    assert not found["prefix"].safe and "did not create" in found["prefix"].reason
+    _refused(cfg, tmp, "prefix", "did not create")
+    assert (shared / "file.bin").exists()
+
+
+def test_a_recorded_path_that_was_changed_later_is_no_longer_owned(trees_env):
+    cfg, _, tmp = trees_env
+    made = _tree(tmp, "Games", "made")
+    later = _tree(tmp, "Music")
+    cfg.profiles["gone"].update(
+        install_dir=str(later),
+        owned_trees=["install_dir"],
+        owned_paths={"install_dir": str(made.resolve())},
+    )
+    found = {t.key: t for t in removal.removable_trees(cfg, "gone")}
+    assert not found["install_dir"].safe
+    _refused(cfg, tmp, "install_dir", "did not create")
+    assert (later / "file.bin").exists()
+
+
+def test_a_recorded_path_that_still_matches_is_owned(trees_env):
+    cfg, _, tmp = trees_env
+    made = _tree(tmp, "Games", "made")
+    cfg.profiles["gone"].update(
+        install_dir=str(made),
+        owned_trees=["install_dir"],
+        owned_paths={"install_dir": str(made.resolve())},
+    )
+    found = {t.key: t for t in removal.removable_trees(cfg, "gone")}
+    assert found["install_dir"].safe
 
 
 def test_a_prefix_field_pointing_at_a_plain_folder_is_refused(trees_env):

@@ -94,3 +94,24 @@ def test_the_support_report_button_falls_back_to_the_first_profile(qapp, logs):
     dlg.report_requested.connect(got.append)
     dlg.report_btn.click()
     assert got == ["G"]
+
+
+def test_zip_button_saves_every_log_of_the_profile(qapp, logs, tmp_path, monkeypatch):
+    import zipfile
+
+    from PyQt6.QtWidgets import QFileDialog
+
+    dlg = make(logs)
+    target = tmp_path / "bundle.zip"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
+    assert dlg.zip_btn.isEnabled()
+    dlg.zip_btn.click()
+    with zipfile.ZipFile(target) as zf:
+        names = set(zf.namelist())
+        assert {"README.txt", "G-launch.log", "G-install.log"} <= names
+        assert os.path.expanduser("~") not in zf.read("G-launch.log").decode()
+
+
+def test_zip_button_is_disabled_when_there_are_no_logs(qapp, tmp_path):
+    dlg = make(tmp_path / "none")
+    assert not dlg.zip_btn.isEnabled()

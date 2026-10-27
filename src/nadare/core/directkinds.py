@@ -190,6 +190,7 @@ VERIFIED_KINDS = frozenset(
         "direct-hi3",
         "direct-endfield",
         "direct-nte",
+        "direct-mongil",
     }
 )
 

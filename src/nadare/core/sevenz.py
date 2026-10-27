@@ -875,6 +875,7 @@ def _extract_archive(
         current = 0
         stream_pos = 0
         active: Path | None = None
+        final: Path | None = None
         out_file = None
         running_crc = 0
         try:
@@ -901,9 +902,7 @@ def _extract_archive(
                     record = stream_map.get(current)
                     if record is not None:
                         if out_file is None:
-                            active = _safe_destination_path(dest, record.path)
-                            active.parent.mkdir(parents=True, exist_ok=True)
-                            active = _safe_destination_path(dest, record.path)
+                            final, active = _staged_path(dest, record.path)
                             out_file = open(active, "wb")
                             running_crc = 0
                         out_file.write(piece)
@@ -915,9 +914,7 @@ def _extract_archive(
                         record = stream_map.get(current)
                         if record is not None:
                             if out_file is None:
-                                active = _safe_destination_path(dest, record.path)
-                                active.parent.mkdir(parents=True, exist_ok=True)
-                                active = _safe_destination_path(dest, record.path)
+                                final, active = _staged_path(dest, record.path)
                                 out_file = open(active, "wb")
                                 running_crc = 0
                             out_file.close()
@@ -926,6 +923,8 @@ def _extract_archive(
                                 active.unlink(missing_ok=True)
                                 active = None
                                 raise SevenZipError(f"CRC mismatch for {record.path}")
+                            # Verified: only now does the new file replace an installed one.
+                            os.replace(active, final)
                             active = None
                             add_count(1)
                         current += 1
@@ -1014,6 +1013,15 @@ def _extract_archive(
     for folder_index in sorted(plan):
         extract_folder(fh, folder_index)
     return count
+
+
+def _staged_path(dest: Path, relative: str) -> tuple[Path, Path]:
+    """``(final, staging)`` for a member: it is written beside the target and renamed over it
+    once its CRC passes, so a bad block or a cancel never truncates a file already installed."""
+    final = _safe_destination_path(dest, relative)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    final = _safe_destination_path(dest, relative)
+    return final, final.with_name(final.name + ".nadare-new")
 
 
 def extract(

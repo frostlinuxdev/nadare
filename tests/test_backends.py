@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from nadare.core import paths
+from nadare.core import backends, paths
 from nadare.core.backends import (
     BackendContext,
     BackendError,
@@ -296,3 +296,31 @@ def test_every_builtin_backend_imports_and_is_bundled():
         mod_name, _, attr = target.partition(":")
         assert mod_name.startswith("nadare.backends."), kind
         assert getattr(importlib.import_module(mod_name), attr), kind
+
+
+def test_a_builtin_that_fails_to_import_says_why_and_warns_once(monkeypatch, caplog):
+    monkeypatch.setitem(backends._BUILTINS, "broken-kind", "nadare_no_such_module:Thing")
+    monkeypatch.setattr(backends, "_FAILED_IMPORTS", {})
+    with caplog.at_level("WARNING", logger=backends.log.name):
+        with pytest.raises(backends.BackendError, match="failed to load.*nadare_no_such_module"):
+            backends.get("broken-kind")
+        assert not backends.is_available("broken-kind")
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "broken-kind" in warnings[0].getMessage()
+
+
+def test_a_deliberately_omitted_kind_does_not_warn(monkeypatch, caplog):
+    monkeypatch.setitem(backends._BUILTINS, "fgo-lepton", "nadare_no_such_module:Thing")
+    monkeypatch.setattr(backends, "_FAILED_IMPORTS", {})
+    with backends._REGISTRY_LOCK:
+        monkeypatch.delitem(backends._REGISTRY, "fgo-lepton", raising=False)
+    with caplog.at_level("WARNING", logger=backends.log.name):
+        assert not backends.is_available("fgo-lepton")
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_a_non_string_kind_is_a_backend_error_not_a_type_error():
+    with pytest.raises(backends.BackendError):
+        backends.get(["wine"])
+    assert backends.is_available(["wine"]) is False

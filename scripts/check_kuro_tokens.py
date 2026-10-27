@@ -28,6 +28,15 @@ from pathlib import Path
 from typing import Any
 
 PROBLEM = 4
+
+#: What this run could not look at; :func:`main` reports each as a ``CANARY:`` line, because
+#: "could not check" is not "fine".
+BLIND: list[str] = []
+
+
+def _blind(message: str) -> None:
+    print(f"kuro tokens: {message}", file=sys.stderr)
+    BLIND.append(message)
 #: Seconds to wait for one launcher index.
 TIMEOUT = 15
 #: game -> (launcher group, launcher prefix)
@@ -101,7 +110,7 @@ def check(
         try:
             status, body = fetch(url)
         except Exception as exc:  # noqa: BLE001 - one bad game must not stop the rest
-            print(f"kuro tokens: could not check {game}: {exc}", file=sys.stderr)
+            _blind(f"could not check {game}: {exc}")
             continue
         if 400 <= status < 500:
             problems.append(
@@ -109,7 +118,7 @@ def check(
                 "update catalog/kuro-tokens.json in the index"
             )
         elif status >= 500:
-            print(f"kuro tokens: {game} returned HTTP {status}, ignored", file=sys.stderr)
+            _blind(f"{game} returned HTTP {status}")
         elif status == 200 and not _has_default(body):
             problems.append(f"Kuro token for {game} returned an unexpected page")
     return problems
@@ -143,7 +152,9 @@ def main(argv: list[str] | None = None) -> int:
     if tokens is None:
         tokens = builtin_tokens()
         print("kuro tokens: no published file, checking the built-in tokens")
+    BLIND.clear()
     problems = check(tokens, _fetch)
+    problems += [f"kuro tokens: blind, {note}" for note in BLIND]
     for line in problems:
         print(f"CANARY: {line}")
     if not problems:

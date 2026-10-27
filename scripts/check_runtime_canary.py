@@ -60,6 +60,16 @@ def read_manifest(fileobj: IO[bytes]) -> str | None:
     return None
 
 
+#: What this run could not look at; :func:`main` reports each as a ``CANARY:`` line, because
+#: "could not check" is not "fine".
+BLIND: list[str] = []
+
+
+def _blind(message: str) -> None:
+    print(f"canary: {message}", file=sys.stderr)
+    BLIND.append(message)
+
+
 def load_state(path: Path) -> dict[str, dict[str, Any]]:
     """The saved ``{family: {tag, appid}}`` answers; anything unreadable is empty."""
     try:
@@ -97,7 +107,7 @@ def check(
         try:
             appid = fetch_appid(family, tag)
         except Exception as exc:  # noqa: BLE001 - one bad family must not stop the rest
-            print(f"canary: could not read {family} {tag}: {exc}", file=sys.stderr)
+            _blind(f"could not read {family} {tag}: {exc}")
             continue
         new_state[family] = {"tag": tag, "appid": appid}
     problems: list[str] = []
@@ -154,16 +164,18 @@ def main(argv: list[str] | None = None) -> int:
 
     from nadare.core import runners, umu
 
+    BLIND.clear()
     releases: dict[str, str] = {}
     for family, spec in runners.RUNNERS.items():
         try:
             releases[family] = str(runners._release(spec, None)["tag"])  # noqa: SLF001
         except Exception as exc:  # noqa: BLE001
-            print(f"canary: cannot look up {family}: {exc}", file=sys.stderr)
+            _blind(f"cannot look up {family}: {exc}")
     state, problems = check(
         load_state(args.state), releases, _fetch_appid, umu.SUPPORTED_RUNTIME_APPIDS
     )
     save_state(args.state, state)
+    problems += [f"runtime canary blind, {note}" for note in BLIND]
     for line in problems:
         print(f"CANARY: {line}")
     if not problems:

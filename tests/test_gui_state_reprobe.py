@@ -169,3 +169,68 @@ def test_switching_away_and_back_replays_a_running_install(tmp_path, qapp, monke
         window.close()
         window.deleteLater()
         qapp.processEvents()
+
+
+def test_stop_ignores_the_second_click_of_a_launch_double_click(qapp):
+    """#617: LAUNCH turns into STOP under the finger; a double-click must not
+    start the game and then stop it again."""
+    import time
+
+    from nadare.gui.game_view import GameView
+
+    view = GameView()
+    view.set_profile("sample", {})
+    actions: list[str] = []
+    view.action_requested.connect(actions.append)
+    try:
+        view.set_busy("launch")
+        view.primary.click()
+        assert actions == []
+        view._primary_grace_until = time.monotonic() - 1
+        view.primary.click()
+        assert actions == ["stop"]
+    finally:
+        view.deleteLater()
+        qapp.processEvents()
+
+
+@pytest.mark.parametrize("operation", ["install", "update", "repair", "remake_prefix"])
+def test_primary_is_neutral_until_the_status_after_a_successful_operation(qapp, operation):
+    """#618: the old not_installed/update_available status must not re-offer the
+    action that just succeeded while the re-probe is still running."""
+    from nadare.core.backends import Status
+    from nadare.gui.game_view import GameView
+
+    view = GameView()
+    view.set_profile("sample", {})
+    actions: list[str] = []
+    view.action_requested.connect(actions.append)
+    try:
+        view.set_status(Status("not_installed", data={"can_install": True}))
+        view.set_busy(operation)
+        view.finish(operation, 0)
+        assert view.primary.isEnabled() is False
+        view.primary.click()
+        assert actions == []
+        view.set_status(Status("installed"))
+        assert view.primary.isEnabled() is True
+    finally:
+        view.deleteLater()
+        qapp.processEvents()
+
+
+def test_failed_operation_keeps_the_primary_action(qapp, monkeypatch):
+    from nadare.core.backends import Status
+    from nadare.gui.game_view import GameView
+
+    view = GameView()
+    view.set_profile("sample", {})
+    monkeypatch.setattr(view, "show_error", lambda *args, **kwargs: None)
+    try:
+        view.set_status(Status("not_installed", data={"can_install": True}))
+        view.set_busy("install")
+        view.fail("boom")
+        assert view.primary.isEnabled() is True
+    finally:
+        view.deleteLater()
+        qapp.processEvents()

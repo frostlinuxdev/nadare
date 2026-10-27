@@ -439,7 +439,10 @@ class Config:
     @contextmanager
     def _file_lock(self) -> Iterator[None]:
         """Cross-process lock around the read-merge-write in :meth:`save`."""
-        lock_path = self.path.with_name(self.path.name + ".lock")
+        # Key the lock on the file a symlinked name points at, the same file
+        # save() replaces, so every name for one config shares one lock.
+        real = Path(os.path.realpath(self.path))
+        lock_path = real.with_name(real.name + ".lock")
         fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
@@ -586,9 +589,13 @@ class Config:
                 local.update(merged)
             # A profile added locally but not saved yet keeps the local values.
         for key, value in raw.items():
-            if key == "profiles" or key not in self._top_snapshot:
+            if key == "profiles":
                 continue
-            if self.data.get(key) == self._top_snapshot[key]:
+            if key not in self._top_snapshot:
+                # A key this process had not seen when it loaded: another
+                # process added it. Keep it unless we set our own value.
+                self.data.setdefault(key, value)
+            elif self.data.get(key) == self._top_snapshot[key]:
                 self.data[key] = value
         active = self.data.get("active_profile")
         if not isinstance(active, str) or active not in self.profiles:

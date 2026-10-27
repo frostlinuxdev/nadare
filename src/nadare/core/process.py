@@ -570,11 +570,14 @@ class ProfileLock:
     lost lock raises :class:`ProfileLockError`.
     """
 
+    #: File suffix; subclasses use another one so their lock is independent.
+    suffix = ".lock"
+
     def __init__(self, profile: str, *, wait: float = 0.0, poll: float = 0.2) -> None:
         self.profile = profile
         self.wait = wait
         self.poll = poll
-        self.path = paths.state_dir() / LOCK_DIR_NAME / f"{_safe(profile)}.lock"
+        self.path = paths.state_dir() / LOCK_DIR_NAME / f"{_safe(profile)}{self.suffix}"
         self._fd: int | None = None
 
     def acquire(self) -> ProfileLock:
@@ -617,6 +620,23 @@ class ProfileLock:
 
     def __exit__(self, *exc: object) -> None:
         self.release()
+
+
+class OperationLock(ProfileLock):
+    """Serialises install, update, repair, remake-prefix and Remove per profile.
+
+    A separate lock file from :class:`ProfileLock`, which CZN holds for token
+    rotation inside those same operations, so the two never block each other.
+    """
+
+    suffix = ".ops.lock"
+
+
+#: What the user sees when an :class:`OperationLock` is already held.
+OPERATION_BUSY = (
+    "Another Nadare window or command is installing, updating or removing {name}. "
+    "Wait for it to finish and try again."
+)
 
 
 class ProfileLockError(RuntimeError):

@@ -11,9 +11,11 @@ never written verbatim. Console output is opt-in (the CLI prints Events itself).
 from __future__ import annotations
 
 import contextlib
+import faulthandler
 import logging
 import logging.handlers
 import os
+import signal
 import threading
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,10 @@ BACKUP_COUNT = 5
 
 _lock = threading.Lock()
 _configured = False
+
+STACKS_FILE = "nadare-stacks.log"
+#: faulthandler writes to a file descriptor, so the file must stay open for the process's life.
+_stack_dump_file: Any = None
 
 
 class _RotatingFileHandler(logging.handlers.RotatingFileHandler):
@@ -250,3 +256,31 @@ def log_event(logger: logging.Logger, level: int, message: str, **data: Any) -> 
     """Log a message plus optional structured data, both masked by the filter."""
     suffix = (" " + " ".join(f"{k}={v}" for k, v in data.items())) if data else ""
     logger.log(level, "%s%s", message, suffix)
+
+
+def install_stack_dump(path: str | Path | None = None) -> Path | None:
+    """Make ``kill -USR1 <pid>`` write every thread's stack to ``nadare-stacks.log``.
+
+    A stuck window cannot be inspected without a debugger (ptrace is often blocked), so the
+    process dumps its own threads on request. Returns the file, or ``None`` when the platform
+    has no SIGUSR1 or the file cannot be opened: this is a diagnostic and never stops startup.
+    """
+    global _stack_dump_file
+    sigusr1 = getattr(signal, "SIGUSR1", None)
+    if sigusr1 is None:
+        return None
+    target = Path(path) if path else paths.logs_dir() / STACKS_FILE
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        stream = os.fdopen(fd, "a", encoding="utf-8")
+        with contextlib.suppress(OSError):
+            os.chmod(target, 0o600)
+        faulthandler.register(sigusr1, file=stream, all_threads=True)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if _stack_dump_file is not None:
+        with contextlib.suppress(Exception):
+            _stack_dump_file.close()
+    _stack_dump_file = stream
+    return target

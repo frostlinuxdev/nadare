@@ -17,6 +17,7 @@ from nadare.backends import direct
 from nadare.core import directdl as dd
 from nadare.core import directkinds as dk
 from nadare.core.backends import BackendError, get, kinds
+from nadare.core.events import Cancelled
 
 
 def _zip(files: dict[str, bytes]) -> bytes:
@@ -221,6 +222,36 @@ def test_a_failed_download_leaves_the_install_incomplete(game):
 
 
 # ------------------------------------------------------------ launcher games
+def test_a_failed_update_keeps_a_completed_install_installed(game):
+    game.install()
+    game.state["version"] = "2"
+    game.srv.objects["/pkg.zip"] = b"corrupted"  # the update's archive is bad
+    with pytest.raises(BackendError):
+        game.update()
+    assert not game._install_incomplete()
+    st = game.status()
+    assert st.state == "installed" and st.version == "1"
+    assert (game.install_dir() / "BrownDust II.exe").read_bytes() == b"MZ"
+
+
+def test_a_cancelled_update_keeps_a_completed_install_installed(game):
+    game.install()
+    game.state["version"] = "2"
+    game.ctx.cancel.cancel()
+    with pytest.raises(Cancelled):
+        game._sync_direct()
+    assert not game._install_incomplete()
+    assert game.status().state == "installed"
+
+
+def test_a_failed_repeat_install_of_an_unfinished_install_stays_incomplete(game):
+    game.srv.objects["/pkg.zip"] = b"corrupted"
+    for _ in range(2):
+        with pytest.raises(BackendError):
+            game.install()
+        assert game._install_incomplete()
+
+
 def _launcher(tmp_path, cls_name):
     from nadare.backends import launcher
 
@@ -456,6 +487,7 @@ def test_tiers_mark_only_the_launched_games_as_verified():
     assert dk.tier_of("direct-bd2") == "Verified"
     assert dk.tier_of("direct-endfield") == "Verified"
     assert dk.tier_of("direct-nte") == "Verified"
+    assert dk.tier_of("direct-mongil") == "Verified"  # b13 end to end, 2026-10-27
     assert dk.tier_of("launcher-nte") == "Experimental"
     assert dk.tier_of("direct-genshin") == "Experimental"
     assert dk.tier_of("direct-wuwa") == "Experimental"

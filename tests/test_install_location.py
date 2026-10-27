@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -56,7 +57,9 @@ def test_folder_moves_default_prefix_and_two_games_are_distinct(tmp_path, qapp):
     try:
         d.set_install_dir("/x/y/Games/Brown Dust 2")
         assert d.prefix.text() == "/x/y/Games/Brown Dust 2-prefix"
-        assert d.prefix_summary.full_text() == f"Wine prefix: {d.prefix.text()}"
+        title = add_game._folder_name(d._selected_game().title)
+        nested = f"/x/y/Games/Brown Dust 2/Nadare/{title}/prefix"
+        assert d.prefix_summary.full_text() == f"Wine prefix: {nested}"
         d.set_install_dir("/x/y/BD2/install")
         assert d.prefix.text() == "/x/y/BD2/prefix"
         d.set_install_dir("/x/y/Games/One")
@@ -222,7 +225,8 @@ def test_a_very_long_path_does_not_widen_the_dialog(tmp_path, qapp):
         scroll = d.findChildren(QScrollArea)[0]
         assert scroll.horizontalScrollBar().maximum() == 0
         full = d.prefix_summary.full_text()
-        assert full == f"Wine prefix: {long_folder}-prefix"
+        nested = f"{long_folder}/Nadare/{add_game._folder_name(d._selected_game().title)}/prefix"
+        assert full == f"Wine prefix: {nested}"
         assert d.prefix_summary.toolTip() == full
         assert d.prefix_summary.text() != full  # shortened to fit, not wrapped or clipped
     finally:
@@ -248,6 +252,10 @@ def test_a_picked_new_folder_gets_nadare_game_install_and_prefix(tmp_path, qapp)
         assert profile["prefix"] == str(game_dir / "prefix")
         assert set(profile["owned_trees"]) == {"install_dir", "prefix"}
         assert profile["owned_dirs"] == [str(game_dir)]
+        assert profile["owned_paths"] == {
+            "install_dir": str(Path(profile["install_dir"]).resolve()),
+            "prefix": str(Path(profile["prefix"]).resolve()),
+        }
     finally:
         d.close()
 
@@ -361,3 +369,98 @@ def test_folder_names_drop_path_and_shell_hostile_characters():
     assert add_game._folder_name("Punishing: Gray Raven") == "Punishing Gray Raven"
     assert add_game._folder_name("Wine/Proton game") == "Wine Proton game"
     assert add_game._folder_name("///") == "game"
+
+
+# ---- the dialog shows the folder the game really gets (b14) ------------------------
+def test_the_dialog_shows_the_final_install_path_for_a_picked_folder(tmp_path, qapp):
+    d = dialog(tmp_path, qapp)
+    try:
+        d.location_toggle.click()
+        library = tmp_path / "Games"
+        d.set_install_dir(str(library))
+        name = add_game._folder_name(d._selected_game().title)
+        final = library / "Nadare" / name / "install"
+        assert d.install_summary.full_text() == f"Installs to: {final}"
+        assert not d.install_summary.isHidden()
+        assert d.create_profile()
+        (profile,) = d.config.profiles.values()
+        assert profile["install_dir"] == str(final)
+    finally:
+        d.close()
+
+
+def test_the_final_path_follows_the_next_free_game_folder(tmp_path, qapp):
+    library = tmp_path / "Games"
+    first = dialog(tmp_path, qapp)
+    try:
+        name = add_game._folder_name(first._selected_game().title)
+        _create(first, library)
+    finally:
+        first.close()
+    second = dialog(tmp_path, qapp)
+    try:
+        second.location_toggle.click()
+        second.set_install_dir(str(library))
+        expected = library / "Nadare" / f"{name} 2" / "install"
+        assert second.install_summary.full_text() == f"Installs to: {expected}"
+    finally:
+        second.close()
+
+
+def test_the_default_location_is_shown_as_is_and_keeps_the_prefix_text(tmp_path, qapp):
+    d = dialog(tmp_path, qapp)
+    try:
+        d.location_toggle.click()
+        default = tmp_path / "data" / "wine-proton-game"
+        assert d.install_summary.full_text() == f"Installs to: {default / 'install'}"
+        assert d.prefix_summary.full_text() == f"Wine prefix: {default / 'prefix'}"
+    finally:
+        d.close()
+
+
+def test_the_prefix_text_shows_the_nested_prefix_for_a_picked_folder(tmp_path, qapp):
+    d = dialog(tmp_path, qapp)
+    try:
+        d.location_toggle.click()
+        library = tmp_path / "Games"
+        d.set_install_dir(str(library))
+        name = add_game._folder_name(d._selected_game().title)
+        expected = library / "Nadare" / name / "prefix"
+        assert d.prefix_summary.full_text() == f"Wine prefix: {expected}"
+    finally:
+        d.close()
+
+
+def test_the_final_path_follows_the_selected_game(tmp_path, qapp):
+    d = dialog(tmp_path, qapp)
+    try:
+        d.location_toggle.click()
+        library = tmp_path / "Games"
+        d.set_install_dir(str(library))
+        for row in range(d.game_list.count()):
+            d.game_list.setCurrentRow(row)
+            game = d._selected_game()
+            if game is None or game.kind in add_game.PREFIX_ONLY_KINDS:
+                continue
+            assert str(library / "Nadare" / add_game._folder_name(game.title)) in (
+                d.install_summary.full_text()
+            ), game.title
+            break
+    finally:
+        d.close()
+
+
+def test_no_final_path_is_shown_for_an_import_or_a_prefix_only_game(tmp_path, qapp):
+    d = dialog(tmp_path, qapp)
+    try:
+        d.import_existing.setChecked(True)
+        qapp.processEvents()
+        assert d.install_summary.isHidden()
+    finally:
+        d.close()
+    czn = dialog(tmp_path, qapp, kind="czn")
+    try:
+        czn.location_toggle.click()
+        assert czn.install_summary.isHidden()
+    finally:
+        czn.close()

@@ -1323,13 +1323,22 @@ class ArknightsBackend(GameBackend):
                 "(reinstall to record it, or set 'prefix' under the profile's data dir)"
             )
         if (prefix / "drive_c").is_dir():
-            self._refuse_if_shared(prefix)
-            self.ctx.emit(Event("step", f"Removing the game prefix {prefix}"))
-            # ``prefix`` may be a symlink, which rmtree refuses: remove the
-            # resolved tree, then drop the (now dangling) link.
-            shutil.rmtree(prefix.resolve())
             if prefix.is_symlink():
+                # The link may have been moved to another disk or swapped after
+                # install, so its target can hold unrelated data: drop the link
+                # and leave the folder it points at.
+                self.ctx.emit(
+                    Event(
+                        "step",
+                        f"{prefix} links to {prefix.resolve()}, which may hold other "
+                        "files: removing the link and leaving that folder in place",
+                    )
+                )
                 prefix.unlink(missing_ok=True)
+            else:
+                self._refuse_if_shared(prefix)
+                self.ctx.emit(Event("step", f"Removing the game prefix {prefix}"))
+                shutil.rmtree(prefix)
         if purge:
             self.ctx.emit(Event("step", "Purging profile data (cache, prefix)"))
             target = _purge_target(
