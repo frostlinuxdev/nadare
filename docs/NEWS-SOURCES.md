@@ -92,13 +92,13 @@ category and article path, and the article page carries the event banner.
   `banners[]` (image url on `fastcdn.hoyoverse.com`, link). A banner whose link equals a post's
   link gives that post its image; other banners become "Featured" items.
 
-## Scouting 2026-10-26: feeds found, not implemented yet
+## Scouting 2026-10-26: feeds found (Wuthering Waves, Punishing: Gray Raven, NIKKE, NTE, Brown Dust 2 and Endfield are implemented in b12)
 
 Probed with anonymous GET (and one read-only POST) only, nothing executed. "Verified" means the
 endpoint was re-fetched by hand and returned real data; "reported" means a scouting worker saw it
 and it was not re-checked. All of these are public and need no login.
 
-### Verified
+### Verified (implemented: `kuro_news.py`, `nikke_news.py`, `nte_news.py`, `bd2_news.py`, `endfield_news.py`)
 
 - **Wuthering Waves** (`direct-wuwa`). Static JSON on a media CDN, same shape as Punishing: Gray
   Raven below.

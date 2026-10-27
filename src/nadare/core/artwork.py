@@ -130,9 +130,63 @@ _PUBLISHER_OGP: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
 }
 
 
+#: Games whose page has no usable og:image but whose publisher hosts one stable share image.
+_PUBLISHER_FIXED: dict[str, tuple[str, tuple[str, ...]]] = {
+    "stove-czn": (
+        "https://static-pubcomm.onstove.com/live/czn/brand/images/en/ogtag_1200_default.jpg",
+        ("static-pubcomm.onstove.com",),
+    ),
+}
+
+#: Games with no stable cover URL (Arknights' key visual is a hashed asset, Stella Sora's page
+#: advertises a favicon): the newest image of their official news feed stands in.
+_PUBLISHER_NEWS: frozenset[str] = frozenset({"arknights-yostar", "stellasora-yostar"})
+
+
 def publisher_art_kinds() -> frozenset[str]:
-    """Backend kinds whose cover can come from their publisher's page."""
-    return frozenset(_PUBLISHER_OGP)
+    """Backend kinds whose cover can come from their publisher."""
+    return frozenset(_PUBLISHER_OGP) | frozenset(_PUBLISHER_FIXED) | _PUBLISHER_NEWS
+
+
+def _publisher_image_hosts(backend: str) -> tuple[str, ...] | None:
+    """Hosts an official cover of ``backend`` may be served from, or ``None``."""
+    if backend in _PUBLISHER_OGP:
+        return _PUBLISHER_OGP[backend][2]
+    if backend in _PUBLISHER_FIXED:
+        return _PUBLISHER_FIXED[backend][1]
+    if backend in _PUBLISHER_NEWS:
+        from . import backends
+
+        return tuple(getattr(backends.get(backend), "official_image_hosts", ()) or ())
+    return None
+
+
+#: How many news images are tried, newest first, before the placeholder stays.
+_NEWS_COVER_TRIES = 4
+
+
+def _news_covers(backend: str) -> list[tuple[str, tuple[str, ...]]]:
+    """Newest-first news images of ``backend`` that are https and on its official CDN."""
+    from . import backends
+
+    cls = backends.get(backend)
+    source = getattr(cls, "news_source", None)
+    hosts = tuple(getattr(cls, "official_image_hosts", ()) or ())
+    if source is None or not hosts:
+        return []
+    try:
+        items = source().items
+    except Exception as exc:  # noqa: BLE001 - the news cover is an optional fallback
+        log.debug("news cover lookup failed (%s): %s", backend, exc)
+        return []
+    found: list[tuple[str, tuple[str, ...]]] = []
+    for item in items:
+        image = str(item.get("image") or "").strip()
+        if image and host_allowed(image, hosts) and _public_resolution(image):
+            found.append((image, hosts))
+            if len(found) == _NEWS_COVER_TRIES:
+                break
+    return found
 
 SEARCH_TIMEOUT = 20
 DOWNLOAD_TIMEOUT = 60
@@ -727,11 +781,25 @@ class _OgImageParser(HTMLParser):
             self._twitter = content or None
 
 
+def _publisher_covers(profile: dict, kind: str) -> list[tuple[str, tuple[str, ...]]]:
+    """Every official cover URL worth trying for ``profile``, best first."""
+    if kind != "cover":
+        return []
+    backend = str(profile.get("backend") or "")
+    if backend in _PUBLISHER_NEWS:
+        return _news_covers(backend)
+    single = _publisher_og_image(profile, kind)
+    return [single] if single else []
+
+
 def _publisher_og_image(profile: dict, kind: str) -> tuple[str, tuple[str, ...]] | None:
     """Resolve a catalog publisher's current cover URL from its official page."""
     if kind != "cover":
         return None
-    config = _PUBLISHER_OGP.get(str(profile.get("backend") or ""))
+    backend = str(profile.get("backend") or "")
+    if backend in _PUBLISHER_FIXED:
+        return _PUBLISHER_FIXED[backend]
+    config = _PUBLISHER_OGP.get(backend)
     if config is None:
         return None
     page, page_hosts, image_hosts = config
@@ -765,14 +833,14 @@ def _publisher_og_image(profile: dict, kind: str) -> tuple[str, tuple[str, ...]]
 
 def _publisher_art_source(profile: dict, path: Path) -> bool:
     """Return whether a cached image has a validated publisher CDN source sidecar."""
-    config = _PUBLISHER_OGP.get(str(profile.get("backend") or ""))
-    if config is None or path.parent != cache_dir():
+    hosts = _publisher_image_hosts(str(profile.get("backend") or ""))
+    if not hosts or path.parent != cache_dir():
         return False
     try:
         source = src_sidecar(path).read_text(encoding="utf-8").strip()
     except OSError:
         return False
-    return host_allowed(source, config[2])
+    return host_allowed(source, hosts)
 
 
 def _norm_title(text: object) -> str:
@@ -1197,9 +1265,7 @@ def fetch(profile: dict, title: str | None = None, kind: str = "cover") -> Path 
         path = try_candidates(_catalog_candidates(profile, kind))
         if path is not None:
             return path
-        publisher = _publisher_og_image(profile, kind)
-        if publisher is not None:
-            url, allowed_hosts = publisher
+        for url, allowed_hosts in _publisher_covers(profile, kind):
             path = download(url, slug_, kind, allowed_hosts, official=True)
             if path is not None:
                 return path

@@ -1150,10 +1150,13 @@ def test_an_og_page_that_redirects_is_not_followed(fake, tmp_path, monkeypatch):
 
 def test_the_publisher_kinds_are_exactly_the_og_table_and_include_fgo() -> None:
     kinds = artwork.publisher_art_kinds()
-    assert kinds == frozenset(artwork._PUBLISHER_OGP)
+    assert kinds == (
+        frozenset(artwork._PUBLISHER_OGP)
+        | frozenset(artwork._PUBLISHER_FIXED)
+        | frozenset(artwork._PUBLISHER_NEWS)
+    )
+    assert {"stove-czn", "arknights-yostar", "stellasora-yostar"} <= kinds
     assert {"fgo-lepton", "direct-bd2"} <= kinds
-    for left_out in ("arknights-yostar", "stellasora-yostar", "stove-czn"):
-        assert left_out not in kinds
 
 
 def test_a_fgo_profile_with_its_own_art_never_has_it_replaced(
@@ -1176,3 +1179,107 @@ def test_a_fgo_profile_with_its_own_art_never_has_it_replaced(
     }
     artwork.fetch_all(profile, kinds=("cover",))
     assert profile["cover"] == str(user_cover)
+
+
+# ------------------------------------------------ fixed and news-feed publisher covers
+CZN_SHARE = "https://static-pubcomm.onstove.com/live/czn/brand/images/en/ogtag_1200_default.jpg"
+
+
+def _news_result(*images):
+    from nadare.core.news import NewsResult
+
+    return NewsResult(
+        items=[
+            {"id": str(i), "title": f"t{i}", "image": image, "url": f"https://x/{i}"}
+            for i, image in enumerate(images)
+        ]
+    )
+
+
+def test_czn_cover_is_its_fixed_official_share_image(fake, tmp_path, monkeypatch):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    fake.routes[CZN_SHARE] = FakeResponse(
+        content=_png_bytes(), headers={"Content-Type": "image/png"}
+    )
+    profile = {"backend": "stove-czn", "title": "Chaos Zero Nightmare"}
+    found = artwork.fetch_all(profile, kinds=("cover",))
+    assert profile["art_source"]["cover"] == artwork.SOURCE_OFFICIAL
+    assert artwork.src_sidecar(found["cover"]).read_text(encoding="utf-8") == CZN_SHARE
+
+
+@pytest.mark.parametrize("kind", ["arknights-yostar", "stellasora-yostar"])
+def test_news_games_use_their_newest_news_image_as_the_cover(fake, tmp_path, monkeypatch, kind):
+    from nadare.core import backends
+
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    cls = backends.get(kind)
+    host = cls.official_image_hosts[0]
+    wanted = f"https://{host}/a.png"
+    monkeypatch.setattr(
+        cls,
+        "news_source",
+        staticmethod(
+            lambda: _news_result(
+                None, "https://evil.example/x.png", wanted, f"https://{host}/b.png"
+            )
+        ),
+    )
+    fake.routes[wanted] = FakeResponse(content=_png_bytes(), headers={"Content-Type": "image/png"})
+    profile = {"backend": kind, "title": "T"}
+    found = artwork.fetch_all(profile, kinds=("cover",))
+    assert profile["art_source"]["cover"] == artwork.SOURCE_OFFICIAL
+    assert artwork.src_sidecar(found["cover"]).read_text(encoding="utf-8") == wanted
+    assert not any("evil.example" in call[0] for call in fake.calls)
+
+
+def test_a_failing_or_imageless_news_feed_leaves_the_placeholder(fake, tmp_path, monkeypatch):
+    from nadare.core import backends
+    from nadare.core.news import NewsError
+
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    cls = backends.get("arknights-yostar")
+
+    def boom():
+        raise NewsError("503")
+
+    monkeypatch.setattr(cls, "news_source", staticmethod(boom))
+    assert artwork.fetch({"backend": "arknights-yostar", "title": "A"}) is None
+    monkeypatch.setattr(cls, "news_source", staticmethod(lambda: _news_result(None, None)))
+    assert artwork.fetch({"backend": "arknights-yostar", "title": "A"}) is None
+
+
+def test_the_news_cover_never_replaces_user_art(fake, tmp_path, monkeypatch):
+    from nadare.core import backends
+
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    cls = backends.get("arknights-yostar")
+    url = f"https://{cls.official_image_hosts[0]}/a.png"
+    monkeypatch.setattr(cls, "news_source", staticmethod(lambda: _news_result(url)))
+    fake.routes[url] = FakeResponse(content=_png_bytes(), headers={"Content-Type": "image/png"})
+    mine = tmp_path / "mine.png"
+    mine.write_bytes(_png_bytes())
+    profile = {"backend": "arknights-yostar", "title": "A", "cover": str(mine)}
+    artwork.set_art_source(profile, "cover", artwork.SOURCE_USER)
+    artwork.fetch_all(profile, kinds=("cover",))
+    assert profile["cover"] == str(mine)
+
+
+def test_the_news_cover_falls_through_to_the_next_image_when_one_is_too_big(
+    fake, tmp_path, monkeypatch
+):
+    from nadare.core import backends
+
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    cls = backends.get("arknights-yostar")
+    host = cls.official_image_hosts[0]
+    big, small = f"https://{host}/big.png", f"https://{host}/small.png"
+    monkeypatch.setattr(cls, "news_source", staticmethod(lambda: _news_result(big, small)))
+    fake.routes[big] = FakeResponse(content=b"x" * (artwork.MAX_IMAGE_BYTES + 1))
+    fake.routes[small] = FakeResponse(content=_png_bytes(), headers={"Content-Type": "image/png"})
+    found = artwork.fetch_all({"backend": "arknights-yostar", "title": "A"}, kinds=("cover",))
+    assert artwork.src_sidecar(found["cover"]).read_text(encoding="utf-8") == small

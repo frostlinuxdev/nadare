@@ -40,12 +40,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import paths, userns
+from ..core import userns
 from ..core.backends import Status, page_notice, supports_news, supports_update
+from ..core.eta import EtaEstimator, format_eta
 from ..core.events import Event
 from ..core.news import CREDIT
 from .images import ImageLoader
 from .library import backend_label, profile_art_candidates, profile_title
+from .logs_dialog import LogsDialog
 from .theme import badge_style, cover_pixmap, set_state_property
 from .userns_dialog import UsernsDialog
 
@@ -812,6 +814,7 @@ class GameView(QWidget):
         step_row.addWidget(self.elapsed_label, 0, Qt.AlignmentFlag.AlignRight)
         progress_layout.addLayout(step_row)
         self.progress = QProgressBar()
+        self._eta = EtaEstimator()
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setTextVisible(True)
@@ -1163,6 +1166,8 @@ class GameView(QWidget):
         self.progress.setRange(0, 100)  # never leave the busy animation running
         self.progress.setValue(0)
         self.progress.setVisible(False)
+        self._eta.reset()
+        self.progress.setFormat("%p%")
         self.step_label.setText("")
         self.elapsed_label.setText("")
         self._started_at = 0.0
@@ -1263,6 +1268,8 @@ class GameView(QWidget):
         self.progress.setRange(0, 100)  # leave the busy (indeterminate) state
         self.progress.setVisible(True)
         self.progress.setValue(max(0, min(100, int(round(value * 100)))))
+        eta = format_eta(self._eta.update(value, time.monotonic()))
+        self.progress.setFormat(f"%p%  ·  {eta}" if eta else "%p%")
 
     def _show_qr(self, path: str | None) -> bool:
         """Render the STOVE login QR from ``event.data['png']`` (host path)."""
@@ -1464,8 +1471,10 @@ class GameView(QWidget):
             QMessageBox.warning(self, title, message)
 
     def _open_logs(self) -> None:
-        paths.logs_dir().mkdir(parents=True, exist_ok=True)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(paths.logs_dir())))
+        self._logs_dialog = LogsDialog([self._profile], profile=self._profile, parent=self)
+        self._logs_dialog.report_requested.connect(self.report_requested.emit)
+        self._logs_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._logs_dialog.show()
 
 
 __all__ = [

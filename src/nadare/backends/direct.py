@@ -23,7 +23,7 @@ from typing import Any
 from ..core import directdl, endfield_shim, graphics, nte_launcher
 from ..core.backends import BackendError, Option
 from ..core.sources import Fetch, aethergazer, bd2, endfield, gfl2, hoyo, mongil, nte, pgr, wuwa
-from . import hoyo_news
+from . import bd2_news, endfield_news, hoyo_news, kuro_news, nte_news
 from .arknights import INSTALLED_PREFIX_KEY, ArknightsBackend
 from .nmlogin import NetmarbleLoginMixin
 from .wine import profile_setting
@@ -191,6 +191,8 @@ def _subdir(name: str) -> Path:
 
 class BrownDust2Backend(DirectBackend):
     kind = "direct-bd2"
+    news_source = staticmethod(bd2_news.fetch_bd2_news)
+    official_image_hosts = bd2_news.IMAGE_HOSTS
     game_tag = "bd2"
     display_name = "Brown Dust 2"
     install_subdir = _subdir("BrownDust2")
@@ -231,6 +233,8 @@ class MongilBackend(NetmarbleLoginMixin, DirectBackend):
 
 class WutheringWavesBackend(DirectBackend):
     kind = "direct-wuwa"
+    news_source = staticmethod(kuro_news.fetch_wuwa_news)
+    official_image_hosts = kuro_news.IMAGE_HOSTS
     game_tag = "wuwa"
     display_name = "Wuthering Waves"
     install_subdir = _subdir("WutheringWaves")
@@ -376,6 +380,8 @@ class Gfl2HaoplayBackend(Gfl2Backend):
 
 class EndfieldBackend(DirectBackend):
     kind = "direct-endfield"
+    news_source = staticmethod(endfield_news.fetch_endfield_news)
+    official_image_hosts = endfield_news.IMAGE_HOSTS
     game_tag = "endfield"
     display_name = "Arknights: Endfield"
     install_subdir = _subdir("ArknightsEndfield")
@@ -414,6 +420,8 @@ class EndfieldBackend(DirectBackend):
 
 class NteDirectBackend(DirectBackend):
     kind = "direct-nte"
+    news_source = staticmethod(nte_news.fetch_nte_news)
+    official_image_hosts = nte_news.IMAGE_HOSTS
     game_tag = "nte"
     display_name = "Neverness to Everness"
     install_subdir = _subdir("NevernessToEverness")
@@ -460,6 +468,8 @@ class GenshinBackend(DirectBackend):
 
 class PgrBackend(DirectBackend):
     kind = "direct-pgr"
+    news_source = staticmethod(kuro_news.fetch_pgr_news)
+    official_image_hosts = kuro_news.IMAGE_HOSTS
     game_tag = "pgr"
     display_name = "Punishing: Gray Raven"
     install_subdir = _subdir("PunishingGrayRaven")

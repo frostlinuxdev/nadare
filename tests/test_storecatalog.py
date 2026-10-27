@@ -97,9 +97,9 @@ def test_older_games_get_their_tiers_and_delivery_labels() -> None:
     for kind in ("stove-czn", "arknights-yostar", "stellasora-yostar"):
         assert by_kind[kind].tier == TIER_VERIFIED
         assert by_kind[kind].tier_help == TIER_HELP[TIER_VERIFIED]
-    assert by_kind["stove-czn"].has_art is False
-    assert by_kind["arknights-yostar"].has_art is False
-    assert by_kind["stellasora-yostar"].has_art is False
+    assert by_kind["stove-czn"].has_art is True  # a fixed official share image
+    assert by_kind["arknights-yostar"].has_art is True  # newest news image
+    assert by_kind["stellasora-yostar"].has_art is True
     assert by_kind["stove-czn"].title == "Chaos Zero Nightmare"
     assert by_kind["stove-czn"].delivery_label == DIRECT_LABEL
     assert by_kind["arknights-yostar"].title == "Arknights"

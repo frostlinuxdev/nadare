@@ -150,6 +150,7 @@ class SettingsPage(QWidget):
     remove_requested = pyqtSignal(str)  # profile name
     remake_prefix_requested = pyqtSignal(str)  # profile name
     report_requested = pyqtSignal(str)
+    logs_requested = pyqtSignal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -352,6 +353,10 @@ class SettingsPage(QWidget):
         self.report_button.setObjectName("GhostButton")
         self.report_button.clicked.connect(lambda: self.report_requested.emit(self._profile))
         footer.addWidget(self.report_button)
+        self.logs_button = QPushButton("View logs")
+        self.logs_button.setObjectName("GhostButton")
+        self.logs_button.clicked.connect(lambda: self.logs_requested.emit(self._profile))
+        footer.addWidget(self.logs_button)
         self.note = QLabel("")
         self.note.setObjectName("Muted")
         footer.addWidget(self.note, 1)

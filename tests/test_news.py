@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -486,3 +487,65 @@ def test_future_fetched_at_is_stale() -> None:
     now = 1_000_000_000
     assert news._is_fresh({"fetched_at": now - 1000}, 60, now) is True
     assert news._is_fresh({"fetched_at": now + 10_000_000}, 60, now) is False
+
+
+# ---------------------------------------------------------------------------
+# text / POST helpers
+# ---------------------------------------------------------------------------
+class PostingRequests(FakeRequests):
+    def post(self, url: str, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.routes.get(url, FakeResponse(status_code=404))
+
+
+def test_http_get_text_returns_the_decoded_body(fake: FakeRequests) -> None:
+    fake.routes["https://x.example/a"] = FakeResponse(content="héllo".encode())
+    assert news.http_get_text("https://x.example/a") == "héllo"
+    assert fake.calls[0][1]["allow_redirects"] is False
+
+
+def test_http_get_text_rejects_bad_status_and_oversize(fake: FakeRequests) -> None:
+    fake.routes["https://x.example/a"] = FakeResponse(status_code=503, content=b"no")
+    fake.routes["https://x.example/b"] = FakeResponse(content=b"x" * (news.MAX_BODY + 1))
+    for url in ("https://x.example/a", "https://x.example/b"):
+        with pytest.raises(news.NewsError):
+            news.http_get_text(url)
+
+
+def test_http_post_json_sends_the_body_and_returns_the_payload(monkeypatch) -> None:
+    requests = PostingRequests({"https://x.example/p": FakeResponse(payload={"code": 0})})
+    monkeypatch.setattr(news, "_curl", lambda: requests)
+    out = news.http_post_json("https://x.example/p", {"get_num": 3}, headers={"X-A": "1"})
+    assert out == {"code": 0}
+    url, kwargs = requests.calls[0]
+    assert kwargs["allow_redirects"] is False
+    assert kwargs["headers"]["X-A"] == "1" and kwargs["headers"]["User-Agent"].startswith("Nadare/")
+    assert json.loads(kwargs["data"]) == {"get_num": 3}
+
+
+def test_http_post_json_rejects_bad_status_and_bad_json(monkeypatch) -> None:
+    requests = PostingRequests(
+        {
+            "https://x.example/a": FakeResponse(status_code=500, content=b"no"),
+            "https://x.example/b": FakeResponse(content=b"<html>"),
+        }
+    )
+    monkeypatch.setattr(news, "_curl", lambda: requests)
+    for url in ("https://x.example/a", "https://x.example/b"):
+        with pytest.raises(news.NewsError):
+            news.http_post_json(url, {})
+
+
+def test_https_on_accepts_only_plain_https_on_listed_hosts() -> None:
+    hosts = ("a.example",)
+    assert news.https_on("https://a.example/x", hosts) == "https://a.example/x"
+    for bad in (
+        "http://a.example/x",
+        "https://b.example/x",
+        "https://u:p@a.example/x",
+        "https://a.example:8443/x",
+        "",
+        None,
+        "https://a.example.evil/x",
+    ):
+        assert news.https_on(bad, hosts) is None

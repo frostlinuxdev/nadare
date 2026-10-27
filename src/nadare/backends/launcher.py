@@ -20,6 +20,7 @@ from pathlib import Path
 from ..core import graphics
 from ..core.backends import BackendUnsupported, Option
 from ..core.nte_launcher import INSTALLER_URL
+from . import nikke_news, nte_news
 from .arknights import ArknightsBackend
 from .wine import profile_setting
 
@@ -107,6 +108,8 @@ def _subdir(root: str, name: str) -> Path:
 
 class NikkeBackend(LauncherBackend):
     kind = "launcher-nikke"
+    news_source = staticmethod(nikke_news.fetch_nikke_news)
+    official_image_hosts = nikke_news.IMAGE_HOSTS
     #: Measured on a real install (launcher, game and Wine prefix): 27 GiB.
     install_size_hint = 27 * 1024**3
     game_tag = "nikke"
@@ -149,6 +152,8 @@ class NikkeBackend(LauncherBackend):
 
 class NteBackend(LauncherBackend):
     kind = "launcher-nte"
+    news_source = staticmethod(nte_news.fetch_nte_news)
+    official_image_hosts = nte_news.IMAGE_HOSTS
     #: The launcher installs the same game as ``direct-nte``.
     install_size_hint = int(98.0 * 10**9)
     game_tag = "nte-launcher"

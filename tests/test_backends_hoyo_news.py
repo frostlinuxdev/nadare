@@ -178,7 +178,7 @@ def test_every_hoyo_backend_has_a_news_source_and_the_cdn_host():
     ):
         assert cls.news_source is not None, cls
         assert cls.official_image_hosts == ("fastcdn.hoyoverse.com",)
-    assert direct.PgrBackend.news_source is None
+    assert direct.PgrBackend.news_source is not hoyo_news.fetch_hi3_news
 
 
 def test_the_game_ids_match_the_ones_the_installer_uses():

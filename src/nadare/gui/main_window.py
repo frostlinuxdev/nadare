@@ -348,6 +348,7 @@ class MainWindow(QMainWindow):
         self.settings.remove_requested.connect(self._on_remove_requested)
         self.settings.remake_prefix_requested.connect(self._on_remake_prefix_requested)
         self.settings.report_requested.connect(self._show_support_report)
+        self.settings.logs_requested.connect(self._show_logs)
         self.sidebar_games.open_game.connect(self.open_game)
 
     def _build_sidebar(self) -> QWidget:
@@ -600,6 +601,18 @@ class MainWindow(QMainWindow):
         task = ReportTask(dict(self.config.data), profile)
         task.signals.finished.connect(self._report_dialog.set_report)
         QThreadPool.globalInstance().start(task)
+
+    def _show_logs(self, profile: str) -> None:
+        from .logs_dialog import LogsDialog
+
+        if profile not in self.config.profiles:
+            profile = self.config.active
+        self._logs_dialog = LogsDialog(
+            list(self.config.profiles), profile=profile, parent=self
+        )
+        self._logs_dialog.report_requested.connect(self._show_support_report)
+        self._logs_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._logs_dialog.show()
 
     def _on_remove_requested(self, profile: str) -> None:
         """Confirm, then remove ``profile`` from the library (files kept by default)."""

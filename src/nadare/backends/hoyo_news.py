@@ -21,9 +21,8 @@ import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlparse
 
-from ..core.news import NewsError, NewsResult, http_get_json
+from ..core.news import NewsError, NewsResult, http_get_json, https_on
 
 API = "https://sg-hyp-api.hoyoverse.com/hyp/hyp-connect/api/getGameContent"
 LAUNCHER_ID = "VYTpXlbWo8"
@@ -48,24 +47,6 @@ _CATEGORIES = {
     "POST_TYPE_ANNOUNCE": "Announcements",
 }
 _DATE_RE = re.compile(r"\A\s*(\d{1,2})/(\d{1,2})\s*\Z")
-
-
-def _https_on(value: Any, hosts: tuple[str, ...]) -> str | None:
-    """``value`` when it is a plain https URL on one of ``hosts``; no userinfo, no port."""
-    url = str(value or "").strip()
-    if not url:
-        return None
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or parsed.hostname not in hosts:
-        return None
-    if parsed.username or parsed.password:
-        return None
-    try:
-        if parsed.port is not None:
-            return None
-    except ValueError:
-        return None
-    return url
 
 
 def _published_at(value: Any, now: datetime) -> int:
@@ -125,8 +106,8 @@ def fetch_news(
         image = raw.get("image") if isinstance(raw, dict) else None
         if not isinstance(image, dict):
             continue
-        url = _https_on(image.get("url"), IMAGE_HOSTS)
-        link = _https_on(image.get("link"), LINK_HOSTS)
+        url = https_on(image.get("url"), IMAGE_HOSTS)
+        link = https_on(image.get("link"), LINK_HOSTS)
         if url and link:
             images.setdefault(link, url)
             featured.append({"id": f"banner-{raw.get('id')}", "link": link, "image": url})
@@ -138,7 +119,7 @@ def fetch_news(
             continue
         post_id = str(raw.get("id") or "").strip()
         title = str(raw.get("title") or "").strip()
-        link = _https_on(raw.get("link"), LINK_HOSTS)
+        link = https_on(raw.get("link"), LINK_HOSTS)
         if not post_id or not title or not link:
             continue
         used_links.add(link)

@@ -96,6 +96,16 @@ def _masked_value(value: str) -> str:
     return f"{value[:4]}…{value[-4:]}<{len(value)}>"
 
 
+def mask_known(text: str) -> str:
+    """Mask only what is known to be secret: URL userinfo and ``password=``-style values.
+
+    Unlike :func:`mask` this leaves long hashes, paths and timestamps alone, so it suits text
+    people read (the log viewer) while the length heuristic suits text written to disk.
+    """
+    out = _USERINFO_RE.sub(f"{_REDACTED}@", text)
+    return _TOKEN_VALUE_RE.sub(lambda m: f"{m.group(1)}={_REDACTED}", out)
+
+
 def mask(text: str) -> str:
     """Mask anything that looks like a secret value. Used before logging.
 

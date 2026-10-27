@@ -2214,3 +2214,19 @@ def test_close_warning_during_login_does_not_mention_game_files(tmp_path, qapp, 
     finally:
         window.close()
         window.deleteLater()
+
+
+def test_progress_bar_shows_an_eta_once_it_has_enough_samples(qapp, monkeypatch):
+    from nadare.gui import game_view
+    from nadare.gui.game_view import GameView
+
+    clock = iter(range(0, 1000))
+    monkeypatch.setattr(game_view.time, "monotonic", lambda: float(next(clock)))
+    view = GameView()
+    view._set_progress(0.01)
+    assert view.progress.format() == "%p%"
+    for step in range(2, 30):
+        view._set_progress(step / 100)
+    assert "left" in view.progress.format()
+    view._clear_busy_progress()
+    assert view.progress.format() == "%p%"

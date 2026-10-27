@@ -32,6 +32,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .. import __version__
 from . import paths
@@ -80,6 +81,67 @@ def _curl():
     return requests
 
 
+def https_on(value: Any, hosts: tuple[str, ...]) -> str | None:
+    """``value`` when it is a plain https URL on one of ``hosts``; no userinfo, no port."""
+    url = str(value or "").strip()
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in hosts:
+        return None
+    if parsed.username or parsed.password:
+        return None
+    try:
+        if parsed.port is not None:
+            return None
+    except ValueError:
+        return None
+    return url
+
+
+def _parse_json(resp: Any, body: bytes, url: str) -> Any:
+    try:
+        return json.loads(body) if body else resp.json()
+    except (ValueError, TypeError) as exc:
+        raise NewsError(f"invalid JSON for {url}") from exc
+
+
+def _request(
+    method: str,
+    url: str,
+    *,
+    parse: Callable[[Any, bytes], Any],
+    headers: dict[str, str] | None = None,
+    timeout: int = TIMEOUT,
+    data: Any = None,
+) -> Any:
+    """Issue one streamed, non-redirecting request and always release it."""
+    merged = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    if headers:
+        merged.update(headers)
+    kwargs: dict[str, Any] = {
+        "timeout": timeout,
+        "headers": merged,
+        "allow_redirects": False,
+        "stream": True,
+    }
+    if data is not None:
+        kwargs["data"] = data
+    resp = getattr(_curl(), method)(url, **kwargs)
+    try:
+        status = int(getattr(resp, "status_code", 200) or 200)
+        if status != 200:
+            raise NewsError(f"HTTP {status} for {url}")
+        return parse(resp, _read_capped(resp, MAX_BODY, url))
+    finally:
+        # ``stream=True`` holds the connection open until the body is consumed
+        # (or the response is closed), so always release it rather than waiting
+        # for GC on a long-lived GUI process.
+        close = getattr(resp, "close", None)
+        if callable(close):
+            close()
+
+
 def http_get_json(
     url: str, *, headers: dict[str, str] | None = None, timeout: int = TIMEOUT
 ) -> Any:
@@ -89,28 +151,47 @@ def http_get_json(
     JSON. The response body is capped at :data:`MAX_BODY` bytes *while reading*,
     so an oversized response never lands in memory whole.
     """
-    merged = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    return _request(
+        "get",
+        url,
+        headers=headers,
+        timeout=timeout,
+        parse=lambda resp, body: _parse_json(resp, body, url),
+    )
+
+
+def http_get_text(
+    url: str, *, headers: dict[str, str] | None = None, timeout: int = TIMEOUT
+) -> str:
+    """GET ``url`` as UTF-8 text (replacement on invalid bytes), without redirects."""
+    return _request(
+        "get",
+        url,
+        headers=headers,
+        timeout=timeout,
+        parse=lambda _resp, body: body.decode("utf-8", "replace"),
+    )
+
+
+def http_post_json(
+    url: str,
+    body: Any,
+    *,
+    headers: dict[str, str] | None = None,
+    timeout: int = TIMEOUT,
+) -> Any:
+    """POST ``body`` as JSON and return the JSON response, without redirects."""
+    merged = {"Content-Type": "application/json;charset=utf-8"}
     if headers:
         merged.update(headers)
-    resp = _curl().get(
-        url, timeout=timeout, headers=merged, allow_redirects=False, stream=True
+    return _request(
+        "post",
+        url,
+        headers=merged,
+        timeout=timeout,
+        data=json.dumps(body),
+        parse=lambda resp, raw: _parse_json(resp, raw, url),
     )
-    try:
-        status = int(getattr(resp, "status_code", 200) or 200)
-        if status != 200:
-            raise NewsError(f"HTTP {status} for {url}")
-        body = _read_capped(resp, MAX_BODY, url)
-        try:
-            return json.loads(body) if body else resp.json()
-        except (ValueError, TypeError) as exc:
-            raise NewsError(f"invalid JSON for {url}") from exc
-    finally:
-        # ``stream=True`` holds the connection open until the body is consumed
-        # (or the response is closed), so always release it rather than waiting
-        # for GC on a long-lived GUI process.
-        close = getattr(resp, "close", None)
-        if callable(close):
-            close()
 
 
 def _content_length(headers: Any) -> int | None:
@@ -517,6 +598,9 @@ __all__ = [
     "cache_path",
     "fetch",
     "http_get_json",
+    "http_get_text",
+    "http_post_json",
+    "https_on",
     "load",
     "normalize_item",
     "read_cache",

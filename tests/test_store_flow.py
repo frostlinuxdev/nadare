@@ -314,11 +314,14 @@ def test_unrelated_profile_changes_do_not_reset_the_hero(tmp_path, qapp, monkeyp
 
 
 def test_games_without_art_keep_the_placeholder_and_never_fetch(qapp, monkeypatch):
+    from nadare.core import storecatalog
+
     calls = []
     monkeypatch.setattr(artwork, "fetch", lambda *a, **kw: calls.append(a) or None)
+    monkeypatch.setattr(storecatalog, "publisher_art_kinds", lambda: frozenset())
     flow = StoreFlow()
     try:
-        flow.show_detail("stove-czn")  # no art folder
+        flow.show_detail("stove-czn")  # no art source once the publisher kinds are gone
         _settle(flow, qapp)
         assert calls == []
         assert not flow.detail.hero_label.pixmap().isNull()
