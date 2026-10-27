@@ -175,7 +175,9 @@ def test_removable_trees_lists_existing_configured_dirs(trees_env):
     cfg, _, tmp = trees_env
     install = _tree(tmp, "Games", "gone")
     prefix = _tree(tmp, "Prefixes", "gone")
-    cfg.profiles["gone"].update(install_dir=str(install), prefix=str(prefix))
+    cfg.profiles["gone"].update(
+        install_dir=str(install), prefix=str(prefix), owned_trees=["install_dir", "prefix"]
+    )
     cfg.profiles["gone"]["extra"] = {}
     found = {t.key: t for t in removal.removable_trees(cfg, "gone")}
     assert set(found) == {"install_dir", "prefix"}
@@ -193,7 +195,9 @@ def test_delete_trees_removes_only_the_requested_keys(trees_env):
     cfg, _, tmp = trees_env
     install = _tree(tmp, "Games", "gone")
     prefix = _tree(tmp, "Prefixes", "gone")
-    cfg.profiles["gone"].update(install_dir=str(install), prefix=str(prefix))
+    cfg.profiles["gone"].update(
+        install_dir=str(install), prefix=str(prefix), owned_trees=["install_dir", "prefix"]
+    )
     result = removal.remove_game(
         cfg, "gone", delete_trees=["prefix"], applications_dir=tmp / "apps"
     )
@@ -212,7 +216,7 @@ def test_nothing_is_deleted_without_delete_trees(trees_env):
 def test_wineprefix_key_is_handled_too(trees_env):
     cfg, _, tmp = trees_env
     wp = _tree(tmp, "wp", "gone")
-    cfg.profiles["gone"]["wineprefix"] = str(wp)
+    cfg.profiles["gone"].update(wineprefix=str(wp), owned_trees=["wineprefix"])
     result = removal.remove_game(
         cfg, "gone", delete_trees=["wineprefix"], applications_dir=tmp / "apps"
     )
@@ -288,14 +292,16 @@ def test_cli_delete_install_dir_and_prefix_flags(trees_env):
     cfg, cfg_path, tmp = trees_env
     install = _tree(tmp, "Games", "gone")
     prefix = _tree(tmp, "Prefixes", "gone")
-    cfg.profiles["gone"].update(install_dir=str(install), prefix=str(prefix))
+    cfg.profiles["gone"].update(
+        install_dir=str(install), prefix=str(prefix), owned_trees=["install_dir", "prefix"]
+    )
     cfg.save()
     code = app.run_cli(
         ["-c", str(cfg_path), "remove", "-p", "gone", "--yes", "--delete-install-dir"]
     )
     assert code == 0 and not install.exists() and prefix.exists()
     cfg = Config.load(cfg_path)
-    cfg.add_profile("gone", backend="wine", prefix=str(prefix))
+    cfg.add_profile("gone", backend="wine", prefix=str(prefix), owned_trees=["prefix"])
     cfg.save()
     code = app.run_cli(["-c", str(cfg_path), "remove", "-p", "gone", "--yes", "--delete-prefix"])
     assert code == 0 and not prefix.exists()
@@ -362,7 +368,9 @@ def test_cli_remove_refused_tree_exits_nonzero(trees_env, capsys):
 def test_duplicate_prefix_deleted_once(trees_env, capsys):
     cfg, cfg_path, tmp = trees_env
     p = _tree(tmp, "Prefixes", "gone")
-    cfg.profiles["gone"].update(prefix=str(p), wineprefix=str(p))
+    cfg.profiles["gone"].update(
+        prefix=str(p), wineprefix=str(p), owned_trees=["prefix", "wineprefix"]
+    )
     cfg.save()
     rc = app.run_cli(["-c", str(cfg_path), "remove", "-p", "gone", "--yes", "--delete-prefix"])
     out = capsys.readouterr().out
@@ -389,8 +397,9 @@ def test_nested_prefix_inside_install_dir_is_deleted_once(env):
     cfg, _, tmp = env
     inst = _mk(tmp, "games", "g")
     pfx = _mk(tmp, "games", "g", "pfx")
-    cfg.profiles["gone"]["install_dir"] = str(inst)
-    cfg.profiles["gone"]["prefix"] = str(pfx)
+    cfg.profiles["gone"].update(
+        install_dir=str(inst), prefix=str(pfx), owned_trees=["install_dir", "prefix"]
+    )
     for order in (["install_dir", "prefix"], ["prefix", "install_dir"]):
         result = removal.remove_game(
             cfg, "gone", delete_trees=order, applications_dir=tmp / "apps", save=False
@@ -401,8 +410,9 @@ def test_nested_prefix_inside_install_dir_is_deleted_once(env):
         assert result.trees_removed == [inst]
         cfg.add_profile("gone", backend="wine", title="Gone")
         _mk(tmp, "games", "g", "pfx")
-        cfg.profiles["gone"]["install_dir"] = str(inst)
-        cfg.profiles["gone"]["prefix"] = str(pfx)
+        cfg.profiles["gone"].update(
+            install_dir=str(inst), prefix=str(pfx), owned_trees=["install_dir", "prefix"]
+        )
 
 
 def test_removable_trees_sees_extra_paths_of_other_profile(env):
@@ -419,6 +429,7 @@ def test_removable_trees_lists_extra_only_prefix(env):
     cfg, _, tmp = env
     pfx = _mk(tmp, "pfx")
     cfg.profiles["gone"]["extra"] = {"prefix": str(pfx)}
+    cfg.profiles["gone"]["owned_trees"] = ["prefix"]
     trees = removal.removable_trees(cfg, "gone")
     assert [(t.key, t.safe) for t in trees] == [("prefix", True)]
 
@@ -472,3 +483,95 @@ def test_refused_tree_aborts_every_irreversible_step(env, monkeypatch):
     assert (data / "save").exists()
     assert (ok / "f").exists() and (shared / "f").exists()
     assert "gone" in cfg.profiles
+
+
+# ---- only folders Nadare created may be deleted ----------------------------------
+def test_a_folder_nadare_did_not_create_is_refused_even_with_one_game_in_it(trees_env):
+    cfg, _, tmp = trees_env
+    library = _tree(tmp, "Games")  # a user folder that happens to hold only this game
+    cfg.profiles["gone"]["install_dir"] = str(library)
+    found = {t.key: t for t in removal.removable_trees(cfg, "gone")}
+    assert not found["install_dir"].safe
+    assert "did not create" in found["install_dir"].reason
+    _refused(cfg, tmp, "install_dir", "did not create")
+    assert (library / "file.bin").exists()
+
+
+def test_a_folder_listed_as_created_by_nadare_may_be_deleted(trees_env):
+    cfg, _, tmp = trees_env
+    made = _tree(tmp, "Games", "Punishing Gray Raven")
+    cfg.profiles["gone"].update(install_dir=str(made), owned_trees=["install_dir"])
+    found = {t.key: t for t in removal.removable_trees(cfg, "gone")}
+    assert found["install_dir"].safe
+    result = removal.remove_game(
+        cfg, "gone", delete_trees=["install_dir"], applications_dir=tmp / "apps"
+    )
+    assert not made.exists() and result.trees_removed == [made.resolve()]
+
+
+def test_ownership_is_per_key(trees_env):
+    cfg, _, tmp = trees_env
+    install = _tree(tmp, "Games", "gone")
+    prefix = _tree(tmp, "Games", "gone-prefix")
+    cfg.profiles["gone"].update(
+        install_dir=str(install), prefix=str(prefix), owned_trees=["prefix"]
+    )
+    found = {t.key: t for t in removal.removable_trees(cfg, "gone")}
+    assert found["prefix"].safe and not found["install_dir"].safe
+
+
+def test_a_real_wine_prefix_is_deletable_without_the_ownership_record(trees_env):
+    cfg, _, tmp = trees_env
+    prefix = _tree(tmp, "Prefixes", "gone")
+    (prefix / "drive_c").mkdir()
+    cfg.profiles["gone"]["prefix"] = str(prefix)
+    found = {t.key: t for t in removal.removable_trees(cfg, "gone")}
+    assert found["prefix"].safe
+
+
+def test_a_prefix_field_pointing_at_a_plain_folder_is_refused(trees_env):
+    cfg, _, tmp = trees_env
+    plain = _tree(tmp, "Documents")
+    cfg.profiles["gone"]["prefix"] = str(plain)
+    _refused(cfg, tmp, "prefix", "did not create")
+    assert plain.exists()
+
+
+def test_removing_both_trees_also_tidies_the_empty_game_folder(trees_env):
+    cfg, _, tmp = trees_env
+    game_dir = tmp / "Games" / "Nadare" / "Gone"
+    install = _tree(tmp, "Games", "Nadare", "Gone", "install")
+    prefix = _tree(tmp, "Games", "Nadare", "Gone", "prefix")
+    cfg.profiles["gone"].update(
+        install_dir=str(install),
+        prefix=str(prefix),
+        owned_trees=["install_dir", "prefix"],
+        owned_dirs=[str(game_dir)],
+    )
+    removal.remove_game(
+        cfg, "gone", delete_trees=["install_dir", "prefix"], applications_dir=tmp / "apps"
+    )
+    assert not game_dir.exists()
+    assert (tmp / "Games" / "Nadare").is_dir()  # the shared folder always stays
+
+
+def test_a_game_folder_that_still_holds_something_is_left_alone(trees_env):
+    cfg, _, tmp = trees_env
+    game_dir = tmp / "Games" / "Nadare" / "Gone"
+    install = _tree(tmp, "Games", "Nadare", "Gone", "install")
+    (game_dir / "my-saves.txt").write_text("keep me")
+    cfg.profiles["gone"].update(
+        install_dir=str(install), owned_trees=["install_dir"], owned_dirs=[str(game_dir)]
+    )
+    removal.remove_game(cfg, "gone", delete_trees=["install_dir"], applications_dir=tmp / "apps")
+    assert not install.exists()
+    assert (game_dir / "my-saves.txt").read_text() == "keep me"
+
+
+def test_an_owned_dir_is_not_removed_when_no_tree_was_deleted(trees_env):
+    cfg, _, tmp = trees_env
+    game_dir = tmp / "Games" / "Nadare" / "Gone"
+    game_dir.mkdir(parents=True)
+    cfg.profiles["gone"]["owned_dirs"] = [str(game_dir)]
+    removal.remove_game(cfg, "gone", applications_dir=tmp / "apps")
+    assert game_dir.is_dir()

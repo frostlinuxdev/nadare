@@ -1659,7 +1659,9 @@ def test_remove_game_can_delete_the_install_dir_from_the_gui(tmp_path, qapp, mon
     other.mkdir()
     (other / "keep.exe").write_text("x")
     cfg = _empty_config(tmp_path)
-    cfg.add_profile("g", backend="wine", title="G", install_dir=str(install))
+    cfg.add_profile(
+        "g", backend="wine", title="G", install_dir=str(install), owned_trees=["install_dir"]
+    )
     cfg.add_profile("h", backend="wine", title="H", install_dir=str(other))
     cfg.save()
     window = MainWindow(cfg)
@@ -1725,7 +1727,14 @@ def _confirm_window(tmp_path, monkeypatch):
     shared = tmp_path / "games" / "shared"
     shared.mkdir(parents=True)
     cfg = _empty_config(tmp_path)
-    cfg.add_profile("g", backend="wine", title="G", install_dir=str(install), prefix=str(shared))
+    cfg.add_profile(
+        "g",
+        backend="wine",
+        title="G",
+        install_dir=str(install),
+        prefix=str(shared),
+        owned_trees=["install_dir"],
+    )
     cfg.add_profile("h", backend="wine", title="H", install_dir=str(shared))
     cfg.save()
     window = MainWindow(cfg)

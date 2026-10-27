@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nadare-launcher"
-version = "0.1.0b12"
+version = "0.1.0b13"
 description = "An open-source Linux launcher for anime gacha games (Fate/Grand Order, Chaos Zero Nightmare, and more)"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from nadare.core.config import Config
+from nadare.gui import add_game
 from nadare.gui.add_game import AddGameDialog
 
 
@@ -226,3 +227,137 @@ def test_a_very_long_path_does_not_widen_the_dialog(tmp_path, qapp):
         assert d.prefix_summary.text() != full  # shortened to fit, not wrapped or clipped
     finally:
         d.close()
+
+
+# ---- picking an existing folder must not turn it into the game folder (#560) -------
+def _create(d, folder):
+    d.location_toggle.click()
+    d.set_install_dir(str(folder))
+    name = d.create_profile()
+    assert name
+    return d.config.profile(name)
+
+
+def test_a_picked_new_folder_gets_nadare_game_install_and_prefix(tmp_path, qapp):
+    d = dialog(tmp_path, qapp)
+    try:
+        folder = tmp_path / "Games"
+        game_dir = folder / "Nadare" / add_game._folder_name(d._selected_game().title)
+        profile = _create(d, folder)
+        assert profile["install_dir"] == str(game_dir / "install")
+        assert profile["prefix"] == str(game_dir / "prefix")
+        assert set(profile["owned_trees"]) == {"install_dir", "prefix"}
+        assert profile["owned_dirs"] == [str(game_dir)]
+    finally:
+        d.close()
+
+
+def test_an_existing_nadare_folder_is_reused(tmp_path, qapp):
+    d = dialog(tmp_path, qapp)
+    try:
+        folder = tmp_path / "Games"
+        (folder / "Nadare" / "Some other game").mkdir(parents=True)
+        game_dir = folder / "Nadare" / add_game._folder_name(d._selected_game().title)
+        profile = _create(d, folder)
+        assert profile["install_dir"] == str(game_dir / "install")
+        assert (folder / "Nadare" / "Some other game").is_dir()
+    finally:
+        d.close()
+
+
+def test_the_untouched_default_location_is_not_nested(tmp_path, qapp):
+    d = dialog(tmp_path, qapp)
+    try:
+        d.location_toggle.click()
+        profile_name = d.create_profile()
+        profile = d.config.profile(profile_name)
+        assert profile["install_dir"] == str(tmp_path / "data" / "wine-proton-game" / "install")
+        assert "owned_dirs" not in profile
+    finally:
+        d.close()
+
+
+def test_a_folder_with_other_things_in_it_gets_nadare_game_install_and_prefix(tmp_path, qapp):
+    d = dialog(tmp_path, qapp)
+    try:
+        library = tmp_path / "Games"
+        (library / "other game").mkdir(parents=True)
+        (library / "other game" / "x.exe").write_text("x")
+        game_dir = library / "Nadare" / add_game._folder_name(d._selected_game().title)
+        profile = _create(d, library)
+        assert profile["install_dir"] == str(game_dir / "install")
+        assert profile["prefix"] == str(game_dir / "prefix")
+        assert set(profile["owned_trees"]) == {"install_dir", "prefix"}
+        assert profile["owned_dirs"] == [str(game_dir)]
+        assert (library / "other game" / "x.exe").exists()
+    finally:
+        d.close()
+
+
+def test_a_second_profile_of_the_same_game_gets_the_next_free_folder(tmp_path, qapp):
+    library = tmp_path / "Games"
+    (library / "other game").mkdir(parents=True)
+    (library / "other game" / "x.exe").write_text("x")
+    first = dialog(tmp_path, qapp)
+    try:
+        name = add_game._folder_name(first._selected_game().title)
+        _create(first, library)
+    finally:
+        first.close()
+    second = dialog(tmp_path, qapp)
+    try:
+        second.set_profile_name("another")
+        profile = _create(second, library)
+        assert profile["install_dir"] == str(library / "Nadare" / f"{name} 2" / "install")
+    finally:
+        second.close()
+
+
+def test_the_chosen_paths_are_stored_not_recomputed(tmp_path, qapp):
+    d = dialog(tmp_path, qapp)
+    try:
+        library = tmp_path / "Games"
+        (library / "other").mkdir(parents=True)
+        (library / "other" / "x").write_text("x")
+        name = _create(d, library)["install_dir"]
+        stored = json.loads((tmp_path / "config.json").read_text())
+        (profile,) = stored["profiles"].values()
+        assert profile["install_dir"] == name
+    finally:
+        d.close()
+
+
+def test_a_folder_that_already_holds_this_game_is_kept_but_not_owned(tmp_path, qapp):
+    d = dialog(tmp_path, qapp, kind="arknights-yostar")
+    try:
+        game = d._selected_game()
+        folder = tmp_path / "MyGame"
+        folder.mkdir()
+        (folder / game.exes[0]).write_text("x")
+        profile = _create(d, folder)
+        assert profile["install_dir"] == str(folder)
+        assert "install_dir" not in profile.get("owned_trees", [])
+    finally:
+        d.close()
+
+
+def test_an_imported_game_is_never_recorded_as_created_by_nadare(tmp_path, qapp):
+    d = dialog(tmp_path, qapp, kind="arknights-yostar")
+    try:
+        game = d._selected_game()
+        root = tmp_path / "pfx" / "drive_c" / game.install_subdir.replace("\\", "/")
+        root.mkdir(parents=True)
+        (root / game.exes[0]).write_text("x")
+        d.set_mode(True)
+        d.set_install_dir(str(root))
+        name = d.create_profile()
+        assert name
+        assert not d.config.profile(name).get("owned_trees")
+    finally:
+        d.close()
+
+
+def test_folder_names_drop_path_and_shell_hostile_characters():
+    assert add_game._folder_name("Punishing: Gray Raven") == "Punishing Gray Raven"
+    assert add_game._folder_name("Wine/Proton game") == "Wine Proton game"
+    assert add_game._folder_name("///") == "game"

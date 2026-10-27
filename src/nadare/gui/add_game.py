@@ -201,6 +201,61 @@ def _find_exe(folder: Path, names: tuple[str, ...], *, max_depth: int = 2) -> Pa
     return None
 
 
+def _folder_name(title: str) -> str:
+    """``title`` as a folder name: path and shell-hostile characters become spaces."""
+    cleaned = "".join(" " if c in '/\\:*?"<>|' else c for c in title)
+    return " ".join(cleaned.split()) or "game"
+
+
+def _new_or_empty(path: Path) -> bool:
+    """True when ``path`` does not exist yet or is an empty folder."""
+    try:
+        return not path.exists() or (path.is_dir() and not any(path.iterdir()))
+    except OSError:
+        return False
+
+
+def _holds_game(game: GameType, folder: Path) -> bool:
+    """True when ``folder`` already has one of ``game``'s executables directly in it."""
+    return any((folder / exe).exists() for exe in game.exes)
+
+
+def _inside(path: Path, root: Path) -> bool:
+    """True when ``path`` is ``root`` or lies below it (no symlink resolution needed here)."""
+    return path == root or root in path.parents
+
+
+def _claimed(profiles: dict[str, Any], folder: Path) -> bool:
+    """True when a profile already records ``folder`` or something inside it."""
+    text = str(folder)
+    for profile in profiles.values():
+        if not isinstance(profile, dict):
+            continue
+        recorded = [
+            *(profile.get("owned_dirs") or ()),
+            profile.get("install_dir"),
+            profile.get("prefix"),
+        ]
+        for value in recorded:
+            if isinstance(value, str) and (value == text or value.startswith(text + "/")):
+                return True
+    return False
+
+
+def _free_folder(root: Path, name: str, profiles: dict[str, Any]) -> Path:
+    """``root/name``, or ``root/name 2``, ``name 3``... the first neither on disk nor claimed.
+
+    A game folder is only created when its install starts, so two profiles added before
+    that must be told apart by what the config records, not by the disk alone.
+    """
+    candidate = root / name
+    index = 2
+    while candidate.exists() or _claimed(profiles, candidate):
+        candidate = root / f"{name} {index}"
+        index += 1
+    return candidate
+
+
 def _drive_c_prefix(folder: Path) -> Path | None:
     """The Wine prefix that contains ``folder``, if it lies under ``drive_c``.
 
@@ -850,11 +905,43 @@ class AddGameDialog(QDialog):
             # The prefix is the whole install; never persist a duplicate path.
             install_dir = ""
 
+        owned: list[str] = []
+        owned_dirs: list[str] = []
+        if not importing and install_dir and kind not in PREFIX_ONLY_KINDS:
+            # The picked folder is a games library (#560): the game gets
+            # ``<folder>/Nadare/<Game>/install`` with its prefix next to it, so nothing of
+            # Nadare's ever mixes with the user's own folders. A folder that already holds this
+            # game's exe is kept as picked. Nadare may only delete folders it made, so it
+            # records which.
+            chosen = Path(install_dir)
+            default_place = not self._folder_touched or _inside(chosen, self._root())
+            if not default_place and not _holds_game(game, chosen):
+                game_dir = _free_folder(
+                    chosen / "Nadare", _folder_name(game.title), self.config.profiles
+                )
+                owned_dirs.append(str(game_dir))
+                if kind in PREFIX_KINDS:
+                    chosen = game_dir / "install"
+                    if not self._prefix_touched:
+                        prefix_value = str(game_dir / "prefix")
+                else:
+                    chosen = game_dir
+                install_dir = str(chosen)
+            if _new_or_empty(chosen):
+                owned.append("install_dir")
+        if not importing and prefix_value and kind in PREFIX_KINDS:
+            if _new_or_empty(Path(prefix_value)):
+                owned.append("prefix")
+
         values: dict[str, Any] = {"backend": kind, "title": game.title}
         if install_dir and kind not in PREFIX_ONLY_KINDS:
             values["install_dir"] = install_dir
         if prefix_value and kind in PREFIX_KINDS:
             values["prefix"] = prefix_value
+        if owned:
+            values["owned_trees"] = owned
+        if owned_dirs:
+            values["owned_dirs"] = owned_dirs
 
         with self.config.locked():
             self.config.add_profile(name, **values)

@@ -137,6 +137,27 @@ def _rmtree_except(root: Path, keep: list[Path]) -> None:
             shutil.rmtree(entry)
 
 
+def _created_by_nadare(profile, key: str, path: Path, name: str) -> bool:
+    """Whether Nadare made ``path``, so deleting it cannot take anything of the user's.
+
+    True for the profile's own folder under Nadare's data dir, for a key the Add game dialog
+    recorded in ``owned_trees`` (the folder was new or empty when the game was added), and for
+    a Wine prefix (a ``drive_c`` folder, dedicated to one game by nature). A folder the user
+    picked, such as a games library holding one game, is never offered for deletion.
+    """
+    owned = profile.get("owned_trees")
+    if isinstance(owned, list) and key in owned:
+        return True
+    if key in ("prefix", "wineprefix") and (path / "drive_c").is_dir():
+        return True
+    try:
+        own = (paths.profiles_dir() / name).resolve()
+        resolved = path.resolve()
+    except OSError:
+        return False
+    return resolved == own or own in resolved.parents
+
+
 def removable_trees(config, name: str) -> list[RemovableTree]:
     """List the install/prefix trees configured for ``name`` and whether each is safe to delete."""
     profile = config.profiles.get(name, {})
@@ -149,6 +170,12 @@ def removable_trees(config, name: str) -> list[RemovableTree]:
         if not expanded.is_dir():
             continue
         safe, reason = tree_safety(config.profiles, name, expanded)
+        if safe and not _created_by_nadare(profile, key, expanded, name):
+            safe = False
+            reason = (
+                "Nadare did not create this folder, so it will not delete it "
+                "(remove it yourself if you want it gone)"
+            )
         if expanded.is_symlink():
             shown = expanded
         else:
@@ -307,6 +334,18 @@ def remove_game(
         except OSError as exc:
             result.warnings.append(f"could not remove {tree.key}: {exc}")
             keep_profile = True
+
+    # 5c. The per-game folder Nadare made around them goes too, but only when it is now empty
+    # (``rmdir`` never touches contents), so a file the user put there survives.
+    if done and not keep_profile:
+        owned_dirs = config.profiles.get(name, {}).get("owned_dirs")
+        for entry in owned_dirs if isinstance(owned_dirs, list) else ():
+            folder = Path(str(entry))
+            if folder.is_absolute() and not folder.is_symlink():
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass
 
     # 6. Drop the profile and persist.
     result.profile_kept = keep_profile
