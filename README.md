@@ -8,6 +8,8 @@ environment, and keeps it updated, one profile per game.
 
 ![The Nadare Store](docs/screenshots/store.png)
 
+![More games in the Store, including the Hoyoverse games](docs/screenshots/store-more.png)
+
 **Download:** the latest AppImage is on the
 [releases page](https://github.com/frostlinuxdev/nadare/releases). Source code and the
 issue tracker are at [github.com/frostlinuxdev/nadare](https://github.com/frostlinuxdev/nadare).
