@@ -45,6 +45,9 @@ SUPPORTED_RUNTIME_APPIDS: dict[int, str] = {
 #: with a container runtime").
 MIN_SYSTEM_VERSION = (1, 3, 0)
 
+#: The interpreter the zipapp's shebang names (and the one it will run under).
+SHEBANG_PYTHON = "/usr/bin/python3"
+
 #: The archive member we install; everything else in the tar is ignored.
 _MEMBER = "umu/umu-run"
 
@@ -103,14 +106,16 @@ def managed() -> Path | None:
     """The installed managed umu, or ``None``. Pure lookup, never downloads.
 
     The zipapp has a ``#!/usr/bin/python3`` shebang, so a copy is only usable
-    when a system ``python3`` exists. A venv/version-manager shim is not enough:
+    when the interpreter named by that shebang (:data:`SHEBANG_PYTHON`) exists
+    and is executable. A venv/version-manager shim on ``PATH`` is not enough:
     the game environment strips those from ``PATH`` (see
-    :func:`process.sanitize_game_env`).
+    :func:`process.sanitize_game_env`), which is why only the absolute shebang
+    path counts.
     """
     path = managed_path()
     if not (path.is_file() and os.access(path, os.X_OK)):
         return None
-    if shutil.which("python3") is None:
+    if not (os.path.isfile(SHEBANG_PYTHON) and os.access(SHEBANG_PYTHON, os.X_OK)):
         return None
     return path
 

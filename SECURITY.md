@@ -45,8 +45,9 @@ Review logs yourself before sharing.
 2. **FGO:** change your account's recovery method from inside the game
    (My Room → Account Linking / Issue Transfer Number) and contact the game's
    support. Full-disk encryption limits the blast radius of a stolen disk.
-3. Delete `~/.config/nadare/secrets.json` and clear the `nadare-launcher`
-   keyring entries, then change any account credentials you reused elsewhere.
+3. Clear the `nadare-launcher` keyring entries (and delete a leftover
+   `~/.config/nadare/secrets.json` from an older beta, which current versions
+   no longer use), then change any account credentials you reused elsewhere.
 
 ## Scope
 

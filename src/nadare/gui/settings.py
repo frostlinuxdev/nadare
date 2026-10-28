@@ -167,6 +167,7 @@ class SettingsPage(QWidget):
         self._files_form: QFormLayout | None = None
         self._install_dir_row = -1
         self._prefix_lock_note: QLabel | None = None
+        self._prefix_lock_generation = 0
         self._fetch_button: QPushButton | None = None
         self._pending_art: dict[str, str] = {}
         self._loaded_state: dict[str, Any] | None = None
@@ -686,10 +687,7 @@ class SettingsPage(QWidget):
         hint.setWordWrap(True)
         layout.addWidget(hint)
         if option.key == "prefix":
-            self._prefix_lock_note = QLabel(
-                "The game is installed, so this location is locked. Moving it would make "
-                "the game unfindable; remove the game and add it again to move it."
-            )
+            self._prefix_lock_note = QLabel(self._LOCKED_NOTE)
             self._prefix_lock_note.setObjectName("Muted")
             self._prefix_lock_note.setWordWrap(True)
             self._prefix_lock_note.setVisible(False)
@@ -743,17 +741,51 @@ class SettingsPage(QWidget):
         editor = QLineEdit()
         return editor, editor
 
-    def _game_is_installed(self) -> bool:
-        """Whether this profile's game is already on disk (read-only check)."""
-        if self._config is None or not self._profile:
-            return False
-        try:
-            status = create_backend(self._profile, self._config).status()
-        except Exception:  # noqa: BLE001 - a probe failure must not block Settings
-            return False
-        return status.state in ("installed", "running")
+    #: Shown under the locked prefix field (the note is reworded while a check is pending/failed).
+    _LOCKED_NOTE = (
+        "The game is installed, so this location is locked. Moving it would make "
+        "the game unfindable; remove the game and add it again to move it."
+    )
 
-    def _set_prefix_locked(self, locked: bool) -> None:
+    def _refresh_prefix_lock(self, has_wine_prefix: bool) -> None:
+        """Lock the prefix now, then unlock it only if the game is shown not to be installed.
+
+        The status probe can be slow (keyring, ``/proc`` scan), so it runs on the thread pool; a
+        failed probe leaves the field locked, since unlocking is the risky direction.
+        """
+        self._prefix_lock_generation += 1
+        if not has_wine_prefix or self._config is None or not self._profile:
+            self._set_prefix_locked(False)
+            return
+        self._set_prefix_locked(True, "Checking whether the game is installed…")
+        generation, profile, config = self._prefix_lock_generation, self._profile, self._config
+
+        def probe() -> tuple[int, object]:
+            try:
+                return generation, create_backend(profile, config).status()
+            except Exception:  # noqa: BLE001 - reported as "could not check", never as "free"
+                return generation, None
+
+        task = CallTask(probe)
+        # A bound method, so Qt drops the connection if the page is destroyed meanwhile.
+        task.signals.done.connect(self._on_prefix_probe)
+        QThreadPool.globalInstance().start(task)
+
+    def _on_prefix_probe(self, answer: object) -> None:
+        """Apply a finished status probe on the GUI thread (a stale answer is dropped)."""
+        generation, status = answer  # type: ignore[misc]
+        if generation != self._prefix_lock_generation:
+            return
+        if status is None:
+            self._set_prefix_locked(
+                True,
+                "Could not check whether the game is installed, so this location stays locked.",
+            )
+            return
+        installed = getattr(status, "state", "") in ("installed", "running")
+        self._set_prefix_locked(installed)
+
+    def _set_prefix_locked(self, locked: bool, note: str | None = None) -> None:
         """Stop an installed game's prefix from being silently repointed."""
         editor = self._option_widgets.get("prefix")
         if isinstance(editor, QLineEdit):
@@ -762,6 +794,7 @@ class SettingsPage(QWidget):
         if browse is not None:
             browse.setEnabled(not locked)
         if self._prefix_lock_note is not None:
+            self._prefix_lock_note.setText(note or self._LOCKED_NOTE)
             self._prefix_lock_note.setVisible(locked)
 
     def _apply_advanced(self, show: bool) -> None:
@@ -940,7 +973,7 @@ class SettingsPage(QWidget):
             option.key == "prefix" and option.label == "Wine prefix"
             for option in self._backend_options(kind)
         )
-        self._set_prefix_locked(has_wine_prefix and self._game_is_installed())
+        self._refresh_prefix_lock(has_wine_prefix)
 
         supported = supports_remember_me(str(data.get("backend") or ""))
         self.account_card.setVisible(supported)

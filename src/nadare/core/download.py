@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from . import tls
+from .diskspace import human_size
 from .events import Cancel, Emitter, Event, emitter
 
 DEFAULT_CHUNK = 1 << 20  # 1 MiB
@@ -283,10 +284,11 @@ def _drop_symlinked_part(part: Path) -> None:
 
 def _emit_progress(emit: Emitter, stage: str, done: int, total: int) -> None:
     progress = (done / total) if total > 0 else None
+    sizes = f"{human_size(done)} / {human_size(total)}" if total > 0 else human_size(done)
     emit(
         Event(
             "progress",
-            f"{stage}: {done}/{total or '?'} bytes",
+            f"{stage}: {sizes}",
             progress=progress,
             data={"stage": stage, "done": done, "total": total},
         )

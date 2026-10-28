@@ -27,6 +27,15 @@ def qapp():
     yield app
 
 
+def _settle(qapp) -> None:
+    """Let Settings' background "is it installed?" probe finish and deliver its answer."""
+    from PyQt6.QtCore import QThreadPool
+
+    QThreadPool.globalInstance().waitForDone(5000)
+    for _ in range(5):
+        qapp.processEvents()
+
+
 def _config(tmp_path, kind: str, name: str = "sample", **profile):
     config = Config.load(tmp_path / "config.json")
     config.add_profile(name, backend=kind, **profile)
@@ -61,11 +70,13 @@ def test_installed_game_locks_the_wine_prefix(tmp_path, qapp):
     page = SettingsPage()
     try:
         page.load(_config(tmp_path, "stove-czn", prefix=str(prefix)), "sample")
+        _settle(qapp)
         editor = page.option_widget("prefix")
         assert editor.isReadOnly(), "changing the prefix after install hides the game"
 
         fresh = tmp_path / "fresh"
         page.load(_config(tmp_path, "stove-czn", prefix=str(fresh)), "sample")
+        _settle(qapp)
         assert not page.option_widget("prefix").isReadOnly()
     finally:
         page.deleteLater()
@@ -105,9 +116,7 @@ def test_arknights_and_stella_offer_the_display_choice(tmp_path, qapp):
         qapp.processEvents()
 
 
-def test_a_custom_runner_that_does_not_exist_is_warned_about_on_save(
-    tmp_path, qapp, monkeypatch
-):
+def test_a_custom_runner_that_does_not_exist_is_warned_about_on_save(tmp_path, qapp, monkeypatch):
     shown: list[str] = []
     monkeypatch.setattr(
         "nadare.gui.settings.QMessageBox.open", lambda self, *a: shown.append(self.text())

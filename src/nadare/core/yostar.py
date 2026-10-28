@@ -376,6 +376,15 @@ def _as_int(value: Any, what: str) -> int:
 def _parse_manifest(payload: Any, source: str = "") -> Manifest:
     if not isinstance(payload, dict):
         raise ManifestError("manifest root is not an object")
+    schema = payload.get("schema", 1)
+    if (
+        isinstance(schema, bool)
+        or not isinstance(schema, int)
+        or not 1 <= schema <= SCHEMA
+    ):
+        raise ManifestError(
+            f"unsupported manifest schema {schema!r} (this Nadare reads up to {SCHEMA})"
+        )
     game_tag = payload.get("game_tag")
     version = payload.get("version")
     base_url = payload.get("base_url")
@@ -417,6 +426,7 @@ def _parse_manifest(payload: Any, source: str = "") -> Manifest:
         generated_at=str(generated_at),
         files=tuple(files),
         source=source,
+        schema=schema,
     )
 
 
@@ -424,20 +434,26 @@ def _is_url(source: str) -> bool:
     return urllib.parse.urlparse(source).scheme in ("http", "https")
 
 
-def _read_json(source: str, timeout: int) -> Any:
+def _read_bytes(source: str, timeout: int) -> bytes:
     if _is_url(source):
-        raw = download.http_get(
+        return download.http_get(
             source, timeout=timeout, redirect_allowed=_redirect_allowed(source)
         )
-    else:
-        try:
-            raw = Path(source).expanduser().read_bytes()
-        except OSError as exc:
-            raise ManifestError(f"cannot read manifest {source}: {exc}") from exc
+    try:
+        return Path(source).expanduser().read_bytes()
+    except OSError as exc:
+        raise ManifestError(f"cannot read manifest {source}: {exc}") from exc
+
+
+def _parse_json(raw: bytes, source: str) -> Any:
     try:
         return json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ManifestError(f"manifest {source} is not valid JSON: {exc}") from exc
+
+
+def _read_json(source: str, timeout: int) -> Any:
+    return _parse_json(_read_bytes(source, timeout), source)
 
 
 def _looks_like_index(payload: Any) -> bool:
@@ -499,7 +515,7 @@ def load_manifest(source: str, *, game_tag: str | None = None, timeout: int = 60
         raise ManifestError("no manifest source configured")
     source = str(source).strip()
     payload = _read_json(source, timeout)
-    if _looks_like_index(payload):
+    while _looks_like_index(payload):
         if not game_tag:
             raise ManifestError("manifest index needs a game_tag to select an entry")
         entry = payload.get(game_tag)
@@ -508,7 +524,16 @@ def load_manifest(source: str, *, game_tag: str | None = None, timeout: int = 60
         if _depth >= 4:
             raise ManifestError("manifest index nesting too deep")
         target = _resolve_relative(source, str(entry["url"]))
-        return load_manifest(target, game_tag=game_tag, timeout=timeout, _depth=_depth + 1)
+        raw = _read_bytes(target, timeout)
+        expected = entry.get("sha256")
+        if isinstance(expected, str) and re.fullmatch(r"[0-9a-fA-F]{64}", expected):
+            if hashlib.sha256(raw).hexdigest() != expected.lower():
+                raise ManifestError(
+                    f"manifest {target} does not match the sha256 in the index"
+                )
+        payload = _parse_json(raw, target)
+        source = target
+        _depth += 1
     manifest = _parse_manifest(payload, source)
     if game_tag and manifest.game_tag != game_tag:
         raise ManifestError(f"manifest is for {manifest.game_tag!r}, expected {game_tag!r}")

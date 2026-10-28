@@ -85,6 +85,11 @@ def _one_line(value: str) -> str:
     return re.sub(r"[\x00-\x1f\x7f]", " ", value)
 
 
+def _value(value: str) -> str:
+    """Escape a desktop-entry string value per the spec (backslash only here)."""
+    return _one_line(value).replace("\\", "\\\\")
+
+
 def desktop_entry(profile: str, title: str, argv: list[str], icon: str = "nadare") -> str:
     """Render a freedesktop entry that launches ``profile`` through Nadare."""
     exec_args = " ".join(_quote_exec(str(a)) for a in argv)
@@ -92,12 +97,12 @@ def desktop_entry(profile: str, title: str, argv: list[str], icon: str = "nadare
     lines = [
         "[Desktop Entry]",
         "Type=Application",
-        f"Name={_one_line(title)}",
+        f"Name={_value(title)}",
         f"Exec={exec_line}",
         f"Icon={icon}",
         "Terminal=false",
         "Categories=Game;",
-        f"X-Nadare-Profile={_one_line(profile)}",
+        f"X-Nadare-Profile={_value(profile)}",
         "StartupNotify=false",
     ]
     return "\n".join(lines) + "\n"
@@ -194,7 +199,7 @@ def _owned_profile(path: Path) -> str | None:
         return None
     for line in lines:
         if line.startswith("X-Nadare-Profile="):
-            return line.split("=", 1)[1]
+            return line.split("=", 1)[1].replace("\\\\", "\\")
     return None
 
 

@@ -340,6 +340,8 @@ class MainWindow(QMainWindow):
         self.game.back_requested.connect(self.show_library)
         self.game.action_requested.connect(self._on_game_action)
         self.game.cancel_requested.connect(self._on_cancel)
+        self.game.pause_requested.connect(self._on_pause)
+        self.game.resume_requested.connect(self._on_resume)
         self.game.remember_toggled.connect(self._on_remember_toggled)
         self.game.settings_requested.connect(self.open_settings)
         self.game.report_requested.connect(self._show_support_report)
@@ -462,6 +464,7 @@ class MainWindow(QMainWindow):
         self.controller.succeeded.connect(self._on_succeeded)
         self.controller.failed.connect(self._on_failed)
         self.controller.cancelled.connect(self._on_cancelled)
+        self.controller.paused.connect(self._on_paused)
         self.controller.busy.connect(self._on_busy)
 
     # ---- navigation chrome -------------------------------------------------
@@ -579,6 +582,8 @@ class MainWindow(QMainWindow):
         else:
             # Status always refreshes, but silently (no busy/CANCEL flash).
             self._start(profile, "status", silent=True)
+            if self.controller.is_paused(profile):
+                self.game.set_paused(self.controller.paused_operation(profile))
 
     def open_settings(self) -> None:
         profile = self._current_profile or self.config.active
@@ -730,6 +735,7 @@ class MainWindow(QMainWindow):
     def _on_game_removed(self, profile: str, result: object) -> None:
         title = self._game_title(profile)
         self._busy.pop(profile, None)
+        self.controller.forget(profile)
         self._snapshots.pop(profile, None)
         self._status_errors.pop(profile, None)
         self._remember_notice.pop(profile, None)
@@ -1132,6 +1138,21 @@ class MainWindow(QMainWindow):
     def _on_cancel(self) -> None:
         if self._current_profile:
             self.controller.cancel(self._current_profile)
+
+    def _on_pause(self) -> None:
+        if self._current_profile:
+            self.controller.pause(self._current_profile)
+
+    def _on_resume(self) -> None:
+        if self._current_profile:
+            self.controller.resume(self._current_profile)
+
+    def _on_paused(self, profile: str, operation: str) -> None:
+        if self._closing:
+            return
+        self._busy.pop(profile, None)
+        if profile == self._current_profile:
+            self.game.set_paused(operation)
 
     # ---- controller fan-out -------------------------------------------------
     def _on_event(self, profile: str, event: Event) -> None:
@@ -1668,14 +1689,15 @@ class MainWindow(QMainWindow):
         # Only an install/update/removal leaves half-written game files; a login
         # just gets cancelled.
         writes_files = any(
-            self.controller.running_operation(n) in {"install", "update", "uninstall"}
+            self.controller.running_operation(n) in {"install", "update", "repair", "uninstall"}
             for n in active
         )
         if writes_files:
             title = "Operation in progress"
             text = (
                 f"{names} is still installing or updating.\n\n"
-                "Closing now can leave the game files incomplete. Close anyway?"
+                "Closing stops it. What is already downloaded is kept and INSTALL carries on "
+                "from there, but the game files stay incomplete until you do. Close anyway?"
             )
         else:
             title = "Sign-in in progress"

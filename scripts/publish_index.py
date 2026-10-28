@@ -623,6 +623,11 @@ def main(argv: list[str] | None = None) -> int:
         state = state_root / "nadare-index" / "catalog-checked"
         if not args.catalog_force and not catalog_due(state, args.catalog_max_age_hours):
             print("catalog: checked recently, skipping")
+            # A broken source must keep turning the hourly heartbeat down, not only every 6 h.
+            _report_catalog_failures(
+                _load_catalog_failures(state_root / "nadare-index" / "catalog-failures.json"),
+                args.catalog_fail_threshold,
+            )
         else:
             try:
                 changed |= publish_catalog(

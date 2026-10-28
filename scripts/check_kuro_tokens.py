@@ -20,6 +20,7 @@ import argparse
 import gzip
 import json
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -52,8 +53,32 @@ def load_published(index: Path) -> dict[str, Any] | None:
     """The published ``tokens`` table, or ``None`` when the file is absent or unreadable."""
     path = index / "catalog" / "kuro-tokens.json"
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        if (index / ".git").exists():
+            # Check what clients can download (the committed file), not a local edit.
+            committed = subprocess.run(
+                ["git", "-C", str(index), "show", "HEAD:catalog/kuro-tokens.json"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=30,
+                check=False,
+            )
+            if committed.returncode != 0:
+                return None
+            try:
+                local = path.read_text(encoding="utf-8")
+            except OSError:
+                local = None
+            if local != committed.stdout:
+                _blind(
+                    "catalog/kuro-tokens.json has uncommitted changes or is missing locally; "
+                    "checking the committed one"
+                )
+            text = committed.stdout
+        else:
+            text = path.read_text(encoding="utf-8")
+        data = json.loads(text)
+    except (OSError, ValueError, subprocess.SubprocessError):
         return None
     if not isinstance(data, dict):
         return None
@@ -148,11 +173,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--index", required=True, type=Path, help="nadare-index checkout")
     args = parser.parse_args(argv)
 
+    BLIND.clear()
     tokens = load_published(args.index)
     if tokens is None:
         tokens = builtin_tokens()
         print("kuro tokens: no published file, checking the built-in tokens")
-    BLIND.clear()
     problems = check(tokens, _fetch)
     problems += [f"kuro tokens: blind, {note}" for note in BLIND]
     for line in problems:

@@ -332,3 +332,27 @@ def test_the_hoyo_games_are_published_unless_hidden(pi, monkeypatch):
     assert {k.removeprefix("direct-") for k in dk.HOYO_KINDS} <= set(pi.default_catalog_games())
     monkeypatch.setenv("NADARE_HIDE_HOYO", "1")
     assert not {k.removeprefix("direct-") for k in dk.HOYO_KINDS} & set(pi.default_catalog_games())
+
+
+def test_a_skipped_recent_catalog_run_still_reports_a_failing_source(
+    pi, tmp_path, monkeypatch, capsys
+):
+    """The 6-hourly gate must not hide a broken source from the hourly heartbeat (#601)."""
+    state = tmp_path / "state" / "nadare-index"
+    state.mkdir(parents=True)
+    (state / "catalog-checked").touch()
+    (state / "catalog-failures.json").write_text(
+        json.dumps({"ge": {"count": 5, "reason": "HTTP 500"}, "ok": {"count": 1}})
+    )
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    rc = pi.main(
+        [
+            "--index", str(tmp_path / "idx"), "--skip-yostar", "--skip-czn",
+            "--skip-webview2", "--skip-vcredist", "--catalog",
+        ]
+    )  # fmt: skip
+    out = capsys.readouterr().out
+    assert "checked recently, skipping" in out
+    assert "CANARY: catalog source ge has failed 5 runs in a row (HTTP 500)" in out
+    assert "source ok" not in out
+    assert rc == 3

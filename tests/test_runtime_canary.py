@@ -174,3 +174,29 @@ def test_main_exits_4_when_a_new_runner_cannot_be_read(
     monkeypatch.setattr(canary, "_fetch_appid", fetch)
     assert canary.main(["--state", str(tmp_path / "s.json")]) == canary.PROBLEM
     assert "blind" in capsys.readouterr().out
+
+
+def _stub_download(monkeypatch, canary, manifest):
+    from nadare.core import runners
+
+    monkeypatch.setattr(
+        runners,
+        "_release",
+        lambda spec, tag, **kw: {"tar": {"browser_download_url": "https://github.com/x/y.tar.gz"}},
+    )
+    monkeypatch.setattr(runners, "_github_asset_host_allowed", lambda url: True)
+    monkeypatch.setattr(canary.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(b"x"))
+    monkeypatch.setattr(canary, "read_manifest", lambda stream: manifest)
+
+
+def test_a_tarball_without_a_readable_manifest_is_unknown_not_cached_as_no_runtime(monkeypatch):
+    canary = _canary()
+    _stub_download(monkeypatch, canary, None)
+    with pytest.raises(ValueError, match="toolmanifest"):
+        canary._fetch_appid("dwproton", "t1")
+
+
+def test_a_manifest_that_needs_no_runtime_is_a_real_none(monkeypatch):
+    canary = _canary()
+    _stub_download(monkeypatch, canary, NO_REQUIRE)
+    assert canary._fetch_appid("dwproton", "t1") is None

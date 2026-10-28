@@ -56,10 +56,37 @@ heartbeat() {
         || echo "refresh_index: heartbeat ping failed" >&2
 }
 
-lock="${XDG_RUNTIME_DIR:-/tmp}/nadare-refresh-index.lock"
+# The lock lives in the user's runtime dir, else in a private 0700 directory of our own: a
+# shared /tmp path could be pre-created (or made unwritable) by another local user.
+lock_dir="${XDG_RUNTIME_DIR:-}"
+if [[ -z "$lock_dir" ]]; then
+    lock_dir="${TMPDIR:-/tmp}/nadare-refresh-$(id -u)"
+    [[ ! -L "$lock_dir" ]] || { echo "refresh_index: lock directory is a symlink: $lock_dir" >&2; exit 1; }
+    mkdir -p -m 700 "$lock_dir" 2>/dev/null || true
+    # Re-check after creating it: the path must still be a plain directory of ours.
+    [[ ! -L "$lock_dir" && -d "$lock_dir" && -O "$lock_dir" ]] \
+        || { echo "refresh_index: cannot use lock directory $lock_dir" >&2; exit 1; }
+fi
+lock="$lock_dir/nadare-refresh-index.lock"
 [[ ! -L "$lock" ]] || { echo "refresh_index: lock path is a symlink: $lock" >&2; exit 1; }
-exec 9>"$lock"
+exec 9>"$lock" || { echo "refresh_index: cannot open lock file $lock" >&2; exit 1; }
 flock -n 9 || { echo "refresh_index: already running"; exit 0; }
+
+# A Yostar env that is a symlink is refused up front (it used to skip Yostar silently and freeze
+# those manifests); a wrong owner or mode is refused here too, before any network work.
+yostar_env="${NADARE_YOSTAR_ENV:-$HOME/nadare-index-refresh/yostar.env}"
+if [[ -L "$yostar_env" ]]; then
+    echo "refresh_index: $yostar_env is a symlink; point NADARE_YOSTAR_ENV at the real file" >&2
+    exit 1
+fi
+if [[ -f "$yostar_env" ]]; then
+    # The file holds the salts and is sourced as shell: owner-only (400/600).
+    perms="$(stat -c '%a %u' "$yostar_env")"
+    if [[ ! "${perms% *}" =~ ^[46]00$ || "${perms#* }" != "$(id -u)" ]]; then
+        echo "refresh_index: $yostar_env must be owned by you with mode 600" >&2
+        exit 1
+    fi
+fi
 
 # shellcheck source=index_git.sh
 source "$root/scripts/index_git.sh"
@@ -112,14 +139,7 @@ if [[ -z "${NADARE_SKIP_CANARY:-}" ]]; then
 fi
 
 skip_yostar=--skip-yostar
-yostar_env="${NADARE_YOSTAR_ENV:-$HOME/nadare-index-refresh/yostar.env}"
-if [[ -f "$yostar_env" && ! -L "$yostar_env" ]]; then
-    # The file holds the salts and is sourced as shell: owner-only (400/600).
-    perms="$(stat -c '%a %u' "$yostar_env")"
-    if [[ ! "${perms% *}" =~ ^[46]00$ || "${perms#* }" != "$(id -u)" ]]; then
-        echo "refresh_index: $yostar_env must be owned by you with mode 600" >&2
-        exit 1
-    fi
+if [[ -f "$yostar_env" ]]; then
     set -a
     # shellcheck disable=SC1090
     . "$yostar_env"

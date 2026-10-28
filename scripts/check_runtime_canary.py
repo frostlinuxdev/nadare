@@ -136,7 +136,12 @@ def _fetch_appid(family: str, tag: str) -> int | None:
     request = urllib.request.Request(url, headers={"User-Agent": "nadare-runtime-canary"})
     with urllib.request.urlopen(request, timeout=120) as response:  # noqa: S310 - host checked
         limited = _Limited(response, _MAX_BYTES)
-        return parse_required_appid(read_manifest(limited) or "")
+        manifest = read_manifest(limited)
+        if manifest is None:
+            # Unknown, not "needs no runtime": raising keeps it out of the saved answers so the
+            # next run looks again, and the run reports itself blind meanwhile.
+            raise ValueError("no readable toolmanifest.vdf in the runner tarball")
+        return parse_required_appid(manifest)
 
 
 class _Limited:

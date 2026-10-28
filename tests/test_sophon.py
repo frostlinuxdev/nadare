@@ -745,3 +745,94 @@ def test_a_missing_zstandard_does_not_break_importing_or_the_other_games(monkeyp
     importlib.import_module("nadare.backends.direct")
     with pytest.raises(mod.SophonError, match="zstandard"):
         mod._zstd()
+
+
+def test_a_crash_after_the_marker_does_not_orphan_the_files_the_new_build_dropped(
+    servers, tmp_path, monkeypatch
+):
+    """#612: the ledger keeps the old paths until the stale files are really gone."""
+    old = Build({"keep.bin": b"k" * 100, "gone.bin": b"g" * 100}, chunk_size=100)
+    servers(old)
+    dd.sync(plan_for(old), tmp_path, workers=1)
+    new = Build({"keep.bin": b"k" * 100}, chunk_size=100)
+    servers(new)
+
+    real_cleanup = sophon._cleanup_stale_files
+
+    def killed(*_args, **_kwargs):
+        raise KeyboardInterrupt  # stands in for a SIGKILL after the marker was written
+
+    monkeypatch.setattr(sophon, "_cleanup_stale_files", killed)
+    with pytest.raises(KeyboardInterrupt):
+        dd.sync(plan_for(new), tmp_path, workers=1)
+    assert (tmp_path / "gone.bin").exists()
+    ledger = sophon._ledger_path(new.package(), tmp_path)
+    assert "gone.bin" in ledger.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(sophon, "_cleanup_stale_files", real_cleanup)
+    dd.sync(plan_for(new), tmp_path, workers=1)
+
+    assert not (tmp_path / "gone.bin").exists()
+    assert (tmp_path / "keep.bin").read_bytes() == b"k" * 100
+    assert "gone.bin" not in ledger.read_text(encoding="utf-8")
+
+
+def test_the_ledger_holds_only_the_current_files_after_a_clean_sync(servers, tmp_path):
+    old = Build({"keep.bin": b"k" * 100, "gone.bin": b"g" * 100}, chunk_size=100)
+    servers(old)
+    dd.sync(plan_for(old), tmp_path, workers=1)
+    new = Build({"keep.bin": b"k" * 100, "added.bin": b"a" * 100}, chunk_size=100)
+    servers(new)
+    dd.sync(plan_for(new), tmp_path, workers=1)
+    ledger = sophon._ledger_path(new.package(), tmp_path)
+    assert sorted(ledger.read_text(encoding="utf-8").split()) == ["added.bin", "keep.bin"]
+    assert not (tmp_path / "gone.bin").exists()
+
+
+def test_the_ledger_is_not_narrowed_when_the_prune_was_skipped(servers, tmp_path, monkeypatch):
+    """#612: an unreadable sibling ledger makes ownership uncertain; keep the old paths."""
+    old = Build({"keep.bin": b"k" * 100, "gone.bin": b"g" * 100}, chunk_size=100)
+    servers(old)
+    dd.sync(plan_for(old), tmp_path, workers=1)
+    new = Build({"keep.bin": b"k" * 100}, chunk_size=100)
+    servers(new)
+    real = sophon._other_package_paths
+    monkeypatch.setattr(sophon, "_other_package_paths", lambda *_a, **_k: None)
+    dd.sync(plan_for(new), tmp_path, workers=1)
+    ledger = sophon._ledger_path(new.package(), tmp_path)
+    assert (tmp_path / "gone.bin").exists()
+    assert "gone.bin" in ledger.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(sophon, "_other_package_paths", real)
+    dd.sync(plan_for(new), tmp_path, workers=1)
+    assert not (tmp_path / "gone.bin").exists()
+    assert "gone.bin" not in ledger.read_text(encoding="utf-8")
+
+
+def test_the_cleanup_reports_whether_it_finished(tmp_path):
+    (tmp_path / "a.bin").write_bytes(b"x")
+    ledger = tmp_path / ".nadare" / "sophon-T.files"
+    assert sophon._cleanup_stale_files(tmp_path, ["a.bin"], [], ledger) is True
+    assert not (tmp_path / "a.bin").exists()
+
+
+def test_a_file_that_cannot_be_removed_keeps_the_old_paths(servers, tmp_path, monkeypatch):
+    old = Build({"keep.bin": b"k" * 100, "gone.bin": b"g" * 100}, chunk_size=100)
+    servers(old)
+    dd.sync(plan_for(old), tmp_path, workers=1)
+    new = Build({"keep.bin": b"k" * 100}, chunk_size=100)
+    servers(new)
+    real_unlink = sophon.Path.unlink
+
+    def stubborn(self, *args, **kwargs):
+        if self.name == "gone.bin":
+            raise PermissionError("busy")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(sophon.Path, "unlink", stubborn)
+    dd.sync(plan_for(new), tmp_path, workers=1)
+    ledger = sophon._ledger_path(new.package(), tmp_path)
+    assert "gone.bin" in ledger.read_text(encoding="utf-8")
+    monkeypatch.setattr(sophon.Path, "unlink", real_unlink)
+    dd.sync(plan_for(new), tmp_path, workers=1)
+    assert not (tmp_path / "gone.bin").exists()

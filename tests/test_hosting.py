@@ -12,10 +12,11 @@ BASE = "https://idx.example/nadare-index/raw/"
 def test_defaults_point_at_the_index_repo(monkeypatch):
     monkeypatch.delenv("NADARE_INDEX_BASE")
     monkeypatch.delenv("NADARE_RELEASES_API")
-    assert hosting.index_base() == hosting.DEFAULT_INDEX_BASE
+    first = hosting.DEFAULT_INDEX_BASE.split()[0]
+    assert hosting.index_base() == first
     assert hosting.index_base().endswith("/")
-    assert hosting.yostar_index_url() == hosting.DEFAULT_INDEX_BASE + "yostar/index.json"
-    assert hosting.czn_index_url() == hosting.DEFAULT_INDEX_BASE + "czn/latest.json"
+    assert hosting.yostar_index_url() == first + "yostar/index.json"
+    assert hosting.czn_index_url() == first + "czn/latest.json"
     assert hosting.releases_api() == hosting.DEFAULT_RELEASES_API
     assert hosting.releases_api().startswith("https://")
 

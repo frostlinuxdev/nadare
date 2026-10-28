@@ -16,7 +16,6 @@ handles. ``ensure`` is deliberately best-effort: any failure becomes a single
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import re
@@ -26,14 +25,13 @@ import tempfile
 import threading
 import time
 import urllib.parse
-import urllib.request
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from . import download as _net
-from . import hosting
+from . import indexfetch
 from .backends import BackendError
 from .events import Cancelled, Event
 
@@ -141,20 +139,19 @@ def overridden(
     return False
 
 
-def _index_payload(url: str) -> Any:
-    """Fetch the small index JSON; redirects must stay https on the same host.
+def _index_document() -> Any:
+    """The published index JSON, or ``None`` when it is unavailable.
 
-    The index is the trust anchor for extra installer hashes, so it goes through
-    the shared safe opener (no https->http downgrade, no hop to another host).
+    The index is the trust anchor for extra installer hashes, so it is fetched
+    through :func:`indexfetch.open_bytes` (https only, same-host redirects, a
+    size cap) and the last good copy is used when every mirror is down.
     """
-    origin = (urllib.parse.urlparse(url).hostname or "").lower()
-
-    def _hop_ok(target: str) -> bool:
-        hop = urllib.parse.urlparse(target)
-        return hop.scheme == "https" and (hop.hostname or "").lower() == origin
-
-    with _net.http_open(url, timeout=10, redirect_allowed=_hop_ok) as r:
-        return json.loads(r.read(65536).decode("utf-8"))
+    try:
+        return indexfetch.fetch_json(
+            "vcredist/latest.json", validate=indexfetch.looks_like_pins_doc
+        ).data
+    except Exception:
+        return None
 
 
 def index_pins() -> set[str]:
@@ -163,13 +160,11 @@ def index_pins() -> set[str]:
     Best effort and offline-safe: a missing, slow or malformed index just means
     the built-in pin is the only accepted hash.
     """
-    url = hosting.vcredist_index_url()
-    if not url.startswith("https://"):
+    payload = _index_document()
+    if not isinstance(payload, dict):
         return set()
-    try:
-        payload = _index_payload(url)
-        hashes = payload["sha256"]
-    except Exception:
+    hashes = payload.get("sha256")
+    if hashes is None:
         return set()
     if not isinstance(hashes, list):
         return set()
@@ -189,14 +184,10 @@ def index_source() -> str:
     Empty on any problem (https and a Microsoft host are required), so the
     ``aka.ms`` fwlink remains the fallback.
     """
-    url = hosting.vcredist_index_url()
-    if not url.startswith("https://"):
+    payload = _index_document()
+    if not isinstance(payload, dict):
         return ""
-    try:
-        payload = _index_payload(url)
-        source = payload["url"]
-    except Exception:
-        return ""
+    source = payload.get("url")
     if not isinstance(source, str):
         return ""
     parts = urllib.parse.urlparse(source)

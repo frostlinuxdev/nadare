@@ -43,13 +43,12 @@ from typing import Any
 from ...core import download as net
 from ...core import (
     graphics,
-    hosting,
     hostlibs,
+    indexfetch,
     paths,
     prefixmove,
     process,
     sandbox,
-    tls,
     vcredist,
 )
 from ...core import runners as core_runners
@@ -1365,33 +1364,36 @@ class CznBackend(GameBackend):
         return False
 
     @staticmethod
+    def _webview2_index_document() -> Any:
+        """The published WebView2 index JSON, or ``None`` when unavailable."""
+        try:
+            return indexfetch.fetch_json(
+                "webview2/latest.json", validate=indexfetch.looks_like_pins_doc
+            ).data
+        except Exception:
+            return None
+
+    @staticmethod
     def _webview2_index_pins() -> set[str]:
         """Installer hashes published in the Nadare index (empty on any error).
 
         Best effort and offline-safe: a missing, slow or malformed index just
         means the built-in pin is the only accepted hash.
         """
-        import urllib.request
-
-        url = hosting.webview2_index_url()
-        if not url.startswith("https://"):
+        payload = CznBackend._webview2_index_document()
+        if not isinstance(payload, dict):
             return set()
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "nadare"})
-            with tls.urlopen(
-                req, timeout=10, context=tls.ssl_context()
-            ) as r:  # noqa: S310
-                payload = json.loads(r.read(65536).decode("utf-8"))
-            hashes = payload["sha256"]
-        except Exception:
-            return set()
+        hashes = payload.get("sha256")
         if not isinstance(hashes, list):
             return set()
-        return {
+        # Validate first, cap after: junk entries at the front must not crowd out
+        # the real hashes behind them.
+        valid = [
             h.strip().lower()
-            for h in hashes[:WEBVIEW2_INDEX_MAX_HASHES]
+            for h in hashes
             if isinstance(h, str) and _SHA256_RE.fullmatch(h.strip().lower())
-        }
+        ]
+        return set(valid[:WEBVIEW2_INDEX_MAX_HASHES])
 
     @staticmethod
     def _webview2_index_source() -> str:
@@ -1404,20 +1406,11 @@ class CznBackend(GameBackend):
         Microsoft host are required).
         """
         import urllib.parse
-        import urllib.request
 
-        url = hosting.webview2_index_url()
-        if not url.startswith("https://"):
+        payload = CznBackend._webview2_index_document()
+        if not isinstance(payload, dict):
             return ""
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "nadare"})
-            with tls.urlopen(
-                req, timeout=10, context=tls.ssl_context()
-            ) as r:  # noqa: S310
-                payload = json.loads(r.read(65536).decode("utf-8"))
-            source = payload["url"]
-        except Exception:
-            return ""
+        source = payload.get("url")
         if not isinstance(source, str):
             return ""
         parts = urllib.parse.urlparse(source)

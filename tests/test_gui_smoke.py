@@ -2281,3 +2281,32 @@ def test_close_warns_while_a_game_is_being_removed(tmp_path, qapp, monkeypatch):
     finally:
         window.close()
         window.deleteLater()
+
+
+@pytest.mark.parametrize("operation", ["install", "update", "repair"])
+def test_close_warning_during_a_download_says_what_is_kept(tmp_path, qapp, monkeypatch, operation):
+    """Closing stops the download and keeps the partial files; the warning must say so (and
+    must not call a repair a sign-in)."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    from nadare.gui import main_window as mw
+
+    window = MainWindow(_empty_config(tmp_path))
+    try:
+        seen: list[str] = []
+        monkeypatch.setattr(
+            mw.QMessageBox,
+            "warning",
+            lambda *args, **kwargs: seen.append(args[2]) or QMessageBox.StandardButton.Close,
+        )
+        monkeypatch.setattr(window.controller, "launching_profiles", lambda: [])
+        monkeypatch.setattr(window.controller, "mutating_profiles", lambda: ["czn"])
+        monkeypatch.setattr(window.controller, "running_operation", lambda name: operation)
+        window._confirm_close()
+        text = seen[0]
+        assert "signing in" not in text
+        assert "game files" in text
+        assert "kept" in text and "carries on" in text
+    finally:
+        window.close()
+        window.deleteLater()

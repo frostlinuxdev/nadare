@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -208,3 +209,60 @@ def test_main_exits_4_when_the_launcher_index_answers_5xx(
     monkeypatch.setattr(canary, "_fetch", fetch)
     assert canary.main(["--index", str(write_tokens(tmp_path))]) == 4
     assert "blind" in capsys.readouterr().out
+
+
+def _git_index(tmp_path: Path, committed: str, working: str | None = None) -> Path:
+    import subprocess
+
+    index = tmp_path / "gitindex"
+    path = index / "catalog" / "kuro-tokens.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"tokens": {"wuwa": committed}}), encoding="utf-8")
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t",
+           "GIT_COMMITTER_EMAIL": "t@x", "PATH": os.environ["PATH"]}  # fmt: skip
+    for args in (["init", "-q"], ["add", "."], ["commit", "-qm", "c"]):
+        subprocess.run(["git", "-C", str(index), *args], check=True, env=env)
+    if working is not None:
+        path.write_text(json.dumps({"tokens": {"wuwa": working}}), encoding="utf-8")
+    return index
+
+
+def test_the_canary_checks_the_committed_token_not_an_uncommitted_edit(tmp_path: Path) -> None:
+    canary = _canary()
+    index = _git_index(tmp_path, "50004_committed1", working="50004_editedlocal")
+    assert canary.load_published(index) == {"wuwa": "50004_committed1"}
+    assert any("uncommitted" in note for note in canary.BLIND)
+
+
+def test_a_clean_checkout_is_read_without_a_note(tmp_path: Path) -> None:
+    canary = _canary()
+    canary.BLIND.clear()
+    index = _git_index(tmp_path, "50004_committed1")
+    assert canary.load_published(index) == {"wuwa": "50004_committed1"}
+    assert not canary.BLIND
+
+
+def test_main_reports_an_uncommitted_token_edit_as_blind(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    canary = _canary()
+    index = _git_index(tmp_path, "50004_committed1", working="50004_editedlocal")
+    fetch, calls = fake_fetch()
+    monkeypatch.setattr(canary, "_fetch", fetch)
+    assert canary.main(["--index", str(index)]) == 4
+    assert (
+        "CANARY: kuro tokens: blind, catalog/kuro-tokens.json has uncommitted"
+        in capsys.readouterr().out
+    )
+    assert all("committed1" in url for url in calls)
+
+
+def test_a_deleted_working_file_does_not_hide_the_committed_token(tmp_path: Path) -> None:
+    """The committed file is what clients download; a local deletion must not switch the
+    canary over to the built-in tokens."""
+    canary = _canary()
+    canary.BLIND.clear()
+    index = _git_index(tmp_path, "50004_committed1")
+    (index / "catalog" / "kuro-tokens.json").unlink()
+    assert canary.load_published(index) == {"wuwa": "50004_committed1"}
+    assert any("uncommitted" in note or "deleted" in note for note in canary.BLIND)

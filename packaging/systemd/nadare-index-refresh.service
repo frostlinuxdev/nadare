@@ -7,5 +7,7 @@ After=network-online.target
 Type=oneshot
 # Adjust the paths if the checkouts live elsewhere.
 Environment=NADARE_INDEX_DIR=%h/nadare-index
+# Optional settings the script documents (catalog, heartbeat, canary toggles, GitHub token).
+EnvironmentFile=-/etc/nadare-index-refresh.env
 ExecStart=%h/nadare/scripts/refresh_index.sh
 TimeoutStartSec=30min

@@ -68,8 +68,10 @@ cat > "$pkg/usr/share/doc/nadare/copyright" <<EOF
 Nadare ${version}
 
 Copyright (C) 2026 Nadare contributors.
-Licensed under the GNU General Public License v3.0 or later (GPL-3.0-or-later).
-Except src/nadare/backends/czn/auth.py, which is GPL-3.0-only.
+Licensed under the GNU General Public License v3.0 only (GPL-3.0-only).
+Most source files carry a `GPL-3.0-or-later` SPDX header, but
+src/nadare/backends/czn/auth.py and the distributed work as a whole are
+`GPL-3.0-only`; keep that file's header intact.
 
 The complete license text is in /opt/nadare/LICENSE after installation and in
 the source repository.

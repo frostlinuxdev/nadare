@@ -50,6 +50,9 @@ OPERATIONS = (
 #: Operations that exclude each other (and Remove) per profile across processes.
 LOCKED_OPERATIONS = frozenset({"install", "update", "repair", "remake_prefix", "uninstall"})
 
+#: Operations that can be paused and later resumed from their partial downloads.
+PAUSABLE = frozenset({"install", "update", "repair"})
+
 #: Operations that mutate the installation and therefore take a per-profile lock.
 MUTATING = frozenset(
     {
@@ -91,9 +94,16 @@ class CallTask(QRunnable):
             result = self._func()
         except Exception as exc:  # noqa: BLE001 - reported to the caller
             log.debug("background task failed", exc_info=True)
-            self.signals.failed.emit(str(exc))
+            self._emit("failed", str(exc))
             return
-        self.signals.done.emit(result)
+        self._emit("done", result)
+
+    def _emit(self, name: str, value: object) -> None:
+        try:
+            getattr(self.signals, name).emit(value)
+        except RuntimeError:
+            # Qt deleted the signal object (the app is quitting): nobody is left to tell.
+            log.debug("background task finished after its receiver was gone")
 
 
 class BackendWorker(QThread):
@@ -133,6 +143,7 @@ class BackendWorker(QThread):
         self._payload = payload
         self._cancel_token = Cancel()
         self._log = None
+        self._last_progress_logged = float("-inf")
 
     # ---- lifecycle ---------------------------------------------------------
     @property
@@ -142,6 +153,10 @@ class BackendWorker(QThread):
     @property
     def operation(self) -> str:
         return self._operation
+
+    @property
+    def payload(self) -> object:
+        return self._payload
 
     def cancel(self) -> None:
         """Ask the backend to stop at its next cancellation point."""
@@ -292,9 +307,24 @@ class BackendWorker(QThread):
         return {"kind": "media", "hero": hero, "banners": cached.get("banners", [])}
 
     # ---- emitter plumbing --------------------------------------------------
+    #: Seconds between two ``[progress]`` lines in the run log (the UI still gets every event).
+    PROGRESS_LOG_INTERVAL = 30.0
+
     def _on_event(self, event: Event) -> None:
-        self._note(f"[{event.kind}] {event.message}")
+        if self._worth_logging(event):
+            self._note(f"[{event.kind}] {event.message}")
         self.backend_event.emit(event)
+
+    def _worth_logging(self, event: Event) -> bool:
+        """Progress ticks arrive per megabyte; the log keeps one every half minute and the last."""
+        if event.kind != "progress":
+            return True
+        now = time.monotonic()
+        finished = event.progress is not None and event.progress >= 1.0
+        if finished or now - self._last_progress_logged >= self.PROGRESS_LOG_INTERVAL:
+            self._last_progress_logged = now
+            return True
+        return False
 
     def _fail(self, message: str) -> None:
         self._note(f"error: {message}")
@@ -440,6 +470,8 @@ class BackendController(QObject):
     Background refreshes (:data:`BACKGROUND`) are preemptible: asking for a user
     operation while one runs cancels it and queues the user operation to start as
     soon as the slot frees. At most one user operation is queued per profile.
+    A :data:`PAUSABLE` operation can be paused, which cancels it while remembering
+    its payload so :meth:`resume` can run it again from the partial downloads.
     """
 
     backend_event = pyqtSignal(str, object)  # profile, Event
@@ -447,6 +479,7 @@ class BackendController(QObject):
     succeeded = pyqtSignal(str, str, int)  # profile, operation, exit code
     failed = pyqtSignal(str, str, str)  # profile, operation, message
     cancelled = pyqtSignal(str, str)  # profile, operation
+    paused = pyqtSignal(str, str)  # profile, operation
     busy = pyqtSignal(str, str, bool)  # profile, operation, active
 
     def __init__(self, config: Config, parent: QObject | None = None) -> None:
@@ -455,6 +488,10 @@ class BackendController(QObject):
         self._workers: dict[str, BackendWorker] = {}
         #: Exactly one user operation waiting for a cancellable background refresh.
         self._pending: dict[str, tuple[str, object]] = {}
+        #: Profiles whose running worker was asked to pause.
+        self._pausing: set[str] = set()
+        #: Paused operations, with the payload needed to run them again.
+        self._paused: dict[str, tuple[str, object]] = {}
         #: Once shutdown starts, no new worker may be spawned (a queued success
         #: callback used to start a status probe after the window was gone).
         self._closed = False
@@ -488,6 +525,14 @@ class BackendController(QObject):
         worker = self._workers.get(profile)
         return worker.operation if worker is not None and worker.isRunning() else ""
 
+    def is_paused(self, profile: str) -> bool:
+        return profile in self._paused
+
+    def paused_operation(self, profile: str) -> str:
+        """The paused operation for ``profile`` ("" when none)."""
+        entry = self._paused.get(profile)
+        return entry[0] if entry is not None else ""
+
     # ---- control -----------------------------------------------------------
     def start(self, profile: str, operation: str, payload: object = None) -> bool:
         """Start ``operation`` for ``profile``. Returns False if it cannot run.
@@ -511,6 +556,8 @@ class BackendController(QObject):
                 return False
             if worker is not None and worker.operation in BACKGROUND:
                 self._pending[profile] = (operation, payload)
+                if operation not in BACKGROUND:
+                    self._paused.pop(profile, None)
                 self.busy.emit(profile, operation, True)
                 worker.cancel()
                 return True
@@ -519,13 +566,58 @@ class BackendController(QObject):
                 # cancellation point stops the process group) and run the
                 # backend-specific ``stop`` once the slot frees.
                 self._pending[profile] = (operation, payload)
+                if operation not in BACKGROUND:
+                    self._paused.pop(profile, None)
                 self.busy.emit(profile, operation, True)
                 worker.cancel()
                 return True
             return False
 
+        if operation not in BACKGROUND:
+            self._paused.pop(profile, None)
         self._spawn(profile, operation, payload)
         return True
+
+    def pause(self, profile: str) -> bool:
+        """Ask the running pausable operation for ``profile`` to stop and remember it."""
+        if profile in self._pausing:
+            return False
+        queued = self._pending.get(profile)
+        if queued is not None:
+            # INSTALL was clicked while a status/news probe still ran, so it is only queued and
+            # the page already shows it as busy: pausing it means it simply does not start.
+            if queued[0] not in PAUSABLE:
+                return False
+            self._pending.pop(profile)
+            probe = self._workers.get(profile)
+            if probe is not None and probe.operation in BACKGROUND and probe.isRunning():
+                probe.cancel()
+                self._detach(profile, probe)
+            self._paused[profile] = queued
+            self.busy.emit(profile, queued[0], False)
+            self.paused.emit(profile, queued[0])
+            return True
+        worker = self._workers.get(profile)
+        if worker is None or not worker.isRunning() or worker.operation not in PAUSABLE:
+            return False
+        self._pausing.add(profile)
+        worker.cancel()
+        return True
+
+    def forget(self, profile: str) -> None:
+        """Drop a paused (or pausing) operation: the game was removed, nothing may resume it."""
+        self._pausing.discard(profile)
+        self._paused.pop(profile, None)
+
+    def resume(self, profile: str) -> bool:
+        """Run the operation paused for ``profile`` again with its payload."""
+        entry = self._paused.pop(profile, None)
+        if entry is None:
+            return False
+        if self.start(profile, entry[0], entry[1]):
+            return True
+        self._paused[profile] = entry
+        return False
 
     def _spawn(self, profile: str, operation: str, payload: object = None) -> bool:
         if self._closed:
@@ -558,6 +650,9 @@ class BackendController(QObject):
         _detached.add(worker)
 
     def cancel(self, profile: str) -> None:
+        # Cancel beats a pause that has not landed yet, even when the worker thread has already
+        # exited and only its queued "cancelled" slot is left to run.
+        self._pausing.discard(profile)
         pending = self._pending.pop(profile, None)
         if pending is not None:
             # The queued user operation never started. Free the profile's slot
@@ -573,6 +668,10 @@ class BackendController(QObject):
         worker = self._workers.get(profile)
         if worker is not None and worker.isRunning():
             worker.cancel()
+            return
+        entry = self._paused.pop(profile, None)
+        if entry is not None:
+            self.cancelled.emit(profile, entry[0])
 
     def launching_profiles(self) -> list[str]:
         """Profiles whose game is currently running under a ``launch`` worker."""
@@ -605,6 +704,8 @@ class BackendController(QObject):
             self.busy.emit(profile, operation, False)
             self.cancelled.emit(profile, operation)
         self._pending.clear()
+        self._pausing.clear()
+        self._paused.clear()
         workers = [
             worker
             for worker in self._workers.values()
@@ -648,14 +749,22 @@ class BackendController(QObject):
         self._spawn(profile, pending[0], pending[1])
 
     def _on_succeeded(self, profile: str, operation: str, code: int, worker) -> None:
+        self._pausing.discard(profile)
         self._finish(profile, operation, worker)
         self.succeeded.emit(profile, operation, code)
 
     def _on_failed(self, profile: str, operation: str, message: str, worker) -> None:
+        self._pausing.discard(profile)
         self._finish(profile, operation, worker)
         self.failed.emit(profile, operation, message)
 
     def _on_cancelled(self, profile: str, operation: str, worker) -> None:
+        if profile in self._pausing:
+            self._pausing.discard(profile)
+            self._paused[profile] = (operation, getattr(worker, "payload", None))
+            self._finish(profile, operation, worker)
+            self.paused.emit(profile, operation)
+            return
         self._finish(profile, operation, worker)
         self.cancelled.emit(profile, operation)
 
@@ -668,6 +777,7 @@ def is_mutating(operation: str) -> bool:
 __all__ = [
     "OPERATIONS",
     "MUTATING",
+    "PAUSABLE",
     "BACKGROUND",
     "BackendWorker",
     "BackendController",

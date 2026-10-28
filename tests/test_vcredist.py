@@ -14,11 +14,13 @@ from pathlib import Path
 
 import pytest
 
-from nadare.core import hosting, vcredist
+from nadare.core import indexfetch, vcredist
 from nadare.core.backends import BackendError
 from nadare.core.events import Cancel, Cancelled
 
 BUILTIN = b"MZ" + b"\x00" * 10 + b"Wine builtin DLL" + b"\x00" * 32
+
+INDEX_BASE = "https://idx.example/"
 
 
 @pytest.fixture(autouse=True)
@@ -27,6 +29,13 @@ def _no_network(monkeypatch):
         raise OSError("offline")
 
     monkeypatch.setattr(vcredist._net, "http_open", _offline)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_index(tmp_path, monkeypatch):
+    """Every index test gets its own cache and a single test base URL."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("NADARE_INDEX_BASE", INDEX_BASE)
 
 
 def _write_dlls(prefix: Path, *, native: bool = True) -> None:
@@ -64,6 +73,13 @@ class _BytesResp:
 def _serve(payload: bytes, *, final: str | None = None):
     def _open(*_a, **_k):
         return _BytesResp(payload, final=final)
+
+    return _open
+
+
+def _serve_index(payload: bytes):
+    def _open(*_a, **_k):
+        return payload
 
     return _open
 
@@ -127,34 +143,25 @@ class TestPins:
         assert vcredist.overridden({}, environ={"NADARE_VCREDIST_SHA256": "a" * 64}) is True
 
     def test_index_pins_parses_and_caps(self, monkeypatch):
-        monkeypatch.setattr(
-            hosting, "vcredist_index_url", lambda: "https://idx.example/vcredist/latest.json"
-        )
         good = [hashlib.sha256(str(i).encode()).hexdigest() for i in range(12)]
         payload = json.dumps({"sha256": [*good, "not-a-hash"]}).encode()
-        monkeypatch.setattr(vcredist._net, "http_open", _serve(payload))
+        monkeypatch.setattr(indexfetch, "open_bytes", _serve_index(payload))
         pins = vcredist.index_pins()
         assert pins == set(good[: vcredist.VCREDIST_INDEX_MAX_HASHES])
 
     def test_index_pins_empty_on_bad_payload(self, monkeypatch):
-        monkeypatch.setattr(hosting, "vcredist_index_url", lambda: "https://idx.example/x")
-        monkeypatch.setattr(vcredist._net, "http_open", _serve(b"{}"))
+        monkeypatch.setattr(indexfetch, "open_bytes", _serve_index(b"{}"))
         assert vcredist.index_pins() == set()
 
     def test_index_source_accepts_a_microsoft_url(self, monkeypatch):
-        monkeypatch.setattr(hosting, "vcredist_index_url", lambda: "https://idx.example/x")
         url = "https://download.visualstudio.microsoft.com/download/x/vc_redist.x64.exe"
         payload = json.dumps({"url": url}).encode()
-        monkeypatch.setattr(vcredist._net, "http_open", _serve(payload))
+        monkeypatch.setattr(indexfetch, "open_bytes", _serve_index(payload))
         assert vcredist.index_source() == url
 
     def test_index_source_rejects_an_off_microsoft_url(self, monkeypatch):
-        monkeypatch.setattr(hosting, "vcredist_index_url", lambda: "https://idx.example/x")
-        monkeypatch.setattr(
-            vcredist._net,
-            "http_open",
-            _serve(json.dumps({"url": "https://evil.example/vc_redist.x64.exe"}).encode()),
-        )
+        payload = json.dumps({"url": "https://evil.example/vc_redist.x64.exe"}).encode()
+        monkeypatch.setattr(indexfetch, "open_bytes", _serve_index(payload))
         assert vcredist.index_source() == ""
 
 
@@ -324,42 +331,23 @@ class TestEnsure:
 
 
 def test_index_source_host_suffix_is_label_bounded(monkeypatch):
-    monkeypatch.setattr(hosting, "vcredist_index_url", lambda: "https://idx.example/x")
     ok = ["https://aka.ms/vs/17/release/vc_redist.x64.exe", "https://www.aka.ms/x.exe"]
     for url in ok:
         monkeypatch.setattr(
-            vcredist._net, "http_open", _serve(json.dumps({"url": url}).encode())
+            indexfetch, "open_bytes", _serve_index(json.dumps({"url": url}).encode())
         )
         assert vcredist.index_source() == url
     monkeypatch.setattr(
-        vcredist._net,
-        "http_open",
-        _serve(json.dumps({"url": "https://evilaka.ms/x.exe"}).encode()),
+        indexfetch,
+        "open_bytes",
+        _serve_index(json.dumps({"url": "https://evilaka.ms/x.exe"}).encode()),
     )
     assert vcredist.index_source() == ""
 
 
-def test_index_lookup_only_follows_https_redirects_on_the_same_host(monkeypatch):
-    """#244: the index is a trust anchor; no downgrade and no hop to another host."""
-    seen = {}
-
-    def _open(url, *, timeout, redirect_allowed):
-        seen["allowed"] = redirect_allowed
-        return _BytesResp(b"{}")
-
-    monkeypatch.setattr(vcredist._net, "http_open", _open)
-    vcredist._index_payload("https://idx.example/v.json")
-
-    allowed = seen["allowed"]
-    assert allowed("https://idx.example/other.json") is True
-    assert allowed("http://idx.example/v.json") is False
-    assert allowed("https://evil.example/v.json") is False
-
-
 def test_index_pins_junk_up_front_does_not_hide_real_hashes(monkeypatch):
     """#97: the cap applies to valid hashes, not to the raw list."""
-    monkeypatch.setattr(hosting, "vcredist_index_url", lambda: "https://idx.example/x")
     good = hashlib.sha256(b"real").hexdigest()
     payload = json.dumps({"sha256": ["junk"] * 20 + [good]}).encode()
-    monkeypatch.setattr(vcredist._net, "http_open", _serve(payload))
+    monkeypatch.setattr(indexfetch, "open_bytes", _serve_index(payload))
     assert vcredist.index_pins() == {good}

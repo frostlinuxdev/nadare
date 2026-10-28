@@ -32,7 +32,7 @@ from nadare.backends.czn.backend import (
     SERVICE,
     CznBackend,
 )
-from nadare.core import paths
+from nadare.core import indexfetch, paths
 from nadare.core import secrets as core_secrets
 from nadare.core.backends import BackendError
 from nadare.core.events import Cancelled, contains_value
@@ -2270,62 +2270,41 @@ class TestWebView2IndexPins:
         with pytest.raises(BackendError):
             backend._verify_webview2(self._inst(tmp_path, data))
 
-    def test_index_fetch_parses_and_filters(self, monkeypatch):
-        import io
-        import urllib.request
-
+    def test_index_fetch_parses_and_filters(self, monkeypatch, tmp_path):
         body = json.dumps({"sha256": ["A" * 64, "bad", 5, "b" * 64]}).encode()
-
-        class R(io.BytesIO):
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-
-        monkeypatch.setattr(
-            czn_backend.hosting, "webview2_index_url", lambda: "https://example.test/w.json"
-        )
-        monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: R(body))
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+        monkeypatch.setenv("NADARE_INDEX_BASE", "https://example.test/")
+        monkeypatch.setattr(indexfetch, "open_bytes", lambda *_a, **_k: body)
         assert _REAL_INDEX_PINS() == {"a" * 64, "b" * 64}
 
-    def test_index_fetch_failure_is_empty(self, monkeypatch):
-        import urllib.request
+    def test_index_fetch_failure_is_empty(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+        monkeypatch.setenv("NADARE_INDEX_BASE", "https://example.test/")
 
-        def boom(*a, **k):
+        def boom(*_a, **_k):
             raise OSError("offline")
 
-        monkeypatch.setattr(
-            czn_backend.hosting, "webview2_index_url", lambda: "https://example.test/w.json"
-        )
-        monkeypatch.setattr(urllib.request, "urlopen", boom)
+        monkeypatch.setattr(indexfetch, "open_bytes", boom)
         assert _REAL_INDEX_PINS() == set()
 
-    def test_non_https_index_is_ignored(self, monkeypatch):
-        monkeypatch.setattr(
-            czn_backend.hosting, "webview2_index_url", lambda: "http://example.test/w.json"
-        )
+    def test_non_https_index_is_ignored(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+        monkeypatch.setenv("NADARE_INDEX_BASE", "http://example.test/")
+
+        def boom(*_a, **_k):
+            raise AssertionError("a non-https base must not be fetched")
+
+        monkeypatch.setattr(indexfetch, "open_bytes", boom)
         assert _REAL_INDEX_PINS() == set()
 
-    def test_index_source_requires_https_microsoft(self, monkeypatch):
-        import io
-        import urllib.request
+    def test_index_source_requires_https_microsoft(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+        monkeypatch.setenv("NADARE_INDEX_BASE", "https://example.test/")
 
         def serve(url):
             body = json.dumps({"url": url}).encode()
+            monkeypatch.setattr(indexfetch, "open_bytes", lambda *_a, **_k: body)
 
-            class R(io.BytesIO):
-                def __enter__(self):
-                    return self
-
-                def __exit__(self, *a):
-                    return False
-
-            monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: R(body))
-
-        monkeypatch.setattr(
-            czn_backend.hosting, "webview2_index_url", lambda: "https://example.test/w.json"
-        )
         good = "https://msedge.sf.dl.delivery.mp.microsoft.com/files/g/Installer.exe"
         serve(good)
         assert _REAL_INDEX_SOURCE() == good

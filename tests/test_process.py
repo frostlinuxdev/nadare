@@ -46,15 +46,15 @@ def test_build_env_profile_prefix_and_runner() -> None:
     assert env["WINEDEBUG"] == "-all"
 
 
-def test_build_env_extra_overrides_everything() -> None:
+def test_build_env_extra_overrides_everything_except_the_declared_prefix() -> None:
     env = process.build_env(
         {"prefix": "/games/pfx"},
-        {"WINEPREFIX": "/override", "CUSTOM": "1"},
+        {"WINEPREFIX": "/override", "CUSTOM": "1", "WINEDEBUG": "fixme"},
         base={"WINEDEBUG": "warn"},
     )
-    assert env["WINEPREFIX"] == "/override"
+    assert env["WINEPREFIX"] == "/games/pfx"  # #595: a declared prefix is not overridable
     assert env["CUSTOM"] == "1"
-    assert env["WINEDEBUG"] == "warn"
+    assert env["WINEDEBUG"] == "fixme"
 
 
 def test_build_env_inherits_base_by_default(monkeypatch: pytest.MonkeyPatch) -> None:

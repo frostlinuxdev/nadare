@@ -15,7 +15,7 @@
 # target. The release build is done on Ubuntu 22.04 (glibc 2.35).
 #
 # Requirements (build host):
-#   pip install -e ".[build]"        # PyInstaller
+#   uv sync --frozen --extra build   # PyInstaller and the locked runtime set (uv.lock)
 #   appimagetool                     # on PATH, or set APPIMAGETOOL=/path
 #
 # `appimage-builder` is intentionally not used: on Ubuntu 22.04 it drags in a

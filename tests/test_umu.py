@@ -105,11 +105,15 @@ def test_managed_path_is_versioned_under_data_dir() -> None:
     )
 
 
-def test_managed_requires_an_executable_file_and_python3(monkeypatch) -> None:
+def test_managed_requires_an_executable_file_and_python3(monkeypatch, tmp_path) -> None:
     dest = umu.managed_path()
     dest.parent.mkdir(parents=True)
     dest.write_text("#!/usr/bin/python3\n")
     dest.chmod(0o755)
+    shebang = tmp_path / "python3"
+    shebang.write_text("")
+    shebang.chmod(0o755)
+    monkeypatch.setattr(umu, "SHEBANG_PYTHON", str(shebang))
     _only_python(monkeypatch)
     assert umu.managed() == dest
 
@@ -118,7 +122,7 @@ def test_managed_requires_an_executable_file_and_python3(monkeypatch) -> None:
     dest.chmod(0o755)
     assert umu.managed() == dest
 
-    monkeypatch.setattr(umu.shutil, "which", lambda name, *a, **k: None)
+    monkeypatch.setattr(umu, "SHEBANG_PYTHON", str(tmp_path / "no-such-python3"))
     assert umu.managed() is None
 
 

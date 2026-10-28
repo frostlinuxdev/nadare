@@ -18,8 +18,11 @@ from __future__ import annotations
 
 import os
 
-#: Raw-file base of the public index repository (trailing slash required).
-DEFAULT_INDEX_BASE = "https://raw.githubusercontent.com/frostlinuxdev/nadare-index/main/"
+#: Bases of the public index (trailing slash required), tried in this order: the
+#: GitHub raw files first, then the Cloudflare Pages mirror of the same repository.
+DEFAULT_INDEX_BASE = (
+    "https://raw.githubusercontent.com/frostlinuxdev/nadare-index/main/ https://index.nadare.app/"
+)
 
 #: "Latest release" endpoint. Gitea/Forgejo (``/api/v1/repos/<o>/<r>/releases/latest``)
 #: and GitHub (``https://api.github.com/repos/<o>/<r>/releases/latest``) return the
@@ -38,12 +41,17 @@ def _env(name: str, default: str) -> str:
     return default if value is None else value.strip()
 
 
+def index_bases() -> list[str]:
+    """Base URLs of the index mirrors, each ending in ``/`` (``[]`` = disabled)."""
+    value = _env("NADARE_INDEX_BASE", DEFAULT_INDEX_BASE)
+    bases = [part for part in value.replace(",", " ").split() if part]
+    return [base if base.endswith("/") else base + "/" for base in bases]
+
+
 def index_base() -> str:
     """Base URL of the index repo, always ending in ``/`` (``""`` = disabled)."""
-    base = _env("NADARE_INDEX_BASE", DEFAULT_INDEX_BASE)
-    if base and not base.endswith("/"):
-        base += "/"
-    return base
+    bases = index_bases()
+    return bases[0] if bases else ""
 
 
 def yostar_index_url() -> str:
@@ -92,6 +100,7 @@ __all__ = [
     "DEFAULT_UMU_ZIPAPP_URL",
     "czn_index_url",
     "index_base",
+    "index_bases",
     "kuro_tokens_url",
     "releases_api",
     "umu_zipapp_url",

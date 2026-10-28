@@ -21,6 +21,11 @@ def _canary():
     return module
 
 
+def _no_deep_check(monkeypatch: pytest.MonkeyPatch, canary) -> None:
+    """main() also runs the Games.exe deep check, which downloads the real installer."""
+    monkeypatch.setattr(canary, "check_endfield_games_exe", lambda *a, **k: [])
+
+
 def fake_head(status: int = 200, length: int | None = None):
     calls: list[str] = []
 
@@ -150,6 +155,7 @@ def test_main_is_ok_when_both_installers_match(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     canary = _canary()
+    _no_deep_check(monkeypatch, canary)
     head, _calls = fake_head(200, canary.nte_launcher.INSTALLER_SIZE)
     get_json, _jcalls = fake_json({"exe_url": "https://hg-cdn.com/setup.exe"})
     monkeypatch.setattr(canary, "_head", head)
@@ -162,6 +168,7 @@ def test_main_exits_4_for_a_gone_nte_installer(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     canary = _canary()
+    _no_deep_check(monkeypatch, canary)
     head, _calls = fake_head(404, None)
     get_json, _jcalls = fake_json({"exe_url": "https://hg-cdn.com/setup.exe"})
     monkeypatch.setattr(canary, "_head", head)
@@ -176,6 +183,7 @@ def test_main_exits_4_for_a_moved_endfield_installer(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     canary = _canary()
+    _no_deep_check(monkeypatch, canary)
     head, _calls = fake_head(200, canary.nte_launcher.INSTALLER_SIZE)
     get_json, _jcalls = fake_json({"exe_url": "https://evil.example/setup.exe"})
     monkeypatch.setattr(canary, "_head", head)
@@ -190,6 +198,7 @@ def test_main_reports_a_canary_that_could_not_check_anything(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     canary = _canary()
+    _no_deep_check(monkeypatch, canary)
 
     def head(url: str) -> tuple[int, int | None]:
         raise TimeoutError("offline")

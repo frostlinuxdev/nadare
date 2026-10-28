@@ -107,6 +107,9 @@ def _application():
 
     app = QApplication.instance()
     if app is None:
+        from . import nativedialogs
+
+        nativedialogs.apply()
         app = QApplication([])
     return app
 

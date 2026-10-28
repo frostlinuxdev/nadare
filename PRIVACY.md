@@ -42,24 +42,21 @@ It authenticates with your own account through the front end for that game.
   to `first4…last4<len>` before it reaches the log formatter, the CLI or the GUI.
 - Tokens are never written to `config.json`.
 
-### Keyring vs. plaintext fallback
+### Keyring only
 
 If the optional `keyring` package and a working backend are present (Secret
 Service / KWallet / macOS Keychain / Windows Credential Manager), Nadare stores
 per-profile tokens in the **system keyring**, service name `nadare-launcher`,
 account `token:<profile>`.
 
-If no keyring is usable, Nadare falls back to `~/.config/nadare/secrets.json`,
-created with mode `0600`. File permissions are the *only* protection there.
-Nadare logs this once at WARNING level. Set `NADARE_NO_KEYRING=1` to force the
-fallback, or disable persistence entirely by installing `keyring` and using a
-backend that works.
+There is no plaintext fallback. If no keyring is usable, **Remember me** is
+unavailable and the token stays in memory for the session only. Set
+`NADARE_NO_KEYRING=1` to behave as if no keyring exists ("never remember").
+Older betas could write `~/.config/nadare/secrets.json`; current versions never
+read or write it, so you can delete a leftover copy.
 
-**Account credentials are the exception.** The CZN (STOVE) refresh token never
-uses the plaintext fallback: it refuses to write a file, and if the keyring is
-unavailable **Remember me** is simply unavailable for that profile (the token
-stays in memory for the session only). See
-[docs/ACCOUNT-SAFETY.md](docs/ACCOUNT-SAFETY.md).
+Account credentials such as the CZN (STOVE) refresh token follow the same rule.
+See [docs/ACCOUNT-SAFETY.md](docs/ACCOUNT-SAFETY.md).
 
 The system keyring does not protect against malicious software already running
 as your user. Full-disk encryption (LUKS) is the real protection if a machine is
@@ -72,7 +69,7 @@ Nadare follows the XDG base directories, all namespaced under `nadare`:
 | Path | Contents |
 |---|---|
 | `~/.config/nadare/config.json` | Profiles (game, backend, prefix, runner, language), settings. Never tokens. |
-| `~/.config/nadare/secrets.json` | **Only if the keyring is unavailable.** Per-profile tokens, mode `0600`. |
+| `~/.config/nadare/secrets.json` | **Not used by current versions.** A leftover from older betas that can be deleted. |
 | `~/.local/share/nadare/runners/` | Downloaded Proton/GE/DW runners. |
 | `~/.local/share/nadare/profiles/<name>/` | Per-profile game trees, Wine/Proton prefixes, the CZN stub and session. |
 | `~/.local/state/nadare/logs/nadare.log` | Rotating log, secrets masked. |
@@ -93,8 +90,8 @@ rm -rf ~/.local/share/nadare ~/.config/nadare ~/.local/state/nadare ~/.cache/nad
 ```
 
 Stored keyring tokens: clear the `nadare-launcher` service in your credential
-manager (e.g. `secret-tool clear service nadare-launcher token:<profile>`). The
-plaintext fallback is removed with `~/.config/nadare/secrets.json`.
+manager (e.g. `secret-tool clear service nadare-launcher token:<profile>`). A
+leftover `~/.config/nadare/secrets.json` from an older beta can simply be deleted.
 
 Game-side data (FGO APKs/assets, the CZN game tree) is governed by the tool that
 installed it. See the Uninstall section of [README.md](README.md).

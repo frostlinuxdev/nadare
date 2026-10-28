@@ -64,3 +64,27 @@ def test_format_eta_wording():
     assert format_eta(3 * 3600) == "about 3 h left"
     assert format_eta(None) is None
     assert format_eta(60 * 3600) is None  # an estimate that long is noise
+
+
+def test_a_burst_of_skipped_files_at_the_start_does_not_make_the_estimate_far_too_short():
+    """A resumed install jumps over the files already on disk, then downloads at a steady rate."""
+    est = EtaEstimator()
+    est.update(0.0, 0.0)
+    est.update(0.30, 1.0)  # 30 % "done" in one second: files that were already there
+    out = None
+    seen = []
+    for t in range(2, 41):  # then a steady 1 % per second
+        out = est.update(0.30 + (t - 1) / 100, float(t))
+        if out is not None:
+            seen.append((t, out, 100 * (1 - (0.30 + (t - 1) / 100))))
+    assert seen, "an estimate should appear once there is enough steady data"
+    for t, eta, truth in seen:
+        assert abs(eta - truth) < 0.25 * truth + 5, (t, eta, truth)
+
+
+def test_a_transfer_that_slows_down_is_followed_within_the_window():
+    est = EtaEstimator()
+    feed(est, [(t, t / 100) for t in range(0, 31)])  # 1 % per second
+    eta = feed(est, [(31 + i, 0.30 + (i + 1) / 1000) for i in range(0, 40)])  # now 0.1 % per second
+    remaining = 1 - 0.30 - 40 / 1000
+    assert eta is not None and 0.6 * (remaining / 0.001) < eta < 1.4 * (remaining / 0.001)

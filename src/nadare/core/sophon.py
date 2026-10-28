@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import logging
 import os
 import shutil
 import stat
@@ -30,6 +31,8 @@ from . import diskspace
 from . import download as download_module
 from .download import DownloadError
 from .events import Cancel, Cancelled, Emitter, Event, emitter
+
+log = logging.getLogger(__name__)
 
 #: Manifest file entries with this ``type`` are directories, not files.
 _DIRECTORY_TYPE = 64
@@ -408,12 +411,18 @@ def _other_package_paths(root: Path, current_ledger: Path) -> set[str] | None:
 
 def _cleanup_stale_files(
     root: Path, previous: list[str], current: list[str], current_ledger: Path
-) -> None:
-    """Remove unowned stale ledger paths, then prune empty directories."""
+) -> bool:
+    """Remove unowned stale ledger paths, then prune empty directories.
+
+    Returns ``True`` when the cleanup completed, and ``False`` when ownership is
+    uncertain (a sibling ledger could not be read) or a stale file could not be
+    removed. Callers must keep the union ledger when this returns ``False``.
+    """
     protected = _other_package_paths(root, current_ledger)
     if protected is None:
-        return
+        return False
     keep = set(current) | protected
+    complete = True
     parents: set[Path] = set()
     for relative in previous:
         if relative in keep or relative.split("/", 1)[0] == STATE_DIR:
@@ -428,7 +437,9 @@ def _cleanup_stale_files(
         except FileNotFoundError:
             pass
         except OSError:
-            # Best effort: one stubborn file must not fail an otherwise good install.
+            # Best effort: one stubborn file must not fail an otherwise good install,
+            # but it does mean the prune is incomplete and must be retried later.
+            complete = False
             continue
         parents.add(Path(relative).parent)
     for parent in sorted(parents, key=lambda path: len(path.parts), reverse=True):
@@ -448,6 +459,7 @@ def _cleanup_stale_files(
             except OSError:
                 break
             target = target.parent
+    return complete
 
 
 #: Attempts per request before an error fails the install (the CDN drops a connection now and then).
@@ -678,6 +690,8 @@ def sync_package(
         # New files can be written in place: there is no old copy to protect,
         # and keeping the final path lets an interrupted first install resume.
         fresh_entries = [entry for entry in files if entry.path not in existing]
+        if fresh_entries:
+            diskspace.check_space(root, sum(entry.size for entry in fresh_entries))
         fresh_tasks: list[
             tuple[FileEntry, tuple[ChunkEntry, ...], Path, Path | None, set[ChunkEntry]]
         ] = []
@@ -729,9 +743,13 @@ def sync_package(
     current = list(dict.fromkeys(entry.path for entry in files))
     ledger = _ledger_path(pkg, root)
     marker = _marker_path(pkg, root)
-    # Publish the new ownership set before best-effort cleanup. If pruning fails
-    # partway, the old paths are no longer in the ledger and will not be retried.
-    _atomic_write_text(ledger, "".join(f"{path}\n" for path in current))
+    # Publish the union of the old and new ownership sets before the marker and
+    # the best-effort cleanup: if the process dies from here on, the next sync
+    # still knows the old paths and can prune them. Only once the prune has run
+    # is the ledger narrowed to the new build alone.
+    known = set(previous)
+    pending = previous + [path for path in current if path not in known]
+    _atomic_write_text(ledger, "".join(f"{path}\n" for path in pending))
     try:
         _atomic_write_text(marker, pkg.manifest_id)
     except BaseException:
@@ -743,5 +761,11 @@ def sync_package(
         except OSError:
             pass
         raise
-    _cleanup_stale_files(root, previous, current, ledger)
+    if _cleanup_stale_files(root, previous, current, ledger):
+        try:
+            _atomic_write_text(ledger, "".join(f"{path}\n" for path in current))
+        except OSError:
+            # The union ledger is safe: the next sync retries the prune.
+            log.warning("could not shrink %s after cleanup", ledger, exc_info=True)
+    # Otherwise keep the union ledger so the next sync retries the prune.
     say(Event("log", f"installed {pkg.name}", data={"sophon": pkg.name}))

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from PyQt6.QtCore import QRectF, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QDesktopServices,
@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStyle,
     QVBoxLayout,
     QWidget,
 )
@@ -564,6 +565,8 @@ class GameView(QWidget):
 
     action_requested = pyqtSignal(str)  # operation name
     cancel_requested = pyqtSignal()
+    pause_requested = pyqtSignal()
+    resume_requested = pyqtSignal()
     back_requested = pyqtSignal()
     settings_requested = pyqtSignal()
     report_requested = pyqtSignal(str)
@@ -585,6 +588,7 @@ class GameView(QWidget):
         self._profile_data: dict[str, Any] = {}
         self._status: Status | None = None
         self._busy_op: str | None = None
+        self._paused_op: str | None = None
         #: True between a successful install/update/... and the status that
         #: follows it, so the stale status cannot offer the same action again.
         self._awaiting_status = False
@@ -694,6 +698,22 @@ class GameView(QWidget):
         self.primary.setMinimumHeight(52)
         self.primary.clicked.connect(self._on_primary)
         copy.addWidget(self.primary)
+
+        # An icon, not a word: the pause symbol reads the same in every language.
+        self.pause_button = QPushButton()
+        self.pause_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause)
+        )
+        self.pause_button.setIconSize(QSize(22, 22))
+        self.pause_button.setAccessibleName("Pause")
+        self.pause_button.setObjectName("GhostButton")
+        self.pause_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pause_button.setToolTip(
+            "Stop for now. Everything downloaded so far is kept, and Resume carries on from there."
+        )
+        self.pause_button.clicked.connect(self.pause_requested.emit)
+        self.pause_button.setVisible(False)
+        copy.addWidget(self.pause_button)
 
         secondary = QHBoxLayout()
         secondary.setSpacing(8)
@@ -902,6 +922,7 @@ class GameView(QWidget):
         self._timer.stop()
         self._started_at = 0.0
         self._busy_op = None
+        self._paused_op = None
         self._awaiting_status = False
         self._primary_grace_until = 0.0
         title = profile_title(name, profile)
@@ -1049,6 +1070,7 @@ class GameView(QWidget):
 
     def _refresh_actions(self) -> None:
         if self._busy_op is not None:
+            self.pause_button.setVisible(self._can_pause())
             # A launch that is busy means the game process is up: say so and
             # offer Stop; every other busy operation is a cancellable one.
             running = self._busy_op == "launch"
@@ -1068,10 +1090,14 @@ class GameView(QWidget):
                 button.setEnabled(False)
             return
 
+        self.pause_button.setVisible(False)
         op = self._primary_op()
         self.primary.setObjectName("Primary")
         self._polish(self.primary)
-        if op is None:
+        if self._paused_op is not None:
+            self.primary.setText("RESUME")
+            self.primary.setEnabled(True)
+        elif op is None:
             # No status yet: a neutral, disabled skeleton, never CANCEL.
             self.primary.setText(PRIMARY_LABELS["launch"])
             self.primary.setEnabled(False)
@@ -1143,6 +1169,9 @@ class GameView(QWidget):
             else:
                 self.cancel_requested.emit()
             return
+        if self._paused_op is not None:
+            self.resume_requested.emit()
+            return
         op = self._primary_op()
         if op == "retry":
             self.action_requested.emit("status")
@@ -1154,6 +1183,7 @@ class GameView(QWidget):
     # ---- lifecycle ---------------------------------------------------------
     def set_busy(self, operation: str) -> None:
         """Mark ``operation`` as running and start the elapsed clock."""
+        self._paused_op = None
         self._busy_op = operation
         self._primary_grace_until = time.monotonic() + _CANCEL_GRACE_S
         self.news_frame.setVisible(False)
@@ -1191,6 +1221,11 @@ class GameView(QWidget):
 
     def finish(self, operation: str, exit_code: int) -> None:
         """Stop the clock and report the result."""
+        from .workers import BACKGROUND
+
+        # A background refresh ending must not drop a pause on this page.
+        if operation not in BACKGROUND:
+            self._paused_op = None
         self._busy_op = None
         self._clear_busy_progress()
         self.news_frame.setVisible(self._news_shown)
@@ -1211,6 +1246,7 @@ class GameView(QWidget):
             )
 
     def fail(self, message: str) -> None:
+        self._paused_op = None
         self._busy_op = None
         self._clear_busy_progress()
         self.news_frame.setVisible(self._news_shown)
@@ -1221,6 +1257,7 @@ class GameView(QWidget):
         self.show_error("Backend error", message)
 
     def cancelled(self) -> None:
+        self._paused_op = None
         self._busy_op = None
         self._clear_busy_progress()
         self.news_frame.setVisible(self._news_shown)
@@ -1229,6 +1266,31 @@ class GameView(QWidget):
         self._restore_badge()
         self._refresh_actions()
         self._append_line("cancelled", "status")
+
+    def is_paused(self) -> bool:
+        return self._paused_op is not None
+
+    def _can_pause(self) -> bool:
+        """Pause only where the downloads really resume from what is already on disk."""
+        from ..core.directkinds import DIRECT_KINDS
+        from .workers import PAUSABLE
+
+        kind = str(self._profile_data.get("backend") or "")
+        resumable = kind in DIRECT_KINDS or kind == "stellasora-yostar"
+        return self._busy_op in PAUSABLE and resumable
+
+    def set_paused(self, operation: str) -> None:
+        """Show that ``operation`` is paused, with RESUME ready on the primary button."""
+        self._busy_op = None
+        self._clear_busy_progress()
+        self.news_frame.setVisible(self._news_shown)
+        self._timer.stop()
+        self._hide_qr()
+        self._restore_badge()
+        self._paused_op = operation
+        self.step_label.setText("Paused. Everything downloaded so far is kept.")
+        self._refresh_actions()
+        self._append_line("paused", "status")
 
     def _restore_badge(self) -> None:
         """Drop the busy pill once an operation ends without a status refresh."""

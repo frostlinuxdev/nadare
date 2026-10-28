@@ -242,3 +242,25 @@ def test_a_done_record_without_member_digests_is_still_accepted(server, tmp_path
     record_path.write_text(json.dumps(record), encoding="utf-8")
 
     assert dd.plan_missing(plan, tmp_path) == ([], [])
+
+
+def test_a_retry_after_a_failed_unpack_does_not_download_the_archive_again(
+    server, tmp_path, monkeypatch
+):
+    """The kept archive is hash-verified, so the retry must serve zero archive bytes (#594a)."""
+    archive = make_zip({"game.exe": b"MZ" + b"y" * 4096})
+    s = server({"/g.zip": archive})
+    source = dd.RemoteFile("g.zip", s.url + "/g.zip", len(archive), md5=md5(archive))
+    plan = dd.Plan("T", "1", archives=(dd.Archive("g", source, unwrap=("zip",)),))
+
+    def disk_full(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(dd.shutil, "copyfileobj", disk_full)
+    with pytest.raises(dd.DirectError):
+        dd.sync(plan, tmp_path)
+    monkeypatch.undo()
+    served = s.bytes_served
+    dd.sync(plan, tmp_path)
+    assert s.bytes_served == served
+    assert (tmp_path / "game.exe").read_bytes().startswith(b"MZ")

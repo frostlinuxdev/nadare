@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -127,6 +127,10 @@ TOP_DEFAULTS: dict[str, Any] = {
 }
 
 
+#: Profile keys that must be real booleans, even when hand-edited as strings.
+_PROFILE_BOOLS = ("remember_me", "accept_account_notice")
+
+
 def _coerce_bool(value: Any, default: bool) -> bool:
     """Turn a hand-edited boolean into a real ``bool`` (or keep the default).
 
@@ -146,6 +150,17 @@ def _coerce_bool(value: Any, default: bool) -> bool:
         if text in ("0", "1"):
             return text == "1"
     return default
+
+
+def _new_profile(values: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Return a fresh profile dict, never sharing nested objects with the defaults."""
+    profile = copy.deepcopy(PROFILE_DEFAULTS)
+    if values:
+        profile.update(copy.deepcopy(dict(values)))
+    for key in _PROFILE_BOOLS:
+        if key in profile:
+            profile[key] = _coerce_bool(profile[key], False)
+    return profile
 
 
 class ConfigReadError(OSError):
@@ -369,9 +384,7 @@ class Config:
                 renames[key] = final
                 log.warning("migrated unsafe profile name %r to %r", key, final)
             taken.add(final)
-            merged = dict(PROFILE_DEFAULTS)
-            if isinstance(prof, dict):
-                merged.update(prof)
+            merged = _new_profile(prof if isinstance(prof, dict) else None)
             Config._normalise_legacy_keys(merged)
             norm[final] = merged
         data["profiles"] = norm
@@ -576,8 +589,7 @@ class Config:
                 continue
             if name not in self.profiles:
                 # Only on disk: adopt it as before.
-                merged = dict(PROFILE_DEFAULTS)
-                merged.update(prof)
+                merged = _new_profile(prof)
                 Config._normalise_legacy_keys(merged)
                 self.profiles[name] = merged
             elif name in self._snapshot:
@@ -619,8 +631,7 @@ class Config:
     def add_profile(self, name: str, **values: Any) -> dict[str, Any]:
         if not valid_profile_name(name):
             raise ValueError(f"invalid profile name: {name!r}")
-        prof = dict(PROFILE_DEFAULTS)
-        prof.update(values)
+        prof = _new_profile(values)
         self.profiles[name] = prof
         self._removed.discard(name)
         if not self.active:

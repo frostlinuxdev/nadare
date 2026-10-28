@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import logging
 import os
 import queue
 import shutil
@@ -32,6 +33,7 @@ from .events import Cancel, Emitter, Event, emitter, mask
 #: How long ``run`` waits after a cancel before escalating to SIGKILL.
 GRACE_SECONDS = 5.0
 LOCK_DIR_NAME = "locks"
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -86,22 +88,32 @@ _SHIM_MARKERS = (
     "/.local/share/shims",
 )
 _SYSTEM_DIRS = ("/usr/bin", "/bin")
+#: Credential-looking variables (matched case-insensitively) never reach a game.
+_SECRET_SUFFIXES = ("_TOKEN", "_SECRET")
+_SECRET_PREFIXES = ("AWS_", "SSH_", "GPG_", "CZN_")
 
 
 def _system_python_exists() -> bool:
     return any(os.access(os.path.join(d, "python3"), os.X_OK) for d in _SYSTEM_DIRS)
 
 
+def _is_secret_name(name: str) -> bool:
+    upper = name.upper()
+    return upper.endswith(_SECRET_SUFFIXES) or upper.startswith(_SECRET_PREFIXES)
+
+
 def sanitize_game_env(env: Mapping[str, str]) -> dict[str, str]:
     """A copy of ``env`` that is safe to hand to Proton/Wine/umu.
 
-    Drops the Python launcher variables and takes version-manager shims and an
-    active virtualenv's ``bin`` off ``PATH`` (a stale ``pyenv`` shim ahead of
-    ``/usr/bin`` makes ``proton``'s ``env python3`` exit 127). Nothing is
-    stripped when there is no system ``python3`` to fall back to, so a machine
+    Always drops credential-looking variables (``*_TOKEN``, ``*_SECRET``, and
+    ``AWS_``/``SSH_``/``GPG_``/``CZN_`` names). Drops the Python launcher
+    variables and takes version-manager shims, an active virtualenv's ``bin`` and
+    relative entries off ``PATH`` (a stale ``pyenv`` shim ahead of ``/usr/bin``
+    makes ``proton``'s ``env python3`` exit 127). The ``PATH`` and Python cleanup
+    is skipped when there is no system ``python3`` to fall back to, so a machine
     whose only Python is a shim keeps working.
     """
-    out = dict(env)
+    out = {key: value for key, value in env.items() if not _is_secret_name(key)}
     if not _system_python_exists():
         return out
     venv = out.get("VIRTUAL_ENV", "").rstrip("/")
@@ -110,7 +122,7 @@ def sanitize_game_env(env: Mapping[str, str]) -> dict[str, str]:
     kept: list[str] = []
     for entry in out.get("PATH", "").split(":"):
         norm = entry.rstrip("/")
-        if not norm:
+        if not norm.startswith("/"):
             continue
         if any(marker in norm + "/" or norm.endswith(marker) for marker in _SHIM_MARKERS):
             continue
@@ -136,8 +148,11 @@ def build_env(
     ``WAYLAND_DISPLAY``, ``XAUTHORITY``, ``DBUS_SESSION_BUS_ADDRESS`` and friends
     survive), then Nadare's XDG roots are pinned so children never write to a
     hard-coded ``~/.local``. Profile ``prefix``/``runner`` become
-    ``WINEPREFIX``/``PROTONPATH`` when set. ``extra`` is merged last, so a caller
-    can override anything.
+    ``WINEPREFIX``/``PROTONPATH`` when set. ``extra`` is merged last and can
+    override anything except the profile's own prefix and runner: a declared
+    prefix also pins ``WINEPREFIX`` and ``STEAM_COMPAT_DATA_PATH``, a declared
+    runner pins ``PROTONPATH``. A conflicting ``extra`` value for those is ignored
+    with a warning.
     """
     env: dict[str, str] = dict(os.environ if base is None else base)
 
@@ -153,17 +168,25 @@ def build_env(
         except OSError:
             pass
 
+    reserved: set[str] = set()
     if profile:
         prefix = str(profile.get("prefix") or "").strip()
         if prefix:
             env["WINEPREFIX"] = str(Path(prefix).expanduser())
+            reserved.update(("WINEPREFIX", "STEAM_COMPAT_DATA_PATH"))
         runner = str(profile.get("runner") or "").strip()
         if runner:
             env["PROTONPATH"] = str(Path(runner).expanduser())
+            reserved.add("PROTONPATH")
         env.setdefault("WINEDEBUG", env.get("WINEDEBUG", "-all"))
 
-    if extra:
-        env.update({str(k): str(v) for k, v in extra.items()})
+    for key, value in (extra or {}).items():
+        key, value = str(key), str(value)
+        if key in reserved:
+            if env.get(key) != value:
+                log.warning("ignoring %s from extra env: the profile declares it", key)
+            continue
+        env[key] = value
     return env
 
 

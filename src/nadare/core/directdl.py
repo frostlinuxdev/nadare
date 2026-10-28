@@ -356,6 +356,14 @@ def _download_remote(
     if size:
         diskspace.check_space(path.parent, size)
     preserve_existing = path.exists()
+    if (
+        preserve_existing
+        and (rf.md5 or rf.sha256 or rf.crc32)
+        and _verify_remote(path, rf, cancel=cancel)
+    ):
+        # Already here and verified against a declared hash (e.g. the archive kept after a
+        # failed unpack): downloading it again would only double the bytes.
+        return
     temporary = path.with_name(path.name + ".nadare-new")
     destination = temporary if preserve_existing else path
     try:
@@ -1228,8 +1236,12 @@ def _remove_stale_parts(root: Path, keep: set[str], managed: set[str]) -> None:
 
 
 def _validate_plan(plan: Plan) -> None:
+    seen: set[str] = set()
     for rf in plan.files:
-        safe_relative_path(rf.path)
+        normalised = safe_relative_path(rf.path)
+        if normalised in seen:
+            raise DirectError(f"duplicate path in plan: {normalised!r}")
+        seen.add(normalised)
     for archive in plan.archives:
         if archive.unwrap not in _UNWRAPS:
             raise DirectError(f"unsupported archive unwrap for {archive.name}: {archive.unwrap!r}")
