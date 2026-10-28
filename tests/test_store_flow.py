@@ -190,8 +190,29 @@ def fake_dialog(monkeypatch):
     return _FakeDialog
 
 
-def test_install_opens_the_dialog_for_that_game_and_rejecting_changes_nothing(
-    tmp_path, qapp, fake_dialog
+@pytest.fixture
+def quick_dialog(monkeypatch):
+    """Replace the one-step confirm's exec; ``outcome`` decides what the user pressed."""
+    from nadare.gui.quick_install import QuickInstallDialog
+
+    class State:
+        shown: list = []
+        outcome = "reject"
+
+    def fake_exec(self):
+        State.shown.append(self)
+        accepted = State.outcome == "accept"
+        return QDialog.DialogCode.Accepted if accepted else QDialog.DialogCode.Rejected
+
+    State.shown = []
+    State.outcome = "reject"
+    monkeypatch.setattr(QuickInstallDialog, "exec", fake_exec)
+    monkeypatch.delenv("NADARE_ASSUME_NOTICES", raising=False)
+    return State
+
+
+def test_install_asks_once_for_that_game_and_rejecting_changes_nothing(
+    tmp_path, qapp, quick_dialog
 ):
     window = _window(tmp_path)
     opened = []
@@ -200,9 +221,7 @@ def test_install_opens_the_dialog_for_that_game_and_rejecting_changes_nothing(
         window.show_store()
         window.store.show_detail("direct-pgr")
         window.store.detail.install_button.click()
-        assert [d.kwargs for d in fake_dialog.instances] == [
-            {"kind": "direct-pgr", "advanced": False}
-        ]
+        assert len(quick_dialog.shown) == 1
         assert window.config.profiles == {}
         assert opened == []
     finally:
@@ -210,12 +229,14 @@ def test_install_opens_the_dialog_for_that_game_and_rejecting_changes_nothing(
 
 
 def test_accepted_install_creates_the_profile_marks_it_added_and_opens_it(
-    tmp_path, qapp, fake_dialog
+    tmp_path, qapp, quick_dialog, monkeypatch
 ):
     window = _window(tmp_path)
     opened = []
     window.open_game = opened.append
-    fake_dialog.outcome = "accept"
+    started = []
+    monkeypatch.setattr(window, "_start", lambda p, op, *a, **k: started.append((p, op)) or True)
+    quick_dialog.outcome = "accept"
     try:
         window.show_store()
         window.show()
@@ -225,7 +246,8 @@ def test_accepted_install_creates_the_profile_marks_it_added_and_opens_it(
         window.store.show_detail("direct-pgr")
         assert window.store.detail.install_button.text() == "Install"
         window.store.detail.install_button.click()
-        assert opened == ["pgr"]
+        (name,) = window.config.profiles
+        assert opened == [name] and started == [(name, "install")]
         assert not window.store.grid._cards["direct-pgr"].added_marker.isHidden()
         assert window.store.detail.install_button.text() == "Add another"
         assert not window.store.detail.installed_note.isHidden()

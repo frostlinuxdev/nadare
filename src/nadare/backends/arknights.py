@@ -257,6 +257,8 @@ class ArknightsBackend(GameBackend):
     #: ignores the unknown key. A profile ``extra_env`` DXVK_CONFIG overrides it.
     dxvk_config = "dxvk.enablePresentTiming = False"
     kind = KIND
+    #: Run the real VC++ runtime step. Off for games shown to run on Wine's builtin one.
+    vcredist_default = True
 
     options = (
         Option("prefix", "Wine prefix", "path_dir", "WINEPREFIX used for this game."),
@@ -949,10 +951,14 @@ class ArknightsBackend(GameBackend):
     def _run_vcredist(self, *, created: bool = False) -> None:
         """Best-effort VC++ runtime step (see :func:`nadare.core.vcredist.ensure`).
 
-        Always attempted, on new and existing prefixes alike (it is not a user
-        setting; a leftover ``"vcredist": false`` in a profile is ignored). It is
-        a no-op once the real runtime is present and never aborts the caller.
+        Attempted on new and existing prefixes alike (a leftover ``"vcredist": false``
+        is ignored). Games whose research showed Wine's builtin runtime is enough set
+        ``vcredist_default = False`` and only run it when the profile says
+        ``"vcredist": true``. A no-op once the real runtime is present; never aborts
+        the caller.
         """
+        if not self.vcredist_default and profile_setting(self.ctx.profile, "vcredist") is not True:
+            return
         vcredist.ensure(
             self.prefix(),
             profile=self.ctx.profile,
@@ -1106,6 +1112,20 @@ class ArknightsBackend(GameBackend):
         if not self._ensure_prefix():
             self._run_vcredist(created=False)
         installer = self._download_installer(url)
+        code = self._run_installer(installer)
+        if self.find_launcher() is None:
+            self.info(f"{self.display_name} installer exited with code {code} and left no launcher")
+            raise BackendError(
+                self._watch.explain(
+                    f"The {self.display_name} installer did not finish. Try Install again. "
+                    "If it still "
+                    "fails, open Settings → Runner and choose Proton-CachyOS."
+                )
+            )
+        self.ctx.emit(Event("done", f"{self.display_name} installer finished"))
+
+    def _run_installer(self, installer: Path) -> int:
+        """Run the publisher's installer in the prefix and wait for it; its exit code."""
         argv, env = self._prefix_command([str(installer), *self._extra_args("installer_args")])
         self.ctx.emit(
             Event("step", f"Running the {self.display_name} installer in {self.prefix()}")
@@ -1118,19 +1138,7 @@ class ArknightsBackend(GameBackend):
             )
         )
         self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
-        code = stream(
-            argv, env, on_line=self._on_line, cancel=self.ctx.cancel
-        )
-        if self.find_launcher() is None:
-            self.info(f"{self.display_name} installer exited with code {code} and left no launcher")
-            raise BackendError(
-                self._watch.explain(
-                    f"The {self.display_name} installer did not finish. Try Install again. "
-                    "If it still "
-                    "fails, open Settings → Runner and choose Proton-CachyOS."
-                )
-            )
-        self.ctx.emit(Event("done", f"{self.display_name} installer finished"))
+        return stream(argv, env, on_line=self._on_line, cancel=self.ctx.cancel)
 
     def update(self) -> None:
         self.ctx.cancel.raise_if_cancelled()

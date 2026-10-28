@@ -389,6 +389,7 @@ class Gfl2HaoplayBackend(Gfl2Backend):
 
 class EndfieldBackend(DirectBackend):
     kind = "direct-endfield"
+    vcredist_default = False  # builtin runtime covers its imports (import scan)
     news_source = staticmethod(endfield_news.fetch_endfield_news)
     official_image_hosts = endfield_news.IMAGE_HOSTS
     game_tag = "endfield"
@@ -429,6 +430,7 @@ class EndfieldBackend(DirectBackend):
 
 class NteDirectBackend(DirectBackend):
     kind = "direct-nte"
+    vcredist_default = False  # builtin runtime covers its imports (import scan)
     news_source = staticmethod(nte_news.fetch_nte_news)
     official_image_hosts = nte_news.IMAGE_HOSTS
     game_tag = "nte"
@@ -464,6 +466,7 @@ class NteDirectBackend(DirectBackend):
 
 class GenshinBackend(DirectBackend):
     kind = "direct-genshin"
+    vcredist_default = False  # builtin runtime covers its imports (import scan)
     game_tag = "genshin"
     display_name = "Genshin Impact"
     install_subdir = _subdir("GenshinImpact")
@@ -515,6 +518,7 @@ class PgrBackend(DirectBackend):
 
 class StarRailBackend(DirectBackend):
     kind = "direct-hsr"
+    vcredist_default = False  # builtin runtime covers its imports (import scan)
     game_tag = "hsr"
     display_name = "Honkai: Star Rail"
     install_subdir = _subdir("HonkaiStarRail")
@@ -545,6 +549,7 @@ class Hi3Backend(DirectBackend):
 
 class ZenlessBackend(DirectBackend):
     kind = "direct-zzz"
+    vcredist_default = False  # builtin runtime covers its imports (import scan)
     game_tag = "zzz"
     display_name = "Zenless Zone Zero"
     install_subdir = _subdir("ZenlessZoneZero")

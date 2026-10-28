@@ -170,6 +170,7 @@ def test_stop_wineserver_runs_k(tmp_path, monkeypatch):
         return _Result()
 
     monkeypatch.setattr(wine_mod.subprocess, "run", fake_run)
+    wine_mod._WINESERVER_KILLED.clear()
     wine_mod._stop_wineserver(
         [str(ws), "game.exe"], {"WINEPREFIX": "/games/pfx", "PATH": "/usr/bin"}
     )
@@ -178,6 +179,30 @@ def test_stop_wineserver_runs_k(tmp_path, monkeypatch):
     argv, env = calls[0]
     assert argv == [str(ws), "-k"]
     assert env["WINEPREFIX"] == "/games/pfx"
+
+
+def test_a_repeated_kill_for_the_same_prefix_is_skipped_then_retried(tmp_path, monkeypatch):
+    """A cancelled launch and the queued GUI Stop must not both wait out `wineserver -k`."""
+    ws = tmp_path / "wineserver"
+    ws.write_text("#!/bin/sh\n")
+    ws.chmod(0o755)
+    calls = []
+    monkeypatch.setattr(
+        wine_mod.subprocess, "run", lambda argv, **kw: calls.append(list(argv)) or None
+    )
+    clock = [1000.0]
+    monkeypatch.setattr(wine_mod.time, "monotonic", lambda: clock[0])
+    wine_mod._WINESERVER_KILLED.clear()
+    env = {"WINEPREFIX": str(tmp_path / "pfx"), "PATH": "/usr/bin"}
+    wine_mod._stop_wineserver([str(ws), "g.exe"], env)
+    wine_mod._stop_wineserver([str(ws), "g.exe"], env)  # right after: skipped
+    assert len(calls) == 1
+    other = {"WINEPREFIX": str(tmp_path / "other"), "PATH": "/usr/bin"}
+    wine_mod._stop_wineserver([str(ws), "g.exe"], other)  # another prefix: runs
+    assert len(calls) == 2
+    clock[0] += 60  # a later Stop retries
+    wine_mod._stop_wineserver([str(ws), "g.exe"], env)
+    assert len(calls) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -359,3 +384,21 @@ def test_the_script_backend_only_matches_shell_runs(tmp_path):
     query = backend._patterns(source)
     assert "bash" in query.arg_runners and "sh" in query.arg_runners
     assert "vim" not in query.arg_runners
+
+
+def test_a_kill_that_failed_does_not_start_the_cooldown(tmp_path, monkeypatch):
+    ws = tmp_path / "wineserver"
+    ws.write_text("#!/bin/sh\n")
+    ws.chmod(0o755)
+    calls = []
+
+    def timeout_run(argv, **kw):
+        calls.append(1)
+        raise wine_mod.subprocess.TimeoutExpired(argv, 15)
+
+    monkeypatch.setattr(wine_mod.subprocess, "run", timeout_run)
+    monkeypatch.setattr(wine_mod.time, "monotonic", lambda: 1000.0)
+    env = {"WINEPREFIX": str(tmp_path / "pfx"), "PATH": "/usr/bin"}
+    wine_mod._stop_wineserver([str(ws), "g.exe"], env)
+    wine_mod._stop_wineserver([str(ws), "g.exe"], env)  # the server may still be alive: retry
+    assert len(calls) == 2

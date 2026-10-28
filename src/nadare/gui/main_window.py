@@ -58,11 +58,12 @@ from ..core.directkinds import DIRECT_KINDS
 from ..core.events import Event
 from ..core.news import NewsResult
 from . import i18n
-from .add_game import AddGameDialog
+from .add_game import PREFIX_ONLY_KINDS, AddGameDialog
 from .banner import InfoBanner
 from .game_view import OPERATION_TITLES, GameSnapshot, GameView
 from .library import LibraryPage, count_text, profile_title
 from .notice import AccountNoticeDialog
+from .quick_install import QuickInstallDialog
 from .settings import SettingsPage
 from .sidebar import SidebarGames
 from .store_flow import StoreFlow
@@ -198,7 +199,7 @@ class MainWindow(QMainWindow):
 
         self._build_shell()
 
-        self.store.install_requested.connect(lambda kind: self._add_game_dialog(kind=kind))
+        self.store.install_requested.connect(lambda kind: self._store_install(kind))
         self.store.own_game_requested.connect(lambda: self._add_game_dialog(advanced=True))
 
         self.controller = BackendController(config, self)
@@ -844,6 +845,121 @@ class MainWindow(QMainWindow):
         if profile == self._current_profile:
             self._set_side_status("Could not remove the saved login")
 
+    def _store_install(self, kind: str) -> None:
+        """Store Install: one confirm, then create the profile and start the install.
+
+        Uses the same defaults, validation and paths as the Add game dialog (it is built
+        but never shown); the full dialog stays behind Advanced and the sidebar.
+        """
+        helper = AddGameDialog(self.config, self, kind=kind)
+        try:
+            game = helper._selected_game()
+            if game is None or helper.selected_kind() != kind:
+                self._add_game_dialog(kind=kind)  # not a plain install: use the full dialog
+                return
+            assume = bool(os.environ.get("NADARE_ASSUME_NOTICES"))
+            acked = self.config.data.get("unofficial_notice_ack")
+            acked = acked if isinstance(acked, list) else []
+            show_notice = (
+                core_backends.unofficial_notice(kind) and not assume and kind not in acked
+            )
+            size = core_backends.install_size_hint(kind)
+
+            def describe(chosen: str | None) -> tuple[str, str, str]:
+                # Shows what create_profile will really store (the picked folder is a library).
+                if chosen and kind in PREFIX_ONLY_KINDS:
+                    helper.set_prefix(chosen)  # the whole install is the prefix
+                elif chosen:
+                    helper.set_install_dir(chosen)
+                install_dir, prefix, _owned, _dirs = helper._plan_paths(
+                    game, helper.folder.text().strip(), helper.prefix.text().strip(), False
+                )
+                where = (prefix if kind in PREFIX_ONLY_KINDS else install_dir) or str(
+                    paths.profiles_dir()
+                )
+                try:
+                    free = f"{diskspace.human_size(diskspace.free_bytes(where))} free"
+                except (OSError, core_backends.BackendError):
+                    free = "free space unknown"
+                summary = ""
+                if size and size >= DOWNLOAD_CONFIRM_BYTES:
+                    summary = (
+                        f"Installing {game.title} downloads about "
+                        f"{diskspace.human_size(size)} and needs about as much free "
+                        f"space ({free})."
+                    )
+                return where, free, summary
+
+            dialog = None
+            if not assume:
+                dialog = QuickInstallDialog(
+                    game.title,
+                    notice=core_backends.UNOFFICIAL_NOTICE if show_notice else "",
+                    describe=describe,
+                    parent=self,
+                )
+                accepted = dialog.exec() == QDialog.DialogCode.Accepted
+                wants_import = dialog.import_requested
+                dialog.deleteLater()
+                if wants_import:
+                    self._add_game_dialog(kind=kind)  # use files the user already has
+                    return
+                if not accepted:
+                    return
+            notice = self._account_notice_for_kind(kind)
+            if notice and not self._confirm_notice_text(notice):
+                return
+            profile = helper.create_profile()
+            if not profile:
+                QMessageBox.warning(
+                    self, "Add game", helper.error_label.text() or "Could not add the game."
+                )
+                return
+        finally:
+            helper.deleteLater()
+        if notice:
+            self._remember_account_notice(profile)
+        if show_notice:
+            self._remember_unofficial(kind, acked)
+        self.refresh_library()
+        self.open_game(profile)
+        self._start(profile, "install")
+
+    def _remember_unofficial(self, kind: str, acked: list) -> None:
+        try:
+            with self.config.locked():
+                self.config.data["unofficial_notice_ack"] = sorted({*acked, kind})
+                self.config.save()
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "Nadare", f"Could not remember your answer ({exc}); you will be asked again."
+            )
+
+    @staticmethod
+    def _account_notice_for_kind(kind: str) -> str | None:
+        try:
+            notice = getattr(core_backends.get(kind), "account_notice", None)
+        except core_backends.BackendError:
+            return None
+        return str(notice) if notice else None
+
+    def _confirm_notice_text(self, notice: str) -> bool:
+        if os.environ.get("NADARE_ASSUME_NOTICES"):
+            return True
+        return AccountNoticeDialog(notice, self).exec() == QDialog.DialogCode.Accepted
+
+    def _remember_account_notice(self, profile: str) -> None:
+        data = self.config.profiles.get(profile)
+        if not data:
+            return
+        try:
+            with self.config.locked():
+                data["accept_account_notice"] = True
+                self.config.save()
+        except OSError as exc:
+            data["accept_account_notice"] = False
+            QMessageBox.warning(self, "Account notice", f"Could not save config: {exc}")
+
     def _add_game_dialog(self, *, kind: str | None = None, advanced: bool = False) -> None:
         dialog = AddGameDialog(self.config, self, kind=kind, advanced=advanced)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -1038,7 +1154,7 @@ class MainWindow(QMainWindow):
         where = str(data.get("install_dir") or paths.profiles_dir())
         try:
             free = f"{diskspace.human_size(diskspace.free_bytes(where))} free"
-        except OSError:
+        except (OSError, core_backends.BackendError):
             free = "free space unknown"
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Question)

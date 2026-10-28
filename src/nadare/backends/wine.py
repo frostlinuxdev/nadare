@@ -36,6 +36,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -103,6 +104,13 @@ def _wineserver_for(argv: Iterable[str], env: dict[str, str]) -> tuple[Path, Pat
     return wineserver, prefix
 
 
+#: A cancelled launch and the Stop queued behind it would otherwise run the same
+#: ``wineserver -k`` twice (2 x 15 s). An immediate repeat after a successful kill is skipped; a
+#: failed kill, or a later Stop, retries.
+_WINESERVER_KILLED: dict[str, float] = {}
+_WINESERVER_KILL_COOLDOWN = 3.0
+
+
 def _stop_wineserver(argv: Iterable[str], env: dict[str, str]) -> None:
     """Best-effort ``wineserver -k`` for the runner behind ``argv``.
 
@@ -118,9 +126,12 @@ def _stop_wineserver(argv: Iterable[str], env: dict[str, str]) -> None:
         return  # no owned prefix: never kill the ambient/default wineserver
     if not wineserver.is_file():
         return
+    key = os.path.normpath(str(prefix))
+    now = time.monotonic()
+    if now - _WINESERVER_KILLED.get(key, -_WINESERVER_KILL_COOLDOWN) < _WINESERVER_KILL_COOLDOWN:
+        return
     child_env = dict(env)
-    if prefix is not None:
-        child_env["WINEPREFIX"] = str(prefix)
+    child_env["WINEPREFIX"] = str(prefix)
     try:
         subprocess.run(
             [str(wineserver), "-k"],
@@ -130,7 +141,8 @@ def _stop_wineserver(argv: Iterable[str], env: dict[str, str]) -> None:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        pass
+        return  # it may still be alive: a retry must not be skipped
+    _WINESERVER_KILLED[key] = time.monotonic()
 
 
 def stop_runner_wineserver(

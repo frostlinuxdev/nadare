@@ -135,3 +135,11 @@ def _restore_backend_registry():
     with backends._REGISTRY_LOCK:
         backends._REGISTRY.clear()
         backends._REGISTRY.update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_wineserver_cooldown() -> None:
+    """The kill cooldown is per process; tests must not inherit another test's kill."""
+    from nadare.backends import wine
+
+    wine._WINESERVER_KILLED.clear()

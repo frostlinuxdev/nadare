@@ -236,6 +236,14 @@ copy_system_libs() {
 }
 copy_system_libs libGL.so.1 libEGL.so.1 libGLX.so.0 libOpenGL.so.0 libGLdispatch.so.0
 
+# Qt's xcb platform plugin links these; a minimal X11 desktop has none of them. Bundle them
+# explicitly (and fail the build when the host lacks one) instead of trusting the binary
+# analysis to find them. scripts/test_appimage.sh checks the same list.
+copy_system_libs libxkbcommon-x11.so.0 libxcb-cursor.so.0 libxcb-icccm.so.4 libxcb-util.so.1 \
+    libxcb-image.so.0 libxcb-keysyms.so.1 libxcb-render-util.so.0 libxcb-xkb.so.1 \
+    libxcb-shape.so.0 libxcb-sync.so.1 libxcb-xfixes.so.0 libxcb-randr.so.0 libxcb-shm.so.0 \
+    libxcb-render.so.0
+
 # Optional GTK3 platform theme plugin: it needs libgtk-3 we do not bundle and
 # Qt falls back to its own theme cleanly. Drop it so the bundle has no dangling
 # shared-library dependency.

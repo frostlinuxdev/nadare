@@ -14,15 +14,108 @@ publisher's own hosts, and redirects must stay on them.
 
 from __future__ import annotations
 
+import hashlib
+import os
+import shlex
+import shutil
+import subprocess
 import urllib.parse
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
-from ..core import graphics
-from ..core.backends import BackendUnsupported, Option
+from ..core import endfield_shim, graphics, sevenzip
+from ..core.backends import BackendError, BackendUnsupported, Option
+from ..core.events import Event
 from ..core.nte_launcher import INSTALLER_URL
+from . import arknights as _arknights
 from . import nikke_news, nte_news
 from .arknights import ArknightsBackend
 from .wine import profile_setting
+
+#: The silent downloader still opens its window. This small Windows program (source in
+#: ``core/shim_src/quiet_start.c``, built with mingw-w64) starts it hidden and keeps hiding the
+#: windows it opens until it exits. It is used only when it matches the pins; a test keeps the
+#: pins in step with the source.
+QUIET_NAME = "nadare_quiet_start.exe"
+QUIET_PREBUILT = Path(__file__).resolve().parents[1] / "assets" / "nikke_quiet_start.exe"
+QUIET_PREBUILT_SHA256 = "2574d409d3974368a10c14851664fa65207fb4d709edf822ca0891a8697b5e4e"
+QUIET_SOURCE_SHA256 = "f5224e12ed14fe977e96b94e0182af3867b3c8307eac1fec0354bcaac49888e0"
+
+
+def _stage_quiet_helper(folder: Path) -> Path | None:
+    """Copy the pinned helper into ``folder``; ``None`` when it is missing or does not match."""
+    try:
+        data = QUIET_PREBUILT.read_bytes()
+        if hashlib.sha256(data).hexdigest() != QUIET_PREBUILT_SHA256:
+            return None
+        target = folder / QUIET_NAME
+        target.write_bytes(data)
+    except OSError:
+        return None
+    return target
+
+
+class SilentInstallUnavailable(Exception):
+    """The silent install cannot be used here; the installer window is the way instead."""
+
+
+#: Unpacking a 20 MB installer takes seconds; anything past this is stuck.
+EXTRACT_TIMEOUT = 120
+
+
+def _extract_nsis(
+    sevenz: str, installer: Path, outdir: Path, run: Callable[..., Any] = subprocess.run
+) -> None:
+    """Unpack an NSIS installer with 7-Zip (the miniloader is an NSIS wrapper)."""
+    try:
+        outdir.mkdir(parents=True, exist_ok=True)
+        result = run(
+            [sevenz, "x", "-tNsis", "-y", f"-o{outdir}", str(installer)],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+            timeout=EXTRACT_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SilentInstallUnavailable(f"unpacking {installer.name} took too long") from exc
+    except OSError as exc:
+        raise SilentInstallUnavailable(f"cannot unpack {installer.name}: {exc}") from exc
+    if result.returncode != 0:
+        raise SilentInstallUnavailable(
+            f"cannot unpack {installer.name} with {sevenz}: {str(result.stderr).strip()}"
+        )
+
+
+def _find_inner_loader(folder: Path) -> Path:
+    """The downloader inside an unpacked miniloader (its name has changed between versions)."""
+    try:
+        found = next(
+            (
+                p
+                for p in sorted(folder.glob("*.exe"))
+                if p.is_file() and "miniloader" in p.name.lower()
+            ),
+            None,
+        )
+    except OSError:
+        found = None
+    if found is None:
+        raise SilentInstallUnavailable("the installer does not contain the downloader")
+    return found
+
+
+def _wine_user_dir(prefix: Path) -> Path:
+    users = prefix / "drive_c" / "users"
+    proton = users / "steamuser"
+    if proton.is_dir():
+        return proton
+    try:
+        other = next(p for p in sorted(users.iterdir()) if p.is_dir() and p.name != "Public")
+    except (OSError, StopIteration):
+        return prefix / "drive_c" / "nadare"
+    return other
 
 
 class LauncherBackend(ArknightsBackend):
@@ -108,6 +201,7 @@ def _subdir(root: str, name: str) -> Path:
 
 class NikkeBackend(LauncherBackend):
     kind = "launcher-nikke"
+    vcredist_default = False  # builtin runtime covers its imports (import scan)
     news_source = staticmethod(nikke_news.fetch_nikke_news)
     official_image_hosts = nikke_news.IMAGE_HOSTS
     #: Measured on a real install (launcher, game and Wine prefix): 27 GiB.
@@ -117,13 +211,17 @@ class NikkeBackend(LauncherBackend):
     install_subdir = _subdir("drive_c", "NIKKE")
     launcher_names = ("nikke_launcher.exe",)
     direct_exe = "nikke_launcher.exe"
-    default_installer_url = "https://nikke-en.com/nikkeminiloader0.0.6.346.exe"
+    default_installer_url = "https://nikke-en.com/nikkeminiloader.exe"
     trusted_hosts = ("nikke-en.com", "nikke-kr.com", "jupiterlauncher.com")
     page_notice = (
-        "After Nadare installs the NIKKE miniloader, click INSTALL in its window, then click "
-        "INSTALL again in the installer window that opens. The launcher downloads the game. "
-        "Tencent's kernel anti-cheat (ACE) may prevent it from starting under Wine, so support "
-        "is experimental.",
+        "Nadare installs the NIKKE launcher for you, without opening any window (about 700 MB). "
+        "Press Play to open the launcher, sign in there and it downloads the game; the launcher "
+        "asks for about 23 GB of free space. Closing the launcher window only hides it in the "
+        "tray: Nadare still sees it running, so press STOP in Nadare to close it completely. "
+        "If the silent install does not work here, Nadare opens the NIKKE miniloader instead: "
+        "click INSTALL, wait for the download, then click LAUNCH (if another installer window "
+        "opens first, click INSTALL there too). Tencent's kernel anti-cheat (ACE) may prevent "
+        "the game from starting under Wine, so support is experimental.",
         "https://nikke-en.com/",
         "Official site",
     )
@@ -133,12 +231,88 @@ class NikkeBackend(LauncherBackend):
     #: avoids that; a profile ``extra_env`` GAMEID/UMU_ID still wins.
     game_id = "umu-nikke"
 
+    #: What the miniloader's own downloader accepts (read from the binary and confirmed on a real
+    #: run): it needs no window with /Silent, installs to /Dst=, and only the literal value
+    #: ``false`` of /StartAfterInstall= stops it from starting the launcher afterwards.
+    STEAM_VARIABLES = ("SteamGameId", "SteamAppId", "UMU_USE_STEAM")
+    SILENT_SWITCHES = ("/Silent", "/StartAfterInstall=false")
+
+    def _silent_wanted(self) -> bool:
+        if os.environ.get("NADARE_NIKKE_SILENT") == "0":
+            return False
+        # Arguments the user chose for the installer mean "run it my way".
+        return not self._extra_args("installer_args")
+
+    def _run_installer(self, installer: Path) -> int:
+        """Install without a window when possible; otherwise the installer window as before."""
+        if self._silent_wanted():
+            try:
+                code = self._run_silent(installer)
+            except (SilentInstallUnavailable, OSError, BackendError) as exc:
+                self.info(f"silent install not available ({exc}); using the installer window")
+            else:
+                # An exit code of 0 and a launcher on disk: a launcher left by an earlier install
+                # must not make a failed run look like a success.
+                if code == 0 and self.find_launcher() is not None:
+                    return code
+                self.info(
+                    f"the silent install did not finish (exit code {code}); "
+                    "using the installer window"
+                )
+        return super()._run_installer(installer)
+
+    def _run_silent(self, installer: Path) -> int:
+        sevenz = sevenzip.find()
+        if not sevenz:
+            raise SilentInstallUnavailable("7-Zip not found")
+        destination = endfield_shim.win_path(self.prefix(), self.install_dir())
+        if not destination.startswith("C:\\"):
+            # Add Game gives every profile an install_dir outside its prefix, which the launcher
+            # installers have always ignored: the launcher goes to the default C:\NIKKE inside the
+            # prefix, and find_launcher() searches drive_c for it.
+            destination = endfield_shim.win_path(self.prefix(), self.prefix() / self.install_subdir)
+        folder = _wine_user_dir(self.prefix()) / "AppData" / "Local" / "nikkeminiloader"
+        # Nadare's own unpack folder, started clean: a downloader left by an earlier version must
+        # never be mistaken for the one in this installer.
+        if folder.is_dir() and not folder.is_symlink():
+            shutil.rmtree(folder, ignore_errors=True)
+        elif folder.exists() or folder.is_symlink():
+            folder.unlink(missing_ok=True)
+        _extract_nsis(sevenz, installer, folder)
+        loader = _find_inner_loader(folder)
+        command = [self.SILENT_SWITCHES[0], f"/Dst={destination}", self.SILENT_SWITCHES[1]]
+        helper = _stage_quiet_helper(folder)
+        if helper is not None:
+            # The helper runs inside Wine, so it is told the loader's Windows path.
+            command = [str(helper), endfield_shim.win_path(self.prefix(), loader), *command]
+        else:
+            self.info("window-hiding helper unavailable; the downloader window will be visible")
+            command = [str(loader), *command]
+        argv, env = self._prefix_command(command)
+        self.ctx.emit(
+            Event("step", f"Installing the {self.display_name} launcher (no window, about 700 MB)")
+        )
+        self.ctx.emit(
+            Event(
+                "progress",
+                f"{self.display_name} launcher download",
+                data={"indeterminate": True},
+            )
+        )
+        self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
+        return _arknights.stream(argv, env, on_line=self._on_line, cancel=self.ctx.cancel)
+
     def _prefix_command(
         self, args: list[str], extra_env: dict[str, str] | None = None
     ) -> tuple[list[str], dict[str, str]]:
         argv, env = super()._prefix_command(args, extra_env)
         env["GAMEID"] = self._explicit_env("GAMEID", extra_env) or self.game_id
         env["UMU_ID"] = self._explicit_env("UMU_ID", extra_env) or env["GAMEID"]
+        # The NIKKE launcher locks its repair, download and update features when it thinks Steam
+        # started it. DW-Proton strips these in its own fix; do it here too so any runner works.
+        for name in self.STEAM_VARIABLES:
+            if not self._explicit_env(name, extra_env):
+                env.pop(name, None)
         return argv, env
 
     def _explicit_env(self, key: str, extra_env: dict[str, str] | None) -> str | None:
@@ -152,6 +326,7 @@ class NikkeBackend(LauncherBackend):
 
 class NteBackend(LauncherBackend):
     kind = "launcher-nte"
+    vcredist_default = False  # builtin runtime covers its imports (import scan)
     news_source = staticmethod(nte_news.fetch_nte_news)
     official_image_hosts = nte_news.IMAGE_HOSTS
     #: The launcher installs the same game as ``direct-nte``.

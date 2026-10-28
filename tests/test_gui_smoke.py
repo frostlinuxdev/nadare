@@ -342,10 +342,15 @@ def test_controller_bookkeeping_runs_on_the_gui_thread(tmp_path, qapp, monkeypat
         assert controller.start("p", "launch") is True  # queued behind status
         assert controller._pending["p"] == ("launch", None)
         release.set()
-        assert _wait_for(qapp, lambda: not controller.is_busy("p"), timeout=5)
+        # The worker thread stops before its queued "finished" slot has run on the GUI
+        # thread, so is_busy() can go false a moment before the bookkeeping is cleared.
+        assert _wait_for(
+            qapp,
+            lambda: not controller.is_busy("p") and "p" not in controller._workers,
+            timeout=5,
+        )
         assert ran == ["launch"], "the queued user operation must run"
         assert "p" not in controller._pending
-        assert "p" not in controller._workers
         assert ("respawn", True) in threads
         assert all(on_gui for _, on_gui in threads), threads
     finally:
@@ -684,7 +689,7 @@ def test_page_notice_link_label_matches_the_backend(tmp_path, qapp):
         qapp.processEvents()
 
 
-def test_nikke_page_notice_explains_both_manual_install_clicks(tmp_path, qapp):
+def test_nikke_page_notice_explains_the_manual_install_clicks(tmp_path, qapp):
     from nadare.gui.game_view import GameView
 
     view = GameView()
