@@ -477,5 +477,4 @@ def test_czn_remake_failure_after_the_game_files_moved_puts_everything_back(
     assert (backend.game_dir() / "game.exe").read_text() == "old game"
     assert (prefix / "drive_c" / "stale.dll").read_text() == "broken"
     parked = list(prefix.parent.glob(f"{prefix.name}.failed-*"))
-    assert len(parked) == 1
-    assert not list(parked[0].rglob("game.exe"))
+    assert not parked, "an emptied parked prefix is tidied up, not left behind"

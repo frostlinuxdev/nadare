@@ -282,6 +282,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also delete the game's Wine prefix",
     )
+    remove_cmd.add_argument(
+        "--delete-backups",
+        action="store_true",
+        help="also delete the old prefix backups recorded after rebuilding the prefix",
+    )
     remove_cmd.add_argument("--yes", action="store_true", help="confirm the removal")
     remove_cmd.add_argument(
         "-q",
@@ -652,6 +657,13 @@ _LOCKED_COMMANDS = frozenset({"install", "update", "repair", "remake-prefix"})
 
 @contextlib.contextmanager
 def _operation_lock(command: str, name: str):
+    if command == "launch":
+        # A game runs for hours, so launch never holds the lock; it only refuses
+        # to start while an install/update/repair/etc. holds it.
+        if process.operation_in_progress(name):
+            raise BackendError(process.OPERATION_IN_PROGRESS.format(name=name))
+        yield
+        return
     if command not in _LOCKED_COMMANDS:
         yield
         return
@@ -930,8 +942,11 @@ def _run_remove(args: argparse.Namespace, config: Config) -> int:
     if getattr(args, "delete_prefix", False):
         delete_trees.extend(["prefix", "wineprefix"])
     result = removal.remove_game(
-        config, name, delete_data=getattr(args, "delete_data", False),
+        config,
+        name,
+        delete_data=getattr(args, "delete_data", False),
         delete_trees=delete_trees,
+        delete_backups=getattr(args, "delete_backups", False),
         desktop_dir=_desktop_dir(),
     )
     if result.profile_kept:

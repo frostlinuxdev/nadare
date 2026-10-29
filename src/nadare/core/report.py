@@ -17,7 +17,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from . import events, paths
+from . import events, paths, process
 
 MAX_REPORT_BYTES = 300_000
 STUB_PREBUILT_SHA256 = "fe4a5bad970750e974cf999e31e3b87132fbb25f9c04c9eea69e3acc2e243185"
@@ -78,7 +78,14 @@ def redact(
 
 def _command(runner: Callable[..., Any], args: list[str], *, timeout: float = 3) -> str:
     try:
-        value = runner(args, capture_output=True, text=True, timeout=timeout, check=False)
+        value = runner(
+            args,
+            env=process.child_environ(),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
         if hasattr(value, "stdout"):
             return str(value.stdout).strip() or "unavailable: no output"
         return str(value).strip() or "unavailable: no output"

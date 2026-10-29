@@ -9,7 +9,7 @@ import pytest
 
 from nadare import app
 from nadare.core import paths, removal, shortcuts
-from nadare.core.backends import BackendError
+from nadare.core.backends import BackendError, Status
 from nadare.core.config import Config
 
 
@@ -104,6 +104,12 @@ def test_saved_login_failure_is_a_warning_not_an_error(env, monkeypatch):
 
     class Boom:
         supports_remember_me = True
+
+        def __init__(self, ctx):
+            pass
+
+        def status(self):
+            return Status("installed")
 
         @staticmethod
         def forget_saved_login(profile):
@@ -448,7 +454,7 @@ def test_delete_data_refused_when_other_profile_prefix_inside(env):
     assert any("keep" in w for w in result.warnings)
 
 
-def test_refused_tree_aborts_every_irreversible_step(env, monkeypatch):
+def test_a_refused_tree_keeps_the_profile_but_deletes_safe_trees(env, monkeypatch):
     cfg, _, tmp = env
     apps = tmp / "apps"
     shortcuts.install_desktop_entry("gone", "Gone", applications_dir=apps, argv=["nadare"])
@@ -459,10 +465,17 @@ def test_refused_tree_aborts_every_irreversible_step(env, monkeypatch):
     ok = _mk(tmp, "ok")
     cfg.profiles["gone"]["install_dir"] = str(shared)
     cfg.profiles["gone"]["prefix"] = str(ok)
+    cfg.profiles["gone"]["owned_trees"] = ["prefix"]
     cfg.profiles["keep"]["install_dir"] = str(shared)
 
     class Boom:
         supports_remember_me = True
+
+        def __init__(self, ctx):
+            pass
+
+        def status(self):
+            return Status("installed")
 
         @staticmethod
         def forget_saved_login(profile):
@@ -481,7 +494,8 @@ def test_refused_tree_aborts_every_irreversible_step(env, monkeypatch):
     assert result.warnings
     assert (apps / "nadare-gone.desktop").exists()
     assert (data / "save").exists()
-    assert (ok / "f").exists() and (shared / "f").exists()
+    assert result.trees_removed == [ok.resolve()]
+    assert not (ok / "f").exists() and (shared / "f").exists()
     assert "gone" in cfg.profiles
 
 
@@ -542,7 +556,7 @@ def test_a_recorded_path_that_was_changed_later_is_no_longer_owned(trees_env):
     )
     found = {t.key: t for t in removal.removable_trees(cfg, "gone")}
     assert not found["install_dir"].safe
-    _refused(cfg, tmp, "install_dir", "did not create")
+    _refused(cfg, tmp, "install_dir", "location changed")
     assert (later / "file.bin").exists()
 
 
@@ -581,7 +595,7 @@ def test_removing_both_trees_also_tidies_the_empty_game_folder(trees_env):
         cfg, "gone", delete_trees=["install_dir", "prefix"], applications_dir=tmp / "apps"
     )
     assert not game_dir.exists()
-    assert (tmp / "Games" / "Nadare").is_dir()  # the shared folder always stays
+    assert not (tmp / "Games" / "Nadare").exists()  # the empty wrapper parent is tidied too
 
 
 def test_a_game_folder_that_still_holds_something_is_left_alone(trees_env):

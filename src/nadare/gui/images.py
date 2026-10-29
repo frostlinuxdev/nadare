@@ -71,13 +71,18 @@ def _soft(image: QImage, width: int, height: int) -> QImage:
     """
     smooth = Qt.TransformationMode.SmoothTransformation
     ignore = Qt.AspectRatioMode.IgnoreAspectRatio
+    if image.isNull() or width < 1 or height < 1:
+        return image  # nothing to blur (and a null image never grows)
     small = image
     while small.width() > max(24, width // 10):
         small = small.scaled(
             max(1, small.width() // 2), max(1, small.height() // 2), ignore, smooth
         )
     while small.width() < width:
-        small = small.scaled(small.width() * 2, small.height() * 2, ignore, smooth)
+        grown = small.scaled(small.width() * 2, small.height() * 2, ignore, smooth)
+        if grown.isNull() or grown.width() <= small.width():
+            break  # Qt could not allocate it: stop growing rather than spin
+        small = grown
     return small.scaled(width, height, ignore, smooth)
 
 
@@ -93,9 +98,13 @@ def _fit_over_blur(image: QImage, width: int, height: int) -> QImage:
     """The whole picture, centred, over a blurred and darkened copy of itself."""
     smooth = Qt.TransformationMode.SmoothTransformation
     cover = image.scaled(width, height, _EXPAND, smooth)
-    x = max(0, (cover.width() - width) // 2)
-    y = max(0, (cover.height() - height) // 2)
-    backdrop = _soft(cover.copy(x, y, width, height), width, height)
+    if cover.isNull():  # extreme art Qt cannot expand: no blur, just the dark base
+        backdrop = QImage(width, height, QImage.Format.Format_ARGB32)
+        backdrop.fill(QColor(11, 13, 18))
+    else:
+        x = max(0, (cover.width() - width) // 2)
+        y = max(0, (cover.height() - height) // 2)
+        backdrop = _soft(cover.copy(x, y, width, height), width, height)
     # Everything is drawn onto an opaque base, so art with transparent pixels never lets the
     # page behind the card show through the bars.
     out = QImage(width, height, QImage.Format.Format_ARGB32)

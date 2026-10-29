@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import subprocess
 
+from . import process
+from .shortcuts import command_hint
+
 #: 32-bit sonames Proton/Wine need early during prefix creation.
 REQUIRED_32BIT = (
     "libfreetype.so.6",
@@ -64,7 +67,13 @@ def _ldconfig_sonames(run) -> tuple[set[str], set[str]] | None:  # noqa: ANN001
     """Return (32-bit, 64-bit) sonames from the first ldconfig that answers."""
     for candidate in ("/usr/sbin/ldconfig", "/sbin/ldconfig", "/usr/bin/ldconfig", "ldconfig"):
         try:
-            result = run([candidate, "-p"], capture_output=True, text=True, check=False)
+            result = run(
+                [candidate, "-p"],
+                env=process.child_environ(),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         except (OSError, subprocess.SubprocessError):
             continue
         text = getattr(result, "stdout", "") or ""
@@ -117,7 +126,13 @@ def missing_32bit(run=subprocess.run) -> list[str] | None:  # noqa: ANN001
     """
     for candidate in ("/usr/sbin/ldconfig", "/sbin/ldconfig", "/usr/bin/ldconfig", "ldconfig"):
         try:
-            result = run([candidate, "-p"], capture_output=True, text=True, check=False)
+            result = run(
+                [candidate, "-p"],
+                env=process.child_environ(),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         except (OSError, subprocess.SubprocessError):
             continue
         text = getattr(result, "stdout", "") or ""
@@ -239,8 +254,8 @@ def hint(missing: list[str], os_release: str | None = None) -> str:
     why = (
         "Nadare normally downloads its own runtime, which needs none of them, but "
         "that was not possible here (offline, a blocked download, or Ubuntu's "
-        "AppArmor restriction; `nadare doctor` shows which). Without it, the game's "
-        "Windows environment needs these libraries on your system."
+        f"AppArmor restriction; `{command_hint('doctor')}` shows which). Without it, "
+        "the game's Windows environment needs these libraries on your system."
     )
     family = distro_family(os_release)
     command = install_command(missing, family)

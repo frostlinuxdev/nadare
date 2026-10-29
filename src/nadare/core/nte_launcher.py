@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from . import download as _dl
-from . import sevenzip
+from . import process, sevenzip
 
 #: Official Perfect World installer carrying the launcher payload.
 INSTALLER_URL = (
@@ -94,6 +94,7 @@ def _extract(sevenz: str, archive: Path, outdir: Path, run: Callable[..., Any]) 
     outdir.mkdir(parents=True, exist_ok=True)
     result = run(
         [sevenz, "x", "-y", f"-o{outdir}", str(archive)],
+        env=process.child_environ(),
         capture_output=True,
         text=True,
         check=False,

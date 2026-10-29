@@ -11,6 +11,7 @@ operations never run at once.
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import logging
@@ -32,7 +33,11 @@ from .events import Cancel, Emitter, Event, emitter, mask
 
 #: How long ``run`` waits after a cancel before escalating to SIGKILL.
 GRACE_SECONDS = 5.0
+#: How long ``run`` waits for a SIGKILLed child to be reaped before giving up.
+REAP_SECONDS = 5.0
 LOCK_DIR_NAME = "locks"
+log = logging.getLogger(__name__)
+
 log = logging.getLogger(__name__)
 
 
@@ -136,6 +141,28 @@ def sanitize_game_env(env: Mapping[str, str]) -> dict[str, str]:
     return out
 
 
+#: Token names that belong to the launcher (or another host tool), never to a game.
+_SECRET_ENV_NAMES = frozenset({"GITHUB_TOKEN", "GH_TOKEN", "GITHUB_PAT", "SGDB_API_KEY"})
+_SECRET_ENV_SUFFIXES = ("TOKEN", "SECRET", "PASSWORD", "KEY")
+
+
+def child_environ(base: Mapping[str, str] | None = None) -> dict[str, str]:
+    """A copy of ``base`` (default ``os.environ``) without launcher secrets.
+
+    Games, installers and Wine/Proton children must not see the user's GitHub
+    token or any other ``NADARE_*`` credential. Deliberate paths such as
+    ``CZN_CREDENTIAL_IN``/``CZN_CREDENTIAL_OUT`` and harmless ``NADARE_*``
+    switches are kept.
+    """
+    env = dict(os.environ if base is None else base)
+    for name in list(env):
+        if name in _SECRET_ENV_NAMES or (
+            name.startswith("NADARE_") and name.endswith(_SECRET_ENV_SUFFIXES)
+        ):
+            del env[name]
+    return env
+
+
 def build_env(
     profile: Mapping[str, Any] | None = None,
     extra: Mapping[str, str] | None = None,
@@ -144,17 +171,18 @@ def build_env(
 ) -> dict[str, str]:
     """Return a child environment.
 
-    The caller's environment is inherited unchanged (so ``DISPLAY``,
-    ``WAYLAND_DISPLAY``, ``XAUTHORITY``, ``DBUS_SESSION_BUS_ADDRESS`` and friends
-    survive), then Nadare's XDG roots are pinned so children never write to a
-    hard-coded ``~/.local``. Profile ``prefix``/``runner`` become
-    ``WINEPREFIX``/``PROTONPATH`` when set. ``extra`` is merged last and can
-    override anything except the profile's own prefix and runner: a declared
+    The caller's environment is inherited, minus launcher secrets (see
+    :func:`child_environ`), so ``DISPLAY``, ``WAYLAND_DISPLAY``, ``XAUTHORITY``,
+    ``DBUS_SESSION_BUS_ADDRESS`` and friends survive; Nadare's XDG roots are then
+    pinned so children never write to a hard-coded ``~/.local``. Profile
+    ``prefix``/``runner`` become ``WINEPREFIX``/``PROTONPATH`` when set. ``extra``
+    is merged last and can override anything except the profile's own prefix and
+    runner: a declared
     prefix also pins ``WINEPREFIX`` and ``STEAM_COMPAT_DATA_PATH``, a declared
     runner pins ``PROTONPATH``. A conflicting ``extra`` value for those is ignored
     with a warning.
     """
-    env: dict[str, str] = dict(os.environ if base is None else base)
+    env: dict[str, str] = child_environ(base)
 
     env["XDG_DATA_HOME"] = _xdg_home(paths.data_dir())
     env["XDG_CONFIG_HOME"] = _xdg_home(paths.config_dir())
@@ -489,9 +517,17 @@ def run(
 
     stderr_mode = subprocess.STDOUT if forward_stderr else subprocess.PIPE
     proc = spawn(args, env=env, cwd=cwd, stderr=stderr_mode, **popen_kwargs)
+    # Keep the group id: once the direct child is reaped ``getpgid(proc.pid)``
+    # fails, but the group can still hold grandchildren we must signal.
+    try:
+        pgid: int | None = os.getpgid(proc.pid)
+    except OSError:
+        pgid = None
 
     lines: list[str] = []
-    line_q: queue.Queue[str | None] = queue.Queue()
+    # Bounded so a chatty child cannot pile its whole output up in memory when
+    # the caller did not ask for capture; the reader blocks until we drain.
+    line_q: queue.Queue[str | None] = queue.Queue(maxsize=1024)
 
     def _reader() -> None:
         if proc.stdout is None:
@@ -513,59 +549,109 @@ def run(
                 return
             if item is None:
                 continue
-            lines.append(item)
+            if capture:
+                lines.append(item)
             if stream:
                 say(Event("log", item))
 
-    cancelled = False
-    while proc.poll() is None:
-        if cancel is not None and cancel.cancelled:
-            cancelled = True
-            _signal_group(proc)
-            break
+    def _wait_reaped() -> None:
         try:
-            item = line_q.get(timeout=0.1)
-        except queue.Empty:
-            continue
-        if item is not None:
-            lines.append(item)
-            if stream:
-                say(Event("log", item))
+            proc.wait(timeout=REAP_SECONDS)
+        except subprocess.TimeoutExpired:
+            log.warning("child %s not reaped %ss after SIGKILL", proc.pid, REAP_SECONDS)
 
     try:
-        proc.wait(timeout=GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        _signal_group(proc, force=True)
-        proc.wait()
-    reader.join(timeout=1.0)
-    _drain()
+        cancelled = False
+        while proc.poll() is None:
+            if cancel is not None and cancel.cancelled:
+                cancelled = True
+                _signal_group(proc)
+                break
+            try:
+                item = line_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if item is not None:
+                if capture:
+                    lines.append(item)
+                if stream:
+                    say(Event("log", item))
 
-    cp = subprocess.CompletedProcess(
-        list(str(a) for a in args), proc.returncode, "\n".join(lines) if capture else None, None
-    )
-    if cancelled:
-        raise _cancelled_exc()
-    if check and cp.returncode != 0:
-        say(
-            Event(
-                "error",
-                f"command failed ({cp.returncode}): {cp.args[0]}",
-                data={"code": cp.returncode},
-            )
+        try:
+            proc.wait(timeout=GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            _signal_group(proc, force=True, pgid=pgid)
+            _wait_reaped()
+        if cancelled:
+            # The direct child may have exited on SIGTERM while a grandchild ignored
+            # it and keeps the stdout pipe open. Escalate after the wait so the
+            # group is gone and the reader thread can end with this operation.
+            _signal_group(proc, force=True, pgid=pgid)
+        # Drain while the reader winds down: with a bounded queue it may be blocked
+        # on a put until we take items out.
+        deadline = time.monotonic() + (5.0 if cancelled else 1.0)
+        while reader.is_alive() and time.monotonic() < deadline:
+            _drain()
+            reader.join(timeout=0.05)
+        _drain()
+
+        cp = subprocess.CompletedProcess(
+            list(str(a) for a in args),
+            proc.returncode,
+            "\n".join(lines) if capture else None,
+            None,
         )
-        raise subprocess.CalledProcessError(cp.returncode, cp.args, cp.stdout)
-    return cp
+        if cancelled:
+            raise _cancelled_exc()
+        if check and cp.returncode != 0:
+            say(
+                Event(
+                    "error",
+                    f"command failed ({cp.returncode}): {cp.args[0]}",
+                    data={"code": cp.returncode},
+                )
+            )
+            raise subprocess.CalledProcessError(cp.returncode, cp.args, cp.stdout)
+        return cp
+    except BaseException:
+        # An interrupt (a second Ctrl-C) or a raising emitter must not unwind
+        # past a live child: it would outlive the CLI and release the profile
+        # lock while still writing to the same files.
+        if proc.poll() is None:
+            _signal_group(proc, pgid=pgid)
+            try:
+                try:
+                    proc.wait(timeout=GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    pass
+            finally:
+                # Always escalate the group, even if this wait is itself interrupted:
+                # the leader may have exited on SIGTERM while a grandchild ignored it
+                # and still holds the profile's files.
+                _signal_group(proc, force=True, pgid=pgid)
+                _wait_reaped()
+        raise
 
 
-def _signal_group(proc: subprocess.Popen[Any], *, force: bool = False) -> None:
+def _signal_group(
+    proc: subprocess.Popen[Any], *, force: bool = False, pgid: int | None = None
+) -> None:
     sig = signal.SIGKILL if force else signal.SIGTERM
-    try:
-        os.killpg(os.getpgid(proc.pid), sig)
-    except (ProcessLookupError, PermissionError, OSError):
+    if pgid is None:
         try:
-            proc.kill() if force else proc.terminate()
+            pgid = os.getpgid(proc.pid)
         except OSError:
+            pgid = None
+    if pgid is not None:
+        try:
+            os.killpg(pgid, sig)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
             pass
+    try:
+        proc.kill() if force else proc.terminate()
+    except OSError:
+        pass
 
 
 def _cancelled_exc() -> BaseException:
@@ -660,6 +746,36 @@ OPERATION_BUSY = (
     "Another Nadare window or command is installing, updating or removing {name}. "
     "Wait for it to finish and try again."
 )
+
+#: What the user sees when a launch is refused because an operation is running.
+OPERATION_IN_PROGRESS = (
+    "An install/update/repair for {name} is in progress; wait for it to finish, then launch again."
+)
+
+
+def operation_in_progress(profile: str) -> bool:
+    """Whether an :class:`OperationLock` for ``profile`` is currently held.
+
+    A launch may run for hours, so it must not take the lock itself; it only
+    probes it without blocking. The probe opens the existing lock file, tries
+    the lock and releases or closes it immediately, so it never keeps the lock.
+    """
+    lock = OperationLock(profile)
+    try:
+        fd = os.open(lock.path, os.O_RDWR)
+    except OSError:
+        return False  # no lock file means nobody ever took the lock
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            # Only "somebody holds it" counts. A filesystem that cannot lock at all
+            # (ENOLCK, ENOTSUP...) must not make every launch look refused forever.
+            return exc.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 class ProfileLockError(RuntimeError):

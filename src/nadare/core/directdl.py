@@ -401,13 +401,21 @@ _MAX_RECORDED_MEMBERS = 100_000
 
 
 def _done_record(
-    plan: Plan, archive: Archive, members: Sequence[str] | None = None
+    plan: Plan,
+    archive: Archive,
+    members: Sequence[str] | None = None,
+    *,
+    verified_hashes: bool = True,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {"version": plan.version, "url": archive.source.url}
     for name in ("md5", "sha256", "crc32"):
         value = getattr(archive.source, name)
         if value:
-            record[name] = value.lower()
+            record[name if verified_hashes else f"declared_{name}"] = value.lower()
+    if not verified_hashes:
+        # A streamed install read only the ranges it needed, so the index's
+        # whole-archive hash was never computed. Say what was checked instead.
+        record["verified"] = "members"
     if members is not None:
         sorted_members = sorted(set(members))
         recorded_members = sorted_members[:_MAX_RECORDED_MEMBERS]
@@ -428,9 +436,12 @@ def _archive_done(plan: Plan, archive: Archive, dest: Path, *, hashes: bool = Fa
         return False
     if record.get("version") != plan.version or record.get("url") != archive.source.url:
         return False
+    streamed = record.get("verified") == "members"
+    if streamed and not isinstance(record.get("member_crc32"), dict):
+        return False  # a streamed record is only worth as much as its member CRCs
     for name in ("md5", "sha256", "crc32"):
         expected = getattr(archive.source, name)
-        actual = record.get(name)
+        actual = record.get(f"declared_{name}" if streamed else name)
         if expected is None:
             if actual not in (None, ""):
                 return False
@@ -671,14 +682,19 @@ def _unwrap(
 
 
 def _write_done(
-    plan: Plan, archive: Archive, dest: Path, members: Sequence[str] | None = None
+    plan: Plan,
+    archive: Archive,
+    dest: Path,
+    members: Sequence[str] | None = None,
+    *,
+    verified_hashes: bool = True,
 ) -> None:
     name = safe_relative_path(archive.name)
     _check_work_dirs(dest)
     record_path = dest / STATE_DIR / f"{name}.done"
     record_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = record_path.with_name(f"{record_path.name}.tmp")
-    record = _done_record(plan, archive, members)
+    record = _done_record(plan, archive, members, verified_hashes=verified_hashes)
     if members is not None:
         record["member_sizes"] = {
             member: (dest / safe_relative_path(member)).stat().st_size
@@ -688,7 +704,10 @@ def _write_done(
             member: _crc32_file(dest / safe_relative_path(member))
             for member in record["members"]
         }
-    temporary.write_text(json.dumps(record), encoding="utf-8")
+    temporary.unlink(missing_ok=True)
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(record))
     os.replace(temporary, record_path)
 
 
@@ -955,6 +974,7 @@ def _install_streamed_zip(
         archive,
         dest,
         [relative for info, relative in entries if not info.is_dir()],
+        verified_hashes=False,
     )
 
 
@@ -971,10 +991,12 @@ def _stream_zip_archive(
 
     The zip's central directory is read, every member is validated, files that
     already match are left untouched, and only the rest is fetched. The archive's
-    declared md5/sha256 are *not* read or verified here: a whole-archive hash is
+    declared md5/sha256 are *not* verified here: a whole-archive hash is
     impossible when only the needed ranges are fetched. Integrity rests on each
-    member's own CRC-32 plus TLS, and the ``.done`` record stores the
-    INDEX-declared hash rather than a hash this path actually confirmed.
+    member's own CRC-32 plus TLS, so the ``.done`` record keeps the declared
+    hash under ``declared_*`` and marks the member CRCs as the verified part.
+    An archive with a declared sha256 does not come this way: the caller falls
+    back to the normal download, which checks the whole archive.
     Returns ``None`` when the server does not support range requests, so the
     caller can fall back to the normal download-then-unpack path.
     """
@@ -1137,17 +1159,21 @@ def _sync_archive(
     part_paths = [dl_dir / safe_relative_path(part.path) for part in archive.parts]
     cache_paths = [] if archive.parts else [source_path]
 
-    if archive.stream and archive.unwrap == ("7z",):
+    # A whole-archive sha256 cannot be computed from ranged reads, and a streamed
+    # install must not record the index hash as if it had checked it. Fall through
+    # to the normal download-then-unpack path, which verifies the whole archive.
+    whole_sha256 = bool(archive.source.sha256) or any(p.sha256 for p in archive.parts)
+    if archive.stream and not whole_sha256 and archive.unwrap == ("7z",):
         members = _stream_7z_archive(
             plan, archive, dest, emit=emit, cancel=cancel, workers=workers
         )
         if members is not None:
             try:
-                _write_done(plan, archive, dest, members)
+                _write_done(plan, archive, dest, members, verified_hashes=False)
             finally:
                 _cleanup_stream_dir(dest)
             return
-    if archive.stream and archive.unwrap == ("zip",):
+    if archive.stream and not whole_sha256 and archive.unwrap == ("zip",):
         if (
             _stream_zip_archive(
                 plan,

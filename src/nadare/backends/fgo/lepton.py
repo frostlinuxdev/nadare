@@ -37,7 +37,7 @@ import threading
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
-from ...core import paths, sandbox
+from ...core import paths, process, sandbox
 from ...core.events import Cancel, Cancelled
 
 log = logging.getLogger(__name__)
@@ -299,7 +299,7 @@ class LeptonFgo:
         return self.conf_path.is_file() and self.lepton_fgo.is_file()
 
     def env(self) -> dict[str, str]:
-        env = dict(os.environ)
+        env = process.child_environ()
         env["LEPTON_CONFIG_DIR"] = str(self.config_dir)
         env.update(self._env_extra)
         return env

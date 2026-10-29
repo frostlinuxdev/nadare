@@ -175,6 +175,7 @@ def test_relink_points_a_locked_profile_at_the_moved_prefix(tmp_path, qapp, monk
         assert page.option_widget("prefix").isReadOnly()
         assert not page.relink_button.isHidden()
         page.relink_button.click()
+        _settle(qapp)  # the game's state is re-checked off the GUI thread first
         assert config.profiles["sample"]["prefix"] == str(new)
         assert Config.load(tmp_path / "config.json").profiles["sample"]["prefix"] == str(new)
         assert page.option_widget("prefix").text() == str(new)
@@ -217,6 +218,7 @@ def test_relink_button_survives_loading_another_profile(tmp_path, qapp, monkeypa
         _settle(qapp)
         assert not page.relink_button.isHidden()
         page.relink_button.click()  # would raise if the button had been deleted
+        _settle(qapp)
         assert config.profiles["sample"]["prefix"] == str(new)
     finally:
         page.deleteLater()
@@ -409,5 +411,132 @@ def test_a_move_is_refused_while_another_operation_holds_the_profile(
         assert any("Another Nadare" in t for t in texts)
     finally:
         lock.release()
+        page.deleteLater()
+        qapp.processEvents()
+
+
+# ---- b17 edge-case audit: move/relink error paths ---------------------------
+def test_a_move_finishing_after_the_page_is_destroyed_does_not_crash(
+    tmp_path, qapp, monkeypatch
+):
+    import threading
+
+    from PyQt6 import sip
+
+    from nadare.core import relocate
+
+    release = threading.Event()
+    real = relocate.move_tree
+    monkeypatch.setattr(
+        relocate, "move_tree", lambda *a, **k: (release.wait(5), real(*a, **k))[1]
+    )
+    page, config, src, parent, texts = _move_setup(tmp_path, qapp, monkeypatch)
+    page.move_button.click()
+    sip.delete(page)  # the window is closed while the copy runs
+    release.set()
+    _settle(qapp)  # pytest-qt fails the test if a slot raised
+    assert config.profiles["sample"]["prefix"] == str(parent / "pfx")  # still recorded
+
+
+def test_a_failed_config_save_after_the_move_says_where_the_folder_is_now(
+    tmp_path, qapp, monkeypatch
+):
+    page, config, src, parent, texts = _move_setup(tmp_path, qapp, monkeypatch)
+    config.save = lambda *a, **k: (_ for _ in ()).throw(OSError(28, "No space left"))
+    try:
+        page.move_button.click()
+        _settle(qapp)
+        assert any(str(parent / "pfx") in t and "I moved it myself" in t for t in texts), texts
+    finally:
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_folder_that_is_no_prefix_is_not_moved(tmp_path, qapp, monkeypatch):
+    page, config, src, parent, texts = _move_setup(tmp_path, qapp, monkeypatch)
+    import shutil
+
+    shutil.rmtree(src / "drive_c")  # not a prefix any more
+    try:
+        page.move_button.click()
+        _settle(qapp)
+        assert src.is_dir() and not (parent / "pfx").exists()
+        assert any("drive_c" in t for t in texts)
+    finally:
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_profile_with_no_prefix_is_not_moved(tmp_path, qapp, monkeypatch):
+    page, config, src, parent, texts = _move_setup(tmp_path, qapp, monkeypatch)
+    config.profiles["sample"]["prefix"] = ""
+    page.option_widget("prefix").setText("")
+    try:
+        page.move_button.click()
+        _settle(qapp)
+        assert any("no prefix" in t.lower() for t in texts)
+        assert not (parent / "pfx").exists()
+    finally:
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_game_started_after_the_page_loaded_blocks_the_move(tmp_path, qapp, monkeypatch):
+    page, config, src, parent, texts = _move_setup(tmp_path, qapp, monkeypatch)
+    _fake_backend(monkeypatch, SimpleNamespace(state="running"))  # started from a desktop icon
+    try:
+        page.move_button.click()
+        _settle(qapp)
+        assert src.is_dir() and not (parent / "pfx").exists()
+        assert any("running" in t.lower() for t in texts), texts
+    finally:
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_relink_is_refused_while_another_operation_holds_the_profile(
+    tmp_path, qapp, monkeypatch
+):
+    from nadare.core import process
+
+    page, config, new, answers = _relink_setup(tmp_path, qapp, monkeypatch)
+    lock = process.OperationLock("sample")
+    lock.acquire()
+    try:
+        page.relink_button.click()
+        _settle(qapp)
+        assert config.profiles["sample"]["prefix"] == str(tmp_path / "pfx")
+        assert any("Another Nadare" in t for t in answers), answers
+    finally:
+        lock.release()
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_second_move_request_while_one_runs_starts_nothing(tmp_path, qapp, monkeypatch):
+    import threading
+
+    from nadare.core import relocate
+
+    release = threading.Event()
+    calls = []
+    real = relocate.move_tree
+
+    def gated(*a, **k):
+        calls.append(1)
+        release.wait(5)
+        return real(*a, **k)
+
+    monkeypatch.setattr(relocate, "move_tree", gated)
+    page, config, src, parent, texts = _move_setup(tmp_path, qapp, monkeypatch)
+    try:
+        page._run_move(config, "sample", src, parent / "pfx")
+        page._run_move(config, "sample", src, parent / "pfx")
+        release.set()
+        _settle(qapp)
+        assert calls == [1]
+        assert not any("Another Nadare" in t for t in texts)
+    finally:
+        release.set()
         page.deleteLater()
         qapp.processEvents()

@@ -13,6 +13,12 @@ import pytest
 
 from nadare.core import news
 
+#: A valid 1x1 PNG; artwork now refuses a body Qt cannot decode.
+PNG_1PX = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108020000009077"
+    "53de0000000c49444154789c63f8cfc0000003010100c9fe92ef0000000049454e44ae426082"
+)
+
 
 class FakeResponse:
     def __init__(self, status_code: int = 200, content: bytes = b"", payload=None, headers=None):
@@ -455,7 +461,7 @@ def test_hostile_news_id_cannot_escape_cache(monkeypatch) -> None:
 
     requests = FakeRequests({})
     requests.routes["https://cdn.example/a.png"] = FakeResponse(
-        content=b"IMG", headers={"Content-Type": "image/png"}
+        content=PNG_1PX, headers={"Content-Type": "image/png"}
     )
     monkeypatch.setattr(artwork, "_curl", lambda: requests)
 

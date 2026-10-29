@@ -171,9 +171,9 @@ def test_import_non_wine_accepts_folder_as_is(tmp_path, qapp):
 
 
 def test_detect_import_prefix_only_kind_takes_folder_as_prefix(tmp_path):
-    """G-5: for a prefix-only backend the picked folder is the Wine prefix."""
+    """G-5: for a prefix-only backend a folder that holds a prefix is the Wine prefix."""
     prefix = tmp_path / "czn-prefix"
-    prefix.mkdir()
+    (prefix / "drive_c").mkdir(parents=True)
     info = detect_import("stove-czn", prefix, None)
     assert info["prefix"] == str(prefix)
 

@@ -495,6 +495,26 @@ def _guess_ext(url: str, headers) -> str:
     return _EXT_BY_TYPE.get(content_type.split(";")[0].strip().lower(), "jpg")
 
 
+def _is_image(content: bytes) -> bool:
+    """True when ``content`` is an image Qt can decode (magic bytes when Qt is absent).
+
+    A publisher or CDN can answer with a 200 HTML error page and an image content-type;
+    such a body must not be cached as a cover, or it blocks every later candidate and is
+    reused on every fetch.
+    """
+    try:
+        from PyQt6.QtGui import QImage
+    except Exception:  # noqa: BLE001 - no Qt (tests, CLI): fall back to the signatures
+        head = content[:12]
+        return head.startswith(
+            (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"BM")
+        ) or (head[:4] == b"RIFF" and head[8:12] == b"WEBP")
+    try:
+        return not QImage.fromData(content).isNull()
+    except Exception:  # noqa: BLE001 - a body Qt chokes on is not an image
+        return False
+
+
 def _content_length(headers: Any) -> int | None:
     if headers is None:
         return None
@@ -545,6 +565,8 @@ def _download(
         content = _read_capped(resp, MAX_IMAGE_BYTES, url)
         if not content:
             raise RuntimeError(f"empty image body for {url}")
+        if not _is_image(content):
+            raise RuntimeError(f"body is not an image for {url}")
         return content, _guess_ext(url, getattr(resp, "headers", None))
     finally:
         # A streamed response holds its socket until closed; the GUI process is
@@ -1040,6 +1062,10 @@ WEBP_QUALITY = 90
 _migrated_cache_roots: set[str] = set()
 _migrating_cache_roots: set[str] = set()
 _migration_lock = threading.Lock()
+#: ``os.replace`` of an image and the write of its ``.src`` sidecar are two steps; without this
+#: lock two overlapping downloads of the same cover can leave one URL's image with the other's
+#: sidecar (and the reader below could see the pair half-written).
+_pair_lock = threading.Lock()
 
 
 def _schedule_cover_migration(root: Path) -> None:
@@ -1254,32 +1280,34 @@ def _store(
             fh.write(content)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(part, dest)
-        _sync_dir(dest.parent)
+        with _pair_lock:
+            os.replace(part, dest)
+            _sync_dir(dest.parent)
+            if official:
+                try:
+                    src_sidecar(dest).write_text(str(url), encoding="utf-8")
+                except OSError as exc:  # pragma: no cover - disk failure edge case
+                    log.debug("could not write art source sidecar: %s", exc)
     except BaseException:
         part.unlink(missing_ok=True)
         raise
-    if official:
-        try:
-            src_sidecar(dest).write_text(str(url), encoding="utf-8")
-        except OSError as exc:  # pragma: no cover - disk failure edge case
-            log.debug("could not write art source sidecar: %s", exc)
     log.info("cached artwork %s (%d bytes)", dest, len(content))
     return dest
 
 
 def _cached_official(slug: str, kind: str, url: str) -> Path | None:
     """Return a cached official image whose sidecar matches ``url``."""
-    for ext in _IMAGE_EXTS:
-        candidate = cache_dir() / f"{slug}-{kind}.{ext}"
-        if not candidate.is_file():
-            continue
-        try:
-            stored = src_sidecar(candidate).read_text(encoding="utf-8").strip()
-        except OSError:
-            continue
-        if stored == url:
-            return candidate
+    with _pair_lock:
+        for ext in _IMAGE_EXTS:
+            candidate = cache_dir() / f"{slug}-{kind}.{ext}"
+            if not candidate.is_file():
+                continue
+            try:
+                stored = src_sidecar(candidate).read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if stored == url:
+                return candidate
     return None
 
 

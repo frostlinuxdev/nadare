@@ -193,6 +193,11 @@ def test_import_button_is_disabled_until_detection_finds_something(tmp_path, qap
         czn.set_mode(True)
         czn.set_install_dir(prefix)
         czn.detect()
+        assert czn.detect_label.text() == "Nothing detected yet."
+        assert not czn.create_button.isEnabled(), "an empty folder is not a CZN prefix"
+
+        (prefix / "drive_c").mkdir()
+        czn.detect()
         assert czn.detect_label.text() != "Nothing detected yet."
         assert czn.create_button.isEnabled(), "CZN needs only the prefix, which was found"
     finally:

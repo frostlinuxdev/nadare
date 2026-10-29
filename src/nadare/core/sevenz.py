@@ -837,10 +837,7 @@ def _extract_archive(
             progress(done, total)
 
     for item in empty_files:
-        out = _safe_destination_path(dest, item.path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out = _safe_destination_path(dest, item.path)
-        out.write_bytes(b"")
+        _write_empty(dest, item.path)
         add_count(1)
 
     def finish_zero_streams(
@@ -855,10 +852,7 @@ def _extract_archive(
         while current <= last_stream and folder.stream_sizes[current] == 0:
             record = stream_map.get(current)
             if record is not None:
-                out = _safe_destination_path(dest_dir, record.path)
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out = _safe_destination_path(dest_dir, record.path)
-                out.write_bytes(b"")
+                out = _write_empty(dest_dir, record.path)
                 if record.digest is not None and record.digest != 0:
                     out.unlink(missing_ok=True)
                     raise SevenZipError(f"CRC mismatch for {record.path}")
@@ -903,7 +897,7 @@ def _extract_archive(
                     if record is not None:
                         if out_file is None:
                             final, active = _staged_path(dest, record.path)
-                            out_file = open(active, "wb")
+                            out_file = _open_staging(active)
                             running_crc = 0
                         out_file.write(piece)
                         running_crc = zlib.crc32(piece, running_crc) & 0xFFFFFFFF
@@ -915,7 +909,7 @@ def _extract_archive(
                         if record is not None:
                             if out_file is None:
                                 final, active = _staged_path(dest, record.path)
-                                out_file = open(active, "wb")
+                                out_file = _open_staging(active)
                                 running_crc = 0
                             out_file.close()
                             out_file = None
@@ -1015,13 +1009,81 @@ def _extract_archive(
     return count
 
 
+#: Directories already swept for staging leftovers by this process (see ``_sweep_dead_staging``).
+_SWEPT_DIRS: set[str] = set()
+_SWEPT_LOCK = threading.Lock()
+
+
 def _staged_path(dest: Path, relative: str) -> tuple[Path, Path]:
     """``(final, staging)`` for a member: it is written beside the target and renamed over it
-    once its CRC passes, so a bad block or a cancel never truncates a file already installed."""
+    once its CRC passes, so a bad block or a cancel never truncates a file already installed.
+
+    The staging name is short and independent of the member's name (so a long member name still
+    fits NAME_MAX) and unique per open (two workers on one duplicate path never collide)."""
     final = _safe_destination_path(dest, relative)
     final.parent.mkdir(parents=True, exist_ok=True)
     final = _safe_destination_path(dest, relative)
-    return final, final.with_name(final.name + ".nadare-new")
+    _sweep_dead_staging(final)
+    token = f"{os.getpid():x}-{os.urandom(3).hex()}"
+    return final, final.with_name(f".{token}.nadare-new")
+
+
+def _sweep_dead_staging(final: Path) -> None:
+    """Remove staging leftovers of a crashed run in ``final``'s directory, once per directory.
+
+    Staging names are ``.<pid hex>-<random>.nadare-new``; the older ``<name>.nadare-new`` of
+    this member is removed too. A file whose pid is this process (another worker) or a running
+    process is left alone. The directory scan happens once per directory per process, so a
+    folder with thousands of members is not rescanned for every one of them.
+    """
+    final.with_name(final.name + ".nadare-new").unlink(missing_ok=True)
+    key = str(final.parent)
+    with _SWEPT_LOCK:
+        if key in _SWEPT_DIRS:
+            return
+        _SWEPT_DIRS.add(key)
+    try:
+        names = [entry.name for entry in os.scandir(final.parent)]
+    except OSError:
+        return
+    for name in names:
+        if not (name.startswith(".") and name.endswith(".nadare-new")):
+            continue
+        pid_text, _, _rest = name[1 : -len(".nadare-new")].partition("-")
+        try:
+            pid = int(pid_text, 16)
+        except ValueError:
+            continue
+        if pid == os.getpid():
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            (final.parent / name).unlink(missing_ok=True)
+        except OSError:
+            continue  # alive (or not ours to signal): leave it
+
+
+def _write_empty(dest: Path, relative: str) -> Path:
+    """Create an empty member through the same staging path as any other file."""
+    final, active = _staged_path(dest, relative)
+    try:
+        out = _open_staging(active)
+        out.close()
+        os.replace(active, final)
+    except BaseException:
+        try:
+            active.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return final
+
+
+def _open_staging(path: Path) -> BinaryIO:
+    """Open a fresh staging file, never through a symlink or a file planted at its name."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)
+    return os.fdopen(fd, "wb")
 
 
 def extract(

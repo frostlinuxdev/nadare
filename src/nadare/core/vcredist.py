@@ -31,9 +31,10 @@ from pathlib import Path
 from typing import Any
 
 from . import download as _net
-from . import indexfetch
+from . import indexfetch, vcunpack
 from .backends import BackendError
 from .events import Cancelled, Event
+from .graphics import has_display
 
 #: Microsoft's "Visual C++ 2015-2022 x64 Redistributable". ``aka.ms`` is a
 #: mutable redirector, so the download is accepted only when every hop stays on
@@ -82,6 +83,73 @@ def _setting(profile: dict[str, Any], key: str) -> Any:
     if isinstance(extra, dict):
         return extra.get(key)
     return None
+
+
+#: Left in the prefix when the installer ran and failed, hung or was cancelled, so the next
+#: launches do not wait for it again. Removed once the runtime is there.
+FAILED_MARKER = ".nadare-vcredist-failed"
+#: How long that marker keeps the installer from being started again after a failure or hang.
+RETRY_AFTER_FAILURE_SECONDS = 24 * 3600.0
+#: After the user cancelled the installer: short, because they may only have been impatient.
+RETRY_AFTER_CANCEL_SECONDS = 3600.0
+_CANCELLED_TEXT = "the Visual C++ installer was cancelled here\n"
+_SKIPPED_TEXT = "the Visual C++ installer was skipped here\n"
+_MARKER_TEXT = {"failed": "the Visual C++ installer failed or hung here\n",
+                "cancelled": _CANCELLED_TEXT, "skipped": _SKIPPED_TEXT}
+
+
+class StepSkipped(BackendError):
+    """The user chose Skip while the installer ran; the launch carries on without it."""
+
+
+def _skip_state(prefix: Path) -> tuple[float, str] | None:
+    """``(seconds left, kind)`` while the marker blocks a new attempt, else ``None``.
+
+    ``kind`` is ``failed`` (a hang or error), ``cancelled`` or ``skipped`` (both the user's choice).
+    """
+    if os.environ.get("NADARE_VCREDIST_RETRY"):
+        return None
+    marker = prefix / FAILED_MARKER
+    try:
+        age = time.time() - marker.stat().st_mtime
+        text = marker.read_text(errors="replace")
+    except OSError:
+        return None
+    kind = {_CANCELLED_TEXT: "cancelled", _SKIPPED_TEXT: "skipped"}.get(text, "failed")
+    wait = RETRY_AFTER_FAILURE_SECONDS if kind == "failed" else RETRY_AFTER_CANCEL_SECONDS
+    left = wait - age
+    return (left, kind) if left > 0 else None
+
+
+def _failed_recently(prefix: Path) -> float | None:
+    """Seconds left before another attempt is allowed, or ``None`` when one is."""
+    state = _skip_state(prefix)
+    return state[0] if state else None
+
+
+def _mark_failed(prefix: Path, *, kind: str = "failed") -> None:
+    if not prefix.is_dir():
+        return
+    try:
+        (prefix / FAILED_MARKER).write_text(_MARKER_TEXT[kind])
+    except OSError:
+        pass
+
+
+def _clear_failed(prefix: Path) -> None:
+    _unlink_quietly(prefix / FAILED_MARKER)
+
+
+def forget_failure(prefix: Path) -> bool:
+    """Drop a remembered skip, cancel or hang so the next launch tries the runtime step again.
+
+    Returns whether a marker was there.
+    """
+    marker = Path(prefix) / FAILED_MARKER
+    if not (marker.is_symlink() or marker.exists()):
+        return False
+    _unlink_quietly(marker)
+    return True
 
 
 def installed(prefix: Path) -> bool:
@@ -307,7 +375,10 @@ def install(
 ) -> None:
     """Download, verify and run the VC++ redistributable (may raise)."""
     emit(
-        Event("step", "Installing the Microsoft Visual C++ runtime (one time, ~25 MB)…")
+        Event(
+            "step",
+            "Downloading a Windows component (Visual C++ runtime, about 25 MB, one time)…",
+        )
     )
     cache_dir.mkdir(parents=True, exist_ok=True)
     inst = cache_dir / _INSTALLER_NAME
@@ -367,7 +438,7 @@ def install(
                 failure = e
         if failure is not None:
             raise failure
-    emit(Event("step", "Installing the Visual C++ runtime into the prefix…"))
+    seconds = max(1, int(_install_timeout()))
     # Run a private copy: the cache is writable by anything running as this user, so
     # the file that was verified must not be the one that is executed later.
     # (Under the cache, not /tmp: a Proton container may not share /tmp.)
@@ -377,24 +448,46 @@ def install(
         shutil.copyfile(inst, runnable)
         runnable.chmod(0o500)
         _verify(runnable)
-        code, timed_out = _run_with_timeout(
-            run_in_prefix, [str(runnable), "/install", "/quiet", "/norestart"]
+        if _method(profile) == "unpack" and _unpack_first(
+            runnable, prefix, run_in_prefix, private, emit
+        ):
+            return
+        emit(
+            Event(
+                "step",
+                "Installing that Windows component for this game. This normally takes a few "
+                f"seconds; after {seconds} seconds Nadare unpacks its files instead…",
+                data={"skippable": True},
+            )
         )
+        try:
+            code, timed_out, skipped = _run_with_timeout(
+                run_in_prefix, [str(runnable), "/install", "/quiet", "/norestart"], cancel
+            )
+        except Cancelled:
+            # The user gave up on the installer itself: do not start it again at the very next
+            # launch (that was a loop), but try again after a short wait.
+            _mark_failed(prefix, kind="cancelled")
+            raise
+        if (skipped or timed_out or code not in _ACCEPTED_EXIT_CODES) and _unpack_instead(
+            runnable, prefix, emit, run_in_prefix
+        ):
+            return
     finally:
         shutil.rmtree(private, ignore_errors=True)
+    if skipped:
+        raise StepSkipped("the Visual C++ installer was skipped")
     if timed_out:
-        minutes = int(_install_timeout() // 60) or 1
         raise BackendError(
-            f"the Visual C++ installer did not finish within {minutes} minute(s) and was "
-            "stopped; it will be tried again at the next launch"
+            f"the Visual C++ installer did not finish within {seconds} seconds and was stopped"
         )
     if code not in _ACCEPTED_EXIT_CODES:
         raise BackendError(f"the Visual C++ installer exited {code}")
 
 
 #: How long the redistributable may run before it is stopped (it normally takes
-#: seconds; it can sit idle forever when Wine has no display to draw on).
-INSTALL_TIMEOUT_SECONDS = 600.0
+#: seconds; it can sit idle forever, for example when Wine has no display to draw on).
+INSTALL_TIMEOUT_SECONDS = 90.0
 
 
 def _install_timeout() -> float:
@@ -487,23 +580,42 @@ def _stop_installer(proc_root: str = "/proc", *, root_pid: int | None = None) ->
 
 
 def _run_with_timeout(
-    run_in_prefix: Callable[[list[str]], int], argv: list[str]
-) -> tuple[int, bool]:
-    """Run the installer; a watchdog stops it if it outlives the time limit."""
+    run_in_prefix: Callable[[list[str]], int], argv: list[str], cancel: Any = None
+) -> tuple[int, bool, bool]:
+    """Run the installer; a watchdog stops it if it outlives the limit or the user skips it.
+
+    Returns ``(exit code, timed out, skipped)``. A skip asked before the installer started
+    (a stale click) is dropped, so it cannot kill a healthy run.
+    """
     expired = threading.Event()
+    skipped = threading.Event()
+    finished = threading.Event()
 
     def _expire() -> None:
         expired.set()
         _stop_installer()
 
+    def _watch_skip() -> None:
+        while not finished.wait(0.2):
+            if getattr(cancel, "skip_requested", False):
+                skipped.set()
+                _stop_installer()
+                return
+
+    reset = getattr(cancel, "reset_skip", None)
+    if callable(reset):
+        reset()
     timer = threading.Timer(_install_timeout(), _expire)
     timer.daemon = True
     timer.start()
+    if hasattr(cancel, "skip_requested"):
+        threading.Thread(target=_watch_skip, name="vcredist-skip", daemon=True).start()
     try:
         code = run_in_prefix(argv)
     finally:
+        finished.set()
         timer.cancel()
-    return code, expired.is_set()
+    return code, expired.is_set(), skipped.is_set()
 
 
 def ensure(
@@ -521,6 +633,7 @@ def ensure(
     verify_fn: Callable[[Path], None] | None = None,
     download_fn: Callable[[str, Path, Path], None] | None = None,
     install_fn: Callable[[], None] | None = None,
+    display_fn: Callable[[], bool] | None = None,
 ) -> None:
     """Best-effort VC++ runtime install; never aborts the caller.
 
@@ -529,6 +642,33 @@ def ensure(
     propagates. File contents are never logged.
     """
     if installed(prefix):
+        _clear_failed(prefix)
+        return
+    state = _skip_state(prefix)
+    if state is not None:
+        left, kind = state
+        if kind != "failed":
+            what = "cancelled" if kind == "cancelled" else "skipped"
+            message = (
+                f"Skipping the Windows component (Visual C++ runtime) because you {what} it. "
+                f"Nadare tries again in about {int(left // 60) + 1} min."
+            )
+        else:
+            message = (
+                "Skipping the Windows component (Visual C++ runtime): it did not finish last "
+                f"time. Nadare tries again in about {int(left // 3600) + 1} h."
+            )
+        emit(Event("status", message))
+        return
+    if not (display_fn or has_display)():
+        emit(
+            Event(
+                "status",
+                "Skipping the Windows component (Visual C++ runtime): no screen is available "
+                "to run its installer. It is installed on the next launch from a desktop "
+                "session.",
+            )
+        )
         return
     if install_fn is None:
 
@@ -552,22 +692,155 @@ def ensure(
         install_fn()
     except Cancelled:
         raise
+    except StepSkipped:
+        _mark_failed(prefix, kind="skipped")
+        emit(
+            Event(
+                "status",
+                "Skipped the Windows component (Visual C++ runtime). The game should still "
+                "start but may stutter. Nadare asks again in about "
+                f"{int(RETRY_AFTER_CANCEL_SECONDS // 60)} min.",
+            )
+        )
+        return
     except BackendError as e:
         reason = e.message
+        if reason != _VERIFY_FAILED:
+            _mark_failed(prefix)  # the installer ran (or could not run): do not wait again
     except OSError:
-        reason = "download failed"
+        reason = "download failed"  # transient: not remembered
     except Exception:  # noqa: BLE001 - an optimisation must never abort
         reason = "install failed"
+        _mark_failed(prefix)
     else:
+        _clear_failed(prefix)
         return
     emit(
         Event(
             "status",
             reason
             if reason == _VERIFY_FAILED
-            else f"Visual C++ runtime not installed ({reason}): the game may stutter",
+            else "The Windows component (Visual C++ runtime) could not be installed "
+            f"({reason}), so Nadare skipped it. The game should still start but may stutter.",
         )
     )
+
+
+#: How long importing the registry keys may take; it is a nicety, never worth a hang.
+REGISTRY_IMPORT_TIMEOUT = 30.0
+_METHODS = ("unpack", "installer")
+
+
+def _method(profile: dict[str, Any]) -> str:
+    """``unpack`` (default: copy the DLLs out of the redistributable) or ``installer``.
+
+    ``NADARE_VCREDIST_METHOD`` beats the profile's ``vcredist_method``; anything else is the
+    default. ``installer`` runs Microsoft's installer first (unpacking stays its fallback).
+    """
+    value = str(
+        os.environ.get("NADARE_VCREDIST_METHOD") or _setting(profile, "vcredist_method") or ""
+    )
+    value = value.strip().lower()
+    return value if value in _METHODS else "unpack"
+
+
+def _register_runtime(
+    prefix: Path, run_in_prefix: Callable[[list[str]], int], scratch: Path
+) -> None:
+    """Import the registry keys the real installer writes, after the DLLs are in place.
+
+    Best effort: the DLLs are what matter, so a failure or a stuck ``regedit`` is only logged.
+    A user Cancel is honoured.
+    """
+    version = vcunpack.runtime_version(prefix)
+    if version is None:
+        return
+    reg = Path(scratch) / "vcruntime.reg"
+    try:
+        reg.write_text(vcunpack.registry_text(version), encoding="utf-8")
+    except OSError:
+        return
+    argv = ["regedit", "/S", "Z:" + str(reg).replace("/", "\\")]
+    outcome: dict[str, Any] = {}
+
+    def work() -> None:
+        try:
+            outcome["code"] = run_in_prefix(argv)
+        except BaseException as exc:  # noqa: BLE001 - reported on the caller's thread below
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=work, name="vcredist-regedit", daemon=True)
+    worker.start()
+    worker.join(REGISTRY_IMPORT_TIMEOUT)
+    if worker.is_alive():
+        log.warning("importing the Visual C++ registry keys took too long; carrying on")
+        return
+    error = outcome.get("error")
+    if isinstance(error, Cancelled):
+        raise error
+    if error is not None or outcome.get("code") not in (0, None):
+        log.warning("could not import the Visual C++ registry keys (%r)", error or outcome)
+
+
+def _unpack_first(
+    installer: Path,
+    prefix: Path,
+    run_in_prefix: Callable[[list[str]], int],
+    scratch: Path,
+    emit: Callable[[Event], None],
+) -> bool:
+    """Set the runtime up by unpacking the verified installer; False leaves it to the installer."""
+    try:
+        copied = vcunpack.unpack(installer, prefix)
+    except vcunpack.UnpackError as exc:
+        log.info("Visual C++ runtime: cannot unpack, using the installer (%s)", exc)
+        return False
+    except Exception:  # noqa: BLE001 - the installer is the fallback
+        log.exception("unpacking the Visual C++ runtime failed unexpectedly")
+        return False
+    _register_runtime(prefix, run_in_prefix, scratch)
+    log.info("Visual C++ runtime unpacked (%d file(s))", len(copied))
+    emit(
+        Event(
+            "status",
+            "Set up the Windows component (Visual C++ runtime) by unpacking its files, which "
+            "is quick and cannot hang. The game should work as normal.",
+        )
+    )
+    return True
+
+
+def _unpack_instead(
+    installer: Path,
+    prefix: Path,
+    emit: Callable[[Event], None],
+    run_in_prefix: Callable[[list[str]], int] | None = None,
+) -> bool:
+    """After a hang, a skip or a failed run: copy the runtime's DLLs out of the verified installer.
+
+    The installer is only a container of plain files, so this gives Wine the same real runtime
+    without running any of it. Returns whether it worked; any failure leaves the caller's
+    original outcome (skip, timeout, exit code) to stand.
+    """
+    try:
+        copied = vcunpack.unpack(installer, prefix)
+    except vcunpack.UnpackError as exc:
+        log.warning("could not unpack the Visual C++ runtime instead: %s", exc)
+        return False
+    except Exception:  # noqa: BLE001 - a fallback must never hide the real outcome
+        log.exception("unpacking the Visual C++ runtime failed unexpectedly")
+        return False
+    log.info("Visual C++ runtime unpacked instead of installed (%d file(s))", len(copied))
+    if run_in_prefix is not None:
+        _register_runtime(prefix, run_in_prefix, installer.parent)
+    emit(
+        Event(
+            "status",
+            "The Windows component (Visual C++ runtime) did not install the usual way, so "
+            "Nadare unpacked its files instead. The game should work as normal.",
+        )
+    )
+    return True
 
 
 def _sha256_file(path: Path) -> str:
@@ -591,8 +864,10 @@ __all__ = [
     "VCREDIST_INDEX_MAX_HASHES",
     "VCREDIST_SHA256",
     "VCREDIST_URL",
+    "StepSkipped",
     "download",
     "ensure",
+    "forget_failure",
     "index_pins",
     "index_source",
     "install",

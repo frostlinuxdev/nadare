@@ -29,6 +29,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from ..core import process
 from ..core.backends import BackendError, GameBackend, Option, Status
 from ..core.events import Event, mask
 from .wine import (
@@ -243,7 +244,7 @@ class SteamBackend(GameBackend):
         self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
         return stream(
             argv,
-            dict(os.environ),
+            process.child_environ(),
             on_line=lambda line: self.info(mask(line)),
             cancel=self.ctx.cancel,
             stop_wine=False,
@@ -263,7 +264,13 @@ class SteamBackend(GameBackend):
         if profile_setting(self.ctx.profile, "stop_steam"):
             try:
                 client = self._client()
-                subprocess.run([*client, "-shutdown"], capture_output=True, timeout=20, check=False)
+                subprocess.run(
+                    [*client, "-shutdown"],
+                    env=process.child_environ(),
+                    capture_output=True,
+                    timeout=20,
+                    check=False,
+                )
             except (BackendError, OSError, subprocess.TimeoutExpired):
                 pass
 

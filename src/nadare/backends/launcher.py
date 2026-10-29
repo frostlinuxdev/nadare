@@ -24,7 +24,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ..core import endfield_shim, graphics, sevenzip
+from ..core import endfield_shim, graphics, process, sevenzip
 from ..core.backends import BackendError, BackendUnsupported, Option
 from ..core.events import Event
 from ..core.nte_launcher import INSTALLER_URL
@@ -72,6 +72,7 @@ def _extract_nsis(
         outdir.mkdir(parents=True, exist_ok=True)
         result = run(
             [sevenz, "x", "-tNsis", "-y", f"-o{outdir}", str(installer)],
+            env=process.child_environ(),
             capture_output=True,
             text=True,
             errors="replace",

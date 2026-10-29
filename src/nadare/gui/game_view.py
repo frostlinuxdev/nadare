@@ -127,6 +127,14 @@ _BANNER_H = 110
 #: A second click right after a button turns into CANCEL must not cancel the new job.
 _CANCEL_GRACE_S = 0.5
 
+#: A game that exits non-zero after at least this long had a real session; a quicker
+#: non-zero exit is a failed launch. Stop-requested signal codes are always normal.
+_LAUNCH_EXIT_GRACE_S = 30.0
+
+#: Exit codes from being stopped by a signal (SIGINT, SIGKILL, SIGTERM), shell and raw form.
+#: A crash signal (SIGSEGV, SIGABRT...) is not in here: that is a failed launch.
+_STOPPED_EXIT_CODES = frozenset({130, 137, 143, -2, -9, -15})
+
 #: Operations whose success makes the status shown before them out of date.
 _STATE_CHANGING = frozenset({"install", "update", "repair", "remake_prefix", "uninstall"})
 
@@ -565,6 +573,7 @@ class GameView(QWidget):
 
     action_requested = pyqtSignal(str)  # operation name
     cancel_requested = pyqtSignal()
+    skip_step_requested = pyqtSignal()
     pause_requested = pyqtSignal()
     resume_requested = pyqtSignal()
     back_requested = pyqtSignal()
@@ -595,6 +604,7 @@ class GameView(QWidget):
         self._primary_grace_until = 0.0
         self._news_shown = False  # intended news visibility (hidden while busy)
         self._started_at = 0.0
+        self._last_step_at = 0.0  # last phase step; play time is counted from it
         self._console_expanded = True
         self.news_columns = 1
         self._profile_seq = 0
@@ -836,6 +846,16 @@ class GameView(QWidget):
         self.step_label.setObjectName("Hint")
         self.step_label.setWordWrap(True)
         step_row.addWidget(self.step_label, 1)
+        self.skip_button = QPushButton("Skip this step")
+        self.skip_button.setObjectName("GhostButton")
+        self.skip_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.skip_button.setToolTip(
+            "Stops the installer and unpacks the component's files instead. "
+            "The launch carries on."
+        )
+        self.skip_button.setHidden(True)
+        self.skip_button.clicked.connect(self._on_skip_clicked)
+        step_row.addWidget(self.skip_button, 0, Qt.AlignmentFlag.AlignRight)
         self.elapsed_label = QLabel("")
         self.elapsed_label.setObjectName("Muted")
         step_row.addWidget(self.elapsed_label, 0, Qt.AlignmentFlag.AlignRight)
@@ -921,6 +941,7 @@ class GameView(QWidget):
         # set_busy below when the *new* profile is itself running an operation.
         self._timer.stop()
         self._started_at = 0.0
+        self._last_step_at = 0.0
         self._busy_op = None
         self._paused_op = None
         self._awaiting_status = False
@@ -1188,6 +1209,7 @@ class GameView(QWidget):
         self._primary_grace_until = time.monotonic() + _CANCEL_GRACE_S
         self.news_frame.setVisible(False)
         self._started_at = time.time()
+        self._last_step_at = 0.0
         # Remove sends no progress events: show the busy animation, not a dead 0%.
         self.progress.setRange(0, 0 if operation == "remove" else 100)
         self.progress.setVisible(operation != "launch")
@@ -1208,8 +1230,14 @@ class GameView(QWidget):
         self._set_console_expanded(True)
         self._refresh_actions()
 
+    def _on_skip_clicked(self) -> None:
+        # Hide first: a second click must not skip whatever step comes next.
+        self.skip_button.setHidden(True)
+        self.skip_step_requested.emit()
+
     def _clear_busy_progress(self) -> None:
         """Return the progress area to its idle shape when an operation ends."""
+        self.skip_button.setHidden(True)
         self.progress.setRange(0, 100)  # never leave the busy animation running
         self.progress.setValue(0)
         self.progress.setVisible(False)
@@ -1223,6 +1251,13 @@ class GameView(QWidget):
         """Stop the clock and report the result."""
         from .workers import BACKGROUND
 
+        # Snapshot what ended before clearing the busy state: whether STOP was
+        # requested while the game ran, and how long it ran for.
+        stop_requested = self._busy_op == "stop"
+        # Preparation (runner download, prefix setup) is not play time: count from the
+        # last phase step, which a launch emits right before it starts the game.
+        since = self._last_step_at or self._started_at
+        elapsed = time.time() - since if since else 0.0
         # A background refresh ending must not drop a pause on this page.
         if operation not in BACKGROUND:
             self._paused_op = None
@@ -1235,9 +1270,19 @@ class GameView(QWidget):
         self._awaiting_status = exit_code == 0 and operation in _STATE_CHANGING
         self._restore_badge()
         self._refresh_actions()
-        if operation == "launch" and exit_code == 0:
-            self._append_line("game exited normally", "done")
-            return
+        if operation == "launch":
+            if exit_code == 0:
+                self._append_line("game exited normally", "done")
+                return
+            # Many Wine/Proton games and launchers exit non-zero on quit, and
+            # STOP ends them with a signal code. Neither is a failed launch.
+            if (
+                stop_requested
+                or exit_code in _STOPPED_EXIT_CODES
+                or elapsed >= _LAUNCH_EXIT_GRACE_S
+            ):
+                self._append_line(f"Game closed (exit code {exit_code})", "status")
+                return
         if exit_code != 0:
             self.show_error(
                 "Operation failed",
@@ -1309,7 +1354,11 @@ class GameView(QWidget):
     # ---- events ------------------------------------------------------------
     def append_event(self, event: Event) -> None:
         kind = event.kind
+        if kind in ("step", "status", "done", "error"):
+            # Only a step that says so can be skipped, and only until the next step or the end.
+            self.skip_button.setHidden(not (kind == "step" and (event.data or {}).get("skippable")))
         if kind == "step":
+            self._last_step_at = time.time()
             self.step_label.setText(event.message or "")
             data = event.data or {}
             png = data.get("png")

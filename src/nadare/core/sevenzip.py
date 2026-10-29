@@ -11,7 +11,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
-from . import paths
+from . import paths, process
 
 BUNDLED = Path(__file__).parents[1] / "assets" / "7zzs"
 _SYSTEM_NAMES = ("7z", "7zz", "7za")
@@ -69,7 +69,13 @@ def find(
         return None
     try:
         if source.stat().st_mode & 0o111:
-            run([str(source), "-h"], capture_output=True, check=False, timeout=5)
+            run(
+                [str(source), "-h"],
+                env=process.child_environ(),
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
             return str(source)
     except (OSError, subprocess.SubprocessError):
         pass

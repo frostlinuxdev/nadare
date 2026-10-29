@@ -14,6 +14,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+from PyQt6 import sip
 from PyQt6.QtCore import QObject, Qt, QThreadPool, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -174,12 +175,17 @@ class SettingsPage(QWidget):
         self._files_form: QFormLayout | None = None
         self._install_dir_row = -1
         self._prefix_lock_note: QLabel | None = None
+        self._backup_label: QLabel | None = None
+        self._backup_button: QPushButton | None = None
         # Rebuilt with the options form (the old one is deleted with its page).
         self.relink_button = self._make_relink_button()
         self.move_button = self._make_move_button()
         self._moving = False
+        self._move_running = False
         self._game_idle = False  # known idle only after a successful status probe
         self._prefix_lock_generation = 0
+        self._pending_relink: tuple[Config, str, relink_core.Relink, str] | None = None
+        self._probed_prefix = ""  # where Nadare says the prefix is (the page may have none set)
         self._fetch_button: QPushButton | None = None
         self._pending_art: dict[str, str] = {}
         self._loaded_state: dict[str, Any] | None = None
@@ -629,6 +635,8 @@ class SettingsPage(QWidget):
         self._option_free = {}
         self._option_browse = {}
         self._prefix_lock_note = None
+        self._backup_label = None
+        self._backup_button = None
         self.relink_button = self._make_relink_button()
         self.move_button = self._make_move_button()
         options = self._backend_options(kind)
@@ -706,6 +714,18 @@ class SettingsPage(QWidget):
             self._prefix_lock_note.setWordWrap(True)
             self._prefix_lock_note.setVisible(False)
             layout.addWidget(self._prefix_lock_note)
+            self._backup_label = QLabel("")
+            self._backup_label.setObjectName("Muted")
+            self._backup_label.setWordWrap(True)
+            self._backup_label.setVisible(False)
+            self._backup_button = QPushButton("Delete old backup")
+            self._backup_button.setObjectName("GhostButton")
+            self._backup_button.setVisible(False)
+            self._backup_button.clicked.connect(self._delete_old_backup)
+            backup_row = QHBoxLayout()
+            backup_row.addWidget(self._backup_label, 1)
+            backup_row.addWidget(self._backup_button)
+            layout.addLayout(backup_row)
             self.relink_button = self._make_relink_button()
             self.move_button = self._make_move_button()
             row = QHBoxLayout()
@@ -777,6 +797,7 @@ class SettingsPage(QWidget):
         """
         self._prefix_lock_generation += 1
         self._game_idle = False  # unknown until this profile's probe answers
+        self._probed_prefix = ""
         if not has_wine_prefix or self._config is None or not self._profile:
             self._set_prefix_locked(False)
             return
@@ -808,6 +829,9 @@ class SettingsPage(QWidget):
             return
         state = getattr(status, "state", "")
         self._game_idle = state != "running"
+        data = getattr(status, "data", None)
+        # A profile with no prefix key uses a folder of Nadare's own; the status knows where.
+        self._probed_prefix = str(data.get("prefix") or "") if isinstance(data, dict) else ""
         self._set_prefix_locked(state in ("installed", "running"))
 
     def _set_prefix_locked(self, locked: bool, note: str | None = None) -> None:
@@ -838,6 +862,55 @@ class SettingsPage(QWidget):
             "Nothing is copied or deleted."
         )
 
+    def _first_deletable_backup(self, name: str) -> Path | None:
+        """The first recorded backup the removal dialog would also let the user delete."""
+        if self._config is None or name not in self._config.profiles:
+            return None
+        from ..core import removal
+
+        for tree in removal.removable_trees(self._config, name):
+            if tree.key.startswith("prefix_backup") and tree.safe:
+                return tree.path
+        return None
+
+    def _refresh_backup_row(self, data: dict[str, Any] | None = None) -> None:
+        """Show the first recorded rebuild backup that can really be deleted, if any."""
+        if self._backup_label is None or self._backup_button is None:
+            return
+        found = self._first_deletable_backup(self._profile)
+        self._backup_label.setText(f"Old prefix backup: {found}" if found else "")
+        self._backup_label.setVisible(found is not None)
+        self._backup_button.setVisible(found is not None)
+
+    def _delete_old_backup(self) -> None:
+        """Delete one recorded old prefix, after confirmation, from the prefix field."""
+        config, name = self._config, self._profile
+        if config is None or not name or name not in config.profiles:
+            return
+        target = self._first_deletable_backup(name)
+        if target is None:
+            self._refresh_backup_row()
+            return
+        answer = QMessageBox.question(
+            self,
+            "Delete old backup",
+            f"Permanently delete the old prefix backup at {target}?\n\n"
+            "This cannot be undone.",
+            QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        from ..core import prefixmove
+
+        try:
+            prefixmove.delete_backup(config, name, target)
+        except (prefixmove.PrefixMoveError, OSError) as exc:
+            QMessageBox.warning(self, "Delete old backup", str(exc))
+            return
+        self.note.setText(f"Deleted old prefix backup {target}")
+        self._refresh_backup_row()
+
     def _make_relink_button(self) -> QPushButton:
         button = QPushButton("I moved it myself — use the new location…")
         button.setAutoDefault(False)
@@ -856,29 +929,87 @@ class SettingsPage(QWidget):
         if not chosen:
             return
         try:
-            plan = relink_core.plan_relink(data, chosen)
+            plan = relink_core.plan_relink(data, chosen, name=name, profiles=config.profiles)
         except relink_core.RelinkError as exc:
             QMessageBox.warning(self, "Wine prefix", str(exc))
             return
-        answer = QMessageBox.question(
-            self,
-            "Use the new location?",
-            f"Nadare will use {chosen} as this game's Wine prefix from now on. "
-            "Nothing is copied, moved or deleted.",
+        message = (
+            f"Nadare will use {plan.changes['prefix']} as this game's Wine prefix from now on. "
+            "Nothing is copied, moved or deleted."
         )
+        details = [*plan.notes, *plan.warnings]
+        if details:
+            message += "\n\n" + "\n".join(details)
+        answer = QMessageBox.question(self, "Use the new location?", message)
         if answer != QMessageBox.StandardButton.Yes:
             return
-        if self._commit_relink(config, name, plan):
-            self.note.setText(f"Now using {chosen}")
+        if plan.sibling_install:
+            follow = QMessageBox.question(
+                self,
+                "Game folder",
+                f"The game folder seems to be at {plan.sibling_install} now. "
+                "Use it as this game's folder too?",
+            )
+            if follow == QMessageBox.StandardButton.Yes:
+                plan = relink_core.follow_install(data, plan, plan.sibling_install)
+        # The page's idea of "not running" may be minutes old, or the game may have been started
+        # outside Nadare since: ask once more, off the GUI thread, and only then save.
+        self.relink_button.setEnabled(False)
+        self._pending_relink = (config, name, plan, chosen)
+
+        def probe() -> object:
+            try:
+                return getattr(create_backend(name, config).status(), "state", "")
+            except Exception:  # noqa: BLE001 - unknown means do not relink
+                return None
+
+        task = CallTask(probe)
+        # A bound method, so Qt drops the connection if the page is destroyed meanwhile.
+        task.signals.done.connect(self._on_relink_probe)
+        QThreadPool.globalInstance().start(task)
+
+    def _on_relink_probe(self, state: object) -> None:
+        """Finish a relink once the game's state is known right now."""
+        pending, self._pending_relink = self._pending_relink, None
+        if pending is None:
+            return
+        config, name, plan, chosen = pending
+        if state is None:
+            self.relink_button.setEnabled(self._game_idle)
+            QMessageBox.warning(
+                self,
+                "Wine prefix",
+                "Could not check whether the game is running, so Nadare did not change where "
+                "its Wine prefix is.",
+            )
+            return
+        if state == "running":
+            self._game_idle = False
+            self._set_prefix_locked(True)  # the buttons follow: both stay off while it runs
+            QMessageBox.warning(self, "Wine prefix", "The game is running. Close it first.")
+            return
+        self.relink_button.setEnabled(self._game_idle)
+        lock = process_core.OperationLock(name)
+        try:
+            lock.acquire()
+        except process_core.ProfileLockError:
+            QMessageBox.warning(self, "Wine prefix", process_core.OPERATION_BUSY.format(name=name))
+            return
+        try:
+            if self._commit_relink(config, name, plan):
+                self.note.setText(f"Now using {chosen}")
+        finally:
+            lock.release()
 
     def _commit_relink(self, config: Config, name: str, plan: relink_core.Relink) -> bool:
         """Save ``plan`` into profile ``name``; False if it could not be saved.
 
         The profile is passed in, never read from the page: a move finishes minutes after it
-        started and the page may show another game by then.
+        started and the page may show another game, or no page at all, by then.
         """
         if name not in config.profiles:
             return False
+        alive = not sip.isdeleted(self)
         data = config.profiles[name]
         backup = copy.deepcopy(data)
         try:
@@ -889,16 +1020,19 @@ class SettingsPage(QWidget):
             with config.locked():
                 data.clear()
                 data.update(backup)
-            QMessageBox.critical(self, "Settings", f"Could not save config: {exc}")
+            QMessageBox.critical(
+                self if alive else None, "Settings", f"Could not save config: {exc}"
+            )
             return False
-        if config is self._config and name == self._profile:
-            editor = self._option_widgets.get("prefix")
-            if isinstance(editor, QLineEdit):
-                editor.setText(str(plan.changes["prefix"]))
-            if "install_dir" in plan.changes:
-                self.install_dir.setText(str(plan.changes["install_dir"]))
-            self._loaded_state = self._form_state()
-        self.saved.emit(name)
+        if alive:
+            if config is self._config and name == self._profile:
+                editor = self._option_widgets.get("prefix")
+                if isinstance(editor, QLineEdit):
+                    editor.setText(str(plan.changes["prefix"]))
+                if "install_dir" in plan.changes:
+                    self.install_dir.setText(str(plan.changes["install_dir"]))
+                self._loaded_state = self._form_state()
+            self.saved.emit(name)
         return True
 
     def _make_move_button(self) -> QPushButton:
@@ -915,8 +1049,30 @@ class SettingsPage(QWidget):
             return
         if not self._game_idle or self._moving:
             return
+        self._moving = True  # also covers the dialogs below: a second click must not start a move
+        self.move_button.setEnabled(False)
+        if not self._ask_and_run_move(config, name):
+            self._moving = False
+            self.move_button.setEnabled(self._game_idle)
+
+    def _ask_and_run_move(self, config: Config, name: str) -> bool:
+        """Check, ask, then start the move; True once it is running."""
         data = config.profiles[name]
-        old = Path(str(data.get("prefix") or "")).expanduser()
+        if not data.get("prefix"):
+            where = (
+                f"Nadare is using its own folder, {self._probed_prefix}. "
+                if self._probed_prefix
+                else ""
+            )
+            QMessageBox.warning(
+                self,
+                "Wine prefix",
+                "This game has no prefix set, so there is nothing to move. "
+                f"{where}Use \"I moved it myself\" and pick that folder to give the game a "
+                "location of its own, then Move will work.",
+            )
+            return False
+        old = Path(str(data.get("prefix"))).expanduser()
         if not old.is_dir():
             QMessageBox.warning(
                 self,
@@ -924,29 +1080,72 @@ class SettingsPage(QWidget):
                 f"{old} was not found. If you moved it yourself, use "
                 "\"I moved it myself\" instead.",
             )
-            return
+            return False
+        try:
+            relink_core.check_movable(data)
+        except relink_core.RelinkError as exc:
+            QMessageBox.warning(self, "Wine prefix", str(exc))
+            return False
+        home = relink_core.managed_home(data)
+        if home is not None:
+            return self._ask_and_move_home(config, name, home)
         parent = QFileDialog.getExistingDirectory(
             self, "Move the Wine prefix into which folder?", str(old.parent)
         )
         if not parent:
-            return
+            return False
         dst = Path(parent) / old.name
-        answer = QMessageBox.question(
-            self,
-            "Move the Wine prefix?",
+        message = (
             f"Move {old} to {dst}?\n\nOn the same disk this is instant. On another disk "
             "Nadare copies it, checks the copy, and keeps your original, so you can delete "
-            "it yourself when you are happy. Nothing is deleted.",
+            "it yourself when you are happy. Nothing is deleted."
+        )
+        install = str(data.get("install_dir") or "")
+        if install and not relink_core.is_inside(Path(install).expanduser(), old):
+            message += f"\n\nOnly the Wine prefix moves; the game folder stays at {install}."
+        answer = QMessageBox.question(self, "Move the Wine prefix?", message)
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        self._run_move(config, name, old, dst)
+        return True
+
+    def _ask_and_move_home(self, config: Config, name: str, home: Path) -> bool:
+        """Move a game Nadare laid out as ``<library>/Nadare/<Game>`` as one unit."""
+        data = config.profiles[name]
+        library = QFileDialog.getExistingDirectory(
+            self, "Move the game into which folder?", str(home.parent.parent)
+        )
+        if not library:
+            return False
+        try:
+            relink_core.check_home_target(data, library, name=name, profiles=config.profiles)
+        except relink_core.RelinkError as exc:
+            QMessageBox.warning(self, "Move the game", str(exc))
+            return False
+        dst = relink_core.free_home(library, home.name, config.profiles)
+        answer = QMessageBox.question(
+            self,
+            "Move the game?",
+            f"Move {home} to {dst}?\n\nThe game folder and its Wine prefix move together. "
+            "On the same disk this is instant. On another disk Nadare copies them, checks the "
+            "copy, and keeps your original, so you can delete it yourself when you are happy. "
+            "Nothing is deleted.",
         )
         if answer != QMessageBox.StandardButton.Yes:
-            return
-        self._run_move(config, name, old, dst)
+            return False
+        self._run_move(config, name, home, dst, managed=True)
+        return True
 
-    def _run_move(self, config: Config, name: str, old: Path, dst: Path) -> None:
+    def _run_move(
+        self, config: Config, name: str, old: Path, dst: Path, *, managed: bool = False
+    ) -> None:
         from PyQt6.QtWidgets import QProgressDialog
 
         from ..core.events import Cancel
 
+        if self._move_running:
+            return
+        self._move_running = True
         cancel = Cancel()
         signals = _MoveSignals(self)
         dialog = QProgressDialog("Moving the Wine prefix…", "Cancel", 0, 100, self)
@@ -974,6 +1173,17 @@ class SettingsPage(QWidget):
                     process_core.OPERATION_BUSY.format(name=name)
                 ) from None
             try:
+                # The page's idea of "not running" may be minutes old: ask again right now.
+                try:
+                    state = getattr(create_backend(name, config).status(), "state", "")
+                except Exception as exc:  # noqa: BLE001 - unknown means do not move
+                    raise relocate_core.RelocateError(
+                        f"Could not check whether the game is running ({exc})."
+                    ) from None
+                if state == "running":
+                    raise relocate_core.RelocateError(
+                        "The game is running. Close it first."
+                    )
                 return relocate_core.move_tree(
                     old, dst, cancel=cancel, progress=lambda d, t: signals.progress.emit(d, t)
                 )
@@ -982,31 +1192,48 @@ class SettingsPage(QWidget):
 
         task = CallTask(work)
 
-        def finish() -> None:
+        def finish() -> bool:
+            """Reset the state; False when the page is gone (nothing on it may be touched)."""
             self._moving = False
+            self._move_running = False
+            if sip.isdeleted(self):
+                return False
             dialog.canceled.disconnect()  # closing the dialog would otherwise count as Cancel
             dialog.close()
             dialog.deleteLater()
             signals.deleteLater()
             self.move_button.setEnabled(self._game_idle)
+            return True
 
         def done(result: object) -> None:
-            finish()
+            alive = finish()
+            parent = self if alive else None
             if name not in config.profiles:
                 QMessageBox.warning(
-                    self,
+                    parent,
                     "Wine prefix",
                     f"The game was removed while it moved. Its folder is now {dst}.",
                 )
                 return
+            stuck = (
+                f"Nadare moved the folder to {dst} but could not update the game. Use "
+                "\"I moved it myself\" in the game's Settings and pick "
+                f"{dst / 'prefix' if managed else dst}."
+            )
             try:
-                plan = relink_core.plan_relink(
-                    config.profiles[name], dst, made_by_nadare=True
-                )
+                if managed:
+                    plan = relink_core.plan_home_move(config.profiles[name], dst)
+                else:
+                    plan = relink_core.plan_relink(
+                        config.profiles[name], dst, made_by_nadare=True
+                    )
             except relink_core.RelinkError as exc:
-                QMessageBox.warning(self, "Wine prefix", str(exc))
+                QMessageBox.warning(parent, "Wine prefix", f"{exc}\n\n{stuck}")
                 return
             if not self._commit_relink(config, name, plan):
+                QMessageBox.warning(parent, "Wine prefix", stuck)
+                return
+            if not alive:
                 return
             kept = getattr(result, "kept_old", None)
             if kept is not None:
@@ -1019,7 +1246,8 @@ class SettingsPage(QWidget):
             self.note.setText(f"Moved to {dst}")
 
         def failed(message: str) -> None:
-            finish()
+            if not finish():
+                return
             if cancel.cancelled:
                 self.note.setText("Move cancelled; nothing was changed.")
                 return
@@ -1199,6 +1427,7 @@ class SettingsPage(QWidget):
         self.background.setText(str(data.get("custom_background") or ""))
         self._load_options(kind, data)
         self._update_free_hints()
+        self._refresh_backup_row(data)
         if self._files_form is not None:
             self._files_form.setRowVisible(
                 self._remake_prefix_row, kind in runners_core.PROTON_DEFAULT_BACKENDS

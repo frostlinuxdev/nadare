@@ -22,9 +22,7 @@ def _config(tmp_path: Path, *profiles: tuple[str, dict]) -> tuple[Config, Path]:
     return cfg, path
 
 
-def test_remove_missing_install_dir_keeps_profile_and_says_nothing_was_deleted(
-    tmp_path, capsys
-) -> None:
+def test_remove_missing_install_dir_keeps_the_profile(tmp_path, capsys) -> None:
     _, path = _config(tmp_path, ("gone", {"backend": "wine"}))
 
     code = app.run_cli(["-c", str(path), "remove", "-p", "gone", "--yes", "--delete-install-dir"])
@@ -32,7 +30,7 @@ def test_remove_missing_install_dir_keeps_profile_and_says_nothing_was_deleted(
     out = capsys.readouterr().out
     assert code != 0
     assert "no configured install folder was found" in out
-    assert "nothing was deleted" in out
+    assert "it was kept" in out
     assert "removed gone" not in out
     assert "gone" in Config.load(path).profiles
 

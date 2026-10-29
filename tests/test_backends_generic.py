@@ -490,7 +490,7 @@ class TestWineVcredist:
         monkeypatch.setattr(wine_mod, "stream", lambda *a, **k: 0)
         monkeypatch.setattr("urllib.request.urlopen", _offline)
         assert backend.launch() == 0
-        assert any(e.kind == "status" and "not installed" in e.message for e in events)
+        assert any(e.kind == "status" and "skipped it" in e.message for e in events)
 
 
 def test_stream_cancel_non_wine_does_not_stop_wineserver(monkeypatch) -> None:

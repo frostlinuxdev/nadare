@@ -77,9 +77,25 @@ class Cancel:
 
     def __init__(self) -> None:
         self._cancelled = False
+        self._skip = False
 
     def cancel(self) -> None:
         self._cancelled = True
+
+    def skip_step(self) -> None:
+        """Ask the running step to stop on its own while the operation carries on.
+
+        Unlike :meth:`cancel` this never aborts the operation; only a step that offers a skip
+        (it says so with ``data={"skippable": True}``) looks at it.
+        """
+        self._skip = True
+
+    @property
+    def skip_requested(self) -> bool:
+        return self._skip
+
+    def reset_skip(self) -> None:
+        self._skip = False
 
     @property
     def cancelled(self) -> bool:

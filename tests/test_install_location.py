@@ -73,17 +73,18 @@ def test_folder_moves_default_prefix_and_two_games_are_distinct(tmp_path, qapp):
 def test_advanced_prefix_stops_following_and_persists(tmp_path, qapp):
     d = dialog(tmp_path, qapp)
     try:
+        custom = str(tmp_path / "custom-prefix")
         d.location_toggle.click()
         d.prefix_toggle.click()
         assert not d.prefix_row.isHidden()
-        d.prefix.setText("/custom/prefix")
+        d.prefix.setText(custom)
         d.prefix.textEdited.emit(d.prefix.text())
         d.prefix_toggle.click()
         assert d.prefix_row.isHidden()
-        d.set_install_dir("/other/game")
-        assert d.prefix.text() == "/custom/prefix"
+        d.set_install_dir(str(tmp_path / "other-game"))
+        assert d.prefix.text() == custom
         assert d.create_profile() == "wine-proton-game"
-        assert d.config.profile("wine-proton-game")["prefix"] == "/custom/prefix"
+        assert d.config.profile("wine-proton-game")["prefix"] == custom
     finally:
         d.close()
 
@@ -117,6 +118,7 @@ def test_import_and_prefix_only_layouts_remain_unchanged(tmp_path, qapp):
         assert czn.folder_label.text() == "Game folder"
         assert not czn.prefix_row.isHidden()  # prefix-only location is the game folder
         assert czn.prefix_summary.isHidden() and czn.prefix_toggle.isHidden()
+        assert not czn.prefix_only_summary.isHidden()  # CZN's own line says where it goes
     finally:
         czn.close()
 

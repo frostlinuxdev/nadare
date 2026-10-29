@@ -81,6 +81,21 @@ def _catalog_rows() -> list[tuple[str, str, str, str]]:
     ]
 
 
+def unavailable_games() -> list[tuple[str, str]]:
+    """Catalog kinds this build could not load, as ``(kind, title)`` pairs.
+
+    A kind the build leaves out on purpose is not a fault: optional backends and
+    games hidden by ``NADARE_HIDE_HOYO`` are ignored, as are builtins outside the
+    store catalog.
+    """
+    unavailable = set(backends.unavailable()) - backends.OPTIONAL_KINDS
+    if not hoyo_visible():
+        unavailable -= HOYO_KINDS
+    return [
+        (kind, title) for kind, title, _delivery, _tier in _catalog_rows() if kind in unavailable
+    ]
+
+
 def entries(
     *,
     installed_kinds: frozenset[str] = frozenset(),
@@ -166,4 +181,4 @@ def game_of(kind: str, *, installed_kinds: frozenset[str] = frozenset()) -> Stor
     return None
 
 
-__all__ = ["StoreEntry", "StoreGame", "entries", "game_of", "store_games"]
+__all__ = ["StoreEntry", "StoreGame", "entries", "game_of", "store_games", "unavailable_games"]

@@ -25,7 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...core import hosting, paths
+from ...core import hosting, paths, process
 from ...core.download import IntegrityError, download, hash_file
 from ...core.events import Cancel, Cancelled, Event, emitter
 from .lepton import LeptonError, LeptonFgo
@@ -188,6 +188,7 @@ def ensure_installer(
             with open(tar_path, "wb") as out:
                 subprocess.run(
                     ["zstd", "-q", "-d", "-c", str(archive)],
+                    env=process.child_environ(),
                     stdout=out,
                     check=True,
                 )

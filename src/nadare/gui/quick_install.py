@@ -21,6 +21,14 @@ from PyQt6.QtWidgets import (
 from .theme import apply_theme
 
 
+def _elide_middle(text: str, limit: int = 64) -> str:
+    """``text`` cut in the middle with an ellipsis once it is longer than ``limit``."""
+    if len(text) <= limit:
+        return text
+    head = limit // 2 - 3
+    return f"{text[:head]}…{text[-(limit - head - 1):]}"
+
+
 class QuickInstallDialog(QDialog):
     """Size, free space, the unofficial-launcher notice and the install folder, once.
 
@@ -101,7 +109,10 @@ class QuickInstallDialog(QDialog):
 
     def _show_folder(self) -> None:
         extra = f" ({self._free})" if self._free else ""
-        self.folder_label.setText(f"Install folder: {self.folder_text}{extra}")
+        shown = _elide_middle(self.folder_text)
+        self.folder_label.setText(f"Install folder: {shown}{extra}")
+        # A path has no spaces to wrap at, so a long one would make the dialog very wide.
+        self.folder_label.setToolTip(self.folder_text if shown != self.folder_text else "")
         self.summary_label.setText(self.summary_text)
         self.summary_label.setVisible(bool(self.summary_text))
 
@@ -114,6 +125,21 @@ class QuickInstallDialog(QDialog):
         chosen = QFileDialog.getExistingDirectory(self, "Select folder", start)
         if not chosen:
             return
+        try:
+            folder_text, free, summary = self._describe(chosen)
+        except OSError as exc:
+            # A folder we may not look into: keep the one in use, and put the page's state back
+            # (describe records the pick before it fails).
+            try:
+                self._describe(self.chosen_folder or None)
+            except OSError:
+                pass
+            reason = exc.strerror or str(exc)
+            self.summary_label.setText(
+                f"Nadare cannot use {chosen} ({reason}). Pick another folder."
+            )
+            self.summary_label.setVisible(True)
+            return
         self.chosen_folder = chosen
-        self.folder_text, self._free, self.summary_text = self._describe(chosen)
+        self.folder_text, self._free, self.summary_text = folder_text, free, summary
         self._show_folder()

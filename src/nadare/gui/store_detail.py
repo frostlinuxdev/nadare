@@ -24,6 +24,16 @@ _DELIVERY_FACTS = {
 }
 
 
+class _HeroLabel(QLabel):
+    """A label that says when its size changed, so the art can be drawn at the new size."""
+
+    resized = pyqtSignal()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        self.resized.emit()
+
+
 class StoreDetail(QWidget):
     """Present catalog facts and emit navigation/install requests."""
 
@@ -49,14 +59,15 @@ class StoreDetail(QWidget):
         self.back_button.clicked.connect(self.back_requested.emit)
         layout.addWidget(self.back_button, 0, Qt.AlignmentFlag.AlignLeft)
 
-        self.hero_label = QLabel()
+        self.hero_label = _HeroLabel()
         self.hero_label.setObjectName("StoreHero")
         self.hero_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         # The art is re-rendered to the page width; it must not set that width itself.
         self.hero_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.hero_label.setScaledContents(True)
         self.hero_label.setMinimumHeight(160)
         self.hero_label.setMaximumHeight(300)
+        # The art is drawn at the label's own size (never stretched), so follow its resizes.
+        self.hero_label.resized.connect(self._on_hero_resized)
         layout.addWidget(self.hero_label)
 
         self.title_label = QLabel()
@@ -125,8 +136,11 @@ class StoreDetail(QWidget):
         ``variants`` are all the builds of this game (a version picker is shown for more than
         one). ``None`` keeps the builds already known, as long as ``entry`` is one of them.
         """
+        # A refresh of the same build (it only became installed, say) keeps the art already
+        # fetched; showing another build starts over, as its art is fetched afresh.
+        if self._entry.kind != entry.kind:
+            self._hero = None
         self._entry = entry
-        self._hero = None
         if variants is None:
             variants = self._variants if any(v.kind == entry.kind for v in self._variants) else ()
         self._variants = tuple(variants)
@@ -186,9 +200,16 @@ class StoreDetail(QWidget):
         self._render_hero()
 
     def _render_hero(self) -> None:
-        self.hero_label.setPixmap(
-            theme.cover_pixmap(self._hero, max(1, self.width() - 48), 240, self._entry.title)
+        label = self.hero_label
+        height = max(label.minimumHeight(), min(label.maximumHeight(), label.height()))
+        label.setPixmap(
+            theme.cover_pixmap(self._hero, max(1, self.width() - 48), height, self._entry.title)
         )
+
+    def _on_hero_resized(self) -> None:
+        pixmap = self.hero_label.pixmap()
+        if pixmap is None or pixmap.isNull() or pixmap.height() != self.hero_label.height():
+            self._render_hero()
 
     def _open_notice(self) -> None:
         if self._notice_url:

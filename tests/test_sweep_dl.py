@@ -18,6 +18,12 @@ from nadare.core.events import Cancel
 
 REPO = Path(__file__).resolve().parents[1]
 
+#: A valid 1x1 PNG; artwork now refuses a body Qt cannot decode.
+PNG_1PX = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108020000009077"
+    "53de0000000c49444154789c63f8cfc0000003010100c9fe92ef0000000049454e44ae426082"
+)
+
 
 # ---------------------------------------------------------------------------
 # 1. vcredist: concurrent installs must not share one .part path
@@ -266,7 +272,7 @@ def test_download_with_empty_allowlist_refuses_a_local_resolution(
 
 
 def test_download_with_an_allowlist_does_not_resolve(monkeypatch, tmp_path: Path) -> None:
-    fake = _JsonFake(_JsonStream([b"IMG"]))
+    fake = _JsonFake(_JsonStream([PNG_1PX]))
     monkeypatch.setattr(artwork, "_curl", lambda: fake)
     monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path)
 

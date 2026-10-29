@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from typing import Any
 
@@ -25,9 +26,11 @@ from PyQt6.QtWidgets import (
 
 from ..core import artwork
 from ..core.diskspace import human_size
-from ..core.storecatalog import StoreEntry, store_games
+from ..core.storecatalog import StoreEntry, store_games, unavailable_games
+from .banner import InfoBanner
 from .images import ImageLoader
 from .library import FlowLayout, _drop_shadow
+from .logs_dialog import LogsDialog
 from .theme import ACCENT, cover_pixmap
 
 #: Store tiles are landscape: most covers are wide key art, which then fills the tile whole.
@@ -36,6 +39,8 @@ CARD_ART_H = 186
 CARD_HEIGHT = CARD_ART_H + 148
 
 _FOCUS_RING = f"QFrame#StoreCard:focus {{ border: 2px solid {ACCENT}; }}"
+
+log = logging.getLogger(__name__)
 
 
 class _FetchSignals(QObject):
@@ -229,6 +234,10 @@ class StorePage(QWidget):
         heading.setObjectName("Title")
         root.addWidget(heading)
 
+        self.unavailable_banner = InfoBanner()
+        self.unavailable_banner.action_clicked.connect(self._open_logs)
+        root.addWidget(self.unavailable_banner)
+
         controls = QHBoxLayout()
         controls.setSpacing(12)
         self.search = QLineEdit()
@@ -271,6 +280,34 @@ class StorePage(QWidget):
 
         self.search.textChanged.connect(self.refresh)
         self.tier_filter.currentTextChanged.connect(self.refresh)
+        self._report_unavailable_games()
+
+    def _open_logs(self) -> None:
+        """Open the app log, where each unavailable backend was just named."""
+        self._logs_dialog = LogsDialog([], parent=self)
+        self._logs_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._logs_dialog.show()
+
+    def _report_unavailable_games(self) -> None:
+        """Name the games this build lost in the Store, and in the app log."""
+        missing = unavailable_games()
+        if not missing:
+            self.unavailable_banner.hide_banner()
+            return
+        for kind, title in missing:
+            log.warning(
+                "backend %s (%s) is not available in this build; the Store cannot list it",
+                kind,
+                title,
+            )
+        count = len(missing)
+        noun = "game" if count == 1 else "games"
+        titles = ", ".join(title for _kind, title in missing)
+        self.unavailable_banner.show_message(
+            f"{count} {noun} can't load in this build: {titles}.",
+            "Open logs",
+            dismissible=False,
+        )
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().showEvent(event)
@@ -307,7 +344,7 @@ class StorePage(QWidget):
                 shown = replace(
                     primary,
                     title=game.title,
-                    delivery_label=f"{len(game.entries)} versions",
+                    delivery_label=f"{len(whole[primary.kind].entries)} versions",
                     size_bytes=None,
                     installed=whole[primary.kind].installed,
                 )

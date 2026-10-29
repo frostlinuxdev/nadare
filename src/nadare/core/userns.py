@@ -20,7 +20,7 @@ import shlex
 import shutil
 import subprocess
 
-from . import sandbox
+from . import process, sandbox
 
 #: The sysctl Ubuntu 24.04+ uses to gate unprivileged user namespaces.
 SYSCTL_PATH = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
@@ -93,6 +93,7 @@ def probe(run=subprocess.run) -> bool | None:  # noqa: ANN001
         try:
             result = run(
                 [path, "--unshare-user", "--ro-bind", "/", "/", "/bin/true"],
+                env=process.child_environ(),
                 capture_output=True,
                 text=True,
                 check=False,
@@ -206,6 +207,7 @@ def install_profile(run=subprocess.run) -> tuple[bool, str]:
     try:
         result = run(
             ["pkexec", "/bin/sh", "-c", fix_script()],
+            env=process.child_environ(),
             capture_output=True,
             text=True,
             check=False,

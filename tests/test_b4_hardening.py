@@ -123,13 +123,13 @@ def test_a_normal_installer_is_not_touched_by_the_watchdog(tmp_path, monkeypatch
     _install(tmp_path, monkeypatch, lambda argv: 0)
 
 
-def test_the_timeout_defaults_to_ten_minutes_and_ignores_garbage(monkeypatch):
+def test_the_timeout_defaults_to_ninety_seconds_and_ignores_garbage(monkeypatch):
     monkeypatch.delenv("NADARE_VCREDIST_TIMEOUT", raising=False)
-    assert vcredist._install_timeout() == 600.0
+    assert vcredist._install_timeout() == 90.0
     monkeypatch.setenv("NADARE_VCREDIST_TIMEOUT", "nonsense")
-    assert vcredist._install_timeout() == 600.0
+    assert vcredist._install_timeout() == 90.0
     monkeypatch.setenv("NADARE_VCREDIST_TIMEOUT", "-5")
-    assert vcredist._install_timeout() == 600.0
+    assert vcredist._install_timeout() == 90.0
 
 
 def test_stop_installer_only_targets_the_redistributable(tmp_path, monkeypatch):

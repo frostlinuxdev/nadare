@@ -184,3 +184,54 @@ def test_a_destination_that_appears_before_the_rename_is_not_replaced(tmp_path, 
     with pytest.raises(relocate.RelocateError, match="appeared"):
         relocate.move_tree(src, dst)
     assert src.is_dir() and not list(dst.iterdir())
+
+
+# ---- edge-case audit (b17) ---------------------------------------------------
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a 000 directory")
+def test_an_unreadable_subfolder_stops_the_move_instead_of_being_skipped(tmp_path, cross_disk):
+    src = _tree(tmp_path / "src")
+    locked = src / "locked"
+    locked.mkdir()
+    (locked / "precious.bin").write_bytes(b"x" * 100)
+    locked.chmod(0o000)
+    try:
+        with pytest.raises(relocate.RelocateError):
+            relocate.move_tree(src, tmp_path / "dst")
+        assert not (tmp_path / "dst").exists() and not list(tmp_path.glob("*partial*"))
+    finally:
+        locked.chmod(0o755)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a 000 directory")
+def test_an_unreadable_source_root_is_refused_not_copied_empty(tmp_path, cross_disk):
+    src = _tree(tmp_path / "src")
+    src.chmod(0o000)
+    try:
+        with pytest.raises(relocate.RelocateError):
+            relocate.move_tree(src, tmp_path / "dst")
+        assert not (tmp_path / "dst").exists()
+    finally:
+        src.chmod(0o755)
+
+
+def test_a_failed_copy_with_a_read_only_folder_leaves_no_partial_behind(
+    tmp_path, cross_disk, monkeypatch
+):
+    src = _tree(tmp_path / "src")
+    (src / "ro").mkdir()
+    (src / "ro" / "keep.txt").write_text("x")
+    (src / "ro").chmod(0o555)
+    real_stat = relocate.shutil.copystat
+
+    def failing_stat(a, b, **kw):
+        if str(a).endswith("src"):  # the last pass, after the read-only mode was applied
+            raise OSError("vanished")
+        return real_stat(a, b, **kw)
+
+    monkeypatch.setattr(relocate.shutil, "copystat", failing_stat)
+    try:
+        with pytest.raises(relocate.RelocateError):
+            relocate.move_tree(src, tmp_path / "dst")
+        assert not list(tmp_path.glob("*partial*"))
+    finally:
+        (src / "ro").chmod(0o755)

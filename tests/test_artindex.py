@@ -241,3 +241,75 @@ def test_a_load_that_finishes_after_the_state_was_cleared_is_ignored():
         gate.append(1)  # always release the loader, or later tests would wait on it
     artindex.wait_for_load(5)
     assert artindex._fresh() is None
+
+
+def test_a_failed_refresh_keeps_answering_from_the_saved_copy(monkeypatch):
+    """An outage must not throw away the copy saved on disk for the retry window."""
+    from nadare.core import indexfetch
+
+    saved = _doc(**{"direct-genshin": {"cover": [_entry()]}})
+    monkeypatch.setattr(indexfetch, "read_cached", lambda rel, validate=None: saved)
+
+    def boom():
+        raise OSError("offline")
+
+    artindex.set_loader(boom)
+    assert artindex.lookup("direct-genshin", wait=False) == [(GOOD_URL, ("cdn2.unrealengine.com",))]
+    artindex.wait_for_load(5)
+    assert artindex.lookup("direct-genshin", wait=False) == [(GOOD_URL, ("cdn2.unrealengine.com",))]
+
+
+def test_a_failed_first_load_falls_back_to_the_saved_copy(monkeypatch):
+    from nadare.core import indexfetch
+
+    saved = _doc(**{"direct-genshin": {"cover": [_entry()]}})
+    monkeypatch.setattr(indexfetch, "read_cached", lambda rel, validate=None: saved)
+
+    def boom():
+        raise OSError("offline")
+
+    artindex.set_loader(boom)
+    assert artindex.lookup("direct-genshin", wait=True) == [(GOOD_URL, ("cdn2.unrealengine.com",))]
+
+
+def test_the_index_hooks_do_not_accept_a_schema_they_do_not_understand(monkeypatch):
+    from nadare.core import indexfetch
+
+    validators = []
+
+    def fake_fetch_json(rel, *, validate=None, **kwargs):
+        validators.append(validate)
+        return indexfetch.IndexResult({}, False, "")
+
+    monkeypatch.setattr(indexfetch, "fetch_json", fake_fetch_json)
+    artindex._default_loader()
+    monkeypatch.setattr(
+        indexfetch, "read_cached", lambda rel, validate=None: validators.append(validate)
+    )
+    artindex._saved_copy()
+    assert len(validators) == 2 and all(callable(v) for v in validators)
+    for validate in validators:
+        assert validate({"schema": 2, "games": {}}) is False
+        assert validate({"schema": True, "games": {}}) is False
+        assert validate(_doc(**{"direct-genshin": {"cover": [_entry()]}})) is True
+
+
+def test_an_unreadable_schema_never_overwrites_the_saved_copy(monkeypatch):
+    """A document the app cannot use must not destroy the last good cached copy."""
+    import json
+
+    from nadare.core import indexfetch
+
+    monkeypatch.setenv("NADARE_INDEX_BASE", "https://a.example/index/")
+    good = _doc(**{"direct-genshin": {"cover": [_entry()]}})
+    validate = artindex.valid_document
+    indexfetch.fetch_json(
+        "catalog/art.json", validate=validate, opener=lambda url: json.dumps(good).encode()
+    )
+    fallback = indexfetch.fetch_json(
+        "catalog/art.json",
+        validate=validate,
+        opener=lambda url: json.dumps({"schema": 2, "games": {}}).encode(),
+    )
+    assert fallback.data == good and fallback.from_cache is True
+    assert indexfetch.read_cached("catalog/art.json", validate=validate) == good

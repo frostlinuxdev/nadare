@@ -105,10 +105,19 @@ def parse_candidate(raw: Any, hosts: tuple[str, ...]) -> ArtCandidate | None:
     return ArtCandidate(raw["url"], orientation, width, height)
 
 
+def valid_document(doc: Any) -> bool:
+    """True when ``doc`` claims the schema version this build understands.
+
+    Used as the validator of both index hooks, so a document from a newer schema is
+    rejected before :func:`indexfetch.fetch_json` writes it over the last good copy.
+    """
+    # ``type(...) is int``: JSON ``true`` equals 1 in Python but is not schema 1.
+    return isinstance(doc, dict) and type(doc.get("schema")) is int and doc["schema"] == SCHEMA
+
+
 def parse(doc: Any) -> dict[str, list[ArtCandidate]]:
     """The accepted candidates per game (``{}`` for a document of the wrong shape)."""
-    # ``type(...) is int``: JSON ``true`` equals 1 in Python but is not schema 1.
-    if not isinstance(doc, dict) or type(doc.get("schema")) is not int or doc["schema"] != SCHEMA:
+    if not valid_document(doc):
         return {}
     games = doc.get("games")
     if not isinstance(games, dict):
@@ -129,9 +138,7 @@ def parse(doc: Any) -> dict[str, list[ArtCandidate]]:
 def _default_loader() -> Any:
     from . import indexfetch
 
-    return indexfetch.fetch_json(
-        "catalog/art.json", validate=lambda data: isinstance(data, dict)
-    ).data
+    return indexfetch.fetch_json("catalog/art.json", validate=valid_document).data
 
 
 _loader: Callable[[], Any] = _default_loader
@@ -187,7 +194,8 @@ def _load_now() -> dict[str, list[ArtCandidate]]:
             parsed, ttl = parse(_loader()), TTL
         except Exception as exc:  # noqa: BLE001 - offline or broken index: the old sources stay
             log.debug("art index unavailable: %s", exc)
-            parsed, ttl = {}, RETRY_AFTER_FAILURE
+            # The copy on disk still answers during the outage; only the retry wait is reset.
+            parsed, ttl = _saved_copy(), RETRY_AFTER_FAILURE
         with _state_lock:
             if generation == _generation:
                 _parsed, _valid_until = parsed, time.monotonic() + ttl
@@ -199,9 +207,7 @@ def _saved_copy() -> dict[str, list[ArtCandidate]]:
     from . import indexfetch
 
     try:
-        return parse(
-            indexfetch.read_cached("catalog/art.json", validate=lambda data: isinstance(data, dict))
-        )
+        return parse(indexfetch.read_cached("catalog/art.json", validate=valid_document))
     except Exception as exc:  # noqa: BLE001 - an unreadable copy is just no copy
         log.debug("art index: saved copy unreadable: %s", exc)
         return {}
@@ -251,5 +257,6 @@ __all__ = [
     "parse",
     "reset",
     "set_loader",
+    "valid_document",
     "wait_for_load",
 ]

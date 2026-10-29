@@ -11,7 +11,7 @@ Every catalog game carries a support tier, shown on its card in the **Store** (t
 
 | Tier | Meaning |
 |---|---|
-| **Verified** | A maintainer installed it through Nadare and played it past the title screen on a real machine. Currently: Brown Dust 2, Aether Gazer, Punishing: Gray Raven, Girls' Frontline 2 (the Darkwinter build), Honkai Impact 3rd, Arknights: Endfield and Neverness to Everness (the direct install). |
+| **Verified** | A maintainer installed it through Nadare and played it past the title screen on a real machine. Currently: Brown Dust 2, Aether Gazer, Punishing: Gray Raven, Girls' Frontline 2: Exilium (Darkwinter build), Honkai Impact 3rd, Arknights: Endfield, Neverness to Everness (the direct install) and Mongil: Star Dive. |
 | **Experimental** | The install path is covered by tests and fixtures, but nobody has played it end to end yet, or it needs a workaround (an anti-cheat, a publisher launcher, a login). It can break when a publisher changes something. |
 
 The HoYo games (Genshin Impact, Honkai: Star Rail, Honkai Impact 3rd, Zenless Zone Zero) are offered

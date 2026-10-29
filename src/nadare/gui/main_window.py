@@ -341,6 +341,7 @@ class MainWindow(QMainWindow):
         self.game.back_requested.connect(self.show_library)
         self.game.action_requested.connect(self._on_game_action)
         self.game.cancel_requested.connect(self._on_cancel)
+        self.game.skip_step_requested.connect(self._on_skip_step)
         self.game.pause_requested.connect(self._on_pause)
         self.game.resume_requested.connect(self._on_resume)
         self.game.remember_toggled.connect(self._on_remember_toggled)
@@ -658,9 +659,13 @@ class MainWindow(QMainWindow):
             "install_dir": "game install folder",
             "prefix": "Wine prefix",
             "wineprefix": "Wine prefix",
+            "prefix_backup": "old prefix backup",
         }
         for tree in removal.removable_trees(self.config, profile):
-            label = f"Also delete the {labels.get(tree.key, tree.key)} ({tree.path})"
+            name = labels.get(tree.key)
+            if name is None and tree.key.startswith("prefix_backup"):
+                name = "old prefix backup"
+            label = f"Also delete the {name or tree.key} ({tree.path})"
             check = QCheckBox(label)
             if not tree.safe:
                 why = _removal_reason_text(tree.reason)
@@ -1232,13 +1237,9 @@ class MainWindow(QMainWindow):
         else:
             self._busy.pop(profile, None)
             self._apply_pending_remember(profile)
-            if (
-                self._quit_after_games
-                and not self.controller.launching_profiles()
-                and not self.controller.mutating_profiles()
-            ):
-                self._quit_after_games = False
-                QTimer.singleShot(0, self._finish_background_close)
+            if operation == "launch":
+                self.controller.launch_ended(profile)
+            self._maybe_finish_background_close()
         if profile == self._current_profile and active:
             self.game.set_busy(operation)
             label = _OPERATION_LABELS.get(operation, operation.replace("_", " ").capitalize())
@@ -1254,6 +1255,10 @@ class MainWindow(QMainWindow):
     def _on_cancel(self) -> None:
         if self._current_profile:
             self.controller.cancel(self._current_profile)
+
+    def _on_skip_step(self) -> None:
+        if self._current_profile:
+            self.controller.skip_step(self._current_profile)
 
     def _on_pause(self) -> None:
         if self._current_profile:
@@ -1392,6 +1397,9 @@ class MainWindow(QMainWindow):
             self._show_remember_notice(profile)
         if operation in ("install", "update", "launch"):
             self._maybe_offer_runner_cleanup()
+        if operation == "launch":
+            self.controller.launch_ended(profile)
+            self._maybe_finish_background_close()
 
     # ---- old runners ----------------------------------------------------------
     def _maybe_offer_runner_cleanup(self) -> None:
@@ -1581,6 +1589,9 @@ class MainWindow(QMainWindow):
             # the last READY state (and an enabled LAUNCH) on the page.
             self._mark_status_error(profile, message)
             self._start(profile, "status", silent=True)
+        if operation == "launch":
+            self.controller.launch_ended(profile)
+            self._maybe_finish_background_close()
 
     def _on_cancelled(self, profile: str, operation: str) -> None:
         if self._closing:
@@ -1590,6 +1601,9 @@ class MainWindow(QMainWindow):
         if operation == "set_remember":
             self._remember_watching.discard(profile)
             self._remember_notice.pop(profile, None)
+        if operation == "launch":
+            self.controller.launch_ended(profile)
+            self._maybe_finish_background_close()
         if operation in SILENT_OPERATIONS or profile != self._current_profile:
             return
         self.game.cancelled()
@@ -1774,6 +1788,16 @@ class MainWindow(QMainWindow):
             return
         self.controller.shutdown()
         QApplication.quit()
+
+    def _maybe_finish_background_close(self) -> None:
+        """Quit after a hidden close once no launch or mutation is still running."""
+        if (
+            self._quit_after_games
+            and not self.controller.launching_profiles()
+            and not self.controller.mutating_profiles()
+        ):
+            self._quit_after_games = False
+            QTimer.singleShot(0, self._finish_background_close)
 
     def _confirm_close(self) -> bool:
         """Warn before quitting while an install/update is still writing.

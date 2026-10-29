@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -21,7 +22,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from . import sandbox
+from . import process, sandbox
 
 #: Application id under which the Flatpak build is published.
 FLATPAK_ID = "io.github.frostlinuxdev.Nadare"
@@ -29,6 +30,18 @@ FLATPAK_ID = "io.github.frostlinuxdev.Nadare"
 #: Characters that force a Desktop Entry ``Exec`` argument to be quoted. The
 #: spec reserves these; quoting them is always safe.
 _EXEC_RESERVED = set(' \t\n"\'\\><~|&;$*?#()`')
+
+
+def command_hint(subcommand: str) -> str:
+    """How to run a Nadare command in this build (AppImage, Flatpak or ``nadare``)."""
+    appimage = os.environ.get("APPIMAGE")
+    if appimage:
+        invocation = shlex.quote(appimage)
+    elif sandbox.in_flatpak():
+        invocation = f"flatpak run {FLATPAK_ID}"
+    else:
+        invocation = "nadare"
+    return f"{invocation} {subcommand}"
 
 
 class ShortcutError(RuntimeError):
@@ -147,7 +160,12 @@ def desktop_dir() -> Path:
         argv = sandbox.host_argv([tool, "DESKTOP"]) if flatpak else [tool, "DESKTOP"]
         try:
             result = subprocess.run(
-                argv, capture_output=True, text=True, timeout=5, check=False
+                argv,
+                env=process.child_environ(),
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
             )
             if result.returncode == 0 and result.stdout.strip():
                 return _host_path(Path(result.stdout.strip()))
@@ -672,6 +690,7 @@ __all__ = [
     "FLATPAK_ID",
     "ShortcutError",
     "add_steam_shortcut",
+    "command_hint",
     "desktop_entry",
     "find_steam_shortcut_files",
     "install_desktop_entry",

@@ -33,6 +33,7 @@ import logging
 
 from ...core.backends import BackendError, GameBackend, Option, Status
 from ...core.events import Event, mask
+from ...core.shortcuts import command_hint
 from . import installer
 from .lepton import FGO_PKG, LeptonError, LeptonFgo
 from .news import IMAGE_HOSTS, fetch_fgo_news, hero_key
@@ -56,6 +57,23 @@ any backups private."""
 
 #: Raised when install/launch is attempted before the notice is acknowledged.
 _NOTICE_ERROR = "Read and accept the account notice first"
+
+
+def _page_notice() -> tuple[str, str, str]:
+    return (
+        "Experimental: FGO runs in an Android container (Lepton). It needs podman and "
+        f"a kernel with binder support; run `{command_hint('doctor --fgo')}` to check "
+        "your host.",
+        "https://github.com/frostlinuxdev/nadare-index/tree/main/lepton",
+        "Setup notes",
+    )
+
+
+class _PageNotice:
+    """Compute the notice on access so it names the command this build has."""
+
+    def __get__(self, instance, owner):  # noqa: ANN001, ANN201 - descriptor protocol
+        return _page_notice()
 
 
 class FgoLeptonBackend(GameBackend):
@@ -97,12 +115,7 @@ class FgoLeptonBackend(GameBackend):
     news_hero_key = staticmethod(hero_key)
 
     #: FGO is the one game that needs a container stack; say so up front.
-    page_notice = (
-        "Experimental: FGO runs in an Android container (Lepton). It needs podman and "
-        "a kernel with binder support; run `nadare doctor --fgo` to check your host.",
-        "https://github.com/frostlinuxdev/nadare-index/tree/main/lepton",
-        "Setup notes",
-    )
+    page_notice = _PageNotice()
 
     def __init__(self, ctx) -> None:  # noqa: ANN001 - BackendContext
         super().__init__(ctx)

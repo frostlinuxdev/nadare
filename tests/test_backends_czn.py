@@ -1411,7 +1411,7 @@ class TestProcessWideSession:
         with pytest.raises(BackendError) as exc:
             backend.launch()
         assert exc.value.code == 3
-        assert "log in first, or enable remember_me" in exc.value.message
+        assert "log in first, or turn on 'Remember me on this device'" in exc.value.message
 
     def test_set_remember_off_keeps_the_live_session(
         self, make_backend_context, tmp_path, fake_keyring
@@ -3092,6 +3092,26 @@ class TestVcredist:
         self._serve(monkeypatch, payload)
         return backend, cache, ran, events
 
+    def test_a_skip_is_not_turned_into_a_day_long_failure(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        from nadare.core import vcredist as vc
+
+        backend, _cache, _ran, events = self._installable(
+            make_backend_context, tmp_path, monkeypatch, b"MZ-skip", 0
+        )
+
+        def skipped(*_a, **_k):
+            raise vc.StepSkipped("the Visual C++ installer was skipped")
+
+        monkeypatch.setattr(vc, "install", skipped)
+        backend.prefix().mkdir(parents=True, exist_ok=True)
+        backend._ensure_vcredist()  # the launch goes on
+
+        marker = backend.prefix() / vc.FAILED_MARKER
+        assert marker.is_file() and "skipped" in marker.read_text()
+        assert any("skipped" in e.message.lower() for e in events if e.kind == "status")
+
     def test_success_installs_and_invokes_the_runner_with_quiet_flags(
         self, make_backend_context, tmp_path, monkeypatch
     ):
@@ -3118,7 +3138,7 @@ class TestVcredist:
         backend._ensure_vcredist()
 
         assert ran and ran[0][1:] == ["/install", "/quiet", "/norestart"]
-        assert not any(e.kind == "status" and "not installed" in e.message for e in events)
+        assert not any(e.kind == "status" and "skipped it" in e.message for e in events)
 
     def test_unexpected_exit_code_is_just_a_warning(
         self, make_backend_context, tmp_path, monkeypatch
@@ -3132,7 +3152,7 @@ class TestVcredist:
 
         assert ran
         assert any(
-            e.kind == "status" and "not installed" in e.message for e in events
+            e.kind == "status" and "skipped it" in e.message for e in events
         ), events
 
     def test_offline_download_is_just_a_warning(
@@ -3151,7 +3171,7 @@ class TestVcredist:
         backend._ensure_vcredist()
 
         assert any(
-            e.kind == "status" and "not installed" in e.message for e in events
+            e.kind == "status" and "skipped it" in e.message for e in events
         ), events
 
     def test_cancelled_propagates(self, make_backend_context, tmp_path, monkeypatch):

@@ -46,13 +46,18 @@ def _same_device(src: Path, dst: Path) -> bool:
     return os.stat(src).st_dev == os.stat(_nearest_existing(dst.parent)).st_dev
 
 
+def _walk_error(exc: OSError) -> None:
+    """``os.walk`` hides a folder it cannot list; a move must not, or the copy would "verify"."""
+    raise exc
+
+
 def _summary(root: Path) -> tuple[int, int, int, int, int]:
     """``(files, dirs, links, bytes, newest mtime)`` below ``root``.
 
     Only regular files, folders and symlinks count: a FIFO, socket or device is never copied.
     """
     files = dirs = links = size = newest = 0
-    for current, names, filenames in os.walk(root, followlinks=False):
+    for current, names, filenames in os.walk(root, followlinks=False, onerror=_walk_error):
         for name in list(names):
             path = Path(current, name)
             if path.is_symlink():
@@ -99,7 +104,7 @@ def _copy(
     """Copy ``src`` into ``partial``, an empty folder the caller just made."""
     done = 0
     dir_stats: list[tuple[Path, Path]] = [(src, partial)]
-    for current, names, filenames in os.walk(src, followlinks=False):
+    for current, names, filenames in os.walk(src, followlinks=False, onerror=_walk_error):
         rel = Path(current).relative_to(src)
         target_dir = partial / rel
         for name in list(names):
@@ -134,6 +139,20 @@ def _copy(
         progress(total, total)
 
 
+def _remove_partial(partial: Path) -> None:
+    """Delete the copy this call made, including folders it already made read-only."""
+
+    def make_writable(func, path, exc_info):  # noqa: ANN001 - shutil's callback signature
+        try:
+            os.chmod(os.path.dirname(path) or ".", 0o700)
+            os.chmod(path, 0o700)
+            func(path)
+        except OSError:
+            pass
+
+    shutil.rmtree(partial, onexc=make_writable)
+
+
 def move_tree(
     src: Path,
     dst: Path,
@@ -154,7 +173,10 @@ def move_tree(
     except OSError as exc:
         raise RelocateError(f"Could not move {src}: {exc}") from exc
 
-    before = _summary(src)
+    try:
+        before = _summary(src)
+    except OSError as exc:
+        raise RelocateError(f"Could not read {src}: {exc}") from exc
     size = before[3]
     try:
         free = diskspace.free_bytes(dst.parent)
@@ -189,7 +211,7 @@ def move_tree(
         os.rename(partial, dst)
     except BaseException as exc:
         if created and partial.exists():
-            shutil.rmtree(partial, ignore_errors=True)  # only the copy this call made
+            _remove_partial(partial)  # only the copy this call made
         if isinstance(exc, OSError):
             raise RelocateError(f"Could not copy {src}: {exc}") from exc
         raise

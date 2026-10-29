@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -278,7 +281,7 @@ class TestEnsure:
     def test_accepted_exit_codes(self, tmp_path, monkeypatch, code):
         ran, events = self._ensure(tmp_path, monkeypatch, b"MZ-ok", code)
         assert ran
-        assert not any(e.kind == "status" and "not installed" in e.message for e in events)
+        assert not any(e.kind == "status" and "skipped it" in e.message for e in events)
 
     def test_hash_mismatch_warns_and_never_runs(self, tmp_path, monkeypatch):
         ran, events = self._ensure(
@@ -294,7 +297,7 @@ class TestEnsure:
     def test_unexpected_exit_code_is_just_a_warning(self, tmp_path, monkeypatch):
         ran, events = self._ensure(tmp_path, monkeypatch, b"MZ-code5", 5)
         assert ran
-        assert any(e.kind == "status" and "not installed" in e.message for e in events)
+        assert any(e.kind == "status" and "skipped it" in e.message for e in events)
 
     def test_offline_download_is_just_a_warning(self, tmp_path, monkeypatch):
         events: list = []
@@ -306,7 +309,7 @@ class TestEnsure:
             emit=events.append,
             cancel=Cancel(),
         )
-        assert any(e.kind == "status" and "not installed" in e.message for e in events)
+        assert any(e.kind == "status" and "skipped it" in e.message for e in events)
 
     def test_exactly_one_status_event_on_failure(self, tmp_path, monkeypatch):
         _ran, events = self._ensure(
@@ -351,3 +354,95 @@ def test_index_pins_junk_up_front_does_not_hide_real_hashes(monkeypatch):
     payload = json.dumps({"sha256": ["junk"] * 20 + [good]}).encode()
     monkeypatch.setattr(indexfetch, "open_bytes", _serve_index(payload))
     assert vcredist.index_pins() == {good}
+
+
+# ---- b17 edge-case audit: a hung installer must not be retried at every launch -------------
+def _bare_prefix(tmp_path):
+    prefix = tmp_path / "pfx"
+    (prefix / "drive_c" / "windows" / "system32").mkdir(parents=True)
+    return prefix
+
+
+def _ensure(prefix, install_fn, emitted):
+    vcredist.ensure(
+        prefix,
+        profile={},
+        cache_dir=prefix.parent / "cache",
+        run_in_prefix=lambda argv: 0,
+        emit=emitted.append,
+        cancel=SimpleNamespace(cancelled=False),
+        install_fn=install_fn,
+    )
+
+
+def test_a_failed_install_is_not_tried_again_straight_away(tmp_path):
+    from nadare.core.backends import BackendError
+
+    prefix = _bare_prefix(tmp_path)
+    calls, events = [], []
+
+    def hang():
+        calls.append(1)
+        raise BackendError("the Visual C++ installer did not finish within 90 seconds")
+
+    _ensure(prefix, hang, events)
+    _ensure(prefix, hang, events)
+    _ensure(prefix, hang, events)
+    assert calls == [1]
+    assert any("skipped it" in e.message for e in events)
+    assert any("skipping" in e.message.lower() for e in events[1:])
+
+
+def test_the_retry_wait_ends_and_an_override_forces_a_try(tmp_path, monkeypatch):
+    from nadare.core.backends import BackendError
+
+    prefix = _bare_prefix(tmp_path)
+    calls = []
+
+    def hang():
+        calls.append(1)
+        raise BackendError("stuck")
+
+    _ensure(prefix, hang, [])
+    monkeypatch.setenv("NADARE_VCREDIST_RETRY", "1")
+    _ensure(prefix, hang, [])
+    assert calls == [1, 1]
+    monkeypatch.delenv("NADARE_VCREDIST_RETRY")
+    marker = prefix / vcredist.FAILED_MARKER
+    old = time.time() - vcredist.RETRY_AFTER_FAILURE_SECONDS - 5
+    os.utime(marker, (old, old))
+    _ensure(prefix, hang, [])
+    assert calls == [1, 1, 1]
+
+
+def test_a_cancel_does_not_count_as_a_failed_install(tmp_path):
+    from nadare.core.events import Cancelled
+
+    prefix = _bare_prefix(tmp_path)
+    calls = []
+
+    def cancelled():
+        calls.append(1)
+        raise Cancelled()
+
+    with pytest.raises(Cancelled):
+        _ensure(prefix, cancelled, [])
+    with pytest.raises(Cancelled):
+        _ensure(prefix, cancelled, [])
+    assert calls == [1, 1]
+    assert not (prefix / vcredist.FAILED_MARKER).exists()
+
+
+def test_a_successful_install_clears_the_failure_marker(tmp_path):
+    prefix = _bare_prefix(tmp_path)
+    marker = prefix / vcredist.FAILED_MARKER
+    marker.write_text("x")
+    os.utime(marker, (1, 1))  # long past the wait: a new attempt is allowed
+
+    def good():
+        root = prefix / "drive_c" / "windows" / "system32"
+        (root / "vcruntime140.dll").write_bytes(b"real")
+        (root / "msvcp140.dll").write_bytes(b"real")
+
+    _ensure(prefix, good, [])
+    assert not marker.exists()

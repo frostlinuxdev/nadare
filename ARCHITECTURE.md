@@ -13,7 +13,17 @@ stacks (Wine/Proton, native Steam, Android-in-a-container, shell scripts).
 | Arknights (EN) | `arknights-yostar` | Proton/Wine + Yostar's own launcher/installer |
 | Stella Sora (EN) | `stellasora-yostar` | Proton/Wine + a CI-signed Yostar manifest (direct download) |
 | Fate/Grand Order (NA) | `fgo-lepton` | lepton-x86 Android context + Venus/virgl, via the `lepton-fgo` CLI |
-| Wine / Steam / script | generic | scaffolding; you supply the prefix, exe or app |
+| Wine / Steam / script | `wine`, `steam`, `script` | scaffolding; you supply the prefix, exe or app |
+| Catalog: 13 direct-download games | `direct-<game>` | Proton/Wine prefix + the publisher's patch API |
+| Catalog: 3 publisher-launcher games | `launcher-<game>` | Proton/Wine prefix + the publisher's installer/launcher |
+
+The `direct-*` kinds are `direct-bd2`, `direct-aethergazer`, `direct-mongil`,
+`direct-wuwa`, `direct-gfl2`, `direct-endfield`, `direct-pgr`, `direct-nte`,
+`direct-gfl2-haoplay`, `direct-genshin`, `direct-hsr`, `direct-hi3` and
+`direct-zzz`. The `launcher-*` kinds are `launcher-nikke`, `launcher-nte` and
+`launcher-gfl2-haoplay`. Their catalogue rows live in
+`core/directkinds.py`; see [docs/CATALOG.md](docs/CATALOG.md) for how they work
+and how to add one.
 
 `stellasora-yostar` subclasses `arknights-yostar` (`backends/arknights.py`) so the
 Yostar/Wine machinery lives in one place; it adds the manifest requirement and
@@ -117,10 +127,14 @@ modules.
 ## Backend registry
 
 `core/backends.py` maps each kind to a `"module:Class"` target in `_BUILTINS`
-and imports it lazily. `load_builtins()` resolves them, `is_available(kind)`
-reports whether one loaded, and `unavailable()` lists built-ins whose import
-failed — for example a backend left out of a bundle. Unknown or unavailable
-kinds degrade gracefully rather than crashing the app.
+and imports it lazily. Hand-written backends are listed there directly; the
+catalog's `direct-*` and `launcher-*` kinds come from `CATALOG_BACKENDS` in
+`core/directkinds.py`, which is merged into `_BUILTINS`. Add a hand-written
+backend to `_BUILTINS`; add a catalog game to `core/directkinds.py` (see
+[docs/CATALOG.md](docs/CATALOG.md)). `load_builtins()` resolves them,
+`is_available(kind)` reports whether one loaded, and `unavailable()` lists
+built-ins whose import failed — for example a backend left out of a bundle.
+Unknown or unavailable kinds degrade gracefully rather than crashing the app.
 
 ## Hosting
 

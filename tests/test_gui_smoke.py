@@ -361,6 +361,49 @@ def test_controller_bookkeeping_runs_on_the_gui_thread(tmp_path, qapp, monkeypat
         qapp.processEvents()
 
 
+def test_worker_bridge_slots_log_instead_of_raising(qapp, monkeypatch):
+    """A broken controller callback (or signal emit) on any bridge slot is logged,
+    not allowed to escape: an unhandled exception in a Qt slot aborts the app."""
+    from nadare.core.events import Event
+    from nadare.gui import workers
+
+    class Boom:
+        def emit(self, *args):
+            raise RuntimeError("emit failed")
+
+    class Controller:
+        def __init__(self):
+            self.backend_event = Boom()
+            self.result = Boom()
+
+        def _on_succeeded(self, *args):
+            raise RuntimeError("succeeded failed")
+
+        def _on_failed(self, *args):
+            raise RuntimeError("failed failed")
+
+        def _on_cancelled(self, *args):
+            raise RuntimeError("cancelled failed")
+
+    logged: list[str] = []
+    monkeypatch.setattr(
+        workers.log, "exception", lambda msg, *args, **kwargs: logged.append(msg % args)
+    )
+
+    bridge = workers._WorkerBridge(Controller(), "p", "install", object())
+    try:
+        bridge.forward_event(Event("log", "line"))
+        bridge.forward_result({"kind": "status"})
+        bridge.on_succeeded(0)
+        bridge.on_failed("boom")
+        bridge.on_cancelled()
+    finally:
+        bridge.deleteLater()
+        qapp.processEvents()
+
+    assert len(logged) == 5, logged
+
+
 def test_game_view_logout_enabled_before_install(tmp_path, qapp):
     """Log out is available whenever the game is idle, installed or not."""
     from nadare.core.backends import Status

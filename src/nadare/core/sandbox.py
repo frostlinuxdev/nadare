@@ -11,7 +11,7 @@ import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
-from . import paths
+from . import paths, process
 
 FLATPAK_INFO = Path("/.flatpak-info")
 
@@ -68,6 +68,7 @@ def host_which(name: str) -> str | None:
     try:
         result = subprocess.run(
             ["flatpak-spawn", "--host", "sh", "-c", 'command -v -- "$1"', "sh", name],
+            env=process.child_environ(),
             capture_output=True,
             text=True,
             timeout=10,

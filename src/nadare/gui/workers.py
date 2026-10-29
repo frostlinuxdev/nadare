@@ -16,15 +16,22 @@ import os
 import time
 import traceback
 from datetime import datetime
+from pathlib import Path
 
 from PyQt6.QtCore import QObject, QRunnable, QThread, pyqtSignal
 
 from .. import __version__
-from ..core import logview, paths
+from ..core import logview, paths, vcredist
 from ..core.backends import BackendError, BackendUnsupported, create
 from ..core.config import Config
 from ..core.events import Cancel, Cancelled, Event, mask
-from ..core.process import OPERATION_BUSY, OperationLock, ProfileLockError
+from ..core.process import (
+    OPERATION_BUSY,
+    OPERATION_IN_PROGRESS,
+    OperationLock,
+    ProfileLockError,
+    operation_in_progress,
+)
 
 log = logging.getLogger(__name__)
 
@@ -162,6 +169,10 @@ class BackendWorker(QThread):
         """Ask the backend to stop at its next cancellation point."""
         self._cancel_token.cancel()
 
+    def skip_step(self) -> None:
+        """Ask the step that offers a skip to stop; the operation itself carries on."""
+        self._cancel_token.skip_step()
+
     def run(self) -> None:  # noqa: D401 - QThread entry point
         code: int | None = None
         lock = None
@@ -172,6 +183,9 @@ class BackendWorker(QThread):
                     lock.acquire()
                 except ProfileLockError:
                     raise BackendError(OPERATION_BUSY.format(name=self._profile)) from None
+            elif self._operation == "launch" and operation_in_progress(self._profile):
+                # Launch itself does not hold the lock (a game runs for hours).
+                raise BackendError(OPERATION_IN_PROGRESS.format(name=self._profile))
             backend = create(
                 self._profile, self._config, emit=self._on_event, cancel=self._cancel_token
             )
@@ -216,6 +230,7 @@ class BackendWorker(QThread):
         elif op == "update":
             backend.update()
         elif op == "repair":
+            self._retry_runtime_step(backend)
             backend.repair()
         elif op == "remake_prefix":
             backend.remake_prefix()
@@ -309,6 +324,30 @@ class BackendWorker(QThread):
     # ---- emitter plumbing --------------------------------------------------
     #: Seconds between two ``[progress]`` lines in the run log (the UI still gets every event).
     PROGRESS_LOG_INTERVAL = 30.0
+
+    def _retry_runtime_step(self, backend: object) -> None:
+        """Repair also gives the Visual C++ step another chance.
+
+        A skip, cancel or hang is remembered per prefix so launches do not keep asking; the user
+        asking for a repair is the signal to forget it. Best effort: it never breaks the repair.
+        """
+        for attr in ("prefix", "_prefix"):
+            getter = getattr(backend, attr, None)
+            if not callable(getter):
+                continue
+            try:
+                forgotten = vcredist.forget_failure(Path(getter()))
+            except Exception:  # noqa: BLE001 - no prefix configured, or anything else
+                return
+            if forgotten:
+                self._on_event(
+                    Event(
+                        "status",
+                        "The Windows component (Visual C++ runtime) will be tried again at "
+                        "the next launch.",
+                    )
+                )
+            return
 
     def _on_event(self, event: Event) -> None:
         if self._worth_logging(event):
@@ -435,19 +474,34 @@ class _WorkerBridge(QObject):
         self._worker = worker
 
     def forward_event(self, event: Event) -> None:
-        self._controller.backend_event.emit(self._profile, event)
+        try:
+            self._controller.backend_event.emit(self._profile, event)
+        except Exception:  # noqa: BLE001 - a slot must never raise
+            log.exception("worker-event forward failed for %r", self._profile)
 
     def forward_result(self, result: object) -> None:
-        self._controller.result.emit(self._profile, result)
+        try:
+            self._controller.result.emit(self._profile, result)
+        except Exception:  # noqa: BLE001 - a slot must never raise
+            log.exception("worker-result forward failed for %r", self._profile)
 
     def on_succeeded(self, code: int) -> None:
-        self._controller._on_succeeded(self._profile, self._operation, code, self._worker)
+        try:
+            self._controller._on_succeeded(self._profile, self._operation, code, self._worker)
+        except Exception:  # noqa: BLE001 - a slot must never raise
+            log.exception("worker-succeeded bookkeeping failed for %r", self._profile)
 
     def on_failed(self, message: str) -> None:
-        self._controller._on_failed(self._profile, self._operation, message, self._worker)
+        try:
+            self._controller._on_failed(self._profile, self._operation, message, self._worker)
+        except Exception:  # noqa: BLE001 - a slot must never raise
+            log.exception("worker-failed bookkeeping failed for %r", self._profile)
 
     def on_cancelled(self) -> None:
-        self._controller._on_cancelled(self._profile, self._operation, self._worker)
+        try:
+            self._controller._on_cancelled(self._profile, self._operation, self._worker)
+        except Exception:  # noqa: BLE001 - a slot must never raise
+            log.exception("worker-cancelled bookkeeping failed for %r", self._profile)
 
     def on_finished(self) -> None:
         # Always reap the bridge, even if the controller's bookkeeping raises,
@@ -486,6 +540,11 @@ class BackendController(QObject):
         super().__init__(parent)
         self._config = config
         self._workers: dict[str, BackendWorker] = {}
+        #: Profiles with a live ``launch`` worker. Kept explicitly because a
+        #: QThread still reports ``isRunning()`` while its final slots run.
+        self._launches: set[str] = set()
+        #: Profiles whose launch reported its end, even if the thread lingers.
+        self._launch_ended: set[str] = set()
         #: Exactly one user operation waiting for a cancellable background refresh.
         self._pending: dict[str, tuple[str, object]] = {}
         #: Profiles whose running worker was asked to pause.
@@ -517,7 +576,9 @@ class BackendController(QObject):
         return [
             name
             for name, worker in self._workers.items()
-            if worker.isRunning() and worker.operation in MUTATING
+            if worker.isRunning()
+            and worker.operation in MUTATING
+            and not (worker.operation == "launch" and name in self._launch_ended)
         ]
 
     def running_operation(self, profile: str) -> str:
@@ -622,6 +683,9 @@ class BackendController(QObject):
     def _spawn(self, profile: str, operation: str, payload: object = None) -> bool:
         if self._closed:
             return False
+        if operation == "launch":
+            self._launches.add(profile)
+            self._launch_ended.discard(profile)
         worker = BackendWorker(self._config, profile, operation, parent=self, payload=payload)
         # Route every callback through a bridge that lives on this (GUI) thread.
         # Connecting to bound methods (not lambdas) means Qt queues the worker's
@@ -649,6 +713,12 @@ class BackendController(QObject):
         worker.setParent(None)
         _detached.add(worker)
 
+    def skip_step(self, profile: str) -> None:
+        """Skip the running step of ``profile``'s operation (it keeps running)."""
+        worker = self._workers.get(profile)
+        if worker is not None and worker.isRunning():
+            worker.skip_step()
+
     def cancel(self, profile: str) -> None:
         # Cancel beats a pause that has not landed yet, even when the worker thread has already
         # exited and only its queued "cancelled" slot is left to run.
@@ -675,11 +745,26 @@ class BackendController(QObject):
 
     def launching_profiles(self) -> list[str]:
         """Profiles whose game is currently running under a ``launch`` worker."""
-        return [
-            name
-            for name, worker in self._workers.items()
-            if worker.isRunning() and worker.operation == "launch"
-        ]
+        names = set(self._launches)
+        for name, worker in self._workers.items():
+            if (
+                worker.operation == "launch"
+                and name not in self._launch_ended
+                and worker.isRunning()
+            ):
+                # A worker put in the slot directly (rather than through
+                # ``_spawn``) is still honoured, as long as its end was not seen.
+                names.add(name)
+        return sorted(names)
+
+    def launch_ended(self, profile: str) -> None:
+        """Record that ``profile``'s launch reported success/failure/cancel.
+
+        Its QThread may still be returning, so do not wait for ``isRunning()``
+        to turn false before deciding the game is no longer running.
+        """
+        self._launches.discard(profile)
+        self._launch_ended.add(profile)
 
     def reopen(self) -> None:
         """Accept operations again after ``shutdown(keep_launches=True)``.
@@ -728,12 +813,21 @@ class BackendController(QObject):
 
     # ---- callbacks ---------------------------------------------------------
     def _finish(self, profile: str, operation: str, worker: BackendWorker) -> None:
-        if self._workers.get(profile) is worker:
-            self._workers.pop(profile, None)
+        if self._workers.get(profile) is not worker:
+            # A worker whose slot ran late (a stall on the GUI thread, or one that was detached):
+            # the profile has moved on and its busy state belongs to the newer operation, or was
+            # already cleared by the cancel or pause that detached this one.
+            return
+        self._workers.pop(profile, None)
+        if operation == "launch":
+            self.launch_ended(profile)
         self.busy.emit(profile, operation, False)
 
     def _on_worker_finished(self, profile: str, worker: BackendWorker) -> None:
         """Start a queued user operation once the background refresh has ended."""
+        if worker.operation == "launch" and self._workers.get(profile) is worker:
+            # A launch that produced no terminal signal still ends with its thread.
+            self.launch_ended(profile)
         if self._closed:
             self._pending.pop(profile, None)
             return

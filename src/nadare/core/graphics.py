@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import process
+
 #: Renderer profile values, in Settings order.
 RENDERER_CHOICES: tuple[tuple[str, str], ...] = (
     ("Auto (Vulkan if available)", "auto"),
@@ -213,6 +215,7 @@ def _query_vulkan() -> VulkanInfo:
         try:
             proc = subprocess.run(  # noqa: S603 - fixed argv, no shell
                 [exe, "--summary"],
+                env=process.child_environ(),
                 capture_output=True,
                 text=True,
                 timeout=20,

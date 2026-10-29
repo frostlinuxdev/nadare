@@ -725,7 +725,7 @@ class TestArknightsVcredist:
         events: list = []
         backend.ctx.emit = events.append
         backend.install()
-        assert any(e.kind == "status" and "not installed" in e.message for e in events)
+        assert any(e.kind == "status" and "skipped it" in e.message for e in events)
 
 
 class TestStellaSoraVcredist:

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import signal
 import sys
 import threading
@@ -125,6 +126,82 @@ def test_run_cancellation() -> None:
         timer.join(timeout=2)
 
     assert time.monotonic() - started < process.GRACE_SECONDS + 5
+
+
+def test_run_without_capture_does_not_retain_output() -> None:
+    """``capture=False`` must not keep every line: a long game session can emit
+    far more output than the launcher has memory for."""
+    import tracemalloc
+
+    script = (
+        "import sys\n"
+        "line = 'x' * 100 + '\\n'\n"
+        "for _ in range(200_000):\n"
+        "    sys.stdout.write(line)\n"
+    )
+    tracemalloc.start()
+    try:
+        cp = process.run([sys.executable, "-c", script], capture=False, stream=False)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert cp.returncode == 0
+    assert cp.stdout is None
+    # Without retention the 20 MiB of output passes straight through the queue.
+    assert peak < 8 * 2**20, f"run() retained output with capture=False: {peak / 2**20:.1f} MiB"
+
+
+def test_run_cancel_kills_group_after_leader_exits() -> None:
+    """A grandchild that ignores SIGTERM must not survive the cancelled leader,
+    and the stdout reader must end with the operation."""
+    script = (
+        "trap 'exit 0' TERM\n"
+        "( trap '' TERM; sleep 60 ) &\n"
+        'echo "grandchild $!" >&2\n'
+        "wait\n"
+    )
+    cancel = Cancel()
+    marks: dict[str, object] = {}
+    seen = threading.Event()
+
+    def emit(event: Event) -> None:
+        if event.kind == "log" and "grandchild" in event.message:
+            marks["pid"] = int(event.message.split()[1])
+            seen.set()
+
+    def go() -> None:
+        try:
+            process.run(["sh", "-c", script], emit=emit, cancel=cancel, stream=True)
+        except Cancelled:
+            marks["done"] = True
+
+    runner = threading.Thread(target=go, daemon=True)
+    runner.start()
+    try:
+        assert seen.wait(5), "grandchild pid never reported"
+        cancel.cancel()
+        runner.join(timeout=10)
+        assert marks.get("done"), "run did not raise Cancelled"
+        pid = int(marks["pid"])
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("cancelled run left its grandchild alive")
+        assert not [t for t in threading.enumerate() if t.name == "nadare-run-reader"]
+    finally:
+        cancel.cancel()
+        runner.join(timeout=2)
+        if "pid" in marks and "done" not in marks:
+            try:
+                os.kill(int(marks["pid"]), signal.SIGKILL)
+            except OSError:
+                pass
 
 
 def test_which_finds_executable() -> None:

@@ -1202,6 +1202,10 @@ class ArknightsBackend(GameBackend):
         except BaseException:
             prefixmove.roll_back(backup, self.prefix(), moved)
             raise
+        backups = self.ctx.profile.get("prefix_backups")
+        if not isinstance(backups, list):
+            backups = []
+        self.ctx.set("prefix_backups", [*backups, str(backup.resolve())])
         self.ctx.emit(
             Event(
                 "done",

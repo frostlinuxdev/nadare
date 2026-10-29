@@ -111,6 +111,21 @@ _WINESERVER_KILLED: dict[str, float] = {}
 _WINESERVER_KILL_COOLDOWN = 3.0
 
 
+def _kill_key(prefix: Path) -> str:
+    """The prefix's real location, so one wineserver is one entry however it was spelled."""
+    try:
+        return os.path.realpath(str(prefix))
+    except (OSError, ValueError):
+        return os.path.normpath(str(prefix))
+
+
+def _forget_kill(argv: Iterable[str], env: dict[str, str]) -> None:
+    """A new process run means a new wineserver: an earlier kill record is about an old one."""
+    found = _wineserver_for(argv, env)
+    if found is not None and found[1] is not None:
+        _WINESERVER_KILLED.pop(_kill_key(found[1]), None)
+
+
 def _stop_wineserver(argv: Iterable[str], env: dict[str, str]) -> None:
     """Best-effort ``wineserver -k`` for the runner behind ``argv``.
 
@@ -126,7 +141,7 @@ def _stop_wineserver(argv: Iterable[str], env: dict[str, str]) -> None:
         return  # no owned prefix: never kill the ambient/default wineserver
     if not wineserver.is_file():
         return
-    key = os.path.normpath(str(prefix))
+    key = _kill_key(prefix)
     now = time.monotonic()
     if now - _WINESERVER_KILLED.get(key, -_WINESERVER_KILL_COOLDOWN) < _WINESERVER_KILL_COOLDOWN:
         return
@@ -190,6 +205,7 @@ def stream(
             if event.kind == "log":
                 on_line(event.message)
 
+    _forget_kill(cmd, env)
     try:
         completed = process.run(cmd, env=env, emit=emit, cancel=cancel, errors="replace")
     except Cancelled:

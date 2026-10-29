@@ -71,6 +71,15 @@ def fake(monkeypatch: pytest.MonkeyPatch) -> FakeRequests:
     return requests
 
 
+#: Valid 1x1 GIFs, small enough that the WebP recode keeps the original bytes. Downloads now
+#: refuse a body Qt cannot decode, so test bodies must be real images.
+GIF = (
+    b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff"
+    b"!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
+)
+GIF_RED = GIF.replace(b"\xff\xff\xff", b"\xff\x00\x00")
+
+
 # ---------------------------------------------------------------------------
 # local resolution
 # ---------------------------------------------------------------------------
@@ -203,14 +212,14 @@ def test_fetch_prefers_steam_cdn(fake: FakeRequests) -> None:
     base = "https://cdn.cloudflare.steamstatic.com/steam/apps/730/"
     fake.routes[base + "library_600x900.jpg"] = FakeResponse(status_code=404)
     fake.routes[base + "header.jpg"] = FakeResponse(
-        content=b"HEADER", headers={"Content-Type": "image/jpeg"}
+        content=GIF, headers={"Content-Type": "image/jpeg"}
     )
 
     path = artwork.fetch({"steam_appid": 730, "title": "Counter-Strike"}, kind="cover")
 
     assert path is not None
     assert path.name == "counter-strike-cover.jpg"
-    assert path.read_bytes() == b"HEADER"
+    assert path.read_bytes() == GIF
     assert fake.calls[0][1] == base + "library_600x900.jpg"
     assert fake.calls[1][1] == base + "header.jpg"
 
@@ -226,14 +235,14 @@ def test_fetch_uses_steamgriddb_when_key_present(
         payload={"data": [{"url": "https://cdn.example/nier.png"}]}
     )
     fake.routes["https://cdn.example/nier.png"] = FakeResponse(
-        content=b"PNG", headers={"Content-Type": "image/png"}
+        content=GIF, headers={"Content-Type": "image/png"}
     )
 
     path = artwork.fetch({"title": "Nier"}, kind="cover")
 
     assert path is not None
     assert path.name == "nier-cover.png"
-    assert path.read_bytes() == b"PNG"
+    assert path.read_bytes() == GIF
     auth = [kw.get("headers", {}).get("Authorization") for _, _, kw in fake.calls]
     assert "Bearer s3cret" in auth
 
@@ -263,14 +272,14 @@ def test_fetch_falls_back_to_anilist(fake: FakeRequests, monkeypatch: pytest.Mon
         }
     )
     fake.routes["https://img.example/arknights.jpg"] = FakeResponse(
-        content=b"ANIME", headers={"Content-Type": "image/jpeg"}
+        content=GIF, headers={"Content-Type": "image/jpeg"}
     )
 
     path = artwork.fetch({"anilist": "Arknights"}, kind="cover")
 
     assert path is not None
     assert path.name == "arknights-cover.jpg"
-    assert path.read_bytes() == b"ANIME"
+    assert path.read_bytes() == GIF
     post = next(call for call in fake.calls if call[0] == "POST")
     assert post[1] == "https://graphql.anilist.co"
     assert post[2]["json"]["variables"] == {"search": "Arknights"}
@@ -284,7 +293,7 @@ def test_second_fetch_uses_cache(fake: FakeRequests) -> None:
     fake.routes["https://cdn.cloudflare.steamstatic.com/steam/apps/730/library_600x900.jpg"] = (
         FakeResponse(status_code=404)
     )
-    fake.routes[url] = FakeResponse(content=b"ONCE", headers={"Content-Type": "image/jpeg"})
+    fake.routes[url] = FakeResponse(content=GIF, headers={"Content-Type": "image/jpeg"})
 
     profile = {"steam_appid": 730, "title": "CS"}
     first = artwork.fetch(profile, kind="cover")
@@ -292,20 +301,20 @@ def test_second_fetch_uses_cache(fake: FakeRequests) -> None:
     second = artwork.fetch(profile, kind="cover")
 
     assert first == second
-    assert second is not None and second.read_bytes() == b"ONCE"
+    assert second is not None and second.read_bytes() == GIF
     assert fake.calls == calls_after_first  # no second download
 
 
 def test_fetch_all_records_each_requested_kind(fake: FakeRequests) -> None:
     base = "https://cdn.cloudflare.steamstatic.com/steam/apps/730/"
     fake.routes[base + "library_600x900.jpg"] = FakeResponse(
-        content=b"COVER", headers={"Content-Type": "image/jpeg"}
+        content=GIF, headers={"Content-Type": "image/jpeg"}
     )
     fake.routes[base + "hero.jpg"] = FakeResponse(
-        content=b"HERO", headers={"Content-Type": "image/jpeg"}
+        content=GIF, headers={"Content-Type": "image/jpeg"}
     )
     fake.routes[base + "logo.png"] = FakeResponse(
-        content=b"LOGO", headers={"Content-Type": "image/png"}
+        content=GIF, headers={"Content-Type": "image/png"}
     )
 
     profile = {"steam_appid": 730, "title": "Test Game"}
@@ -349,13 +358,13 @@ def test_host_allowed_requires_https_exact_host_no_userinfo_or_port() -> None:
 
 def test_download_official_enforces_allowlist(fake: FakeRequests) -> None:
     fake.routes["https://cdn.example/a.jpg"] = FakeResponse(
-        content=b"OFFICIAL", headers={"Content-Type": "image/jpeg"}
+        content=GIF, headers={"Content-Type": "image/jpeg"}
     )
     path = artwork.download(
         "https://cdn.example/a.jpg", "game", "hero", ("cdn.example",)
     )
     assert path is not None
-    assert path.read_bytes() == b"OFFICIAL"
+    assert path.read_bytes() == GIF
     assert path.name == "game-hero.jpg"
 
     assert artwork.download("https://evil.example/a.jpg", "game", "hero", ("cdn.example",)) is None
@@ -373,7 +382,7 @@ def test_download_uses_no_browser_impersonation(fake: FakeRequests) -> None:
 def test_empty_allowlist_never_marks_official(fake: FakeRequests) -> None:
     """M1: without a trust anchor the bytes are cached as third-party art."""
     url = "https://cdn.example/a.jpg"
-    fake.routes[url] = FakeResponse(content=b"PUB", headers={"Content-Type": "image/jpeg"})
+    fake.routes[url] = FakeResponse(content=GIF, headers={"Content-Type": "image/jpeg"})
     path = artwork.download(url, "game", "official-hero", ())
     assert path is not None
     assert path.name == "game-official-hero.jpg"
@@ -426,7 +435,7 @@ def test_download_rejects_oversized_chunked_body(fake: FakeRequests) -> None:
 def test_store_fsyncs_before_replace(fake: FakeRequests, monkeypatch) -> None:
     """L16: the cached image is durable, not merely renamed into place."""
     url = "https://cdn.example/a.jpg"
-    fake.routes[url] = FakeResponse(content=b"IMG", headers={"Content-Type": "image/jpeg"})
+    fake.routes[url] = FakeResponse(content=GIF, headers={"Content-Type": "image/jpeg"})
     fsyncs: list[int] = []
     real_fsync = artwork.os.fsync
 
@@ -450,12 +459,12 @@ def test_official_fetch_ignores_stale_thirdparty_file(fake: FakeRequests) -> Non
     stale.write_bytes(b"SGDB")
 
     url = "https://launcher-pkg-ark-en.yo-star.com/img/bg.jpg"
-    fake.routes[url] = FakeResponse(content=b"YOSTAR", headers={"Content-Type": "image/jpeg"})
+    fake.routes[url] = FakeResponse(content=GIF, headers={"Content-Type": "image/jpeg"})
     path = artwork.download(url, "arknights", "official-hero", ("launcher-pkg-ark-en.yo-star.com",))
 
     assert path is not None
     assert path.name == "arknights-official-hero.jpg"
-    assert path.read_bytes() == b"YOSTAR"
+    assert path.read_bytes() == GIF
     assert stale.read_bytes() == b"SGDB", "the third-party file must be untouched"
 
     profile = {"hero": str(stale), "art_source": {"hero": "thirdparty"}}
@@ -469,11 +478,11 @@ def test_official_fetch_ignores_stale_thirdparty_file(fake: FakeRequests) -> Non
 def test_official_download_redownloads_when_url_changes(fake: FakeRequests) -> None:
     first = "https://cdn.example/a.jpg"
     second = "https://cdn.example/b.jpg"
-    fake.routes[first] = FakeResponse(content=b"ONE", headers={"Content-Type": "image/jpeg"})
-    fake.routes[second] = FakeResponse(content=b"TWO", headers={"Content-Type": "image/png"})
+    fake.routes[first] = FakeResponse(content=GIF, headers={"Content-Type": "image/jpeg"})
+    fake.routes[second] = FakeResponse(content=GIF_RED, headers={"Content-Type": "image/png"})
 
     one = artwork.download(first, "game", "official-hero", ("cdn.example",))
-    assert one is not None and one.read_bytes() == b"ONE"
+    assert one is not None and one.read_bytes() == GIF
     calls = len(fake.calls)
 
     # Same URL: a cache hit, no second download.
@@ -483,13 +492,13 @@ def test_official_download_redownloads_when_url_changes(fake: FakeRequests) -> N
 
     # Changed URL: the stale file must be replaced, not reused.
     changed = artwork.download(second, "game", "official-hero", ("cdn.example",))
-    assert changed is not None and changed.read_bytes() == b"TWO"
+    assert changed is not None and changed.read_bytes() == GIF_RED
     assert len(fake.calls) == calls + 1
 
 
 def test_official_download_redownloads_when_sidecar_missing(fake: FakeRequests) -> None:
     url = "https://cdn.example/a.jpg"
-    fake.routes[url] = FakeResponse(content=b"X", headers={"Content-Type": "image/jpeg"})
+    fake.routes[url] = FakeResponse(content=GIF, headers={"Content-Type": "image/jpeg"})
     one = artwork.download(url, "game", "official-hero", ("cdn.example",))
     assert one is not None
     artwork.src_sidecar(one).unlink()
@@ -501,7 +510,7 @@ def test_official_download_redownloads_when_sidecar_missing(fake: FakeRequests) 
 
 def test_official_banner_names_are_namespaced(fake: FakeRequests) -> None:
     url = "https://cdn.example/banner.jpg"
-    fake.routes[url] = FakeResponse(content=b"B", headers={"Content-Type": "image/jpeg"})
+    fake.routes[url] = FakeResponse(content=GIF, headers={"Content-Type": "image/jpeg"})
     path = artwork.download(url, "game", "official-banner-0", ())
     assert path is not None
     assert path.name == "game-official-banner-0.jpg"
@@ -514,7 +523,7 @@ def test_cache_media_keeps_official_provenance(fake: FakeRequests) -> None:
     from nadare.core import yostar
 
     url = "https://launcher-pkg-ark-en.yo-star.com/img/bg.jpg"
-    fake.routes[url] = FakeResponse(content=b"BG", headers={"Content-Type": "image/jpeg"})
+    fake.routes[url] = FakeResponse(content=GIF, headers={"Content-Type": "image/jpeg"})
     media = yostar.Media(
         game_tag="Arknights_EN", generated_at="t", background=url, banners=()
     )
@@ -567,12 +576,12 @@ def test_store_rejects_unsafe_name(fake: FakeRequests) -> None:
 
 def test_safe_slug_still_writes_inside_cache(fake: FakeRequests) -> None:
     fake.routes["https://cdn.example/a.jpg"] = FakeResponse(
-        content=b"OK", headers={"Content-Type": "image/jpeg"}
+        content=GIF, headers={"Content-Type": "image/jpeg"}
     )
     path = artwork.download("https://cdn.example/a.jpg", "safe-slug", "thumb", ("cdn.example",))
     assert path is not None
     assert path.parent == artwork.cache_dir()
-    assert path.read_bytes() == b"OK"
+    assert path.read_bytes() == GIF
     assert not list(artwork.cache_dir().glob("*.part"))
 
 
@@ -659,7 +668,7 @@ class _ClosableResponse(ChunkedResponse):
 
 
 def test_download_closes_the_response_on_success(fake: FakeRequests) -> None:
-    resp = _ClosableResponse([b"IMG"], headers={"Content-Type": "image/jpeg"})
+    resp = _ClosableResponse([GIF], headers={"Content-Type": "image/jpeg"})
     fake.routes["https://cdn.example/a.jpg"] = resp
     assert artwork.download("https://cdn.example/a.jpg", "game", "hero", ("cdn.example",))
     assert resp.closed == 1
@@ -744,11 +753,11 @@ def test_a_downloaded_png_is_cached_as_a_smaller_webp(fake: FakeRequests) -> Non
     assert path.stat().st_size < len(png)
 
 
-def test_bytes_qt_cannot_decode_are_cached_unchanged(fake: FakeRequests) -> None:
+def test_bytes_qt_cannot_decode_are_not_cached(fake: FakeRequests) -> None:
     url = "https://cdn.example/a.png"
     fake.routes[url] = FakeResponse(content=b"IMG", headers={"Content-Type": "image/png"})
-    path = artwork.download(url, "game", "hero", ("cdn.example",))
-    assert path is not None and path.suffix == ".png" and path.read_bytes() == b"IMG"
+    assert artwork.download(url, "game", "hero", ("cdn.example",)) is None
+    assert artwork._recode_webp(b"IMG", "png") == (b"IMG", "png")
 
 
 def test_gifs_and_webps_are_not_recoded() -> None:
@@ -1733,3 +1742,36 @@ def test_index_art_counts_as_official_and_can_replace_an_official_cover(
     assert found.get("cover") is not None
     assert artwork.art_source(profile)["cover"] == artwork.SOURCE_OFFICIAL
     assert profile["cover"] == str(found["cover"])
+
+
+def test_a_body_that_is_not_an_image_is_rejected_and_nothing_is_cached(
+    fake: FakeRequests, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 200 with a lying content-type must not be cached as a cover."""
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    url = "https://cdn.example/a.jpg"
+    fake.routes[url] = FakeResponse(
+        content=b"<html>404 page, status 200</html>", headers={"Content-Type": "image/jpeg"}
+    )
+    assert artwork.download(url, "game", "cover", ("cdn.example",)) is None
+    assert not (tmp_path / "covers" / "game-cover.jpg").exists()
+
+
+def test_the_news_cover_falls_through_to_the_next_image_when_a_body_is_not_an_image(
+    fake, tmp_path, monkeypatch
+):
+    from nadare.core import backends
+
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    cls = backends.get("arknights-yostar")
+    host = cls.official_image_hosts[0]
+    bad, good = f"https://{host}/newest.jpg", f"https://{host}/older.png"
+    monkeypatch.setattr(cls, "news_source", staticmethod(lambda: _news_result(bad, good)))
+    fake.routes[bad] = FakeResponse(
+        content=b"<html>404 page, status 200</html>", headers={"Content-Type": "image/jpeg"}
+    )
+    fake.routes[good] = FakeResponse(content=_png_bytes(), headers={"Content-Type": "image/png"})
+    found = artwork.fetch_all({"backend": "arknights-yostar", "title": "A"}, kinds=("cover",))
+    assert artwork.src_sidecar(found["cover"]).read_text(encoding="utf-8") == good
+    assert not (tmp_path / "covers" / "a-cover.jpg").exists()

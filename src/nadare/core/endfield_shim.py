@@ -26,7 +26,8 @@ from pathlib import Path
 from typing import Any
 
 from . import download as _dl
-from . import sevenzip
+from . import process, sevenzip
+from .shortcuts import command_hint
 
 #: Endpoint returning the current Gryphline launcher installer (``exe_url``).
 LAUNCHER_API = (
@@ -64,10 +65,14 @@ class ShimError(RuntimeError):
         self.hint = hint
 
 
-_REPORT_HINT = (
-    "The publisher may have changed its launcher; please report this "
-    "(Report a problem, or `nadare report`)"
-)
+def _report_hint() -> str:
+    """What to tell the user when the publisher's launcher changes."""
+    return (
+        "The publisher may have changed its launcher; please report this "
+        f"(Report a problem, or `{command_hint('report')}`)"
+    )
+
+
 _NETWORK_HINT = "Check your network connection and try again"
 
 
@@ -195,13 +200,13 @@ def build_shim(
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.name + ".tmp")
     argv = [resolved, "-O2", "-s", "-municode", "-mwindows", "-o", str(tmp), str(src)]
-    result = run(argv, capture_output=True, text=True, check=False)
+    result = run(argv, env=process.child_environ(), capture_output=True, text=True, check=False)
     if result.returncode != 0:
         tmp.unlink(missing_ok=True)
         raise ShimError(
             f"cannot build {out.name} with {resolved}: {result.stderr.strip()}",
             step="build",
-            hint=_REPORT_HINT,
+            hint=_report_hint(),
         )
     os.replace(tmp, out)
     stamp.write_text(digest + "\n", encoding="ascii")
@@ -239,6 +244,7 @@ def extract_games_exe(
     with tempfile.TemporaryDirectory(prefix="endfield-7z-") as tmpdir:
         result = run(
             [sevenz, "x", "-y", f"-o{tmpdir}", str(installer), "-r", "Games.exe"],
+            env=process.child_environ(),
             capture_output=True,
             text=True,
             check=False,
@@ -247,14 +253,14 @@ def extract_games_exe(
             raise ShimError(
                 f"cannot extract Games.exe with {sevenz}: {result.stderr.strip()}",
                 step="extract",
-                hint=_REPORT_HINT,
+                hint=_report_hint(),
             )
         candidates = [path for path in Path(tmpdir).rglob("Games.exe") if path.is_file()]
         if not candidates:
             raise ShimError(
                 "the launcher installer does not contain Games.exe",
                 step="extract",
-                hint=_REPORT_HINT,
+                hint=_report_hint(),
             )
         extracted = candidates[0]
         with open(extracted, "rb") as fh:
@@ -262,7 +268,7 @@ def extract_games_exe(
                 raise ShimError(
                     f"{extracted.name} is not a Windows executable",
                     step="extract",
-                    hint=_REPORT_HINT,
+                    hint=_report_hint(),
                 )
         _atomic_copy(extracted, dest)
     return dest
@@ -299,7 +305,7 @@ def _obtain_games(
         raise ShimError(
             "the launcher API did not return an exe_url on an allowed host",
             step="fetch",
-            hint=_REPORT_HINT,
+            hint=_report_hint(),
         )
 
     cache.parent.mkdir(parents=True, exist_ok=True)

@@ -52,8 +52,9 @@ src/nadare/
   app.py              # CLI parser + run_cli; run_gui hook
   core/               # paths, config, events, backends+registry, runners, download,
                       # journal, secrets, process, hosting, graphics, yostar, …
-  backends/           # czn/, fgo/ packages; arknights.py, stellasora.py;
-                      # generic wine/steam/script
+  backends/           # czn/, fgo/ packages; arknights.py, arknights_news.py,
+                      # stellasora.py; direct.py, launcher.py; the other
+                      # *_news.py modules; generic wine/steam/script
   gui/                # PyQt6 umbrella UI
 packaging/            # PyInstaller spec, .desktop, Flatpak manifest, systemd
 scripts/              # dev + build helpers

@@ -9,7 +9,8 @@ the caller decides what to do next (open the game page, offer a verify run).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,7 @@ from ..core.directkinds import (
     hoyo_visible,
     tier_of,
 )
+from ..core.shortcuts import command_hint
 from .theme import apply_theme
 
 
@@ -68,15 +70,15 @@ class GameType:
 #: The wizard group for profiles that need the user's own game files.
 ADVANCED_GROUP = "Advanced (bring your own game files)"
 
-CATALOG: tuple[GameType, ...] = (
+_CATALOG: tuple[GameType, ...] = (
     GameType("Chaos Zero Nightmare", "stove-czn"),
     GameType(
         "Fate/Grand Order",
         "fgo-lepton",
         badge="Experimental",
+        # The command half of this hint is filled in by _catalog() at display time.
         badge_help=(
-            "Runs in an Android container (Lepton). Needs podman and a kernel with "
-            "binder support; run `nadare doctor --fgo` to check your host."
+            "Runs in an Android container (Lepton). Needs podman and a kernel with binder support."
         ),
     ),
     GameType(
@@ -150,6 +152,25 @@ CATALOG: tuple[GameType, ...] = (
     ),
 )
 
+
+def _catalog() -> tuple[GameType, ...]:
+    """The catalog with hints that name the command this build actually has."""
+    fgo_help = (
+        "Runs in an Android container (Lepton). Needs podman and a kernel with "
+        f"binder support; run `{command_hint('doctor --fgo')}` to check your host."
+    )
+    return tuple(
+        replace(game, badge_help=fgo_help) if game.kind == "fgo-lepton" else game
+        for game in _CATALOG
+    )
+
+
+def __getattr__(name: str) -> Any:
+    if name == "CATALOG":
+        return _catalog()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 #: Kinds that run through a Wine/Proton prefix (so the wizard offers a prefix).
 PREFIX_KINDS = frozenset(
     {"wine", "script", "arknights-yostar", "stellasora-yostar", "stove-czn", *CATALOG_KINDS}
@@ -165,7 +186,7 @@ def available_catalog() -> tuple[GameType, ...]:
     missing = set(backends.unavailable())
     if not hoyo_visible():
         missing |= HOYO_KINDS
-    return tuple(g for g in CATALOG if g.kind not in missing)
+    return tuple(g for g in _catalog() if g.kind not in missing)
 
 
 #: Characters kept by :func:`_slugify` (ASCII letters/digits only, so a
@@ -215,9 +236,49 @@ def _new_or_empty(path: Path) -> bool:
         return False
 
 
+def _absolute(path: str | Path) -> str:
+    """``path`` with ``~`` expanded and made absolute, keeping its spelling (no symlink loss).
+
+    A path with a ``..`` component is resolved physically, the way the kernel reads it;
+    collapsing it lexically could land in a different folder when a symlink is involved.
+    """
+    text = os.path.expanduser(str(path))
+    if not os.path.isabs(text):
+        text = os.path.join(os.getcwd(), text)
+    if ".." in Path(text).parts:
+        return os.path.realpath(text)
+    return os.path.normpath(text)
+
+
+def _cannot_create(path: str | Path) -> bool:
+    """True when ``path`` exists but cannot be written, or cannot be created at all.
+
+    A folder that does not exist yet is allowed when its nearest existing ancestor is a
+    writable folder (the install creates the chain later).
+    """
+    probe = Path(path).expanduser()
+    try:
+        while not probe.exists():
+            parent = probe.parent
+            if parent == probe:
+                return True
+            probe = parent
+        if not probe.is_dir():
+            return True
+        return not os.access(probe, os.W_OK | os.X_OK)
+    except OSError:
+        return True
+
+
 def _holds_game(game: GameType, folder: Path) -> bool:
-    """True when ``folder`` already has one of ``game``'s executables directly in it."""
-    return any((folder / exe).exists() for exe in game.exes)
+    """True when ``folder`` already has one of ``game``'s executables directly in it.
+
+    A folder the user may not look into (EACCES, a stale mount) holds no game we can use.
+    """
+    try:
+        return any((folder / exe).exists() for exe in game.exes)
+    except OSError:
+        return False
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -276,9 +337,9 @@ def detect_import(kind: str, folder: str | Path | None, prefix: str | Path | Non
     callers decide which hint to adopt.
     """
     info: dict[str, Any] = {"install_dir": "", "prefix": "", "notes": []}
-    folder_path = Path(folder) if folder else None
-    prefix_path = Path(prefix) if prefix else None
-    game = next((g for g in CATALOG if g.kind == kind), None)
+    folder_path = Path(folder).expanduser() if folder else None
+    prefix_path = Path(prefix).expanduser() if prefix else None
+    game = next((g for g in _catalog() if g.kind == kind), None)
     adopted = (
         _drive_c_prefix(folder_path)
         if folder_path and folder_path.is_dir() and not (folder_path / "drive_c").is_dir()
@@ -316,10 +377,13 @@ def detect_import(kind: str, folder: str | Path | None, prefix: str | Path | Non
     else:
         if folder_path and folder_path.is_dir():
             if kind in PREFIX_ONLY_KINDS:
-                # The backend reads only ``prefix()``; a picked folder (or the
-                # game folder inside drive_c) is the existing Wine prefix.
-                info["prefix"] = str(adopted or folder_path)
-                info["notes"].append("Folder found; Nadare will use it as-is.")
+                # The backend reads only ``prefix()``; only a real prefix (one
+                # holding drive_c, or a folder inside it) is worth importing.
+                found = _drive_c_prefix(folder_path)
+                if found is not None:
+                    info["prefix"] = str(found)
+                    if not any("prefix" in note.lower() for note in info["notes"]):
+                        info["notes"].append(f"Found the Wine prefix at {found}.")
             else:
                 info["install_dir"] = str(folder_path)
                 info["notes"].append("Folder found; Nadare will use it as-is.")
@@ -328,8 +392,10 @@ def detect_import(kind: str, folder: str | Path | None, prefix: str | Path | Non
         if prefix_path and prefix_path.is_dir():
             # The game folder inside the prefix is an easy thing to pick: use the
             # prefix that contains it.
-            info["prefix"] = str(_drive_c_prefix(prefix_path) or prefix_path)
-            info["notes"].append("Prefix folder found.")
+            found = _drive_c_prefix(prefix_path)
+            if kind not in PREFIX_ONLY_KINDS or found is not None:
+                info["prefix"] = str(found or prefix_path)
+                info["notes"].append("Prefix folder found.")
     return info
 
 
@@ -482,6 +548,7 @@ class AddGameDialog(QDialog):
         self.prefix = QLineEdit()
         self.prefix.setPlaceholderText("Created automatically")
         self.prefix.textEdited.connect(lambda _t: setattr(self, "_prefix_touched", True))
+        self.prefix.textChanged.connect(self._update_prefix_summary)
         self.prefix.editingFinished.connect(self.detect)
         prefix_layout.addWidget(self.prefix, 1)
         prefix_browse = QPushButton("Browse")
@@ -493,6 +560,12 @@ class AddGameDialog(QDialog):
         self.prefix_free = QLabel("")
         self.prefix_free.setObjectName("Muted")
         form.addRow("", self.prefix_free)
+        # A prefix-only kind has no install-folder row to hang the usual summary on, and its
+        # picked folder is only a library: this line says where the prefix will really go.
+        self.prefix_only_summary = _ElidedLabel()
+        self.prefix_only_summary.setObjectName("Muted")
+        self.prefix_only_summary.setAccessibleName("Wine prefix location")
+        form.addRow("", self.prefix_only_summary)
 
         self._location_open = False
         self._prefix_open = False
@@ -599,7 +672,7 @@ class AddGameDialog(QDialog):
 
     def _selected_game(self) -> GameType | None:
         kind = self.selected_kind()
-        return next((g for g in CATALOG if g.kind == kind), None)
+        return next((g for g in _catalog() if g.kind == kind), None)
 
     def set_backend(self, kind: str) -> None:
         for row in range(self.game_list.count()):
@@ -618,8 +691,8 @@ class AddGameDialog(QDialog):
         self._folder_changed()
 
     def set_prefix(self, path: str | Path) -> None:
-        self.prefix.setText(str(path))
         self._prefix_touched = True
+        self.prefix.setText(str(path))
 
     def set_profile_name(self, name: str) -> None:
         self.name.setText(name)
@@ -729,6 +802,9 @@ class AddGameDialog(QDialog):
         if hasattr(self, "prefix_toggle"):
             prefix_controls = show and uses_prefix and not prefix_only and not importing
             self.prefix_summary.setVisible(prefix_controls)
+            self.prefix_only_summary.setVisible(
+                show and uses_prefix and prefix_only and not importing
+            )
             self.install_summary.setVisible(show and not prefix_only and not importing)
             self.prefix_toggle.setVisible(prefix_controls)
             self.prefix_toggle.setText(
@@ -784,15 +860,20 @@ class AddGameDialog(QDialog):
     def _update_prefix_summary(self) -> None:
         game = self._selected_game()
         fresh = game is not None and self.install_new.isChecked()
-        if fresh and game.kind not in PREFIX_ONLY_KINDS:
+        if fresh:
             install_dir, prefix, _owned, _dirs = self._plan_paths(
                 game, self.folder.text().strip(), self.prefix.text().strip(), False
             )
-            self.install_summary.set_full_text(f"Installs to: {install_dir}")
+            if game.kind not in PREFIX_ONLY_KINDS:
+                self.install_summary.set_full_text(f"Installs to: {install_dir}")
         else:
             prefix = self.prefix.text().strip()
         if fresh and game.kind in PREFIX_KINDS:
-            self.prefix_summary.set_full_text(f"Wine prefix: {prefix}")
+            line = f"Wine prefix: {prefix}"
+            if game.kind in PREFIX_ONLY_KINDS:
+                self.prefix_only_summary.set_full_text(line)
+            else:
+                self.prefix_summary.set_full_text(line)
 
     def _update_size_hint(self) -> None:
         """Explain that Install new downloads later, with the known download size."""
@@ -823,8 +904,8 @@ class AddGameDialog(QDialog):
         start = self.prefix.text().strip() or str(Path.home())
         chosen = QFileDialog.getExistingDirectory(self, "Select Wine prefix", start)
         if chosen:
-            self.prefix.setText(chosen)
             self._prefix_touched = True
+            self.prefix.setText(chosen)
             self.detect()
 
     def _free_hint(self, path: str) -> str:
@@ -876,13 +957,15 @@ class AddGameDialog(QDialog):
         The picked folder is a games library (#560): the game gets
         ``<folder>/Nadare/<Game>/install`` with its prefix next to it, so nothing of
         Nadare's ever mixes with the user's own folders. A folder that already holds this
-        game's exe is kept as picked. Nadare may only delete folders it made, so it
-        records which. The preview under the folder field uses this too, so what it
-        shows is what ``create_profile`` stores.
+        game's exe (or, for a prefix-only kind, a Wine prefix) is kept as picked. Nadare
+        may only delete folders it made, so it records which. The preview under the folder
+        field uses this too, so what it shows is what ``create_profile`` stores.
         """
         kind = game.kind
         owned: list[str] = []
         owned_dirs: list[str] = []
+        install_dir = _absolute(install_dir) if install_dir else ""
+        prefix_value = _absolute(prefix_value) if prefix_value else ""
         if not importing and install_dir and kind not in PREFIX_ONLY_KINDS:
             chosen = Path(install_dir)
             default_place = not self._folder_touched or _inside(chosen, self._root())
@@ -900,6 +983,17 @@ class AddGameDialog(QDialog):
                 install_dir = str(chosen)
             if _new_or_empty(chosen):
                 owned.append("install_dir")
+        if not importing and prefix_value and kind in PREFIX_ONLY_KINDS:
+            chosen = Path(prefix_value)
+            default_place = not self._prefix_touched or _inside(chosen, self._root())
+            # A folder that already holds a prefix is the prefix, as for other kinds;
+            # every other picked folder is a library and gets Nadare's own sub-tree.
+            if not default_place and _drive_c_prefix(chosen) != chosen:
+                game_dir = _free_folder(
+                    chosen / "Nadare", _folder_name(game.title), self.config.profiles
+                )
+                owned_dirs.append(str(game_dir))
+                prefix_value = str(game_dir / "prefix")
         if not importing and prefix_value and kind in PREFIX_KINDS:
             if _new_or_empty(Path(prefix_value)):
                 owned.append("prefix")
@@ -940,6 +1034,11 @@ class AddGameDialog(QDialog):
                         f"that contains {game.exes[0] if game.exes else 'the game'} or its "
                         "Wine prefix."
                     )
+                elif kind in PREFIX_ONLY_KINDS:
+                    self.error_label.setText(
+                        f"No {game.title} Wine prefix was found there. Pick the folder "
+                        "that holds the existing prefix (it must contain drive_c)."
+                    )
                 else:
                     self.error_label.setText(
                         "That folder does not exist. Pick the folder you already use for "
@@ -958,6 +1057,29 @@ class AddGameDialog(QDialog):
         install_dir, prefix_value, owned, owned_dirs = self._plan_paths(
             game, install_dir, prefix_value, importing
         )
+
+        if not importing and kind in PREFIX_ONLY_KINDS and prefix_value:
+            chosen = Path(prefix_value)
+            container = _drive_c_prefix(chosen)
+            if container is not None and container != chosen:
+                self.error_label.setText(
+                    "That folder is inside another Wine prefix. Pick a folder outside it."
+                )
+                return None
+
+        if not importing:
+            targets = []
+            if kind not in PREFIX_ONLY_KINDS and install_dir:
+                targets.append(("game folder", install_dir))
+            if prefix_value and kind in PREFIX_KINDS:
+                targets.append(("Wine prefix", prefix_value))
+            for label, target in targets:
+                if _cannot_create(target):
+                    self.error_label.setText(
+                        f"That {label} is not writable: {target}. "
+                        "Pick a folder you can write to."
+                    )
+                    return None
 
         values: dict[str, Any] = {"backend": kind, "title": game.title}
         if install_dir and kind not in PREFIX_ONLY_KINDS:
@@ -994,7 +1116,7 @@ class AddGameDialog(QDialog):
 
 __all__ = [
     "AddGameDialog",
-    "CATALOG",
+    "CATALOG",  # noqa: F822 - provided lazily by __getattr__
     "GameType",
     "PREFIX_KINDS",
     "PREFIX_ONLY_KINDS",

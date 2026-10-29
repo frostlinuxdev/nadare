@@ -63,6 +63,7 @@ from ...core.events import Cancelled, Event, mask
 from ...core.removal import tree_safety
 from ...core.runtimewatch import RuntimeWatch
 from ...core.secrets import SecretStore, SecretStoreError, default_collection_exists
+from ...core.shortcuts import command_hint
 from .news import IMAGE_HOSTS, fetch_czn_news
 
 KIND = "stove-czn"
@@ -206,7 +207,18 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 #: (-SIGTERM, 128+SIGTERM, and the 256-15 wrap umu/proton produce; likewise SIGINT).
 _STOPPED_EXIT_CODES = frozenset({-15, 143, 241, -2, 130, 254})
 
-REMEMBER_NOTICE = "Remember me unavailable: system keyring not usable (run: nadare doctor)"
+
+def _remember_notice() -> str:
+    """The no-keyring notice, naming the command this build actually has."""
+    return f"Remember me unavailable: system keyring not usable (run: {command_hint('doctor')})"
+
+
+def __getattr__(name: str) -> Any:
+    if name == "REMEMBER_NOTICE":
+        return _remember_notice()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 #: Emitted when the stored credential belongs to a different account.
 MISMATCH_NOTICE = "Saved login no longer matches this account; log in again"
 #: Emitted when log out could not remove the persisted credential from the OS
@@ -645,9 +657,7 @@ class CznBackend(GameBackend):
         if self._remember_notice_shown:
             return
         self._remember_notice_shown = True
-        self.ctx.emit(
-            Event("status", REMEMBER_NOTICE, data={"remember_unavailable": True})
-        )
+        self.ctx.emit(Event("status", _remember_notice(), data={"remember_unavailable": True}))
 
     def _notify_mismatch(self) -> None:
         self.ctx.emit(Event("status", MISMATCH_NOTICE))
@@ -761,7 +771,7 @@ class CznBackend(GameBackend):
 
     # ---- env / process helpers --------------------------------------------
     def _env(self) -> dict[str, str]:
-        env = dict(os.environ)
+        env = process.child_environ()
         env["CZN_STATE_DIR"] = str(self._auth_dir())
         env["CZN_PREFIX"] = str(self.prefix())
         env["CZN_RUNNERS_DIR"] = str(self._runners_dir())
@@ -1680,6 +1690,8 @@ class CznBackend(GameBackend):
                 verify_fn=self._verify_vcredist,
                 download_fn=self._download_vcredist,
             )
+        except vcredist.StepSkipped:
+            raise  # the user chose Skip: ensure carries on without the runtime
         except BackendError as e:
             raise BackendError(self._explain(e.message), e.code) from e
 
@@ -1842,6 +1854,10 @@ class CznBackend(GameBackend):
         except BaseException:
             prefixmove.roll_back(backup, self.prefix(), moved)
             raise
+        backups = self.ctx.profile.get("prefix_backups")
+        if not isinstance(backups, list):
+            backups = []
+        self.ctx.set("prefix_backups", [*backups, str(backup.resolve())])
         self.ctx.emit(
             Event(
                 "done",
@@ -2034,7 +2050,7 @@ class CznBackend(GameBackend):
                 "The saved STOVE login expired or was used elsewhere. Log in again.",
                 3,
             )
-        raise BackendError("log in first, or enable remember_me", 3)
+        raise BackendError("log in first, or turn on 'Remember me on this device'", 3)
 
     # ---- launch ------------------------------------------------------------
     def _prefix_command(
@@ -2087,7 +2103,12 @@ class CznBackend(GameBackend):
             # No umu-run (or inside Flatpak): run the Proton tree directly, so
             # umu-launcher is not a hard dependency.
             if not (Path(proton) / "proton").is_file():
-                raise BackendError("the selected runner needs umu-run (umu-launcher)", 1)
+                raise BackendError(
+                    "the selected runner needs umu-run (umu-launcher): install "
+                    "umu-launcher, or choose a Proton runner that does not need it "
+                    "in Settings",
+                    1,
+                )
             # Running a Steam-Runtime Proton build directly makes it load the
             # host's 32-bit libraries; without them wineboot cannot find
             # FreeType and the WebView2 installer hangs silently. Fail fast
@@ -2102,7 +2123,11 @@ class CznBackend(GameBackend):
             return argv, process.sanitize_game_env(env)
         wine = os.environ.get("CZN_WINE") or shutil.which("wine")
         if not wine:
-            raise BackendError("no wine found; pick a Proton runner or set CZN_WINE", 1)
+            raise BackendError(
+                "no Proton runner found: pick one in Settings -> Manage runners "
+                "(CZN_WINE also works for advanced use)",
+                1,
+            )
         # A fresh plain-Wine prefix otherwise pops "Wine could not find a
         # wine-mono / wine-gecko package" dialogs. The game and WebView2 need
         # neither, so suppress both prompts (Proton handles this itself).
@@ -2394,7 +2419,9 @@ class CznBackend(GameBackend):
         for item in left:
             self.ctx.emit(Event("step", f"Left in place: {item}"))
         if failed:
-            raise BackendError("could not remove: " + "; ".join(failed))
+            raise BackendError(
+                "Could not remove these items (permissions or in use?): " + "; ".join(failed)
+            )
         if left:
             self.ctx.emit(Event("done", "Finished; left in place: " + "; ".join(left)))
             return

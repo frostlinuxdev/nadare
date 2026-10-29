@@ -123,7 +123,4 @@ def test_roll_back_moves_restored_paths_back_into_the_old_prefix(tmp_path):
     assert (prefix / "drive_c" / "Game" / "game.exe").read_text() == "game"
     assert (prefix / "drive_c" / "stale.dll").read_text() == "old"
     parked = list(tmp_path.glob("prefix.failed-*"))
-    assert len(parked) == 1
-    assert not (parked[0] / "drive_c" / "Game" / "game.exe").exists(), (
-        "the user's game files must not be left in the parked half-built prefix"
-    )
+    assert not parked, "an emptied parked prefix is tidied up, not left behind"

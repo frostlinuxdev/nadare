@@ -164,7 +164,7 @@ def _smoke_test(python: str, executable: Path) -> None:
     try:
         result = subprocess.run(
             [python, str(executable), "--version"],
-            env=process.sanitize_game_env(os.environ),
+            env=process.sanitize_game_env(process.child_environ()),
             capture_output=True,
             text=True,
             timeout=30,
@@ -264,6 +264,7 @@ def system(
     try:
         result = (run or subprocess.run)(
             [found, "--version"],
+            env=process.child_environ(),
             capture_output=True,
             text=True,
             check=False,

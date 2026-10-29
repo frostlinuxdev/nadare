@@ -228,8 +228,7 @@ class MyGameBackend(GameBackend):
 
 ## Registering the backend
 
-Add the kind and its import path to `_BUILTINS` in
-`src/nadare/core/backends.py`:
+A hand-written backend goes in `_BUILTINS` in `src/nadare/core/backends.py`:
 
 ```python
 _BUILTINS = {
@@ -240,8 +239,12 @@ _BUILTINS = {
 
 Imports are lazy and failures are swallowed, so a backend with a missing
 dependency simply is not offered — never crash the registry for everyone else.
-If the backend is a third-party plugin, it can call
-`nadare.core.backends.register("mygame", MyGameBackend)` at import time instead.
+A catalog game is different: add its row to `_DIRECT` or `_LAUNCHER` in
+`src/nadare/core/directkinds.py` and its class to `backends/direct.py` or
+`backends/launcher.py`; `CATALOG_BACKENDS` feeds it into the same registry. See
+[docs/CATALOG.md](CATALOG.md). If the backend is a third-party plugin, it can
+call `nadare.core.backends.register("mygame", MyGameBackend)` at import time
+instead.
 
 ## Profile options
 
@@ -305,10 +308,10 @@ Syncs are parallel and keep-alive by default: `yostar.sync(..., workers=N)`
 fetches up to 16 files at once (default 6) over per-thread reused HTTP(S)
 connections, and the CRC-64/XZ is computed from the bytes as they are written
 (liblzma's `lzma_crc64` via ctypes when available, else a pure-Python table), so
-no second read is needed. The intended profile knob is `download_workers`
-(1-16); the backends do not read it yet, so pass `workers=` to `sync` directly
-until that wiring lands. Progress is aggregated and emitted at most every
-250 ms with `speed_bps`/`eta_s`.
+no second read is needed. The `download_workers` profile option (1-16, set in
+Settings) selects the worker count for `arknights-yostar`, `stellasora-yostar`
+and the `direct-*` catalog backends. Progress is aggregated and emitted at most
+every 250 ms with `speed_bps`/`eta_s`.
 
 ```json
 {
@@ -351,6 +354,7 @@ Run the suite with `./scripts/dev.sh test` (or `pytest -q`).
 - [ ] No token, cookie or secret can reach an `Event` or the log.
 - [ ] `launch()` returns the exit code; `stop()` is a no-op when idle.
 - [ ] Errors are `BackendError`/`BackendUnsupported` with actionable messages.
-- [ ] Registered in `_BUILTINS`, or via `register(...)` for a plugin.
+- [ ] Registered in `_BUILTINS` (hand-written) or `core/directkinds.py`
+      (`direct-*`/`launcher-*` catalog games), or via `register(...)` for a plugin.
 - [ ] Tests added; `ruff check`, `ruff format --check` and `pytest` pass.
 - [ ] README "Supported games" table and [PLAN.md](../PLAN.md) updated.
