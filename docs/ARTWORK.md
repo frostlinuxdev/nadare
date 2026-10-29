@@ -142,3 +142,7 @@ Then set `custom_background` to the saved path.
 owned by the maintainer and distributed under the project license. It was drawn
 as SVG paths with AI assistance (see [AI.md](AI.md)); no third-party artwork is
 included.
+
+## Curated art from the index
+
+The index can also prescribe a game's cover; see [ART-INDEX.md](ART-INDEX.md).

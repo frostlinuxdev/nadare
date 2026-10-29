@@ -21,7 +21,7 @@ except Exception:  # noqa: BLE001
 
 from nadare.core import artwork
 from nadare.core.diskspace import human_size
-from nadare.core.storecatalog import entries
+from nadare.core.storecatalog import entries, store_games
 from nadare.gui import store
 from nadare.gui.images import ImageLoader
 from nadare.gui.store import StoreCard, StorePage
@@ -49,7 +49,7 @@ def _shown_page(qapp, **kwargs) -> StorePage:
 def test_store_grid_card_count_matches_model(qapp):
     page = _shown_page(qapp)
     try:
-        assert len(page.visible_kinds()) == len(entries())
+        assert len(page.visible_kinds()) == len(store_games())
     finally:
         page.close()
 
@@ -180,7 +180,7 @@ def test_construction_does_not_fetch_art(monkeypatch, qapp):
         raise AssertionError("artwork fetch must wait until the page is shown")
 
     monkeypatch.setattr(artwork, "fetch", fail)
-    monkeypatch.setattr(store, "entries", fail)
+    monkeypatch.setattr(store, "store_games", fail)
     page = StorePage()
     try:
         assert page.visible_kinds() == []

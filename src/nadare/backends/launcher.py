@@ -201,7 +201,6 @@ def _subdir(root: str, name: str) -> Path:
 
 class NikkeBackend(LauncherBackend):
     kind = "launcher-nikke"
-    vcredist_default = False  # builtin runtime covers its imports (import scan)
     news_source = staticmethod(nikke_news.fetch_nikke_news)
     official_image_hosts = nikke_news.IMAGE_HOSTS
     #: Measured on a real install (launcher, game and Wine prefix): 27 GiB.
@@ -326,7 +325,6 @@ class NikkeBackend(LauncherBackend):
 
 class NteBackend(LauncherBackend):
     kind = "launcher-nte"
-    vcredist_default = False  # builtin runtime covers its imports (import scan)
     news_source = staticmethod(nte_news.fetch_nte_news)
     official_image_hosts = nte_news.IMAGE_HOSTS
     #: The launcher installs the same game as ``direct-nte``.

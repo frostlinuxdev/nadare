@@ -138,6 +138,22 @@ if [[ -z "${NADARE_SKIP_CANARY:-}" ]]; then
     fi
 fi
 
+# Art index canary: the cover URLs published in catalog/art.json. Exit 4 = a game has no working
+# cover left (clients then use the older art sources); handled like the canaries above and never
+# blocks publishing.
+if [[ -z "${NADARE_SKIP_CANARY:-}" ]]; then
+    art_out="$(python3 "$root/scripts/check_art_index.py" --index "$index" 2>&1)"
+    art_rc=$?
+    [[ -z "$art_out" ]] || echo "$art_out" >&2
+    if [[ $art_rc -eq 4 ]]; then
+        art_down="$(grep '^CANARY:' <<<"$art_out" | head -c 400)"
+        canary_down="${canary_down:+$canary_down; }$art_down"
+        canary_down="${canary_down:0:400}"
+    elif [[ $art_rc -ne 0 ]]; then
+        echo "refresh_index: art index canary failed (exit $art_rc), ignored" >&2
+    fi
+fi
+
 skip_yostar=--skip-yostar
 if [[ -f "$yostar_env" ]]; then
     set -a

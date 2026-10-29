@@ -257,8 +257,9 @@ class ArknightsBackend(GameBackend):
     #: ignores the unknown key. A profile ``extra_env`` DXVK_CONFIG overrides it.
     dxvk_config = "dxvk.enablePresentTiming = False"
     kind = KIND
-    #: Run the real VC++ runtime step. Off for games shown to run on Wine's builtin one.
-    vcredist_default = True
+    #: Run the real Microsoft VC++ installer in the prefix. Off by default: it is slow on a
+    #: fresh prefix and only Mongil is known to want it (a profile can set ``vcredist: true``).
+    vcredist_default = False
 
     options = (
         Option("prefix", "Wine prefix", "path_dir", "WINEPREFIX used for this game."),
@@ -951,11 +952,9 @@ class ArknightsBackend(GameBackend):
     def _run_vcredist(self, *, created: bool = False) -> None:
         """Best-effort VC++ runtime step (see :func:`nadare.core.vcredist.ensure`).
 
-        Attempted on new and existing prefixes alike (a leftover ``"vcredist": false``
-        is ignored). Games whose research showed Wine's builtin runtime is enough set
-        ``vcredist_default = False`` and only run it when the profile says
-        ``"vcredist": true``. A no-op once the real runtime is present; never aborts
-        the caller.
+        Off unless the class sets ``vcredist_default`` or the profile says ``"vcredist": true``
+        (Mongil is the one game here that wants it; Chaos Zero Nightmare has its own backend that
+        always installs it). A no-op once the real runtime is present; never aborts the caller.
         """
         if not self.vcredist_default and profile_setting(self.ctx.profile, "vcredist") is not True:
             return

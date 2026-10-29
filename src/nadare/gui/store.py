@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from PyQt6.QtCore import QObject, QRunnable, Qt, pyqtSignal
@@ -24,10 +25,15 @@ from PyQt6.QtWidgets import (
 
 from ..core import artwork
 from ..core.diskspace import human_size
-from ..core.storecatalog import StoreEntry, entries
+from ..core.storecatalog import StoreEntry, store_games
 from .images import ImageLoader
-from .library import CARD_ART_H, CARD_HEIGHT, CARD_WIDTH, FlowLayout, _drop_shadow
+from .library import FlowLayout, _drop_shadow
 from .theme import ACCENT, cover_pixmap
+
+#: Store tiles are landscape: most covers are wide key art, which then fills the tile whole.
+CARD_WIDTH = 330
+CARD_ART_H = 186
+CARD_HEIGHT = CARD_ART_H + 148
 
 _FOCUS_RING = f"QFrame#StoreCard:focus {{ border: 2px solid {ACCENT}; }}"
 
@@ -65,16 +71,33 @@ class StoreCard(QFrame):
 
     activated = pyqtSignal(str)
 
-    def __init__(self, entry: StoreEntry, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        entry: StoreEntry,
+        parent: QWidget | None = None,
+        *,
+        art_title: str | None = None,
+        art_kind: str | None = None,
+        has_art: bool | None = None,
+        kinds: tuple[str, ...] = (),
+    ) -> None:
         super().__init__(parent)
         self.entry = entry
+        #: The title the cover is looked up by (a game with several builds shows the game's name).
+        self.art_title = art_title or entry.title
+        #: Which build's cover this card shows (the game's lead build, whatever filter is on).
+        self.art_kind = art_kind or entry.kind
+        #: Whether that build has a cover to fetch (the lead build's, not a filtered one's).
+        self.has_art = entry.has_art if has_art is None else has_art
+        #: Every build this card stands for.
+        self.kinds = kinds or (entry.kind,)
         self.setObjectName("StoreCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAccessibleName(entry.title)
         self.setToolTip(entry.title)
         self.setStyleSheet(_FOCUS_RING)
-        self.setFixedSize(CARD_WIDTH, CARD_HEIGHT + 48)
+        self.setFixedSize(CARD_WIDTH, CARD_HEIGHT)
         self._shadow = _drop_shadow(self, 18, 70)
 
         root = QVBoxLayout(self)
@@ -187,6 +210,8 @@ class StorePage(QWidget):
         self.setObjectName("Page")
         self._installed_kinds: frozenset[str] = frozenset()
         self._cards: dict[str, StoreCard] = {}
+        #: Every build's kind -> the card of its game (a game with several builds has one card).
+        self._card_for_kind: dict[str, StoreCard] = {}
         self._art_started = False
         self._built = False
         self._art_requested: set[str] = set()
@@ -257,8 +282,8 @@ class StorePage(QWidget):
 
     def set_installed_kinds(self, kinds: frozenset[str]) -> None:
         self._installed_kinds = frozenset(kinds)
-        for kind, card in self._cards.items():
-            card.set_added(kind in self._installed_kinds)
+        for card in self._cards.values():
+            card.set_added(any(kind in self._installed_kinds for kind in card.kinds))
 
     def refresh(self) -> None:
         """Rebuild cards using the headless model's filtering and ordering."""
@@ -269,19 +294,46 @@ class StorePage(QWidget):
         )
         tier = selected_tier if selected_tier in ("Verified", "Experimental") else None
         query = self.search.text() if hasattr(self, "search") else ""
-        results = entries(installed_kinds=self._installed_kinds, query=query, tier=tier)
+        games = store_games(installed_kinds=self._installed_kinds, query=query, tier=tier)
+        whole = {}
+        for full in store_games(installed_kinds=self._installed_kinds):
+            for build in full.entries:
+                whole[build.kind] = full
         self._clear_cards()
-        for entry in results:
-            card = StoreCard(entry, self._container)
+        for game in games:
+            primary = game.primary
+            shown = primary
+            if len(game.entries) > 1:
+                shown = replace(
+                    primary,
+                    title=game.title,
+                    delivery_label=f"{len(game.entries)} versions",
+                    size_bytes=None,
+                    installed=whole[primary.kind].installed,
+                )
+            # The card stands for the whole game, whatever the search or filter hides of it.
+            kinds = tuple(entry.kind for entry in whole[primary.kind].entries)
+            art = whole[primary.kind].primary
+            card = StoreCard(
+                shown,
+                self._container,
+                art_title=art.title,
+                art_kind=art.kind,
+                has_art=art.has_art,
+                kinds=kinds,
+            )
             card.activated.connect(self.entry_activated.emit)
             self._flow.addWidget(card)
-            self._cards[entry.kind] = card
-            self._apply_art(entry.kind)
+            self._cards[primary.kind] = card
+            for kind in kinds:
+                self._card_for_kind[kind] = card
+            self._apply_art(card)
+        results = games
         self._flow.invalidate()
         self.results.setCurrentWidget(self.scroll if results else self.empty_label)
         if results:
-            QWidget.setTabOrder(self.tier_filter, self._cards[results[0].kind])
-            QWidget.setTabOrder(self._cards[results[-1].kind], self.own_game_button)
+            QWidget.setTabOrder(self.tier_filter, self._cards[results[0].primary.kind])
+            QWidget.setTabOrder(self._cards[results[-1].primary.kind], self.own_game_button)
         if self._art_started:
             self._request_visible_art()
 
@@ -290,7 +342,7 @@ class StorePage(QWidget):
 
     def focus_card(self, kind: str) -> None:
         """Focus the card for ``kind``; fall back to the search box when it is not shown."""
-        card = self._cards.get(kind)
+        card = self._card_for_kind.get(kind) or self._cards.get(kind)
         (card or self.search).setFocus()
 
     def visible_kinds(self) -> list[str]:
@@ -312,33 +364,35 @@ class StorePage(QWidget):
         from PyQt6.QtCore import QThreadPool
 
         pool = QThreadPool.globalInstance()
-        for kind, card in tuple(self._cards.items()):
-            if not card.entry.has_art or kind in self._art_requested:
+        for card in tuple(self._cards.values()):
+            if not card.has_art or card.art_kind in self._art_requested:
                 continue
-            self._art_requested.add(kind)
-            pool.start(_FetchArt(kind, card.entry.title, self._art_signals))
+            self._art_requested.add(card.art_kind)
+            pool.start(_FetchArt(card.art_kind, card.art_title, self._art_signals))
 
     def _on_art_fetched(self, kind: str, path: object) -> None:
         if not path:
             return
         self._art_paths[kind] = str(path)
-        self._apply_art(kind)
+        for card in tuple(self._cards.values()):
+            if card.art_kind == kind:
+                self._apply_art(card)
 
-    def _apply_art(self, kind: str) -> None:
-        """Decode the fetched cover (if any) for the card currently showing ``kind``."""
-        card = self._cards.get(kind)
-        path = self._art_paths.get(kind)
-        if card is None or path is None:
+    def _apply_art(self, card: StoreCard) -> None:
+        """Decode the fetched cover (if any) for ``card``."""
+        path = self._art_paths.get(card.art_kind)
+        if path is None:
             return
 
         def apply(pixmap) -> None:
-            if self._cards.get(kind) is card:
+            if card in self._cards.values():
                 card.set_art(pixmap)
 
-        self._images.request([path], CARD_WIDTH - 2, CARD_ART_H, apply, cover=True)
+        self._images.request([path], CARD_WIDTH - 2, CARD_ART_H, apply, cover=True, fit=True)
 
     def _clear_cards(self) -> None:
         self._cards.clear()
+        self._card_for_kind.clear()
         while self._flow.count():
             item = self._flow.takeAt(0)
             widget = item.widget() if item is not None else None

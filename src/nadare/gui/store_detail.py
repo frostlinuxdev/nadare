@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QSize, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QKeyEvent, QPixmap
-from PyQt6.QtWidgets import QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QComboBox, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from ..core import diskspace
 from ..core.storecatalog import StoreEntry
@@ -29,12 +29,15 @@ class StoreDetail(QWidget):
 
     install_requested = pyqtSignal(str)
     back_requested = pyqtSignal()
+    #: The user picked another build of the same game (the kind of that build).
+    variant_requested = pyqtSignal(str)
 
     def __init__(self, entry: StoreEntry, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("Page")
         self._entry = entry
         self._hero: QPixmap | None = None
+        self._variants: tuple[StoreEntry, ...] = ()
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 24)
@@ -61,6 +64,13 @@ class StoreDetail(QWidget):
         self.title_label.setWordWrap(True)
         self.title_label.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(self.title_label)
+
+        self.variant_box = QComboBox()
+        self.variant_box.setAccessibleName("Version")
+        self.variant_box.setToolTip("This game comes in more than one version; pick one.")
+        self.variant_box.hide()
+        self.variant_box.currentIndexChanged.connect(self._variant_picked)
+        layout.addWidget(self.variant_box, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.tier_label = QLabel()
         self.tier_label.setObjectName("Accent")
@@ -109,11 +119,19 @@ class StoreDetail(QWidget):
         """The catalog entry currently shown."""
         return self._entry
 
-    def set_entry(self, entry: StoreEntry) -> None:
-        """Replace all entry content and restore its title placeholder art."""
+    def set_entry(self, entry: StoreEntry, variants: tuple[StoreEntry, ...] | None = None) -> None:
+        """Replace all entry content and restore its title placeholder art.
+
+        ``variants`` are all the builds of this game (a version picker is shown for more than
+        one). ``None`` keeps the builds already known, as long as ``entry`` is one of them.
+        """
         self._entry = entry
         self._hero = None
-        self.title_label.setText(entry.title)
+        if variants is None:
+            variants = self._variants if any(v.kind == entry.kind for v in self._variants) else ()
+        self._variants = tuple(variants)
+        self._fill_variants(entry)
+        self.title_label.setText(entry.group or entry.title)
         self.tier_label.setText(entry.tier)
         self.tier_help_label.setText(entry.tier_help)
         explanation = _DELIVERY_FACTS.get(entry.delivery_label)
@@ -144,6 +162,23 @@ class StoreDetail(QWidget):
         self.install_button.setText("Add another" if entry.installed else "Install")
         self.installed_note.setVisible(entry.installed)
         self._render_hero()
+
+    def _fill_variants(self, entry: StoreEntry) -> None:
+        self.variant_box.blockSignals(True)
+        self.variant_box.clear()
+        if len(self._variants) > 1:
+            for variant in self._variants:
+                self.variant_box.addItem(variant.variant or variant.title)
+            current = next((i for i, v in enumerate(self._variants) if v.kind == entry.kind), 0)
+            self.variant_box.setCurrentIndex(current)
+            self.variant_box.show()
+        else:
+            self.variant_box.hide()
+        self.variant_box.blockSignals(False)
+
+    def _variant_picked(self, index: int) -> None:
+        if 0 <= index < len(self._variants) and self._variants[index].kind != self._entry.kind:
+            self.variant_requested.emit(self._variants[index].kind)
 
     def set_hero(self, pixmap: QPixmap | None) -> None:
         """Set caller-provided artwork, or restore the catalog placeholder."""

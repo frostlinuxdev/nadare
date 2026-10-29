@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -1396,3 +1397,339 @@ def test_hoyo_art_hosts_cover_both_the_feed_and_the_page_image() -> None:
         "fastcdn.hoyoverse.com",
         "launcher-webstatic.hoyoverse.com",
     )
+
+
+@pytest.mark.parametrize("kind", ["arknights-yostar", "stellasora-yostar"])
+def test_a_cover_taken_from_the_news_is_marked_so_its_banner_strip_is_trimmed(
+    fake, tmp_path, monkeypatch, kind
+):
+    from nadare.core import backends
+    from nadare.gui import images
+
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    cls = backends.get(kind)
+    wanted = f"https://{cls.official_image_hosts[0]}/a.png"
+    monkeypatch.setattr(cls, "news_source", staticmethod(lambda: _news_result(wanted)))
+    fake.routes[wanted] = FakeResponse(content=_png_bytes(), headers={"Content-Type": "image/png"})
+    found = artwork.fetch_all({"backend": kind, "title": "T"}, kinds=("cover",))
+    assert artwork.is_news_cover(found["cover"])
+    assert images.banner_trim_for(found["cover"]) == images.NEWS_BANNER_TRIM
+
+
+def test_an_already_cached_news_cover_is_marked_on_the_next_fetch(fake, tmp_path, monkeypatch):
+    from nadare.gui import images
+
+    covers = tmp_path / "covers"
+    covers.mkdir()
+    monkeypatch.setattr(artwork, "cache_dir", lambda: covers)
+    cached = covers / "stella-sora-cover.png"
+    cached.write_bytes(_png_bytes())
+    source = "https://webusstatic.yo-star.com/x/a.png"
+    artwork.src_sidecar(cached).write_text(source, encoding="utf-8")
+    assert not artwork.is_news_cover(cached)
+    got = artwork.fetch({"backend": "stellasora-yostar"}, "Stella Sora", "cover")
+    assert got == cached
+    assert artwork.is_news_cover(cached)
+    assert images.banner_trim_for(cached) == images.NEWS_BANNER_TRIM
+
+
+def test_a_cover_that_is_not_from_the_news_is_never_trimmed(fake, tmp_path, monkeypatch):
+    from nadare.gui import images
+
+    covers = tmp_path / "covers"
+    covers.mkdir()
+    monkeypatch.setattr(artwork, "cache_dir", lambda: covers)
+    cached = covers / "punishing-gray-raven-cover.png"
+    cached.write_bytes(_png_bytes())
+    artwork.fetch({"backend": "direct-pgr"}, "Punishing: Gray Raven", "cover")
+    assert not artwork.is_news_cover(cached)
+    assert images.banner_trim_for(cached) == 0
+
+
+def test_migration_carries_the_news_marker_to_the_webp(tmp_path, monkeypatch):
+    """Library cards read the migrated file without fetching, so the marker must follow it."""
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path)
+    source = tmp_path / "stella-sora-cover.png"
+    source.write_bytes(_png_bytes())
+    artwork.src_sidecar(source).write_text("https://cdn.example/news.png")
+    artwork.news_marker(source).touch()
+
+    assert artwork.migrate_cached_covers() == 1
+
+    target = tmp_path / "stella-sora-cover.webp"
+    assert artwork.is_news_cover(target)
+    assert not artwork.news_marker(source).exists()
+
+
+def test_an_official_cover_of_a_game_that_has_a_real_cover_is_never_marked(
+    fake, tmp_path, monkeypatch
+):
+    """The cache-hit back-fill must not mark every cover that has a .src sidecar."""
+    covers = tmp_path / "covers"
+    covers.mkdir()
+    monkeypatch.setattr(artwork, "cache_dir", lambda: covers)
+    cached = covers / "genshin-impact-cover.png"
+    cached.write_bytes(_png_bytes())
+    artwork.src_sidecar(cached).write_text("https://cdn.example/launcher-cover.png")
+    artwork.fetch({"backend": "direct-genshin"}, "Genshin Impact", "cover")
+    assert not artwork.is_news_cover(cached)
+
+
+def test_a_cover_that_is_already_marked_is_not_touched_again(fake, tmp_path, monkeypatch):
+    covers = tmp_path / "covers"
+    covers.mkdir()
+    monkeypatch.setattr(artwork, "cache_dir", lambda: covers)
+    cached = covers / "stella-sora-cover.png"
+    cached.write_bytes(_png_bytes())
+    artwork.src_sidecar(cached).write_text("https://webusstatic.yo-star.com/x/a.png")
+    marker = artwork.news_marker(cached)
+    marker.touch()
+    os.utime(marker, (1_000_000, 1_000_000))
+    artwork.fetch({"backend": "stellasora-yostar"}, "Stella Sora", "cover")
+    assert marker.stat().st_mtime == 1_000_000
+
+
+# ---- curated art from the index ---------------------------------------------------------------
+INDEX_URL = "https://cdn2.unrealengine.com/egs-genshinimpact-x-s1-2560x1440-abc.jpg"
+INDEX_DOC = {
+    "schema": 1,
+    "games": {
+        "direct-genshin": {
+            "cover": [{"url": INDEX_URL, "orientation": "wide", "width": 2560, "height": 1440}]
+        }
+    },
+}
+
+
+def _with_index(monkeypatch, doc=INDEX_DOC):
+    from nadare.core import artindex
+
+    artindex.reset()
+    artwork._index_failures.clear()
+    artindex.set_loader(lambda: doc)
+    artindex.lookup("direct-genshin", wait=True)  # loaded, as after a first fetch
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    return artindex
+
+
+def test_a_cached_cover_is_upgraded_to_the_index_art_when_the_urls_differ(
+    fake, tmp_path, monkeypatch
+):
+    covers = tmp_path / "covers"
+    covers.mkdir()
+    monkeypatch.setattr(artwork, "cache_dir", lambda: covers)
+    old = covers / "genshin-impact-cover.png"
+    old.write_bytes(_png_bytes())
+    artwork.src_sidecar(old).write_text("https://old.example/small.png")
+    _with_index(monkeypatch)
+    fake.routes[INDEX_URL] = FakeResponse(
+        content=_png_bytes(), headers={"Content-Type": "image/png"}
+    )
+
+    got = artwork.fetch({"backend": "direct-genshin"}, "Genshin Impact", "cover")
+
+    assert got is not None
+    assert artwork.src_sidecar(got).read_text(encoding="utf-8") == INDEX_URL
+    assert any(INDEX_URL in call[1] for call in fake.calls)
+
+
+def test_a_cover_that_already_came_from_the_index_url_is_not_fetched_again(
+    fake, tmp_path, monkeypatch
+):
+    covers = tmp_path / "covers"
+    covers.mkdir()
+    monkeypatch.setattr(artwork, "cache_dir", lambda: covers)
+    cached = covers / "genshin-impact-cover.png"
+    cached.write_bytes(_png_bytes())
+    artwork.src_sidecar(cached).write_text(INDEX_URL)
+    _with_index(monkeypatch)
+    assert artwork.fetch({"backend": "direct-genshin"}, "Genshin Impact", "cover") == cached
+    assert not fake.calls
+
+
+def test_a_failed_index_download_keeps_the_cover_that_is_cached(fake, tmp_path, monkeypatch):
+    covers = tmp_path / "covers"
+    covers.mkdir()
+    monkeypatch.setattr(artwork, "cache_dir", lambda: covers)
+    old = covers / "genshin-impact-cover.png"
+    old.write_bytes(_png_bytes())
+    artwork.src_sidecar(old).write_text("https://old.example/small.png")
+    _with_index(monkeypatch)  # no route for INDEX_URL: the download fails
+    got = artwork.fetch({"backend": "direct-genshin"}, "Genshin Impact", "cover")
+    assert got == old
+    assert artwork.src_sidecar(old).read_text(encoding="utf-8") == "https://old.example/small.png"
+
+
+def test_with_nothing_cached_the_index_art_comes_before_the_other_sources(
+    fake, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path / "covers")
+    _with_index(monkeypatch)
+    fake.routes[INDEX_URL] = FakeResponse(
+        content=_png_bytes(), headers={"Content-Type": "image/png"}
+    )
+    got = artwork.fetch({"backend": "direct-genshin"}, "Genshin Impact", "cover")
+    assert got is not None and artwork.src_sidecar(got).read_text(encoding="utf-8") == INDEX_URL
+    assert [call[1] for call in fake.calls][0] == INDEX_URL
+
+
+def test_a_cached_cover_is_returned_at_once_while_the_index_is_still_loading(
+    fake, tmp_path, monkeypatch
+):
+    import threading
+    import time
+
+    from nadare.core import artindex
+
+    covers = tmp_path / "covers"
+    covers.mkdir()
+    monkeypatch.setattr(artwork, "cache_dir", lambda: covers)
+    cached = covers / "genshin-impact-cover.png"
+    cached.write_bytes(_png_bytes())
+    gate = threading.Event()
+    artindex.reset()
+    artindex.set_loader(lambda: gate.wait(10) and INDEX_DOC)
+    started = time.monotonic()
+    got = artwork.fetch({"backend": "direct-genshin"}, "Genshin Impact", "cover")
+    took = time.monotonic() - started
+    gate.set()
+    artindex.wait_for_load(5)
+    artindex.reset()
+    assert got == cached
+    assert took < 1.0, "a cover that is already cached must not wait for the index"
+
+
+def test_upgrading_a_news_cover_drops_its_news_marker(fake, tmp_path, monkeypatch):
+    covers = tmp_path / "covers"
+    covers.mkdir()
+    monkeypatch.setattr(artwork, "cache_dir", lambda: covers)
+    monkeypatch.setattr(artwork, "_recode_webp", lambda content, ext: (content, "png"))
+    old = covers / "stella-sora-cover.png"
+    old.write_bytes(_png_bytes())
+    artwork.src_sidecar(old).write_text("https://webusstatic.yo-star.com/x/news.png")
+    artwork.news_marker(old).touch()
+    steam = "https://cdn.cloudflare.steamstatic.com/steam/apps/4813850/library_hero.jpg"
+    doc = {
+        "schema": 1,
+        "games": {
+            "stellasora-yostar": {
+                "cover": [{"url": steam, "orientation": "wide", "width": 1920, "height": 1080}]
+            }
+        },
+    }
+    from nadare.core import artindex
+
+    artindex.reset()
+    artwork._index_failures.clear()
+    artindex.set_loader(lambda: doc)
+    artindex.lookup("stellasora-yostar", wait=True)
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    fake.routes[steam] = FakeResponse(
+        content=_png_bytes(), headers={"Content-Type": "image/png"}
+    )
+    got = artwork.fetch({"backend": "stellasora-yostar"}, "Stella Sora", "cover")
+    assert got is not None and artwork.src_sidecar(got).read_text(encoding="utf-8") == steam
+    assert not artwork.is_news_cover(got)
+    assert not artwork.news_marker(old).exists()
+
+
+def test_a_dead_index_url_is_not_retried_on_every_fetch(fake, tmp_path, monkeypatch):
+    covers = tmp_path / "covers"
+    covers.mkdir()
+    monkeypatch.setattr(artwork, "cache_dir", lambda: covers)
+    old = covers / "genshin-impact-cover.png"
+    old.write_bytes(_png_bytes())
+    _with_index(monkeypatch)  # INDEX_URL has no route: every download fails
+    artwork._index_failures.clear()
+    for _ in range(3):
+        assert artwork.fetch({"backend": "direct-genshin"}, "Genshin Impact", "cover") == old
+    assert sum(1 for call in fake.calls if call[1] == INDEX_URL) == 1
+
+
+def test_fetch_all_waits_for_the_index_even_when_a_cover_is_cached(fake, tmp_path, monkeypatch):
+    """An explicit fetch (Settings, ``nadare fetch-art``) must apply the index art in one go."""
+    import threading
+
+    from nadare.core import artindex
+
+    covers = tmp_path / "covers"
+    covers.mkdir()
+    monkeypatch.setattr(artwork, "cache_dir", lambda: covers)
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    old = covers / "genshin-impact-cover.png"
+    old.write_bytes(_png_bytes())
+    artwork.src_sidecar(old).write_text("https://old.example/small.png")
+    artindex.reset()
+    artwork._index_failures.clear()
+    artindex.set_loader(lambda: INDEX_DOC)  # not loaded yet: only a waiting lookup gets it
+    fake.routes[INDEX_URL] = FakeResponse(
+        content=_png_bytes(), headers={"Content-Type": "image/png"}
+    )
+    profile = {"backend": "direct-genshin", "title": "Genshin Impact"}
+    found = artwork.fetch_all(profile, kinds=("cover",))
+    assert artwork.src_sidecar(found["cover"]).read_text(encoding="utf-8") == INDEX_URL
+    assert threading.active_count() >= 1
+
+
+def test_the_saved_index_copy_upgrades_a_cached_cover_without_waiting(fake, tmp_path, monkeypatch):
+    from nadare.core import artindex, indexfetch
+
+    covers = tmp_path / "covers"
+    covers.mkdir()
+    monkeypatch.setattr(artwork, "cache_dir", lambda: covers)
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    old = covers / "genshin-impact-cover.png"
+    old.write_bytes(_png_bytes())
+    artwork.src_sidecar(old).write_text("https://old.example/small.png")
+    artindex.reset()
+    artwork._index_failures.clear()
+    monkeypatch.setattr(artwork, "_recode_webp", lambda content, ext: (content, "png"))
+    monkeypatch.setattr(indexfetch, "read_cached", lambda rel, validate=None: INDEX_DOC)
+    artindex.set_loader(lambda: INDEX_DOC)
+    fake.routes[INDEX_URL] = FakeResponse(
+        content=_png_bytes(), headers={"Content-Type": "image/png"}
+    )
+    got = artwork.fetch({"backend": "direct-genshin"}, "Genshin Impact", "cover")
+    artindex.wait_for_load(5)
+    assert artwork.src_sidecar(got).read_text(encoding="utf-8") == INDEX_URL
+
+
+def test_an_older_webp_that_would_shadow_the_new_cover_is_removed(fake, tmp_path, monkeypatch):
+    covers = tmp_path / "covers"
+    covers.mkdir()
+    monkeypatch.setattr(artwork, "cache_dir", lambda: covers)
+    monkeypatch.setattr(artwork, "_recode_webp", lambda content, ext: (content, "png"))
+    old = covers / "genshin-impact-cover.webp"
+    old.write_bytes(_png_bytes())
+    artwork.src_sidecar(old).write_text("https://old.example/small.webp")
+    artwork.news_marker(old).touch()
+    _with_index(monkeypatch)
+    fake.routes[INDEX_URL] = FakeResponse(
+        content=_png_bytes(), headers={"Content-Type": "image/png"}
+    )
+    got = artwork.fetch({"backend": "direct-genshin"}, "Genshin Impact", "cover")
+    assert got is not None and got.suffix == ".png"
+    assert not old.exists() and not artwork.src_sidecar(old).exists()
+    assert not artwork.news_marker(old).exists()
+    assert artwork._cached("genshin-impact", "cover") == got
+
+
+def test_index_art_counts_as_official_and_can_replace_an_official_cover(
+    fake, tmp_path, monkeypatch
+):
+    covers = tmp_path / "covers"
+    covers.mkdir()
+    monkeypatch.setattr(artwork, "cache_dir", lambda: covers)
+    _with_index(monkeypatch)
+    fake.routes[INDEX_URL] = FakeResponse(
+        content=_png_bytes(), headers={"Content-Type": "image/png"}
+    )
+    previous = covers / "previous-cover.png"
+    previous.write_bytes(_png_bytes())
+    profile = {"backend": "direct-genshin", "title": "Genshin Impact", "cover": str(previous)}
+    artwork.set_art_source(profile, "cover", artwork.SOURCE_OFFICIAL)
+    found = artwork.fetch_all(profile, kinds=("cover",))
+    assert found.get("cover") is not None
+    assert artwork.art_source(profile)["cover"] == artwork.SOURCE_OFFICIAL
+    assert profile["cover"] == str(found["cover"])

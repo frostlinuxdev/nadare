@@ -12,23 +12,24 @@ from nadare.core import backends
 SKIPPED = (
     "launcher-nikke",
     "launcher-nte",
+    "launcher-gfl2-haoplay",
     "direct-nte",
     "direct-endfield",
     "direct-genshin",
     "direct-hsr",
     "direct-zzz",
-)
-KEPT = (
     "arknights-yostar",
     "stellasora-yostar",
     "direct-wuwa",
     "direct-pgr",
     "direct-hi3",
     "direct-gfl2",
+    "direct-gfl2-haoplay",
     "direct-bd2",
-    "direct-mongil",
     "direct-aethergazer",
 )
+#: Only these run the real VC++ installer by default (CZN has its own backend that always does).
+KEPT = ("direct-mongil",)
 
 
 def _run(tmp_path, monkeypatch, kind, **profile):
@@ -41,7 +42,7 @@ def _run(tmp_path, monkeypatch, kind, **profile):
 
 
 @pytest.mark.parametrize("kind", SKIPPED)
-def test_games_that_do_not_need_it_skip_the_step(tmp_path, monkeypatch, kind):
+def test_the_step_is_off_by_default(tmp_path, monkeypatch, kind):
     assert _run(tmp_path, monkeypatch, kind) == []
 
 
@@ -51,5 +52,5 @@ def test_a_user_can_turn_it_on_for_a_stuttering_game(tmp_path, monkeypatch, kind
 
 
 @pytest.mark.parametrize("kind", KEPT)
-def test_unproven_games_keep_the_step(tmp_path, monkeypatch, kind):
+def test_mongil_keeps_the_step(tmp_path, monkeypatch, kind):
     assert _run(tmp_path, monkeypatch, kind) == [1]

@@ -85,3 +85,19 @@ def test_a_symlinked_yostar_env_is_refused_not_skipped(tmp_path):
     result = _run(tmp_path, NADARE_YOSTAR_ENV=str(link), XDG_RUNTIME_DIR=str(tmp_path))
     assert result.returncode != 0
     assert "symlink" in result.stderr
+
+
+def test_the_refresher_runs_the_art_index_canary_unless_canaries_are_skipped():
+    text = SCRIPT.read_text(encoding="utf-8")
+    block_start = text.index("check_art_index.py")
+    before = text[:block_start]
+    assert (
+        before.rstrip()
+        .splitlines()[-2]
+        .lstrip()
+        .startswith('if [[ -z "${NADARE_SKIP_CANARY:-}" ]]')
+    )
+    assert "canary_down" in text[block_start : block_start + 700]
+    assert (
+        'exit "$' not in text[block_start : block_start + 700]
+    )  # a canary never blocks publishing

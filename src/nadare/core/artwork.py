@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urljoin, urlparse
 
-from . import paths
+from . import artindex, paths
 from .logging import get_logger
 
 log = get_logger("artwork")
@@ -875,7 +875,11 @@ def _publisher_og_image(profile: dict, kind: str) -> tuple[str, tuple[str, ...]]
 
 def _publisher_art_source(profile: dict, path: Path) -> bool:
     """Return whether a cached image has a validated publisher CDN source sidecar."""
-    hosts = _publisher_image_hosts(str(profile.get("backend") or ""))
+    backend = str(profile.get("backend") or "")
+    # Art the index prescribes is curated publisher art: its hosts are allowlisted per game in
+    # code, even where they are a store CDN rather than the publisher's own host.
+    publisher = _publisher_image_hosts(backend) or ()
+    hosts = tuple(dict.fromkeys((*publisher, *artindex.ALLOWED_HOSTS.get(backend, ()))))
     if not hosts or path.parent != cache_dir():
         return False
     try:
@@ -1138,10 +1142,13 @@ def migrate_cached_covers() -> int:
                     _copy_sidecar_atomically(source_sidecar, src_sidecar(target))
                 os.replace(part, target)
                 _sync_dir(root)
+                if news_marker(source).is_file():  # a news cover stays a news cover
+                    news_marker(target).touch()
             finally:
                 part.unlink(missing_ok=True)
             if source_sidecar.is_file():
                 source_sidecar.unlink()
+            news_marker(source).unlink(missing_ok=True)
             source.unlink()
             changed += 1
         except Exception as exc:  # noqa: BLE001 - cache migration must not break startup
@@ -1276,17 +1283,107 @@ def _cached_official(slug: str, kind: str, url: str) -> Path | None:
     return None
 
 
-def fetch(profile: dict, title: str | None = None, kind: str = "cover") -> Path | None:
+def news_marker(path: Path | str) -> Path:
+    """Sidecar that says a cover came from a news feed, so it carries a baked-in banner."""
+    return Path(f"{path}.news")
+
+
+def is_news_cover(path: Path | str) -> bool:
+    return news_marker(path).is_file()
+
+
+def _mark_news_cover(path: Path, backend: str, kind: str) -> None:
+    """Record that ``path`` is a news image used as ``backend``'s cover (best effort)."""
+    if kind != "cover" or backend not in _PUBLISHER_NEWS:
+        return
+    marker = news_marker(path)
+    if marker.is_file():
+        return  # already marked: no write on every cache hit
+    try:
+        marker.touch()
+    except OSError as exc:
+        log.debug("could not mark the news cover %s: %s", path, exc)
+
+
+#: Index art URLs that failed to download, with when (monotonic), so a dead URL is not retried
+#: on every fetch of every game.
+_index_failures: dict[str, float] = {}
+_INDEX_RETRY_AFTER = 3600.0
+
+
+def _index_art(slug_: str, kind: str, backend: str, *, wait: bool) -> Path | None:
+    """The cover the index prescribes for ``backend``, downloaded and cached, or ``None``.
+
+    A cover already cached from the same URL is reused without any request. One cached from
+    another source is replaced once the better art has downloaded; if that fails the cover that
+    is already there stays. ``wait`` says whether to wait for the index itself (an explicit
+    fetch, or nothing cached yet); otherwise the copy saved on disk answers at once.
+    """
+    if kind != "cover":
+        return None
+    for url, hosts in artindex.lookup(backend, wait=wait):
+        hit = _cached_official(slug_, kind, url)
+        if hit is not None:
+            return hit
+        failed_at = _index_failures.get(url)
+        if failed_at is not None and time.monotonic() - failed_at < _INDEX_RETRY_AFTER:
+            continue
+        path = download(url, slug_, kind, hosts, official=True)
+        if path is None:
+            _index_failures[url] = time.monotonic()
+            continue
+        _drop_superseded(slug_, kind, path)
+        return path
+    return None
+
+
+def _drop_superseded(slug_: str, kind: str, new: Path) -> None:
+    """Clear what the new cover replaces: its news marker, and an older WebP that would shadow it.
+
+    ``_cached`` prefers a ``.webp`` over every other type, so an older WebP left next to a newer
+    PNG or JPEG would keep being shown. The new image is not a news banner either way.
+    """
+    news_marker(new).unlink(missing_ok=True)
+    if new.suffix.lower() == ".webp":
+        return
+    old = cache_dir() / f"{slug_}-{kind}.webp"
+    if old.is_file():
+        for leftover in (old, src_sidecar(old), news_marker(old)):
+            leftover.unlink(missing_ok=True)
+
+
+def fetch(
+    profile: dict,
+    title: str | None = None,
+    kind: str = "cover",
+    *,
+    wait_for_index: bool = False,
+) -> Path | None:
     """Download the best available art for ``profile`` into the cache.
 
     Returns the cached path, reusing an existing file when present. Any failure
-    (network, parse, disk) is logged and swallowed so callers get ``None``.
+    (network, parse, disk) is logged and swallowed so callers get ``None``. With
+    ``wait_for_index`` the curated index art is looked up even when a cover is already cached
+    (an explicit fetch); otherwise a cached cover is returned without waiting for the network.
     """
     try:
         slug_ = slug(profile, title)
         cached = _cached(slug_, kind)
+        pinned = _index_art(
+            slug_,
+            kind,
+            str(profile.get("backend") or ""),
+            wait=wait_for_index or cached is None,
+        )
+        if pinned is not None:
+            return pinned
         if cached is not None:
             log.debug("artwork cache hit: %s", cached)
+            backend = str(profile.get("backend") or "")
+            # These games have no cover but a news image, which is how an official sidecar got
+            # here; covers cached before the marker existed are marked on first use.
+            if src_sidecar(cached).is_file():
+                _mark_news_cover(cached, backend, kind)
             return cached
 
         def try_candidates(urls: Iterator[str]) -> Path | None:
@@ -1310,6 +1407,7 @@ def fetch(profile: dict, title: str | None = None, kind: str = "cover") -> Path 
         for url, allowed_hosts in _publisher_covers(profile, kind):
             path = download(url, slug_, kind, allowed_hosts, official=True)
             if path is not None:
+                _mark_news_cover(path, str(profile.get("backend") or ""), kind)
                 return path
         path = try_candidates(_optional_candidates(profile, title))
         if path is not None:
@@ -1336,7 +1434,7 @@ def fetch_all(
     """
     found: dict[str, Path] = {}
     for kind in kinds:
-        path = fetch(profile, title=title, kind=kind)
+        path = fetch(profile, title=title, kind=kind, wait_for_index=True)
         if path is not None and _publisher_art_source(profile, path):
             if record_official(profile, path, kind):
                 found[kind] = path

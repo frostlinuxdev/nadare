@@ -152,6 +152,29 @@ def fetch_json(
     raise IndexUnavailable(f"no mirror answered and no usable cached {rel}")
 
 
+def read_cached(rel: str, *, validate: Callable[[Any], Any] | None = None) -> Any | None:
+    """The last good copy of ``rel`` from disk (no network at all), or ``None``.
+
+    For callers that must answer at once and refresh later; a copy older than
+    :data:`MAX_CACHE_AGE_SECONDS` is not used, like in :func:`fetch_json`.
+    """
+    rel = _check_rel(rel)
+    for base in hosting.index_bases():
+        if not base.startswith("https://"):
+            continue
+        cached = cache_path(base, rel)
+        try:
+            if time.time() - cached.stat().st_mtime > MAX_CACHE_AGE_SECONDS:
+                continue
+            payload = cached.read_bytes()
+        except OSError:
+            continue
+        ok, data = _parse(payload, validate)
+        if ok:
+            return data
+    return None
+
+
 __all__ = [
     "IndexResult",
     "IndexUnavailable",
@@ -160,4 +183,5 @@ __all__ = [
     "fetch_json",
     "looks_like_pins_doc",
     "open_bytes",
+    "read_cached",
 ]

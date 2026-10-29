@@ -8,7 +8,7 @@ from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import QStackedWidget
 
 from ..core import artwork
-from ..core.storecatalog import entries
+from ..core.storecatalog import entries, game_of
 from .images import ImageLoader
 from .store import StorePage
 from .store_detail import StoreDetail
@@ -75,9 +75,13 @@ class StoreFlow(QStackedWidget):
         return next((e for e in entries(installed_kinds=self._installed) if e.kind == kind), None)
 
     def show_detail(self, kind: str) -> None:
-        entry = self._entry_for(kind)
+        game = game_of(kind, installed_kinds=self._installed)
+        entry = next((e for e in game.entries if e.kind == kind), None) if game else None
+        if entry is None:
+            entry = self._entry_for(kind)
         if entry is None:
             return
+        variants = game.entries if game is not None else ()
         self._generation += 1
         self._detail_kind = kind
         if self.detail is None:
@@ -85,8 +89,10 @@ class StoreFlow(QStackedWidget):
             self.addWidget(self.detail)
             self.detail.back_requested.connect(lambda: self.show_grid(focus_card=True))
             self.detail.install_requested.connect(self.install_requested.emit)
+            self.detail.variant_requested.connect(self.show_detail)
+            self.detail.set_entry(entry, variants)
         else:
-            self.detail.set_entry(entry)
+            self.detail.set_entry(entry, variants)
         self.setCurrentWidget(self.detail)
         if entry.has_art:
             QThreadPool.globalInstance().start(

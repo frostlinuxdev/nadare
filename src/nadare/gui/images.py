@@ -20,7 +20,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QRunnable, Qt, QThreadPool, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
 
 #: Per-load scale modes: cover (centre-crop) vs contain (keep whole).
 _EXPAND = Qt.AspectRatioMode.KeepAspectRatioByExpanding
@@ -39,6 +39,8 @@ def banner_trim_for(path: str | Path | None) -> float:
     """Fraction of the bottom to drop when ``path`` is used as a cover."""
     if path and _NEWS_THUMB.search(str(path)):
         return NEWS_BANNER_TRIM
+    if path and Path(f"{path}.news").is_file():  # a news image saved as a game's cover
+        return NEWS_BANNER_TRIM
     return 0.0
 
 
@@ -49,14 +51,84 @@ def _mtime_ns(path: str) -> int:
         return 0
 
 
+#: Wide art on a portrait card: a centre crop cuts logos in half, so it is shown whole instead.
+#: Only for cards (portrait and not tiny); icons and thumbnails keep the plain crop.
+_LETTERBOX_MIN_WIDTH = 120
+_LETTERBOX_MIN_RATIO = 1.1  # picture width / height above this counts as wide
+_DIFFERS = 1.4  # how many times wider or taller than the card counts as a different shape
+
+
+def _wants_letterbox(image: QImage, width: int, height: int) -> bool:
+    if width < _LETTERBOX_MIN_WIDTH or height < width * 1.2:
+        return False
+    return image.width() / max(1, image.height()) > _LETTERBOX_MIN_RATIO
+
+
+def _soft(image: QImage, width: int, height: int) -> QImage:
+    """``image`` blurred by shrinking it in halves and growing it back in doubles.
+
+    One big stretch of a tiny picture looks blocky; many small bilinear steps do not.
+    """
+    smooth = Qt.TransformationMode.SmoothTransformation
+    ignore = Qt.AspectRatioMode.IgnoreAspectRatio
+    small = image
+    while small.width() > max(24, width // 10):
+        small = small.scaled(
+            max(1, small.width() // 2), max(1, small.height() // 2), ignore, smooth
+        )
+    while small.width() < width:
+        small = small.scaled(small.width() * 2, small.height() * 2, ignore, smooth)
+    return small.scaled(width, height, ignore, smooth)
+
+
+def _differs(image: QImage, width: int, height: int) -> bool:
+    """True when the picture's shape is far from the card's, in either direction."""
+    if width < _LETTERBOX_MIN_WIDTH:
+        return False
+    ratio = (image.width() / max(1, image.height())) / (width / max(1, height))
+    return ratio > _DIFFERS or ratio < 1 / _DIFFERS
+
+
+def _fit_over_blur(image: QImage, width: int, height: int) -> QImage:
+    """The whole picture, centred, over a blurred and darkened copy of itself."""
+    smooth = Qt.TransformationMode.SmoothTransformation
+    cover = image.scaled(width, height, _EXPAND, smooth)
+    x = max(0, (cover.width() - width) // 2)
+    y = max(0, (cover.height() - height) // 2)
+    backdrop = _soft(cover.copy(x, y, width, height), width, height)
+    # Everything is drawn onto an opaque base, so art with transparent pixels never lets the
+    # page behind the card show through the bars.
+    out = QImage(width, height, QImage.Format.Format_ARGB32)
+    out.fill(QColor(11, 13, 18))
+    base = QPainter(out)
+    base.drawImage(0, 0, backdrop)
+    base.end()
+    foreground = image.scaled(width, height, _KEEP, smooth)
+    painter = QPainter(out)
+    painter.fillRect(out.rect(), QColor(0, 0, 0, 115))
+    painter.drawImage(
+        (width - foreground.width()) // 2, (height - foreground.height()) // 2, foreground
+    )
+    painter.end()
+    return out
+
+
 def decode_scaled(
-    path: str, width: int, height: int, *, crop: bool = True, trim_bottom: float = 0.0
+    path: str,
+    width: int,
+    height: int,
+    *,
+    crop: bool = True,
+    trim_bottom: float = 0.0,
+    fit: bool = False,
 ) -> QImage | None:
     """Decode ``path`` and scale it to ``width``x``height``.
 
     ``crop`` centre-crops to fill the target (cover); otherwise the image is
     kept whole inside the box (contain). Returns ``None`` for an unreadable
-    file. This is designed to run on a worker thread and never touches QPixmap.
+    file. ``fit`` keeps art that is much wider or taller than the card whole, over a blurred
+    copy of itself, instead of centre-cropping it. This is designed to run on a worker thread
+    and never touches QPixmap.
     """
     image = QImage(str(path))
     if image.isNull():
@@ -65,6 +137,10 @@ def decode_scaled(
         image = image.copy(0, 0, image.width(), max(1, int(image.height() * (1 - trim_bottom))))
     width = max(1, int(width))
     height = max(1, int(height))
+    if crop and (
+        _wants_letterbox(image, width, height) or (fit and _differs(image, width, height))
+    ):
+        return _fit_over_blur(image, width, height)
     mode = _EXPAND if crop else _KEEP
     scaled = image.scaled(width, height, mode, Qt.TransformationMode.SmoothTransformation)
     if crop and (scaled.width() != width or scaled.height() != height):
@@ -96,6 +172,7 @@ class _DecodeTask(QRunnable):
         crop: bool,
         decode: Callable[..., QImage | None],
         trim_bottom: float = 0.0,
+        fit: bool = False,
     ) -> None:
         super().__init__()
         self.signals = signals
@@ -106,15 +183,16 @@ class _DecodeTask(QRunnable):
         self._crop = crop
         self._decode = decode
         self._trim = trim_bottom
+        self._fit = fit
 
     def run(self) -> None:  # noqa: D102 - QRunnable entry point
         try:
+            extra: dict[str, object] = {}
             if self._trim:
-                image = self._decode(
-                    self._path, self._width, self._height, crop=self._crop, trim_bottom=self._trim
-                )
-            else:
-                image = self._decode(self._path, self._width, self._height, crop=self._crop)
+                extra["trim_bottom"] = self._trim
+            if self._fit:
+                extra["fit"] = True
+            image = self._decode(self._path, self._width, self._height, crop=self._crop, **extra)
         except Exception:  # noqa: BLE001 - a broken image is not fatal
             image = None
         try:
@@ -165,6 +243,7 @@ class ImageLoader(QObject):
         *,
         crop: bool = True,
         cover: bool = False,
+        fit: bool = False,
     ) -> tuple | None:
         """Decode the first readable candidate and hand a QPixmap to ``callback``.
 
@@ -177,7 +256,7 @@ class ImageLoader(QObject):
             callback(None)
             return None
         trim = banner_trim_for(path) if cover else 0.0
-        key = (path, int(width), int(height), bool(crop), _mtime_ns(path), trim)
+        key = (path, int(width), int(height), bool(crop), _mtime_ns(path), trim, bool(fit))
         cached = self._cache.get(key)
         if cached is not None:
             self._cache.move_to_end(key)
@@ -187,7 +266,7 @@ class ImageLoader(QObject):
             self._waiters.setdefault(key, []).append(callback)
             return key
         self._waiters[key] = [callback]
-        task = _DecodeTask(key, self._signals, path, width, height, crop, self._decode, trim)
+        task = _DecodeTask(key, self._signals, path, width, height, crop, self._decode, trim, fit)
         self._pending[key] = task
         self._pool.start(task)
         return key
@@ -205,9 +284,7 @@ class ImageLoader(QObject):
         for callback in self._waiters.pop(key, []):
             callback(pixmap)
 
-    def cached(
-        self, path: str, width: int, height: int, *, crop: bool = True
-    ) -> QPixmap | None:
+    def cached(self, path: str, width: int, height: int, *, crop: bool = True) -> QPixmap | None:
         """Return a cached pixmap without scheduling a decode."""
         key = (str(path), int(width), int(height), bool(crop), _mtime_ns(str(path)))
         pixmap = self._cache.get(key)

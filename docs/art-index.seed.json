@@ -1,0 +1,284 @@
+{
+  "schema": 1,
+  "updated": "2026-10-28",
+  "games": {
+    "arknights-yostar": {
+      "cover": [
+        {
+          "url": "https://webusstatic.yo-star.com/web-cms-test/upload/content/2026/10/18/VemajPmb.jpg",
+          "orientation": "wide",
+          "width": 1920,
+          "height": 1080
+        }
+      ]
+    },
+    "direct-aethergazer": {
+      "cover": [
+        {
+          "url": "https://www.aethergazer.com/assets/a1.53bc7f9c.jpg",
+          "orientation": "wide",
+          "width": 1600,
+          "height": 900
+        }
+      ]
+    },
+    "direct-bd2": {
+      "cover": [
+        {
+          "url": "https://www.browndust2.com/uploads/Wallpaper_illustration_2_Year_Anniversary_PC_3_1600x900_13656da038.jpg",
+          "orientation": "wide",
+          "width": 1600,
+          "height": 900
+        }
+      ]
+    },
+    "direct-endfield": {
+      "cover": [
+        {
+          "url": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/4732690/86b3553ade80dc37eabc33e3e76a509a052080e3/ss_86b3553ade80dc37eabc33e3e76a509a052080e3.1920x1080.jpg?t=1792035845",
+          "orientation": "wide",
+          "width": 1920,
+          "height": 1080
+        }
+      ]
+    },
+    "direct-genshin": {
+      "cover": [
+        {
+          "url": "https://cdn2.unrealengine.com/egs-genshinimpact-cognospherepteltd-s1-2560x1440-5abdaa9efa5e.jpg",
+          "orientation": "wide",
+          "width": 2560,
+          "height": 1440
+        },
+        {
+          "url": "https://cdn2.unrealengine.com/egs-genshinimpact-cognospherepteltd-s2-1200x1600-f33338ee244c.jpg",
+          "orientation": "portrait",
+          "width": 1200,
+          "height": 1600
+        }
+      ]
+    },
+    "direct-gfl2": {
+      "cover": [
+        {
+          "url": "https://cdn.cloudflare.steamstatic.com/steam/apps/3347400/library_hero.jpg",
+          "orientation": "wide",
+          "width": 1920,
+          "height": 620
+        },
+        {
+          "url": "https://cdn.cloudflare.steamstatic.com/steam/apps/3347400/library_600x900_2x.jpg",
+          "orientation": "portrait",
+          "width": 600,
+          "height": 900
+        }
+      ]
+    },
+    "direct-gfl2-haoplay": {
+      "cover": [
+        {
+          "url": "https://cdn.cloudflare.steamstatic.com/steam/apps/3308670/library_hero.jpg",
+          "orientation": "wide",
+          "width": 1920,
+          "height": 620
+        },
+        {
+          "url": "https://cdn.cloudflare.steamstatic.com/steam/apps/3308670/library_600x900_2x.jpg",
+          "orientation": "portrait",
+          "width": 600,
+          "height": 900
+        }
+      ]
+    },
+    "direct-hi3": {
+      "cover": [
+        {
+          "url": "https://cdn2.unrealengine.com/egs-honkaiimpact3rd-mihoyolimited-s1-2560x1440-bba3636f7a5c.jpg",
+          "orientation": "wide",
+          "width": 2560,
+          "height": 1440
+        },
+        {
+          "url": "https://cdn2.unrealengine.com/egs-honkaiimpact3rd-mihoyolimited-s2-1200x1600-aab51eb2220a.jpg",
+          "orientation": "portrait",
+          "width": 1200,
+          "height": 1600
+        }
+      ]
+    },
+    "direct-hsr": {
+      "cover": [
+        {
+          "url": "https://cdn2.unrealengine.com/2560x1440-en-2560x1440-f85ef416ad0f.jpg",
+          "orientation": "wide",
+          "width": 2560,
+          "height": 1440
+        },
+        {
+          "url": "https://cdn2.unrealengine.com/1200x1600-en-1200x1600-bf45ffa1dc2d.jpg",
+          "orientation": "portrait",
+          "width": 1200,
+          "height": 1600
+        }
+      ]
+    },
+    "direct-mongil": {
+      "cover": [
+        {
+          "url": "https://sgimage.netmarble.com/common/gamemediahub/uploads/2a3c4ed2-75bf-4267-93b9-a6cd32ab7b6e.png",
+          "orientation": "wide",
+          "width": 1886,
+          "height": 800
+        },
+        {
+          "url": "https://sgimage.netmarble.com/images/netmarble/monster2/20260305/m3sm1772674620510.jpg",
+          "orientation": "wide",
+          "width": 1200,
+          "height": 630
+        }
+      ]
+    },
+    "direct-nte": {
+      "cover": [
+        {
+          "url": "https://nte.perfectworld.com/public/images/cover260930/box3-slide1.jpg",
+          "orientation": "wide",
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "url": "https://nte.perfectworld.com/public/images/cover260930/box1.jpg",
+          "orientation": "wide",
+          "width": 2559,
+          "height": 1564
+        }
+      ]
+    },
+    "direct-pgr": {
+      "cover": [
+        {
+          "url": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/4125930/ce7b0170a69a11efcdf01c33420c3c97b42cdf83/ss_ce7b0170a69a11efcdf01c33420c3c97b42cdf83.1920x1080.jpg?t=1790215880",
+          "orientation": "wide",
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "url": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/4125930/fea9f5d49e24f20a8ef572c89222afe42da8b6c0/ss_fea9f5d49e24f20a8ef572c89222afe42da8b6c0.1920x1080.jpg?t=1790215880",
+          "orientation": "wide",
+          "width": 1920,
+          "height": 1080
+        }
+      ]
+    },
+    "direct-wuwa": {
+      "cover": [
+        {
+          "url": "https://cdn.cloudflare.steamstatic.com/steam/apps/3513350/library_hero.jpg",
+          "orientation": "wide",
+          "width": 1920,
+          "height": 620
+        }
+      ]
+    },
+    "direct-zzz": {
+      "cover": [
+        {
+          "url": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/4162040/c1b97d591e5c5ccc4e6dccba52bd2119db0d21ac/library_hero_2x.jpg",
+          "orientation": "wide",
+          "width": 3840,
+          "height": 1240
+        },
+        {
+          "url": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/4162040/bae92fe95e33651e06bf6fdaa877bcf44ac11918/library_capsule_2x.jpg",
+          "orientation": "portrait",
+          "width": 600,
+          "height": 900
+        }
+      ]
+    },
+    "fgo-lepton": {
+      "cover": [
+        {
+          "url": "https://fate-go.us/images/fate_card_1800.png",
+          "orientation": "wide",
+          "width": 1200,
+          "height": 630
+        }
+      ]
+    },
+    "launcher-gfl2-haoplay": {
+      "cover": [
+        {
+          "url": "https://cdn.cloudflare.steamstatic.com/steam/apps/3308670/library_hero.jpg",
+          "orientation": "wide",
+          "width": 1920,
+          "height": 620
+        },
+        {
+          "url": "https://cdn.cloudflare.steamstatic.com/steam/apps/3308670/library_600x900_2x.jpg",
+          "orientation": "portrait",
+          "width": 600,
+          "height": 900
+        }
+      ]
+    },
+    "launcher-nikke": {
+      "cover": [
+        {
+          "url": "https://nikke-en.com/pc/ossweb-img/part1.jpg",
+          "orientation": "wide",
+          "width": 1920,
+          "height": 1078
+        },
+        {
+          "url": "https://nikke-en.com/m/ossweb-img/part1.jpg",
+          "orientation": "portrait",
+          "width": 750,
+          "height": 1334
+        }
+      ]
+    },
+    "launcher-nte": {
+      "cover": [
+        {
+          "url": "https://nte.perfectworld.com/public/images/cover260930/box3-slide1.jpg",
+          "orientation": "wide",
+          "width": 1920,
+          "height": 1080
+        },
+        {
+          "url": "https://nte.perfectworld.com/public/images/cover260930/box1.jpg",
+          "orientation": "wide",
+          "width": 2559,
+          "height": 1564
+        }
+      ]
+    },
+    "stellasora-yostar": {
+      "cover": [
+        {
+          "url": "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/4813850/e12d7adadce4efbcd2dcc93aa8dbefdab48608f5/ss_e12d7adadce4efbcd2dcc93aa8dbefdab48608f5.1920x1080.jpg?t=1792654045",
+          "orientation": "wide",
+          "width": 1920,
+          "height": 1080
+        }
+      ]
+    },
+    "stove-czn": {
+      "cover": [
+        {
+          "url": "https://static-pubcomm.onstove.com/live/czn/brand/images/common/bg_main.webp",
+          "orientation": "wide",
+          "width": 2560,
+          "height": 962
+        },
+        {
+          "url": "https://static-pubcomm.onstove.com/live/czn/brand/images/en/ogtag_1200_default.jpg",
+          "orientation": "wide",
+          "width": 1200,
+          "height": 630
+        }
+      ]
+    }
+  }
+}
