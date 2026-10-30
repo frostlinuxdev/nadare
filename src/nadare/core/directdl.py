@@ -37,13 +37,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import diskspace, paths, sevenz, sophon
 from . import download as download_module
 from .download import DownloadError, download, remote_size
 from .events import Cancel, Cancelled, Emitter, Event, emitter
-from .rangefile import RangeError, RangePart, RangeReader
+from .rangefile import BlockMismatch, RangeError, RangePart, RangeReader
+
+if TYPE_CHECKING:
+    from .archivepins import ArchivePin
 
 #: Cache directory (under the install dir) for in-flight archive downloads.
 #: Most files fetched in parallel. A game with tens of thousands of small files is latency-bound
@@ -126,6 +129,8 @@ class Archive:
     #: hashes are not read), files that already match are skipped, so an update or a
     #: resumed install only fetches what differs. Ignored for other kinds.
     stream: bool = False
+    #: Published per-block checksums for a streamed install, when the index has one.
+    pin: ArchivePin | None = None
 
 
 @dataclass(frozen=True)
@@ -406,6 +411,7 @@ def _done_record(
     members: Sequence[str] | None = None,
     *,
     verified_hashes: bool = True,
+    pin: ArchivePin | None = None,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {"version": plan.version, "url": archive.source.url}
     for name in ("md5", "sha256", "crc32"):
@@ -415,7 +421,12 @@ def _done_record(
     if not verified_hashes:
         # A streamed install read only the ranges it needed, so the index's
         # whole-archive hash was never computed. Say what was checked instead.
-        record["verified"] = "members"
+        if pin is not None:
+            record["verified"] = "pin"
+            record["pin_block_size"] = pin.block_size
+            record["pin_fingerprint"] = pin.fingerprint()
+        else:
+            record["verified"] = "members"
     if members is not None:
         sorted_members = sorted(set(members))
         recorded_members = sorted_members[:_MAX_RECORDED_MEMBERS]
@@ -436,7 +447,10 @@ def _archive_done(plan: Plan, archive: Archive, dest: Path, *, hashes: bool = Fa
         return False
     if record.get("version") != plan.version or record.get("url") != archive.source.url:
         return False
-    streamed = record.get("verified") == "members"
+    pin = _pin_for(archive)
+    if pin is not None and record.get("pin_fingerprint") != pin.fingerprint():
+        return False  # installed under another (or no) pin: verify again against this one
+    streamed = record.get("verified") in ("members", "pin")
     if streamed and not isinstance(record.get("member_crc32"), dict):
         return False  # a streamed record is only worth as much as its member CRCs
     for name in ("md5", "sha256", "crc32"):
@@ -688,13 +702,14 @@ def _write_done(
     members: Sequence[str] | None = None,
     *,
     verified_hashes: bool = True,
+    pin: ArchivePin | None = None,
 ) -> None:
     name = safe_relative_path(archive.name)
     _check_work_dirs(dest)
     record_path = dest / STATE_DIR / f"{name}.done"
     record_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = record_path.with_name(f"{record_path.name}.tmp")
-    record = _done_record(plan, archive, members, verified_hashes=verified_hashes)
+    record = _done_record(plan, archive, members, verified_hashes=verified_hashes, pin=pin)
     if members is not None:
         record["member_sizes"] = {
             member: (dest / safe_relative_path(member)).stat().st_size
@@ -722,14 +737,48 @@ def _stream_member_current(path: Path, info: zipfile.ZipInfo) -> bool:
         return False
 
 
+def _pin_for(archive: Archive) -> ArchivePin | None:
+    """The archive's pin, but only when it describes these exact parts."""
+    pin = archive.pin
+    if pin is None:
+        return None
+    parts = archive.parts or (archive.source,)
+    return pin if pin.matches(parts, archive.source.md5) else None
+
+
+def _pin_mismatch_error(archive: Archive, exc: BlockMismatch) -> DirectError:
+    total = len(archive.parts or (archive.source,))
+    return DirectError(
+        f"{archive.name}: the downloaded data does not match Nadare's checksum list "
+        f"(part {exc.part_index + 1} of {total}, block {exc.block_index}, {exc.url}). "
+        "Nothing from that block was installed. The publisher may have just updated "
+        "the file: try again in a few minutes, and report it if it keeps happening."
+    )
+
+
+def _pin_needs_ranges(archive: Archive, exc: BaseException) -> DirectError:
+    """A pinned archive is never installed from bytes that skipped the block checks."""
+    return DirectError(
+        f"{archive.name}: the server did not give the ranged reads needed to check the "
+        f"download against Nadare's checksum list ({exc}). Nothing was installed; try again later."
+    )
+
+
 def _stream_reader(
-    parts: Sequence[RemoteFile], headers: Mapping[str, str], cancel: Cancel | None
+    parts: Sequence[RemoteFile],
+    headers: Mapping[str, str],
+    cancel: Cancel | None,
+    pin: ArchivePin | None = None,
 ) -> RangeReader:
-    ranges = [RangePart(rf.url, rf.size) for rf in parts]
+    ranges = [
+        RangePart(rf.url, rf.size if rf.size is not None or pin is None else pin_part.size)
+        for rf, pin_part in zip(parts, pin.parts if pin is not None else parts, strict=True)
+    ]
     return RangeReader(
         ranges,
         headers=headers,
-        block_size=_STREAM_BLOCK,
+        block_size=pin.block_size if pin is not None else _STREAM_BLOCK,
+        block_hashes=pin.block_hashes() if pin is not None else None,
         readahead=_STREAM_READAHEAD,
         cancel=cancel,
     )
@@ -841,6 +890,7 @@ def _install_streamed_zip(
     emit: Emitter | None,
     cancel: Cancel | None,
     workers: int,
+    pin: ArchivePin | None = None,
 ) -> None:
     """Write the members of an already-open remote zip into ``dest``."""
     for info, relative in entries:
@@ -926,7 +976,7 @@ def _install_streamed_zip(
             try:
                 if own:
                     try:
-                        local_reader = _stream_reader(parts, headers, combined)
+                        local_reader = _stream_reader(parts, headers, combined, pin=pin)
                         local_zf = zipfile.ZipFile(local_reader)
                     except RangeError as exc:
                         raise DirectError(
@@ -975,6 +1025,7 @@ def _install_streamed_zip(
         dest,
         [relative for info, relative in entries if not info.is_dir()],
         verified_hashes=False,
+        pin=pin,
     )
 
 
@@ -986,6 +1037,7 @@ def _stream_zip_archive(
     emit: Emitter | None,
     cancel: Cancel | None,
     workers: int,
+    pin: ArchivePin | None = None,
 ) -> list[str] | None:
     """Install ``archive`` by ranged reads straight off the server.
 
@@ -1006,12 +1058,16 @@ def _stream_zip_archive(
     zf: zipfile.ZipFile | None = None
     try:
         try:
-            reader = _stream_reader(parts, headers, cancel)
-        except RangeError:
+            reader = _stream_reader(parts, headers, cancel, pin=pin)
+        except RangeError as exc:
+            if pin is not None:
+                raise _pin_needs_ranges(archive, exc) from exc
             return None  # size unknown (HEAD refused) or no ranges: use the normal download
         try:
             zf = zipfile.ZipFile(reader)
         except RangeError as exc:
+            if pin is not None:
+                raise _pin_needs_ranges(archive, exc) from exc
             if "range" in str(exc).lower():
                 return None
             raise DirectError(f"cannot read {archive.name} by range: {exc}") from exc
@@ -1034,10 +1090,13 @@ def _stream_zip_archive(
             emit=emit,
             cancel=cancel,
             workers=workers,
+            pin=pin,
         )
         return [relative for info, relative in entries if not info.is_dir()]
     except DirectError:
         raise
+    except BlockMismatch as exc:
+        raise _pin_mismatch_error(archive, exc) from exc
     except (RangeError, zipfile.BadZipFile, OSError, zlib.error) as exc:
         raise DirectError(f"cannot stream {archive.name}: {exc}") from exc
     finally:
@@ -1055,6 +1114,7 @@ def _stream_7z_archive(
     emit: Emitter | None,
     cancel: Cancel | None,
     workers: int = 1,
+    pin: ArchivePin | None = None,
 ) -> list[str] | None:
     """Install a 7z by reading it straight off the server (no archive on disk).
 
@@ -1072,12 +1132,16 @@ def _stream_7z_archive(
     say = emitter(emit)
     try:
         try:
-            reader = _stream_reader(parts, headers, cancel)
-        except RangeError:
+            reader = _stream_reader(parts, headers, cancel, pin=pin)
+        except RangeError as exc:
+            if pin is not None:
+                raise _pin_needs_ranges(archive, exc) from exc
             return None  # size unknown (HEAD refused) or no ranges: use the normal download
         try:
             entries = sevenz.list_entries(reader)
         except RangeError as exc:
+            if pin is not None:
+                raise _pin_needs_ranges(archive, exc) from exc
             if "range" in str(exc).lower():
                 return None
             raise DirectError(f"cannot read {archive.name} by range: {exc}") from exc
@@ -1116,13 +1180,15 @@ def _stream_7z_archive(
                     cancel=cancel,
                     progress=progress,
                     workers=max(1, min(workers, _MAX_7Z_WORKERS)),
-                    open_reader=lambda: _stream_reader(parts, headers, cancel),
+                    open_reader=lambda: _stream_reader(parts, headers, cancel, pin=pin),
                 )
             except sevenz.SevenZipError as exc:
                 raise DirectError(f"cannot extract {archive.name}: {exc}") from exc
         return [entry.path for entry in entries if not entry.is_dir]
     except DirectError:
         raise
+    except BlockMismatch as exc:
+        raise _pin_mismatch_error(archive, exc) from exc
     except (RangeError, OSError) as exc:
         raise DirectError(f"cannot stream {archive.name}: {exc}") from exc
     finally:
@@ -1163,13 +1229,14 @@ def _sync_archive(
     # install must not record the index hash as if it had checked it. Fall through
     # to the normal download-then-unpack path, which verifies the whole archive.
     whole_sha256 = bool(archive.source.sha256) or any(p.sha256 for p in archive.parts)
+    pin = _pin_for(archive) if archive.stream else None
     if archive.stream and not whole_sha256 and archive.unwrap == ("7z",):
         members = _stream_7z_archive(
-            plan, archive, dest, emit=emit, cancel=cancel, workers=workers
+            plan, archive, dest, emit=emit, cancel=cancel, workers=workers, pin=pin
         )
         if members is not None:
             try:
-                _write_done(plan, archive, dest, members, verified_hashes=False)
+                _write_done(plan, archive, dest, members, verified_hashes=False, pin=pin)
             finally:
                 _cleanup_stream_dir(dest)
             return
@@ -1182,6 +1249,7 @@ def _sync_archive(
                 emit=emit,
                 cancel=cancel,
                 workers=workers,
+                pin=pin,
             )
             is not None
         ):
@@ -1298,18 +1366,22 @@ def _validate_plan(plan: Plan) -> None:
 def safe_relative_path(path: str) -> str:
     """Return ``path`` normalised, or raise :class:`DirectError` for an absolute,
     empty, ``..``-containing or backslash-escaping path."""
-    if not isinstance(path, str) or not path:
-        raise DirectError("path must not be empty")
-    if "\\" in path:
-        raise DirectError(f"path must not contain a backslash: {path!r}")
-    if path.startswith("/"):
-        raise DirectError(f"path must be relative: {path!r}")
-    parts = [part for part in path.split("/") if part not in ("", ".")]
-    if any(part == ".." for part in parts):
-        raise DirectError(f"path must not contain '..': {path!r}")
-    if not parts:
-        raise DirectError(f"path is empty after normalisation: {path!r}")
-    return "/".join(parts)
+    try:
+        return paths.check_relative(path, paths.DIRECT_PATHS)
+    except paths.PathProblem as exc:
+        if exc.code == "not-string" or exc.code == "empty":
+            message = "path must not be empty"
+        elif exc.code == "backslash":
+            message = f"path must not contain a backslash: {path!r}"
+        elif exc.code == "absolute":
+            message = f"path must be relative: {path!r}"
+        elif exc.code == "dotdot":
+            message = f"path must not contain '..': {path!r}"
+        elif exc.code == "empty-normalised":
+            message = f"path is empty after normalisation: {path!r}"
+        else:
+            message = f"unsafe path: {path!r}"
+        raise DirectError(message) from None
 
 
 def plan_missing(

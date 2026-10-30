@@ -10,7 +10,7 @@ from _backend_helpers import make_context
 
 from nadare.backends import direct
 from nadare.backends.czn import backend as czn_backend
-from nadare.backends.czn.backend import CznBackend
+from nadare.core import paths, webview2
 from nadare.core.backends import BackendError
 
 
@@ -27,7 +27,7 @@ def test_install_sets_up_webview2_in_haoplay_prefix_before_sync(tmp_path, monkey
     monkeypatch.setattr(backend, "_ensure_default_runner", lambda strict: None)
     monkeypatch.setattr(backend, "_ensure_direct_prefix", lambda: calls.append("prefix"))
     monkeypatch.setattr(
-        CznBackend,
+        direct.Gfl2HaoplayBackend,
         "_ensure_webview2",
         lambda self: calls.append(("webview2", self.prefix(), self.ctx)),
     )
@@ -43,7 +43,7 @@ def test_install_stops_when_webview2_setup_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(backend, "_ensure_default_runner", lambda strict: None)
     monkeypatch.setattr(backend, "_ensure_direct_prefix", lambda: None)
     monkeypatch.setattr(
-        CznBackend,
+        direct.Gfl2HaoplayBackend,
         "_ensure_webview2",
         lambda self: (_ for _ in ()).throw(BackendError("WebView2 setup failed")),
     )
@@ -61,16 +61,16 @@ def test_webview2_installer_uses_haoplay_prefix_runner_and_xwayland(tmp_path, mo
     backend.ctx.profile["prefix"] = ""
     backend.ctx.profile["wineprefix"] = str(tmp_path / "legacy-prefix")
     installed = iter([False, True])  # before the installer, then after it ran
-    monkeypatch.setattr(CznBackend, "_webview2_installed", lambda self: next(installed))
-    monkeypatch.setattr(CznBackend, "_webview2_pin", lambda self: "a" * 64)
+    monkeypatch.setattr(webview2, "installed", lambda prefix: next(installed))
+    monkeypatch.setattr(webview2, "resolve_pin", lambda profile, constant: "a" * 64)
     monkeypatch.setattr(czn_backend.graphics, "has_display", lambda: True)
-    cache = tmp_path / "cache"
+    cache = tmp_path / "czn"
     cache.mkdir()
     (cache / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe").write_bytes(b"MZ installer")
-    monkeypatch.setattr(CznBackend, "_cache_dir", lambda self: cache)
+    monkeypatch.setattr(paths, "cache_dir", lambda: tmp_path)
     verified = []
     monkeypatch.setattr(
-        CznBackend, "_verify_webview2", lambda self, path: verified.append(path.name)
+        webview2, "verify", lambda path, **kwargs: verified.append(path.name)
     )
     seen = []
 
@@ -80,9 +80,7 @@ def test_webview2_installer_uses_haoplay_prefix_runner_and_xwayland(tmp_path, mo
 
     monkeypatch.setattr(backend, "_prefix_command", command)
     monkeypatch.setattr(
-        CznBackend,
-        "_stream",
-        lambda self, cmd, env, cwd=None: seen.append((cmd, env, cwd)) or 0,
+        direct, "stream", lambda cmd, env, **kwargs: seen.append((cmd, env, kwargs["cwd"])) or 0
     )
 
     backend._ensure_webview2()
@@ -102,16 +100,16 @@ def test_webview2_installer_uses_haoplay_prefix_runner_and_xwayland(tmp_path, mo
 
 def test_webview2_install_is_refused_when_the_installer_did_not_land(tmp_path, monkeypatch):
     backend = _backend(tmp_path)
-    monkeypatch.setattr(CznBackend, "_webview2_installed", lambda self: False)
-    monkeypatch.setattr(CznBackend, "_webview2_pin", lambda self: "a" * 64)
+    monkeypatch.setattr(webview2, "installed", lambda prefix: False)
+    monkeypatch.setattr(webview2, "resolve_pin", lambda profile, constant: "a" * 64)
     monkeypatch.setattr(czn_backend.graphics, "has_display", lambda: True)
-    cache = tmp_path / "cache"
+    cache = tmp_path / "czn"
     cache.mkdir()
     (cache / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe").write_bytes(b"MZ installer")
-    monkeypatch.setattr(CznBackend, "_cache_dir", lambda self: cache)
-    monkeypatch.setattr(CznBackend, "_verify_webview2", lambda self, path: None)
+    monkeypatch.setattr(paths, "cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(webview2, "verify", lambda path, **kwargs: None)
     monkeypatch.setattr(backend, "_prefix_command", lambda args, extra_env=None: (["x"], {}))
-    monkeypatch.setattr(CznBackend, "_stream", lambda self, cmd, env, cwd=None: 1)
+    monkeypatch.setattr(direct, "stream", lambda cmd, env, **kwargs: 1)
 
     with pytest.raises(BackendError, match="WebView2 Runtime install failed"):
         backend._ensure_webview2()
@@ -124,7 +122,9 @@ def test_existing_haoplay_install_gets_webview2_before_launch(tmp_path, monkeypa
     target.write_bytes(b"MZ")
     calls = []
     monkeypatch.setattr(backend, "_ensure_default_runner", lambda strict: None)
-    monkeypatch.setattr(CznBackend, "_ensure_webview2", lambda self: calls.append("webview2"))
+    monkeypatch.setattr(
+        direct.Gfl2HaoplayBackend, "_ensure_webview2", lambda self: calls.append("webview2")
+    )
     monkeypatch.setattr(backend, "_launch_direct", lambda: calls.append("launch") or 0)
 
     assert backend.launch() == 0

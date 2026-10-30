@@ -11,8 +11,10 @@ import pytest
 from _backend_helpers import make_context
 
 from nadare.backends import arknights as ak
+from nadare.backends import winegame as wg
 from nadare.backends.arknights import ArknightsBackend
 from nadare.backends.czn.backend import CznBackend
+from nadare.backends.winegame import WineGameBackend
 from nadare.core import prefixmove, removal
 from nadare.core.config import Config
 
@@ -51,8 +53,8 @@ def _arknights(tmp_path, **profile) -> ArknightsBackend:
 def test_arknights_remake_records_the_backup(tmp_path, monkeypatch):
     backend = _arknights(tmp_path)
     (backend.prefix() / "drive_c").mkdir(parents=True)
-    monkeypatch.setattr(ak, "scan_pids", lambda patterns: [])
-    monkeypatch.setattr(ArknightsBackend, "_ensure_default_runner", lambda self, strict=True: None)
+    monkeypatch.setattr(wg, "scan_pids", lambda patterns: [])
+    monkeypatch.setattr(WineGameBackend, "_ensure_default_runner", lambda self, strict=True: None)
     monkeypatch.setattr(backend, "_ensure_prefix", lambda: True)
     monkeypatch.setattr(backend, "_run_vcredist", lambda created=True: None)
 

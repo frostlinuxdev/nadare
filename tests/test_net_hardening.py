@@ -10,6 +10,7 @@ import tarfile
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -247,6 +248,7 @@ def test_webview2_redirect_checked_before_following(monkeypatch):
 
     monkeypatch.setattr(download, "http_open", fake_open)
     b = czn_backend.CznBackend.__new__(czn_backend.CznBackend)
+    b.ctx = SimpleNamespace(emit=lambda event: None, cancel=object())
     with pytest.raises(czn_backend.BackendError):
         b._download_webview2(
             "https://go.microsoft.com/x", Path("/nonexistent/t"), Path("/nonexistent/i")

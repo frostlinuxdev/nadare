@@ -16,6 +16,7 @@ import pytest
 from _backend_helpers import make_context, write_exe
 
 from nadare.backends import arknights as ak
+from nadare.backends import winegame as wg
 from nadare.backends.czn.backend import CznBackend
 from nadare.backends.wine import WineBackend
 from nadare.core import download as dl
@@ -256,9 +257,9 @@ def _ak_backend(tmp_path, monkeypatch, missing):
     proton = tmp_path / "Proton"
     proton.mkdir()
     (proton / "proton").write_text("")
-    monkeypatch.setattr(ak.runners, "resolve_runner", lambda value: proton)
-    monkeypatch.setattr(ak.sandbox, "in_flatpak", lambda: False)
-    monkeypatch.setattr(ak.hostlibs, "missing_32bit", lambda: missing)
+    monkeypatch.setattr(wg.runners, "resolve_runner", lambda value: proton)
+    monkeypatch.setattr(wg.sandbox, "in_flatpak", lambda: False)
+    monkeypatch.setattr(wg.hostlibs, "missing_32bit", lambda: missing)
     backend = ak.ArknightsBackend(
         make_context(tmp_path, ak.KIND, {"prefix": str(prefix), "runner": "MyProton"})
     )
@@ -268,7 +269,7 @@ def _ak_backend(tmp_path, monkeypatch, missing):
 def test_system_umu_is_used_without_downloading(tmp_path, monkeypatch) -> None:
     backend, _proton, exe = _ak_backend(tmp_path, monkeypatch, ["libfreetype.so.6"])
     monkeypatch.setattr(
-        ak.shutil, "which", lambda name, *a, **k: "/opt/umu-run" if name == "umu-run" else None
+        wg.shutil, "which", lambda name, *a, **k: "/opt/umu-run" if name == "umu-run" else None
     )
     monkeypatch.setattr(umu, "ensure_managed", lambda **k: pytest.fail("downloaded"))
 
@@ -278,7 +279,7 @@ def test_system_umu_is_used_without_downloading(tmp_path, monkeypatch) -> None:
 
 def test_working_32bit_libs_run_proton_directly_without_downloading(tmp_path, monkeypatch) -> None:
     backend, proton, exe = _ak_backend(tmp_path, monkeypatch, [])
-    monkeypatch.setattr(ak.shutil, "which", lambda name, *a, **k: None)
+    monkeypatch.setattr(wg.shutil, "which", lambda name, *a, **k: None)
     monkeypatch.setattr(umu, "ensure_managed", lambda **k: pytest.fail("downloaded"))
 
     argv, _env, _target = backend.build_launch()
@@ -294,7 +295,7 @@ def test_missing_libs_and_no_system_umu_downloads_once_and_uses_managed(
     _fake_download(monkeypatch, _payload(), calls)
     _fake_smoke(monkeypatch)
     monkeypatch.setattr(
-        ak.shutil,
+        wg.shutil,
         "which",
         lambda name, *a, **k: "/usr/bin/python3" if name == "python3" else None,
     )
@@ -313,7 +314,7 @@ def test_download_failure_falls_back_to_the_host_libs_hint(tmp_path, monkeypatch
     monkeypatch.setattr(umu.download, "download", offline)
     _fake_smoke(monkeypatch)
     monkeypatch.setattr(
-        ak.shutil,
+        wg.shutil,
         "which",
         lambda name, *a, **k: "/usr/bin/python3" if name == "python3" else None,
     )
@@ -325,8 +326,8 @@ def test_download_failure_falls_back_to_the_host_libs_hint(tmp_path, monkeypatch
 
 def test_flatpak_behaviour_is_unchanged(tmp_path, monkeypatch) -> None:
     backend, proton, exe = _ak_backend(tmp_path, monkeypatch, ["libfreetype.so.6"])
-    monkeypatch.setattr(ak.sandbox, "in_flatpak", lambda: True)
-    monkeypatch.setattr(ak.shutil, "which", lambda name, *a, **k: None)
+    monkeypatch.setattr(wg.sandbox, "in_flatpak", lambda: True)
+    monkeypatch.setattr(wg.shutil, "which", lambda name, *a, **k: None)
     monkeypatch.setattr(umu, "ensure_managed", lambda **k: pytest.fail("downloaded"))
 
     argv, _env, _target = backend.build_launch()
@@ -359,9 +360,9 @@ def test_wine_status_accepts_a_managed_copy_without_downloading(tmp_path, monkey
     (proton / "proton").write_text("")
     backend = _wine_backend(tmp_path, proton)
     monkeypatch.setattr(backend, "_runner_path", lambda runner: proton)
-    monkeypatch.setattr(ak.shutil, "which", lambda name, *a, **k: None)
-    monkeypatch.setattr(ak.sandbox, "in_flatpak", lambda: False)
-    monkeypatch.setattr(ak.hostlibs, "missing_32bit", lambda: ["libfreetype.so.6"])
+    monkeypatch.setattr(wg.shutil, "which", lambda name, *a, **k: None)
+    monkeypatch.setattr(wg.sandbox, "in_flatpak", lambda: False)
+    monkeypatch.setattr(wg.hostlibs, "missing_32bit", lambda: ["libfreetype.so.6"])
     monkeypatch.setattr(umu, "ensure_managed", lambda **k: pytest.fail("downloaded"))
 
     assert backend._runtime_error() is None
@@ -375,9 +376,9 @@ def test_wine_status_does_not_require_umu_when_managed_setup_is_possible(
     (proton / "proton").write_text("")
     backend = _wine_backend(tmp_path, proton)
     monkeypatch.setattr(backend, "_runner_path", lambda runner: proton)
-    monkeypatch.setattr(ak.shutil, "which", lambda name, *a, **k: None)
-    monkeypatch.setattr(ak.sandbox, "in_flatpak", lambda: False)
-    monkeypatch.setattr(ak.hostlibs, "missing_32bit", lambda: ["libfreetype.so.6"])
+    monkeypatch.setattr(wg.shutil, "which", lambda name, *a, **k: None)
+    monkeypatch.setattr(wg.sandbox, "in_flatpak", lambda: False)
+    monkeypatch.setattr(wg.hostlibs, "missing_32bit", lambda: ["libfreetype.so.6"])
     monkeypatch.setattr(umu, "ensure_managed", lambda **k: pytest.fail("downloaded"))
 
     assert WineBackend.status(backend).state != "error"
@@ -400,9 +401,9 @@ def test_wine_launch_uses_a_downloaded_managed_umu(tmp_path, monkeypatch) -> Non
         calls.append(1)
         return missing
 
-    monkeypatch.setattr(ak.shutil, "which", lambda name, *a, **k: None)
-    monkeypatch.setattr(ak.sandbox, "in_flatpak", lambda: False)
-    monkeypatch.setattr(ak.hostlibs, "missing_32bit", lambda: ["libfreetype.so.6"])
+    monkeypatch.setattr(wg.shutil, "which", lambda name, *a, **k: None)
+    monkeypatch.setattr(wg.sandbox, "in_flatpak", lambda: False)
+    monkeypatch.setattr(wg.hostlibs, "missing_32bit", lambda: ["libfreetype.so.6"])
     monkeypatch.setattr(umu, "ensure_managed", ensure)
 
     argv, _env, _prefix, target = backend.build()
@@ -426,9 +427,9 @@ def test_czn_launch_uses_a_downloaded_managed_umu(tmp_path, monkeypatch) -> None
         calls.append(1)
         return missing
 
-    monkeypatch.setattr(ak.shutil, "which", lambda name, *a, **k: None)
-    monkeypatch.setattr(ak.sandbox, "in_flatpak", lambda: False)
-    monkeypatch.setattr(ak.hostlibs, "missing_32bit", lambda: ["libfreetype.so.6"])
+    monkeypatch.setattr(wg.shutil, "which", lambda name, *a, **k: None)
+    monkeypatch.setattr(wg.sandbox, "in_flatpak", lambda: False)
+    monkeypatch.setattr(wg.hostlibs, "missing_32bit", lambda: ["libfreetype.so.6"])
     monkeypatch.setattr(umu, "ensure_managed", ensure)
 
     argv, _env = backend._prefix_command(["game.exe"])

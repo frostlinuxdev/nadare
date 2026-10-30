@@ -14,8 +14,10 @@ import pytest
 from _backend_helpers import make_context, write_exe
 
 from nadare.backends import arknights as ak
+from nadare.backends import winegame as wg
 from nadare.backends.arknights import ArknightsBackend
 from nadare.backends.stellasora import StellaSoraBackend
+from nadare.backends.winegame import WineGameBackend
 from nadare.core import yostar
 from nadare.core.backends import BackendError, get, kinds
 from nadare.core.events import Cancelled
@@ -24,18 +26,18 @@ from nadare.core.events import Cancelled
 @pytest.fixture(autouse=True)
 def _no_real_vcredist(monkeypatch):
     """The VC++ step always runs now; keep it out of tests about other things."""
-    monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: None)
+    monkeypatch.setattr(wg.vcredist, "ensure", lambda *a, **k: None)
 
 
 @pytest.fixture(autouse=True)
 def _hermetic_runners(monkeypatch):
     """No test may read the developer's real runners or download one."""
-    monkeypatch.setattr(ak.runners, "installed_pinned", lambda family="dwproton": None)
+    monkeypatch.setattr(wg.runners, "installed_pinned", lambda family="dwproton": None)
 
     def offline(*_a, **_k):
-        raise ak.runners.RunnerError("offline (no downloads in tests)")
+        raise wg.runners.RunnerError("offline (no downloads in tests)")
 
-    monkeypatch.setattr(ak.runners, "ensure_pinned", offline)
+    monkeypatch.setattr(wg.runners, "ensure_pinned", offline)
 
 
 def _manifest_file(tmp_path: Path, tag: str, exe: str = "Arknights.exe") -> Path:
@@ -99,7 +101,7 @@ class TestArknightsMode:
         def no_installer(*a, **k):
             raise AssertionError("direct mode must not run the installer")
 
-        monkeypatch.setattr(ArknightsBackend, "_download_installer", no_installer)
+        monkeypatch.setattr(WineGameBackend, "_download_installer", no_installer)
         backend.install()
         assert seen and seen[0][0] == "Arknights_EN"
 
@@ -129,7 +131,7 @@ class TestArknightsMode:
             captured.append(list(argv))
             return 0
 
-        monkeypatch.setattr(ak, "stream", fake_stream)
+        monkeypatch.setattr(wg, "stream", fake_stream)
         assert backend.launch() == 0
         assert captured[0][0] == "/usr/bin/wine"
         assert captured[0][1] == str(exe)
@@ -143,9 +145,9 @@ class TestArknightsMode:
                 "installer_url": "https://launcher-pkg-ark-en.yo-star.com/Arknights-setup.exe",
             },
         )
-        monkeypatch.setattr(ArknightsBackend, "_ensure_prefix", lambda self: None)
-        monkeypatch.setattr(ArknightsBackend, "_download_installer", lambda self, url: installer)
-        monkeypatch.setattr(ak, "stream", lambda *a, **k: 0)
+        monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
+        monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer)
+        monkeypatch.setattr(wg, "stream", lambda *a, **k: 0)
         write_exe(backend.install_dir() / "game launcher.exe", "MZ")
         messages: list[str] = []
         original = backend.ctx.emit
@@ -162,20 +164,20 @@ class TestArknightsMode:
         backend = _ak(tmp_path, {"installer_url": "https://example.test/setup.exe"})
         calls: list[tuple[Path, int]] = []
         monkeypatch.setattr(
-            ak.download,
+            wg.download,
             "remote_size",
             lambda url, **k: 500 * (1 << 20),
         )
         monkeypatch.setattr(
-            ak.diskspace,
+            wg.diskspace,
             "check_space",
             lambda path, needed, margin=0.05: calls.append((Path(path), needed)),
         )
 
         def fake_download(url, dest, **kwargs):
-            return ak.download.DownloadResult(dest, 1024, "a", "b")
+            return wg.download.DownloadResult(dest, 1024, "a", "b")
 
-        monkeypatch.setattr(ak.download, "download", fake_download)
+        monkeypatch.setattr(wg.download, "download", fake_download)
         backend._download_installer("https://example.test/setup.exe")
         assert calls == [(backend.cache_dir(), 500 * (1 << 20))]
 
@@ -223,7 +225,7 @@ class TestStellaSora:
         exe = write_exe(backend.install_dir() / "StellaSora.exe", "MZ")
         captured: list[list[str]] = []
         monkeypatch.setattr(
-            ak,
+            wg,
             "stream",
             lambda argv, env, on_line=None, cancel=None: (captured.append(list(argv)), 0)[1],
         )
@@ -234,38 +236,38 @@ class TestStellaSora:
         """The audit's blocker 1: this override replaced the base install()."""
         manifest = _manifest_file(tmp_path, "StellaSora_EN", exe="StellaSora.exe")
         backend = _stella(tmp_path, {"manifest_file": str(manifest)})
-        monkeypatch.setattr(ak.shutil, "which", lambda name: None)
+        monkeypatch.setattr(wg.shutil, "which", lambda name: None)
         calls: list = []
         monkeypatch.setattr(
-            ak.runners, "ensure_pinned", lambda *a, **k: calls.append(1) or tmp_path
+            wg.runners, "ensure_pinned", lambda *a, **k: calls.append(1) or tmp_path
         )
         monkeypatch.setattr(ak.yostar, "sync", lambda *a, **k: {"downloaded": 0, "skipped": 0})
         backend.install()
         assert calls == [1]
 
         def offline(*_a, **_k):
-            raise ak.download.DownloadError("offline")
+            raise wg.download.DownloadError("offline")
 
-        monkeypatch.setattr(ak.runners, "ensure_pinned", offline)
+        monkeypatch.setattr(wg.runners, "ensure_pinned", offline)
         backend.install()  # a failed runner download does not abort the file sync
 
     def test_launch_sets_up_the_runner_only_for_an_installed_game(self, tmp_path, monkeypatch):
         manifest = _manifest_file(tmp_path, "StellaSora_EN", exe="StellaSora.exe")
         backend = _stella(tmp_path, {"manifest_file": str(manifest)})
-        monkeypatch.setattr(ak.shutil, "which", lambda name: None)
-        monkeypatch.setattr(ak.runners, "ensure_pinned", lambda *a, **k: pytest.fail("downloaded"))
+        monkeypatch.setattr(wg.shutil, "which", lambda name: None)
+        monkeypatch.setattr(wg.runners, "ensure_pinned", lambda *a, **k: pytest.fail("downloaded"))
         with pytest.raises(BackendError, match="not found"):
             backend.launch()  # not installed: no 320 MB download first
 
         write_exe(backend.install_dir() / "StellaSora.exe", "MZ")
         calls: list = []
         monkeypatch.setattr(
-            ak.runners, "ensure_pinned", lambda *a, **k: calls.append(1) or tmp_path
+            wg.runners, "ensure_pinned", lambda *a, **k: calls.append(1) or tmp_path
         )
-        monkeypatch.setattr(ak, "stream", lambda *a, **k: 0)
-        monkeypatch.setattr(ak.hostlibs, "missing_32bit", lambda: [])
+        monkeypatch.setattr(wg, "stream", lambda *a, **k: 0)
+        monkeypatch.setattr(wg.hostlibs, "missing_32bit", lambda: [])
         # CI runners have no wine; the test must not depend on one being installed.
-        monkeypatch.setattr(ak, "first_wine", lambda: Path("/usr/bin/wine"))
+        monkeypatch.setattr(wg, "first_wine", lambda: Path("/usr/bin/wine"))
         backend.launch()
         assert calls == [1]
 
@@ -282,7 +284,7 @@ class TestStellaSora:
         exe = write_exe(backend.install_dir() / "bin" / "StellaSora.exe", "MZ")
         captured: list[list[str]] = []
         monkeypatch.setattr(
-            ak,
+            wg,
             "stream",
             lambda argv, env, on_line=None, cancel=None: (captured.append(list(argv)), 0)[1],
         )
@@ -301,11 +303,10 @@ class TestDisplayDefault:
 
     @staticmethod
     def _env(backend, monkeypatch, tmp_path):
-        from nadare.backends import arknights as ak
 
         monkeypatch.delenv("PROTON_ENABLE_WAYLAND", raising=False)
         monkeypatch.setattr(backend, "resolve_runner", lambda: (tmp_path / "proton", "proton"))
-        monkeypatch.setattr(ak.shutil, "which", lambda name: "/usr/bin/umu-run")
+        monkeypatch.setattr(wg.shutil, "which", lambda name: "/usr/bin/umu-run")
         return backend._prefix_command(["game.exe"])[1]["PROTON_ENABLE_WAYLAND"]
 
     @pytest.mark.parametrize(

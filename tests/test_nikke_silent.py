@@ -16,8 +16,9 @@ from _backend_helpers import make_context, write_exe
 
 from nadare.backends import arknights as ak
 from nadare.backends import launcher
-from nadare.backends.arknights import ArknightsBackend
+from nadare.backends import winegame as wg
 from nadare.backends.launcher import NikkeBackend
+from nadare.backends.winegame import WineGameBackend
 from nadare.core import sevenzip
 from nadare.core.backends import BackendError
 from nadare.core.events import Cancelled
@@ -60,9 +61,11 @@ def rig(tmp_path, monkeypatch):
         (outdir / "res.zip").write_text("zip")
 
     monkeypatch.setattr(ak, "stream", fake_stream)
-    monkeypatch.setattr(ArknightsBackend, "_ensure_prefix", lambda self: None)
-    monkeypatch.setattr(ArknightsBackend, "_run_vcredist", lambda self, created=False: None)
-    monkeypatch.setattr(ArknightsBackend, "_download_installer", lambda self, url: installer)
+
+    monkeypatch.setattr(wg, "stream", fake_stream)
+    monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
+    monkeypatch.setattr(WineGameBackend, "_run_vcredist", lambda self, created=False: None)
+    monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer)
     monkeypatch.setattr(launcher, "_extract_nsis", fake_extract)
     monkeypatch.setattr(sevenzip, "find", lambda **kw: "/usr/bin/7z")
     monkeypatch.delenv("NADARE_NIKKE_SILENT", raising=False)
@@ -153,6 +156,8 @@ def test_cancelling_during_the_silent_run_is_not_turned_into_a_fallback(tmp_path
         raise Cancelled()
 
     monkeypatch.setattr(ak, "stream", cancelled)
+
+    monkeypatch.setattr(wg, "stream", cancelled)
     with pytest.raises(Cancelled):
         _backend(tmp_path).install()
     assert len(calls) == 1
@@ -168,6 +173,8 @@ def test_when_nothing_installs_the_launcher_the_install_still_fails_plainly(
         return 3
 
     monkeypatch.setattr(ak, "stream", nothing)
+
+    monkeypatch.setattr(wg, "stream", nothing)
     with pytest.raises(BackendError):
         _backend(tmp_path).install()
 
@@ -252,6 +259,8 @@ def test_failing_to_start_the_downloader_falls_back(tmp_path, rig, monkeypatch):
         return real(argv, env, on_line, cancel)
 
     monkeypatch.setattr(ak, "stream", flaky)
+
+    monkeypatch.setattr(wg, "stream", flaky)
     _backend(tmp_path).install()
     assert len(calls) == 2 and str(installer) in calls[1]
 

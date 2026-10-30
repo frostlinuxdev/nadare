@@ -35,7 +35,6 @@ import subprocess
 import sys
 import threading
 import time
-import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -44,12 +43,12 @@ from ...core import download as net
 from ...core import (
     graphics,
     hostlibs,
-    indexfetch,
     paths,
     prefixmove,
     process,
     sandbox,
     vcredist,
+    webview2,
 )
 from ...core import runners as core_runners
 from ...core import umu as umu_mod
@@ -105,16 +104,12 @@ WEBVIEW2_URL = "https://go.microsoft.com/fwlink/?linkid=2124701"
 #: Edge release, so the pin goes stale; override with NADARE_WEBVIEW2_SHA256 or
 #: the profile's ``webview2_sha256`` until it is bumped.
 WEBVIEW2_SHA256: str | None = "2a6add76c37bfa872eb8c2b22d45b3216b8e2a1f193e0774006340ff62ac5fa0"
-#: Microsoft re-issues the installer with every Edge release, so a built-in
-#: pin alone would break installs on older Nadare builds. Hashes published in
-#: the project's index (refreshed by ``scripts/publish_index.py``) are accepted
-#: as well, unless the user set an explicit override.
-WEBVIEW2_INDEX_MAX_HASHES = 8
-#: Redirect targets of the fwlink that are allowed to serve the installer.
-WEBVIEW2_HOST_SUFFIXES: tuple[str, ...] = (".microsoft.com",)
-#: Backend-side exit codes for WebView2 failures (not czn-linux exit codes).
-EXIT_WEBVIEW2_UNVERIFIED = 10
-EXIT_WEBVIEW2_FAILED = 11
+#: The WebView2 pipeline lives in :mod:`nadare.core.webview2` so every
+#: Wine-family backend shares one verifier and installer. Re-exported here
+#: because existing CZN tests (and callers) reference these names.
+WEBVIEW2_INDEX_MAX_HASHES = webview2.WEBVIEW2_INDEX_MAX_HASHES
+EXIT_WEBVIEW2_UNVERIFIED = webview2.EXIT_WEBVIEW2_UNVERIFIED
+EXIT_WEBVIEW2_FAILED = webview2.EXIT_WEBVIEW2_FAILED
 
 #: Visual C++ runtime constants live in :mod:`nadare.core.vcredist` so every
 #: Wine-family backend shares one URL/pin. Re-exported here because existing CZN
@@ -170,12 +165,7 @@ RUNNER_EXIT_MESSAGES: dict[int, str] = {
 }
 
 #: Backend-side (not czn-linux) exit codes for WebView2 failures.
-WEBVIEW2_MESSAGES: dict[int, str] = {
-    EXIT_WEBVIEW2_UNVERIFIED: "Nadare could not verify Microsoft's WebView2 installer. "
-    "Try Install again; if it keeps failing, update Nadare and try again.",
-    EXIT_WEBVIEW2_FAILED: "Microsoft's WebView2 installer did not pass a safety check. "
-    "Try Install again; if it keeps failing, update Nadare and try again.",
-}
+WEBVIEW2_MESSAGES: dict[int, str] = webview2.MESSAGES
 
 #: auth.py ``qr_status`` states grouped into the coarse state the GUI renders.
 _QR_STATE = {
@@ -199,8 +189,6 @@ _RUNNER_INTEGRITY_EXIT = 9
 _RUNNER_MATCH = {"cachyos": "cachyos", "ge": "GE-Proton", "dwproton": "dwproton"}
 _FILE_PROGRESS = re.compile(r"^\s*\[(\d+)/(\d+)\]\s*(.*)$")
 _RESULT = re.compile(r"RESULT\s+([a-z-]+)")
-#: A pinned WebView2 installer hash must be exactly 64 lowercase hex digits.
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 #: Emitted once when "Remember me" is on but no OS keyring is available.
 #: Exit codes a game child reports when it was terminated on purpose
@@ -341,15 +329,6 @@ def _unlink_quietly(path: Path) -> None:
         Path(path).unlink()
     except OSError:
         pass
-
-
-def _sha256_file(path: Path) -> str:
-    """Streamed SHA-256 of a file, so large installers are not read at once."""
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _profile_setting(profile: dict[str, Any], key: str) -> Any:
@@ -1327,299 +1306,70 @@ class CznBackend(GameBackend):
         return "game connected" in text or "heartbeats started" in text
 
     def _webview2_installed(self) -> bool:
-        root = self.prefix() / "drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application"
-        return any(root.glob("*/msedgewebview2.exe"))
+        """Whether the WebView2 runtime executable is already in the prefix."""
+        return webview2.installed(self.prefix())
 
     def _webview2_pin(self) -> str:
-        """Resolve the expected installer SHA-256 from a trusted source.
-
-        Precedence: the ``NADARE_WEBVIEW2_SHA256`` environment variable, then
-        the profile's ``webview2_sha256`` setting (top level or ``extra``), then
-        the module constant. The hash is never hardcoded, so a shipped build
-        cannot silently skip verification; an empty result means "not pinned".
-        A whitespace-only value is treated as unset and falls through rather
-        than masking a lower-precedence pin.
-        """
-        for value in (
-            os.environ.get("NADARE_WEBVIEW2_SHA256"),
-            _profile_setting(self.ctx.profile, "webview2_sha256"),
-            WEBVIEW2_SHA256,
-        ):
-            if value:
-                text = str(value).strip().lower()
-                if text:
-                    return text
-        return ""
-
-    def _webview2_pin_error(self, pin: str) -> BackendError:
-        """A fail-fast :class:`BackendError` for an absent/malformed pin."""
-        if pin and not _SHA256_RE.fullmatch(pin):
-            return BackendError(
-                "the configured WebView2 SHA-256 is malformed (expected 64 hex "
-                "digits); refusing before the download",
-                EXIT_WEBVIEW2_UNVERIFIED,
-            )
-        return BackendError(
-            WEBVIEW2_MESSAGES[EXIT_WEBVIEW2_UNVERIFIED], EXIT_WEBVIEW2_UNVERIFIED
-        )
+        """Resolve the expected installer SHA-256 from a trusted source."""
+        return webview2.resolve_pin(self.ctx.profile, WEBVIEW2_SHA256)
 
     def _webview2_overridden(self) -> bool:
         """True when the user pinned a hash explicitly (env or profile)."""
-        for value in (
-            os.environ.get("NADARE_WEBVIEW2_SHA256"),
-            _profile_setting(self.ctx.profile, "webview2_sha256"),
-        ):
-            if value and str(value).strip():
-                return True
-        return False
-
-    @staticmethod
-    def _webview2_index_document() -> Any:
-        """The published WebView2 index JSON, or ``None`` when unavailable."""
-        try:
-            return indexfetch.fetch_json(
-                "webview2/latest.json", validate=indexfetch.looks_like_pins_doc
-            ).data
-        except Exception:
-            return None
+        return webview2.overridden(self.ctx.profile)
 
     @staticmethod
     def _webview2_index_pins() -> set[str]:
-        """Installer hashes published in the Nadare index (empty on any error).
-
-        Best effort and offline-safe: a missing, slow or malformed index just
-        means the built-in pin is the only accepted hash.
-        """
-        payload = CznBackend._webview2_index_document()
-        if not isinstance(payload, dict):
-            return set()
-        hashes = payload.get("sha256")
-        if not isinstance(hashes, list):
-            return set()
-        # Validate first, cap after: junk entries at the front must not crowd out
-        # the real hashes behind them.
-        valid = [
-            h.strip().lower()
-            for h in hashes
-            if isinstance(h, str) and _SHA256_RE.fullmatch(h.strip().lower())
-        ]
-        return set(valid[:WEBVIEW2_INDEX_MAX_HASHES])
+        """Installer hashes published in the Nadare index (empty on any error)."""
+        return webview2.index_pins()
 
     @staticmethod
     def _webview2_index_source() -> str:
-        """The immutable per-build installer URL published in the index.
-
-        Microsoft's fwlink always serves the newest build, so its hash can
-        change under us. The index records the exact build URL the published
-        hash belongs to; downloading that keeps hash and bytes consistent even
-        right after a Microsoft release. Empty on any problem (https and a
-        Microsoft host are required).
-        """
-        import urllib.parse
-
-        payload = CznBackend._webview2_index_document()
-        if not isinstance(payload, dict):
-            return ""
-        source = payload.get("url")
-        if not isinstance(source, str):
-            return ""
-        parts = urllib.parse.urlparse(source)
-        host = (parts.hostname or "").lower()
-        if parts.scheme != "https" or not host.endswith(WEBVIEW2_HOST_SUFFIXES):
-            return ""
-        return source
+        """The immutable per-build installer URL published in the index."""
+        return webview2.index_source()
 
     def _verify_webview2(self, path: Path) -> None:
-        """Refuse a WebView2 installer that does not match the pinned SHA-256.
-
-        Every failure is a :class:`BackendError`, so the cached-copy re-verify
-        is mapped to an exit code exactly like the download path (no raw
-        ``OSError`` escapes).
-        """
-        pin = self._webview2_pin()
-        if not pin:
-            log.debug("WebView2 installer has no pinned SHA-256")
-            raise BackendError(
-                WEBVIEW2_MESSAGES[EXIT_WEBVIEW2_UNVERIFIED], EXIT_WEBVIEW2_UNVERIFIED
-            )
-        if not _SHA256_RE.fullmatch(pin):
-            raise self._webview2_pin_error(pin)
-        try:
-            digest = _sha256_file(path)
-        except OSError as e:
-            raise BackendError(
-                f"cannot read the WebView2 installer: {e}", EXIT_WEBVIEW2_FAILED
-            ) from e
-        if digest != pin:
-            log.debug(
-                "WebView2 installer digest mismatch for %s: got %s, expected %s",
-                path,
-                digest,
-                pin,
-            )
-            if self._webview2_overridden():
-                path.unlink(missing_ok=True)
-                raise BackendError(
-                    WEBVIEW2_MESSAGES[EXIT_WEBVIEW2_FAILED],
-                    EXIT_WEBVIEW2_FAILED,
-                )
-            if self.ctx.cancel.cancelled:
-                raise Cancelled()
-            pins = self._webview2_index_pins()
-            if self.ctx.cancel.cancelled:
-                raise Cancelled()
-            if digest in pins:
-                return
-            path.unlink(missing_ok=True)
-            raise BackendError(
-                WEBVIEW2_MESSAGES[EXIT_WEBVIEW2_FAILED],
-                EXIT_WEBVIEW2_FAILED,
-            )
+        """Refuse a WebView2 installer that does not match the pinned SHA-256."""
+        webview2.verify(
+            path,
+            profile=self.ctx.profile,
+            cancel=self.ctx.cancel,
+            constant=WEBVIEW2_SHA256,
+            index_pins_fn=self._webview2_index_pins,
+            overridden_fn=self._webview2_overridden,
+        )
 
     def _download_webview2(self, url: str, tmp: Path, inst: Path) -> None:
         """Download ``url`` to ``tmp``, verify it, and move it to ``inst``."""
-        import urllib.parse
-
-        def _hop_ok(target: str) -> bool:
-            hop = urllib.parse.urlparse(target)
-            return hop.scheme == "https" and (hop.hostname or "").lower().endswith(
-                WEBVIEW2_HOST_SUFFIXES
-            )
-
-        try:
-            response = net.http_open(url, timeout=60, redirect_allowed=_hop_ok)
-        except net.DownloadError as e:
-            raise BackendError(
-                f"WebView2 download failed: {e}", EXIT_WEBVIEW2_FAILED
-            ) from e
-        with response as r, open(tmp, "wb") as f:
-            if not _hop_ok(r.geturl()):
-                raise BackendError(
-                    f"WebView2 download redirected off Microsoft: {r.geturl()}",
-                    EXIT_WEBVIEW2_FAILED,
-                )
-            total = int(r.headers.get("Content-Length") or 0)
-            done = 0
-            while chunk := r.read(1 << 20):
-                if self.ctx.cancel.cancelled:
-                    raise Cancelled()
-                f.write(chunk)
-                done += len(chunk)
-                if done > (total or net.MAX_DOWNLOAD_BYTES):
-                    f.close()
-                    tmp.unlink(missing_ok=True)
-                    raise BackendError(
-                        "WebView2 download exceeded its declared size",
-                        EXIT_WEBVIEW2_FAILED,
-                    )
-                if total:
-                    self.ctx.emit(Event("progress", "WebView2", progress=done / total))
-        self._verify_webview2(tmp)
-        tmp.replace(inst)
+        webview2.download(
+            url,
+            tmp,
+            inst,
+            verify_fn=self._verify_webview2,
+            emit=self.ctx.emit,
+            cancel=self.ctx.cancel,
+        )
 
     def _ensure_webview2(self) -> None:
-        if self._webview2_installed():
-            return
-        # Fail fast before spending the ~215 MB download: without a valid pin
-        # there is nothing to verify against, so refuse up front.
-        pin = self._webview2_pin()
-        if not pin or not _SHA256_RE.fullmatch(pin):
-            raise self._webview2_pin_error(pin)
-        # The installer needs a display and hangs without one (#437), so refuse
-        # up front too instead of downloading ~215 MB first.
-        if not graphics.has_display():
-            raise BackendError(
-                "No display found (DISPLAY and WAYLAND_DISPLAY are unset), and the "
-                "WebView2 installer needs one. Run the install from a desktop session, "
-                "or over ssh with DISPLAY set (for example ssh -X, or DISPLAY=:0 on "
-                "the machine's own screen).",
-                EXIT_WEBVIEW2_FAILED,
-            )
-
-        # FRESH-2: an unwritable/full cache dir must map to a BackendError like
-        # every other WebView2 failure, not escape as a raw OSError.
-        try:
-            self._cache_dir().mkdir(parents=True, exist_ok=True)
-            inst = self._cache_dir() / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
-            cached = inst.is_file() and bool(inst.stat().st_size)
-        except OSError as e:
-            raise BackendError(
-                f"cannot access the WebView2 cache: {e}", EXIT_WEBVIEW2_FAILED
-            ) from e
-        work_id = f"{os.getpid()}-{uuid.uuid4().hex}"
-        if not cached:
-            self.ctx.emit(Event("step", "Downloading the Microsoft WebView2 Runtime (~215 MB)…"))
-            tmp = inst.with_name(f"{inst.name}.{work_id}.part")
-            urls = [WEBVIEW2_URL]
-            if not self._webview2_overridden():
-                if self.ctx.cancel.cancelled:
-                    raise Cancelled()
-                indexed = self._webview2_index_source()
-                if self.ctx.cancel.cancelled:
-                    raise Cancelled()
-                if indexed and indexed != WEBVIEW2_URL:
-                    urls.insert(0, indexed)
-            failure: BackendError | None = None
-            for url in urls:
-                try:
-                    self._download_webview2(url, tmp, inst)
-                    failure = None
-                    break
-                except Cancelled:
-                    tmp.unlink(missing_ok=True)
-                    raise
-                except BackendError as e:
-                    tmp.unlink(missing_ok=True)
-                    failure = e
-                except Exception as e:
-                    tmp.unlink(missing_ok=True)
-                    failure = BackendError(
-                        f"WebView2 download failed: {e}", EXIT_WEBVIEW2_FAILED
-                    )
-            if failure is not None:
-                raise failure
-        else:
-            # N3: a cached installer that no longer matches the pinned hash must
-            # be evicted here, or it would be re-verified as a throwaway copy on
-            # every attempt and wedge install() forever. Removing it makes the
-            # next attempt re-download a fresh copy.
-            try:
-                self._verify_webview2(inst)
-            except BackendError as exc:
-                _unlink_quietly(inst)
-                raise BackendError(
-                    f"{exc.message} (the cached copy was removed; retry the install "
-                    "to download a fresh one)",
-                    EXIT_WEBVIEW2_FAILED,
-                ) from None
-        # FRESH-6: verify a private, read-only copy and run *that*, so the
-        # verified bytes cannot be swapped between the hash check and the exec.
-        run_path = self._cache_dir() / f".webview2-run-{work_id}.exe"
-        try:
-            try:
-                shutil.copyfile(inst, run_path)
-                os.chmod(run_path, 0o400)
-            except OSError as e:
-                raise BackendError(
-                    f"cannot stage the WebView2 installer: {e}", EXIT_WEBVIEW2_FAILED
-                ) from e
-            self._verify_webview2(run_path)
-            self.ctx.emit(Event("step", "Installing the WebView2 Runtime into the prefix…"))
-            with self._installer_environment(), self._activity_label(
-                "Installing the WebView2 Runtime"
-            ):
-                installer_code = self._run_in_prefix([str(run_path), "/silent", "/install"])
-        finally:
-            _unlink_quietly(run_path)
-        if not self._webview2_installed():
-            raise BackendError(
-                self._explain(
-                    f"WebView2 Runtime install failed (installer exit code {installer_code}). "
-                    "Check the install log; a missing GPU/Vulkan driver (for example a VM), "
-                    "a full disk or a blocked download are the usual causes"
-                ),
-                EXIT_WEBVIEW2_FAILED,
-            )
+        webview2.ensure(
+            self.prefix(),
+            profile=self.ctx.profile,
+            cache_dir_fn=self._cache_dir,
+            run_in_prefix=self._run_in_prefix,
+            emit=self.ctx.emit,
+            cancel=self.ctx.cancel,
+            constant=WEBVIEW2_SHA256,
+            url=WEBVIEW2_URL,
+            installed_fn=self._webview2_installed,
+            pin_fn=self._webview2_pin,
+            index_pins_fn=self._webview2_index_pins,
+            index_source_fn=self._webview2_index_source,
+            overridden_fn=self._webview2_overridden,
+            verify_fn=self._verify_webview2,
+            download_fn=self._download_webview2,
+            installer_environment=self._installer_environment,
+            activity_label=self._activity_label,
+            explain=self._explain,
+        )
 
     # ---- Visual C++ runtime (shared in nadare.core.vcredist) ---------------
     def _vcredist_installed(self) -> bool:

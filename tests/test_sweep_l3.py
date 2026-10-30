@@ -12,8 +12,10 @@ import pytest
 from _backend_helpers import make_context
 
 from nadare.backends import arknights as ak
+from nadare.backends import winegame as wg
 from nadare.backends.arknights import ArknightsBackend
 from nadare.backends.czn.backend import CznBackend
+from nadare.backends.winegame import WineGameBackend
 from nadare.core import download as dl
 from nadare.core import vcredist
 from nadare.core.backends import BackendError
@@ -229,19 +231,19 @@ def test_official_install_runs_vcredist_once_on_a_fresh_prefix(
 
     installer = tmp_path / "setup.exe"
     installer.write_text("MZ")
-    monkeypatch.setattr(ArknightsBackend, "_ensure_default_runner", lambda *a, **k: None)
-    monkeypatch.setattr(ArknightsBackend, "_ensure_prefix", ensure_prefix)
-    monkeypatch.setattr(ArknightsBackend, "_run_vcredist", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(WineGameBackend, "_ensure_default_runner", lambda *a, **k: None)
+    monkeypatch.setattr(WineGameBackend, "_ensure_prefix", ensure_prefix)
+    monkeypatch.setattr(WineGameBackend, "_run_vcredist", lambda *a, **k: calls.append(1))
     monkeypatch.setattr(
         ArknightsBackend,
         "require_installer_url",
         lambda *a, **k: "https://example.invalid/setup.exe",
     )
-    monkeypatch.setattr(ArknightsBackend, "_download_installer", lambda *a, **k: installer)
-    monkeypatch.setattr(ak, "stream", lambda *a, **k: 0)
+    monkeypatch.setattr(WineGameBackend, "_download_installer", lambda *a, **k: installer)
+    monkeypatch.setattr(wg, "stream", lambda *a, **k: 0)
     # CI runners have no wine; the test must not depend on one being installed.
-    monkeypatch.setattr(ak, "first_wine", lambda: Path("/usr/bin/wine"))
-    monkeypatch.setattr(ArknightsBackend, "find_launcher", lambda self: installer)
+    monkeypatch.setattr(wg, "first_wine", lambda: Path("/usr/bin/wine"))
+    monkeypatch.setattr(WineGameBackend, "find_launcher", lambda self: installer)
     backend.ctx.emit = lambda _e: None
 
     backend.install()

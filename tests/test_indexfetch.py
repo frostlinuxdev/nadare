@@ -228,6 +228,27 @@ def test_a_saved_copy_older_than_the_age_limit_is_not_served():
         indexfetch.fetch_json("p.json", opener=down)
 
 
+def test_a_saved_copy_dated_far_in_the_future_is_not_served():
+    """A wrong clock must not keep a saved copy alive forever."""
+    indexfetch.fetch_json("p.json", opener=Net({A + "p.json": doc(n=5)}))
+    path = indexfetch.cache_path(A, "p.json")
+    future = time.time() + 400 * 24 * 3600
+    os.utime(path, (future, future))
+    down = Net({A + "p.json": OSError("x"), B + "p.json": OSError("y")})
+    with pytest.raises(indexfetch.IndexUnavailable):
+        indexfetch.fetch_json("p.json", opener=down)
+
+
+def test_a_saved_copy_a_few_minutes_ahead_of_the_clock_is_still_served():
+    """A small clock step back must not discard a copy that was just written."""
+    indexfetch.fetch_json("p.json", opener=Net({A + "p.json": doc(n=5)}))
+    path = indexfetch.cache_path(A, "p.json")
+    ahead = time.time() + 300
+    os.utime(path, (ahead, ahead))
+    down = Net({A + "p.json": OSError("x"), B + "p.json": OSError("y")})
+    assert indexfetch.fetch_json("p.json", opener=down).data["n"] == 5
+
+
 def test_serving_a_saved_copy_is_logged_as_a_warning(caplog):
     indexfetch.fetch_json("p.json", opener=Net({A + "p.json": doc(n=5)}))
     down = Net({A + "p.json": OSError("x"), B + "p.json": OSError("y")})

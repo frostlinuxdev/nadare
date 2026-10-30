@@ -329,9 +329,9 @@ def test_an_existing_prefix_with_system_wine_still_defaults_to_the_recommended_p
     prefix = tmp_path / "prefix"
     (prefix / "drive_c").mkdir(parents=True)
     config.add_profile("ark", backend="arknights-yostar", prefix=str(prefix))
-    from nadare.backends import arknights as ak
+    from nadare.backends import winegame as wg
 
-    monkeypatch.setattr(ak.shutil, "which", lambda name: "/usr/bin/wine")
+    monkeypatch.setattr(wg.shutil, "which", lambda name: "/usr/bin/wine")
     page = SettingsPage()
     try:
         page.load(config, "ark")

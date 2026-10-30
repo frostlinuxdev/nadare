@@ -1,0 +1,13 @@
+[Unit]
+Description=Publish the Nadare archive block pins every hour
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+# A fallback node sets a different OnBootSec/offset in a drop-in; the job is idempotent, so two
+# nodes never both stream an archive for the same build (the second sees the pushed document).
+RandomizedDelaySec=2min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

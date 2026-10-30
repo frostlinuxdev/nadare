@@ -325,7 +325,7 @@ class TestWebView2Integrity:
         def _unreadable(_path):
             raise OSError("EIO")
 
-        monkeypatch.setattr(czn_backend, "_sha256_file", _unreadable)
+        monkeypatch.setattr("nadare.core.webview2._sha256_file", _unreadable)
         with pytest.raises(BackendError) as excinfo:
             backend._ensure_webview2()
         assert excinfo.value.code == czn_backend.EXIT_WEBVIEW2_FAILED

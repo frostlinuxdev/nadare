@@ -7,6 +7,7 @@ import pytest
 from _backend_helpers import make_context
 
 from nadare.backends import arknights as ak
+from nadare.backends import winegame as wg
 from nadare.backends.arknights import ArknightsBackend
 from nadare.backends.czn import backend as czn_backend
 from nadare.backends.czn import update as czn_update
@@ -14,6 +15,7 @@ from nadare.backends.czn.backend import CznBackend
 from nadare.backends.fgo import installer, lepton
 from nadare.backends.fgo.backend import FgoLeptonBackend
 from nadare.backends.wine import WineBackend
+from nadare.backends.winegame import WineGameBackend
 from nadare.core import download, runners, yostar
 from nadare.core.backends import BackendError
 from nadare.core.events import Cancelled
@@ -237,14 +239,14 @@ def test_arknights_install_runner_failure_is_not_a_wine_binary_hint(tmp_path, mo
             {"installer_url": "https://launcher-pkg-ark-en.yo-star.com/a-setup.exe"},
         )
     )
-    monkeypatch.setattr(ak.shutil, "which", lambda name: None)
-    monkeypatch.setattr(ak.runners, "installed_pinned", lambda family="dwproton": None)
+    monkeypatch.setattr(wg.shutil, "which", lambda name: None)
+    monkeypatch.setattr(wg.runners, "installed_pinned", lambda family="dwproton": None)
 
     def offline(*_a, **_k):
-        raise ak.runners.RunnerError("offline")
+        raise wg.runners.RunnerError("offline")
 
-    monkeypatch.setattr(ak.runners, "ensure_pinned", offline)
-    monkeypatch.setattr(ak, "stream", lambda *a, **k: pytest.fail("must not start Wine"))
+    monkeypatch.setattr(wg.runners, "ensure_pinned", offline)
+    monkeypatch.setattr(wg, "stream", lambda *a, **k: pytest.fail("must not start Wine"))
 
     with pytest.raises(BackendError) as exc:
         backend.install()
@@ -268,9 +270,9 @@ def test_arknights_installer_failure_offers_a_gui_runner_choice(tmp_path, monkey
     )
     installer_exe = tmp_path / "setup.exe"
     installer_exe.write_bytes(b"MZ")
-    monkeypatch.setattr(ArknightsBackend, "_ensure_prefix", lambda self: None)
-    monkeypatch.setattr(ArknightsBackend, "_download_installer", lambda self, url: installer_exe)
-    monkeypatch.setattr(ak, "stream", lambda *a, **k: 0)
+    monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
+    monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer_exe)
+    monkeypatch.setattr(wg, "stream", lambda *a, **k: 0)
 
     with pytest.raises(BackendError) as exc:
         backend.install()

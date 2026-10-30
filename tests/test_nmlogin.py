@@ -12,8 +12,9 @@ import urllib.request
 import pytest
 from _backend_helpers import make_context, make_jwt, write_exe
 
-from nadare.backends import arknights as ak
 from nadare.backends import direct, nmlogin
+from nadare.backends import winegame as wg
+from nadare.backends.winegame import WineGameBackend
 from nadare.core import netmarble as nm
 from nadare.core.backends import BackendError, supports_login, supports_remember_me
 from nadare.core.events import Cancel, Cancelled
@@ -338,10 +339,10 @@ def launch_spy(monkeypatch):
         seen["args"], seen["extra_env"] = list(args), dict(extra_env or {})
         return ["umu-run", *args], dict(extra_env or {})
 
-    monkeypatch.setattr(ak.ArknightsBackend, "_prefix_command", fake_prefix_command)
-    monkeypatch.setattr(ak.ArknightsBackend, "_ensure_default_runner", lambda self, strict: None)
-    monkeypatch.setattr(ak.ArknightsBackend, "_run_vcredist", lambda self, created=False: None)
-    monkeypatch.setattr(ak, "stream", lambda *a, **k: 0)
+    monkeypatch.setattr(WineGameBackend, "_prefix_command", fake_prefix_command)
+    monkeypatch.setattr(WineGameBackend, "_ensure_default_runner", lambda self, strict: None)
+    monkeypatch.setattr(WineGameBackend, "_run_vcredist", lambda self, created=False: None)
+    monkeypatch.setattr(wg, "stream", lambda *a, **k: 0)
     return seen
 
 
@@ -395,10 +396,10 @@ def test_other_games_launch_unchanged(tmp_path, monkeypatch):
         seen["args"], seen["extra_env"] = list(args), extra_env
         return ["umu-run", *args], {}
 
-    monkeypatch.setattr(ak.ArknightsBackend, "_prefix_command", fake_prefix_command)
-    monkeypatch.setattr(ak.ArknightsBackend, "_ensure_default_runner", lambda self, strict: None)
-    monkeypatch.setattr(ak.ArknightsBackend, "_run_vcredist", lambda self, created=False: None)
-    monkeypatch.setattr(ak, "stream", lambda *a, **k: 0)
+    monkeypatch.setattr(WineGameBackend, "_prefix_command", fake_prefix_command)
+    monkeypatch.setattr(WineGameBackend, "_ensure_default_runner", lambda self, strict: None)
+    monkeypatch.setattr(WineGameBackend, "_run_vcredist", lambda self, created=False: None)
+    monkeypatch.setattr(wg, "stream", lambda *a, **k: 0)
     b = direct.BrownDust2Backend(
         make_context(tmp_path, "direct-bd2", {"prefix": str(tmp_path / "pfx")})
     )

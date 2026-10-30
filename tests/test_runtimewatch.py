@@ -9,7 +9,9 @@ import pytest
 from _backend_helpers import make_context, write_exe
 
 from nadare.backends import arknights as ak
+from nadare.backends import winegame as wg
 from nadare.backends.arknights import ArknightsBackend
+from nadare.backends.winegame import WineGameBackend
 from nadare.core import runtimewatch, umu, userns
 from nadare.core.backends import BackendError
 
@@ -70,7 +72,7 @@ def _stream_that(monkeypatch, lines: list[str], code: int) -> None:
                 on_line(line)
         return code
 
-    monkeypatch.setattr(ak, "stream", fake)
+    monkeypatch.setattr(wg, "stream", fake)
     monkeypatch.setattr(
         ArknightsBackend, "_prefix_command", lambda self, args, extra_env=None: (["x"], {})
     )
@@ -106,8 +108,8 @@ def test_installer_that_never_started_is_explained(tmp_path, monkeypatch) -> Non
     backend = _backend(tmp_path)
     installer = write_exe(tmp_path / "Arknights-setup.exe", "MZ")
     _stream_that(monkeypatch, [BWRAP], 1)
-    monkeypatch.setattr(ArknightsBackend, "_ensure_prefix", lambda self: None)
-    monkeypatch.setattr(ArknightsBackend, "_download_installer", lambda self, url: installer)
+    monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
+    monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer)
     backend.ctx.profile["installer_url"] = (
         "https://launcher-pkg-ark-en.yo-star.com/Arknights-setup.exe"
     )
@@ -126,7 +128,7 @@ def test_launcher_exit_after_a_block_is_explained(tmp_path, monkeypatch) -> None
         self._watch.feed(BWRAP)
         return 1
 
-    monkeypatch.setattr(ArknightsBackend, "launch", fake_launch)
+    monkeypatch.setattr(WineGameBackend, "launch", fake_launch)
     with pytest.raises(BackendError) as err:
         backend.update()
     assert "launcher exited with code 1" in str(err.value)

@@ -1,0 +1,22 @@
+[Unit]
+Description=Publish the Nadare archive block pins
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# The pin job has its own index checkout and its own copy of scripts/ and src/ (see
+# docs/ARCHIVE-PINS.md). Adjust the paths if they live elsewhere.
+Environment=NADARE_PIN_INDEX_DIR=%h/nadare-pins/nadare-index
+Environment=NADARE_PIN_STATUS=%h/nadare-pins/status.json
+Environment=XDG_RUNTIME_DIR=/tmp
+# Optional: NADARE_PIN_GAMES, NADARE_PIN_DEADLINE, NADARE_PIN_PUSH and
+# NADARE_PIN_HEARTBEAT_URL (the Uptime Kuma push URL is a secret: keep this file mode 600).
+EnvironmentFile=-/etc/nadare-pin-publisher.env
+ExecStart=%h/nadare-pins/scripts/publish_pins_node.sh
+# A first pass streams a whole archive (minutes to an hour); publish_pins.py enforces its own
+# two hour budget.
+TimeoutStartSec=150min
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true

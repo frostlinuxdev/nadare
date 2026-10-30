@@ -14,6 +14,7 @@ import pytest
 from _backend_helpers import make_context, write_exe
 
 from nadare.backends import arknights as ak
+from nadare.backends import winegame as wg
 from nadare.backends.arknights import ArknightsBackend
 from nadare.core import yostar
 from nadare.core.backends import Status
@@ -22,17 +23,17 @@ from nadare.core.config import Config
 
 @pytest.fixture(autouse=True)
 def _no_real_vcredist(monkeypatch):
-    monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: None)
+    monkeypatch.setattr(wg.vcredist, "ensure", lambda *a, **k: None)
 
 
 @pytest.fixture(autouse=True)
 def _hermetic_runners(monkeypatch):
-    monkeypatch.setattr(ak.runners, "installed_pinned", lambda family="dwproton": None)
+    monkeypatch.setattr(wg.runners, "installed_pinned", lambda family="dwproton": None)
 
     def offline(*_a, **_k):
-        raise ak.runners.RunnerError("offline (no downloads in tests)")
+        raise wg.runners.RunnerError("offline (no downloads in tests)")
 
-    monkeypatch.setattr(ak.runners, "ensure_pinned", offline)
+    monkeypatch.setattr(wg.runners, "ensure_pinned", offline)
 
 
 def _manifest_file(tmp_path: Path, tag: str = "Arknights_EN", version: str = "1.2.3") -> Path:

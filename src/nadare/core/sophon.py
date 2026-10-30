@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import diskspace
+from . import diskspace, paths
 from . import download as download_module
 from .download import DownloadError
 from .events import Cancel, Cancelled, Emitter, Event, emitter
@@ -161,17 +161,20 @@ def _string(value: bytes, label: str) -> str:
 
 def _safe_relative_path(path: str) -> str:
     """Return ``path`` or raise :class:`SophonError` for an unsafe one."""
-    if not isinstance(path, str) or not path:
-        raise SophonError("path must not be empty")
-    if "\\" in path:
-        raise SophonError(f"path must not contain a backslash: {path!r}")
-    if path.startswith("/"):
-        raise SophonError(f"path must be relative: {path!r}")
-    parts = path.split("/")
-    for part in parts:
-        if part in ("", ".", ".."):
-            raise SophonError(f"unsafe path component in {path!r}")
-    return path
+    try:
+        return paths.check_relative(path, paths.SOPHON_PATHS)
+    except paths.PathProblem as exc:
+        if exc.code == "not-string" or exc.code == "empty":
+            message = "path must not be empty"
+        elif exc.code == "backslash":
+            message = f"path must not contain a backslash: {path!r}"
+        elif exc.code == "absolute":
+            message = f"path must be relative: {path!r}"
+        elif exc.code == "component":
+            message = f"unsafe path component in {path!r}"
+        else:
+            message = f"unsafe path: {path!r}"
+        raise SophonError(message) from None
 
 
 def _target_path(root: Path, relative: str) -> Path:

@@ -6,8 +6,8 @@ These games install straight from the publisher's public patch API, with no
 launcher: a per-game source (:mod:`nadare.core.sources`) turns the API into a
 :class:`~nadare.core.directdl.Plan` and :mod:`nadare.core.directdl` installs it.
 Everything else (Wine/Proton runner, prefix, launch, process detection, status)
-is inherited from :class:`~nadare.backends.arknights.ArknightsBackend`, exactly as
-Stella Sora does; only the source of the file list differs.
+is inherited from :class:`~nadare.backends.winegame.WineGameBackend`, the neutral
+Wine/Proton base shared with the Yostar backend; only the source of the file list differs.
 
 Profile keys are the same as ``arknights-yostar`` minus the Yostar manifest and
 installer keys.
@@ -15,24 +15,34 @@ installer keys.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from ..core import directdl, endfield_shim, graphics, nte_launcher
+from ..core import (
+    archivepins,
+    directdl,
+    endfield_shim,
+    graphics,
+    nte_launcher,
+    paths,
+    webview2,
+)
 from ..core.backends import BackendError, Option
 from ..core.sources import Fetch, aethergazer, bd2, endfield, gfl2, hoyo, mongil, nte, pgr, wuwa
 from . import bd2_news, endfield_news, hoyo_art, hoyo_news, kuro_news, nte_news
-from .arknights import INSTALLED_PREFIX_KEY, ArknightsBackend
+from .arknights import INSTALLED_PREFIX_KEY
 from .nmlogin import NetmarbleLoginMixin
-from .wine import profile_setting
+from .wine import profile_setting, stream
+from .winegame import WineGameBackend
 
 #: Sizes below are decimal gigabytes, as the publishers and archive tables report them.
 GB = 10**9
 
 
-class DirectBackend(ArknightsBackend):
+class DirectBackend(WineGameBackend):
     """Base for the per-game classes below; never registered on its own."""
 
     kind = "direct"
@@ -95,12 +105,18 @@ class DirectBackend(ArknightsBackend):
 
     def plan(self) -> directdl.Plan:
         try:
-            return type(self).plan_factory(None, **self.plan_kwargs())
+            plan = type(self).plan_factory(None, **self.plan_kwargs())
         except directdl.DirectError as exc:
             raise BackendError(
                 f"{self.display_name}: could not read the publisher's download "
                 f"information ({exc}). Check your connection or try again later."
             ) from exc
+        if any(archive.stream for archive in plan.archives):
+            try:
+                plan = archivepins.attach(plan, archivepins.load(self.game_tag))
+            except Exception:  # noqa: BLE001 - published pins are optional
+                pass
+        return plan
 
     # ---- hooks the Arknights machinery calls ------------------------------
     def manifest_source(self) -> str:
@@ -321,25 +337,54 @@ class Gfl2HaoplayBackend(Gfl2Backend):
     def _ensure_webview2(self) -> None:
         # Share CZN's pinned Microsoft download, cache verification and silent
         # installer, while using the exact prefix and runner selected here.
-        from .czn.backend import CznBackend
+        from .czn import backend as czn_backend
 
-        owner = self
+        profile = self.ctx.profile
+        prefix = self.prefix()
+        constant = czn_backend.WEBVIEW2_SHA256
 
-        class HaoplayWebView2Installer(CznBackend):
-            def _migrate_legacy_state(self) -> None:
-                # This profile has no CZN credentials to migrate.
-                pass
+        def run_in_prefix(args: list[str]) -> int:
+            cmd, env = self._prefix_command(args, {"PROTON_ENABLE_WAYLAND": "0"})
+            return stream(
+                cmd, env, on_line=self._on_line, cancel=self.ctx.cancel, cwd=prefix
+            )
 
-            def prefix(self) -> Path:
-                return owner.prefix()
+        def verify(path: Path) -> None:
+            webview2.verify(
+                path,
+                profile=profile,
+                cancel=self.ctx.cancel,
+                constant=constant,
+                index_pins_fn=webview2.index_pins,
+                overridden_fn=lambda: webview2.overridden(profile),
+            )
 
-            def _run_in_prefix(self, args: list[str]) -> int:
-                cmd, env = owner._prefix_command(
-                    args, {"PROTON_ENABLE_WAYLAND": "0"}
-                )
-                return self._stream(cmd, env, cwd=owner.prefix())
+        def download(url: str, tmp: Path, inst: Path) -> None:
+            webview2.download(
+                url, tmp, inst, verify_fn=verify, emit=self.ctx.emit, cancel=self.ctx.cancel
+            )
 
-        HaoplayWebView2Installer(self.ctx)._ensure_webview2()
+        webview2.ensure(
+            prefix,
+            profile=profile,
+            # the CZN cache: the ~215 MB installer is downloaded once for both games
+            cache_dir_fn=lambda: paths.cache_dir() / "czn",
+            run_in_prefix=run_in_prefix,
+            emit=self.ctx.emit,
+            cancel=self.ctx.cancel,
+            constant=constant,
+            url=czn_backend.WEBVIEW2_URL,
+            installed_fn=lambda: webview2.installed(prefix),
+            pin_fn=lambda: webview2.resolve_pin(profile, constant),
+            index_pins_fn=webview2.index_pins,
+            index_source_fn=webview2.index_source,
+            overridden_fn=lambda: webview2.overridden(profile),
+            verify_fn=verify,
+            download_fn=download,
+            installer_environment=contextlib.nullcontext,
+            activity_label=lambda label: contextlib.nullcontext(),
+            explain=self._watch.explain,
+        )
 
     def install(self) -> None:
         self.ctx.cancel.raise_if_cancelled()

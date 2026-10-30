@@ -27,6 +27,9 @@ log = logging.getLogger(__name__)
 
 MAX_CACHE_AGE_SECONDS = 30 * 24 * 3600
 
+#: How far ahead of the clock a saved copy may be dated before it is treated as expired.
+_CLOCK_SKEW_SECONDS = 3600
+
 
 class IndexUnavailable(Exception):
     """No mirror answered and no usable cached copy exists."""
@@ -109,9 +112,11 @@ def fetch_json(
     validate: Callable[[Any], Any] | None = None,
     timeout: int = 10,
     opener: Callable[[str], bytes] | None = None,
+    max_bytes: int = 65536,
+    max_cache_age: float = MAX_CACHE_AGE_SECONDS,
 ) -> IndexResult:
     rel = _check_rel(rel)
-    fetch = opener or (lambda url: open_bytes(url, timeout=timeout))
+    fetch = opener or (lambda url: open_bytes(url, timeout=timeout, max_bytes=max_bytes))
     bases = [base for base in hosting.index_bases() if base.startswith("https://")]
     if not bases:
         raise IndexUnavailable("the index is disabled")
@@ -134,7 +139,9 @@ def fetch_json(
         cached = cache_path(base, rel)
         try:
             mtime = cached.stat().st_mtime
-            if time.time() - mtime > MAX_CACHE_AGE_SECONDS:
+            age = time.time() - mtime
+            # A copy dated well ahead of the clock would never expire; allow a small clock step.
+            if age > max_cache_age or age < -_CLOCK_SKEW_SECONDS:
                 continue
             payload = cached.read_bytes()
         except OSError:

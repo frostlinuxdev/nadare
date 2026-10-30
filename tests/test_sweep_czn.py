@@ -15,6 +15,7 @@ import pytest
 from _backend_helpers import make_context
 
 from nadare.backends import arknights as ak
+from nadare.backends import winegame as wg
 from nadare.backends.czn import auth as czn_auth
 from nadare.backends.czn import update as czn_update
 from nadare.backends.czn.backend import CznBackend
@@ -224,14 +225,14 @@ class TestArknightsPrefixCleanup:
         prefix = tmp_path / "prefix"
         backend = self._backend(tmp_path, prefix)
         calls: list[int] = []
-        monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: None)
+        monkeypatch.setattr(wg.vcredist, "ensure", lambda *a, **k: None)
 
         def fake_stream(argv, env, on_line=None, cancel=None):
             calls.append(1)
             (prefix / "drive_c").mkdir(parents=True, exist_ok=True)
             raise Cancelled()
 
-        monkeypatch.setattr(ak, "stream", fake_stream)
+        monkeypatch.setattr(wg, "stream", fake_stream)
         with pytest.raises(Cancelled):
             backend._ensure_prefix()
         assert not prefix.exists(), "a half-built prefix must not look complete"
@@ -242,7 +243,7 @@ class TestArknightsPrefixCleanup:
             (prefix / "drive_c").mkdir(parents=True, exist_ok=True)
             return 0
 
-        monkeypatch.setattr(ak, "stream", succeeding_stream)
+        monkeypatch.setattr(wg, "stream", succeeding_stream)
         backend._ensure_prefix()
         assert calls == [1, 1]
         assert (prefix / "drive_c").is_dir()
@@ -257,7 +258,7 @@ class TestArknightsPrefixCleanup:
             (prefix / "drive_c").mkdir(parents=True, exist_ok=True)
             raise Cancelled()
 
-        monkeypatch.setattr(ak, "stream", fake_stream)
+        monkeypatch.setattr(wg, "stream", fake_stream)
         with pytest.raises(Cancelled):
             backend._ensure_prefix()
         assert (prefix / "keep-me").read_text() == "user data"

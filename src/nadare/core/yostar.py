@@ -34,7 +34,6 @@ import hashlib
 import json
 import logging
 import os
-import posixpath
 import re
 import threading
 import time
@@ -344,21 +343,22 @@ def safe_relative_path(path: Any) -> str:
     Absolute paths, drive-letter paths, ``..`` and anything that escapes the
     install root are rejected.
     """
-    if not isinstance(path, str):
-        raise ManifestError(f"manifest path is not a string: {path!r}")
-    text = path.replace("\\", "/").strip()
-    if not text:
-        raise ManifestError("empty manifest path")
-    if "\x00" in text:
-        raise ManifestError(f"NUL byte in manifest path: {path!r}")
-    if text.startswith("/") or re.match(r"^[A-Za-z]:", text):
-        raise ManifestError(f"absolute manifest path: {path!r}")
-    norm = posixpath.normpath(text)
-    if norm in (".", "..") or norm.startswith("../") or "/../" in norm:
-        raise ManifestError(f"path escapes the install dir: {path!r}")
-    if norm.startswith("/"):
-        raise ManifestError(f"absolute manifest path: {path!r}")
-    return norm
+    try:
+        return paths.check_relative(path, paths.MANIFEST_PATHS)
+    except paths.PathProblem as exc:
+        if exc.code == "not-string":
+            message = f"manifest path is not a string: {path!r}"
+        elif exc.code == "empty":
+            message = "empty manifest path"
+        elif exc.code == "nul":
+            message = f"NUL byte in manifest path: {path!r}"
+        elif exc.code == "absolute":
+            message = f"absolute manifest path: {path!r}"
+        elif exc.code == "escape":
+            message = f"path escapes the install dir: {path!r}"
+        else:
+            message = f"unsafe manifest path: {path!r}"
+        raise ManifestError(message) from None
 
 
 def _as_int(value: Any, what: str) -> int:

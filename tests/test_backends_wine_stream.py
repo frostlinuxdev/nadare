@@ -21,9 +21,11 @@ from _backend_helpers import make_context, write_exe
 
 from nadare.backends import arknights as ak
 from nadare.backends import wine as wine_mod
+from nadare.backends import winegame as wg
 from nadare.backends.arknights import ArknightsBackend
 from nadare.backends.steam import SteamBackend
 from nadare.backends.wine import ProcessQuery, WineBackend
+from nadare.backends.winegame import WineGameBackend
 from nadare.core.backends import BackendError
 from nadare.core.events import Cancel, Cancelled
 
@@ -320,9 +322,9 @@ def _installer_backend(tmp_path: Path) -> tuple[ArknightsBackend, list]:
 
 
 def _wire_install(monkeypatch, backend: ArknightsBackend, installer: Path, code: int) -> None:
-    monkeypatch.setattr(ak, "stream", lambda *a, **k: code)
-    monkeypatch.setattr(ArknightsBackend, "_ensure_prefix", lambda self: None)
-    monkeypatch.setattr(ArknightsBackend, "_download_installer", lambda self, url: installer)
+    monkeypatch.setattr(wg, "stream", lambda *a, **k: code)
+    monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
+    monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer)
     backend.ctx.profile["installer_url"] = (
         "https://launcher-pkg-ark-en.yo-star.com/Arknights-setup.exe"
     )

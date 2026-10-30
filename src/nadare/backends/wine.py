@@ -190,6 +190,7 @@ def stream(
     on_line: Callable[[str], None] | None = None,
     cancel: Cancel | None = None,
     stop_wine: bool = True,
+    cwd: str | os.PathLike[str] | None = None,
 ) -> int:
     """Run ``argv`` in its own process group, streaming merged output.
 
@@ -207,7 +208,9 @@ def stream(
 
     _forget_kill(cmd, env)
     try:
-        completed = process.run(cmd, env=env, emit=emit, cancel=cancel, errors="replace")
+        completed = process.run(
+            cmd, env=env, emit=emit, cancel=cancel, errors="replace", cwd=cwd
+        )
     except Cancelled:
         if stop_wine:
             _stop_wineserver(cmd, env)

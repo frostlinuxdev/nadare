@@ -14,6 +14,7 @@ One reader is for one thread; give each worker its own.
 from __future__ import annotations
 
 import bisect
+import hashlib
 import http.client
 import io
 import time
@@ -29,6 +30,19 @@ DEFAULT_BLOCK = 4 << 20
 
 class RangeError(RuntimeError):
     """The server cannot be read by range, or kept failing."""
+
+
+class BlockMismatch(RuntimeError):
+    """A fetched block does not match the published sha256 list.
+
+    ``part_index`` and ``block_index`` are zero-based; ``url`` is the part's URL.
+    """
+
+    def __init__(self, part_index: int, block_index: int, url: str) -> None:
+        self.part_index = part_index
+        self.block_index = block_index
+        self.url = url
+        super().__init__(f"block {block_index} of {url} does not match the published checksum list")
 
 
 @dataclass(frozen=True)
@@ -64,6 +78,7 @@ class RangeReader(io.RawIOBase):
         backoff: float = 0.5,
         timeout: int = 60,
         cancel: Cancel | None = None,
+        block_hashes: Sequence[Sequence[bytes]] | None = None,
     ) -> None:
         if block_size < 1:
             raise ValueError("block_size must be at least 1")
@@ -80,6 +95,9 @@ class RangeReader(io.RawIOBase):
         self._backoff = backoff
         self._timeout = timeout
         self._cancel = cancel
+        self._block_hashes = (
+            [tuple(blocks) for blocks in block_hashes] if block_hashes is not None else None
+        )
         self._pool = download.HttpClientPool(timeout=timeout)
         self._cache: OrderedDict[tuple[int, int], bytes] = OrderedDict()
         self._last: tuple[int, int] | None = None
@@ -102,6 +120,16 @@ class RangeReader(io.RawIOBase):
             if not size or size < 0:
                 raise RangeError(f"cannot determine size of {part.url}")
             resolved.append(RangePart(part.url, size))
+
+        if self._block_hashes is not None:
+            if len(self._block_hashes) != len(resolved):
+                raise ValueError("block_hashes must have one list per part")
+            for blocks, part in zip(self._block_hashes, resolved, strict=True):
+                expected = ((part.size or 0) + block_size - 1) // block_size
+                if len(blocks) != expected:
+                    raise ValueError(
+                        f"block_hashes for {part.url} has {len(blocks)} blocks, expected {expected}"
+                    )
 
         self._parts = resolved
         self._starts: list[int] = []
@@ -183,7 +211,9 @@ class RangeReader(io.RawIOBase):
         start = block_index * self._block_size
         end = min(start + count * self._block_size, part_size) - 1
         error: BaseException | None = None
-        for attempt in range(self._retries + 1):
+        attempt = 0
+        refetched = False
+        while True:
             if self._cancel is not None:
                 self._cancel.raise_if_cancelled()
             try:
@@ -199,6 +229,14 @@ class RangeReader(io.RawIOBase):
             else:
                 self.requests += 1
                 self.bytes_fetched += len(data)
+                if self._block_hashes is not None:
+                    bad = self._mismatched_block(part_index, block_index, data)
+                    if bad is not None:
+                        if refetched:
+                            raise BlockMismatch(part_index, bad, self._parts[part_index].url)
+                        # One corrupt answer may be a bad edge: ask again before refusing.
+                        refetched = True
+                        continue
                 wanted = data
                 if self._cache_limit > 0:
                     for offset in range(0, len(data), self._block_size):
@@ -211,9 +249,22 @@ class RangeReader(io.RawIOBase):
                 return wanted
             if attempt < self._retries and self._backoff:
                 time.sleep(self._backoff * 2**attempt)
-        raise RangeError(
-            f"failed to fetch bytes {start}-{end} of {self._parts[part_index].url}"
-        ) from error
+            attempt += 1
+            if attempt > self._retries:
+                raise RangeError(
+                    f"failed to fetch bytes {start}-{end} of {self._parts[part_index].url}"
+                ) from error
+
+    def _mismatched_block(self, part_index: int, first_block: int, data: bytes) -> int | None:
+        """The first block in ``data`` whose sha256 is not in the table, if any."""
+        assert self._block_hashes is not None
+        expected = self._block_hashes[part_index]
+        for offset in range(0, len(data), self._block_size):
+            block_index = first_block + offset // self._block_size
+            chunk = data[offset : offset + self._block_size]
+            if hashlib.sha256(chunk).digest() != expected[block_index]:
+                return block_index
+        return None
 
     def readinto(self, buffer) -> int:  # type: ignore[no-untyped-def]
         self._check_open()

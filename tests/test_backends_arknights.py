@@ -14,7 +14,9 @@ import pytest
 from _backend_helpers import make_context, write_exe
 
 from nadare.backends import arknights as ak
+from nadare.backends import winegame as wg
 from nadare.backends.arknights import ArknightsBackend
+from nadare.backends.winegame import WineGameBackend
 from nadare.core.backends import BackendError, BackendUnsupported, get, kinds
 
 
@@ -62,7 +64,7 @@ class TestStatus:
     def test_running_when_process_matches(self, tmp_path, monkeypatch):
         backend = _backend(tmp_path)
         _install_launcher(backend.prefix())
-        monkeypatch.setattr(ak, "scan_pids", lambda patterns: [4242])
+        monkeypatch.setattr(wg, "scan_pids", lambda patterns: [4242])
         status = backend.status()
         assert status.state == "running"
         assert status.running is True
@@ -132,27 +134,27 @@ class TestInstallerUrl:
     def test_api_resolution(self, tmp_path, monkeypatch):
         url = "https://launcher-pkg-ark-en.yo-star.com/Arknights-new-setup.exe"
         payload = {"data": {"rows": [{"client": url}]}}
-        monkeypatch.setattr(ak.download, "fetch_json", lambda *a, **k: payload)
+        monkeypatch.setattr(wg.download, "fetch_json", lambda *a, **k: payload)
         backend = _backend(tmp_path)
         assert backend.installer_url(resolve=True) == url
 
     def test_api_url_on_untrusted_host_falls_back_to_pinned(self, tmp_path, monkeypatch):
         payload = {"data": {"rows": [{"client": "https://cdn.test/Arknights-setup.exe"}]}}
-        monkeypatch.setattr(ak.download, "fetch_json", lambda *a, **k: payload)
+        monkeypatch.setattr(wg.download, "fetch_json", lambda *a, **k: payload)
         backend = _backend(tmp_path)
         assert backend.installer_url(resolve=True) == ak.DEFAULT_INSTALLER_URL
 
     def test_api_failure_falls_back_to_pinned(self, tmp_path, monkeypatch):
         def boom(*a, **k):
-            raise ak.download.DownloadError("offline")
+            raise wg.download.DownloadError("offline")
 
-        monkeypatch.setattr(ak.download, "fetch_json", boom)
+        monkeypatch.setattr(wg.download, "fetch_json", boom)
         backend = _backend(tmp_path)
         assert backend.installer_url(resolve=True) == ak.DEFAULT_INSTALLER_URL
 
     def test_api_with_html_link_is_ignored(self, tmp_path, monkeypatch):
         payload = {"data": {"rows": [{"client": "https://www.arknights.global/"}]}}
-        monkeypatch.setattr(ak.download, "fetch_json", lambda *a, **k: payload)
+        monkeypatch.setattr(wg.download, "fetch_json", lambda *a, **k: payload)
         backend = _backend(tmp_path)
         assert backend.installer_url(resolve=True) == ak.DEFAULT_INSTALLER_URL
 
@@ -195,9 +197,9 @@ class TestBuildLaunch:
         prefix = tmp_path / "prefix"
         exe = _install_launcher(prefix)
         proton = tmp_path / "Proton-CachyOS"
-        monkeypatch.setattr(ak.runners, "resolve_runner", lambda value: proton)
+        monkeypatch.setattr(wg.runners, "resolve_runner", lambda value: proton)
         monkeypatch.setattr(
-            ak.shutil, "which", lambda name: "/opt/umu-run" if name == "umu-run" else None
+            wg.shutil, "which", lambda name: "/opt/umu-run" if name == "umu-run" else None
         )
         backend = _backend(tmp_path, {"prefix": str(prefix), "runner": "MyProton"})
         argv, env, target = backend.build_launch()
@@ -214,9 +216,9 @@ class TestBuildLaunch:
         proton = tmp_path / "Proton-CachyOS"
         proton.mkdir()
         (proton / "proton").write_text("")
-        monkeypatch.setattr(ak.runners, "resolve_runner", lambda value: proton)
-        monkeypatch.setattr(ak.shutil, "which", lambda name: None)
-        monkeypatch.setattr(ak.sandbox, "in_flatpak", lambda: True)
+        monkeypatch.setattr(wg.runners, "resolve_runner", lambda value: proton)
+        monkeypatch.setattr(wg.shutil, "which", lambda name: None)
+        monkeypatch.setattr(wg.sandbox, "in_flatpak", lambda: True)
         backend = _backend(tmp_path, {"prefix": str(prefix), "runner": "MyProton"})
         argv, env, target = backend.build_launch()
         assert argv == [str(proton / "proton"), "run", str(exe)]
@@ -230,14 +232,14 @@ class TestBuildLaunch:
         proton = tmp_path / "Proton"
         proton.mkdir()
         (proton / "proton").write_text("")
-        monkeypatch.setattr(ak.runners, "resolve_runner", lambda value: proton)
-        monkeypatch.setattr(ak.shutil, "which", lambda name: None)
-        monkeypatch.setattr(ak.sandbox, "in_flatpak", lambda: False)
+        monkeypatch.setattr(wg.runners, "resolve_runner", lambda value: proton)
+        monkeypatch.setattr(wg.shutil, "which", lambda name: None)
+        monkeypatch.setattr(wg.sandbox, "in_flatpak", lambda: False)
         return _backend(tmp_path, {"prefix": str(prefix), "runner": "MyProton"}), proton
 
     def test_proton_runner_without_umu_runs_proton_directly(self, tmp_path, monkeypatch):
         backend, proton = self._proton_without_umu(tmp_path, monkeypatch)
-        monkeypatch.setattr(ak.hostlibs, "missing_32bit", lambda: [])
+        monkeypatch.setattr(wg.hostlibs, "missing_32bit", lambda: [])
         argv, env, _target = backend.build_launch()
         assert argv[:2] == [str(proton / "proton"), "run"]
         assert env["STEAM_COMPAT_DATA_PATH"] == str(tmp_path / "prefix")
@@ -246,7 +248,7 @@ class TestBuildLaunch:
         self, tmp_path, monkeypatch
     ):
         backend, _proton = self._proton_without_umu(tmp_path, monkeypatch)
-        monkeypatch.setattr(ak.hostlibs, "missing_32bit", lambda: ["libfreetype.so.6"])
+        monkeypatch.setattr(wg.hostlibs, "missing_32bit", lambda: ["libfreetype.so.6"])
         with pytest.raises(BackendError):
             backend.build_launch()
 
@@ -291,7 +293,7 @@ class TestBuildLaunch:
         """05-9: a whitespace-only wine_binary must not become the name "None"."""
         prefix = tmp_path / "prefix"
         _install_launcher(prefix)
-        monkeypatch.setattr(ak, "first_wine", lambda: Path("/opt/wine/bin/wine"))
+        monkeypatch.setattr(wg, "first_wine", lambda: Path("/opt/wine/bin/wine"))
         backend = _backend(tmp_path, {"prefix": str(prefix), "wine_binary": "   "})
         argv, *_ = backend.build_launch()
         assert argv[0] == "/opt/wine/bin/wine"
@@ -321,9 +323,9 @@ class TestInstall:
             captured.append((list(argv), dict(env)))
             return 0
 
-        monkeypatch.setattr(ak, "stream", fake_stream)
-        monkeypatch.setattr(ArknightsBackend, "_ensure_prefix", lambda self: None)
-        monkeypatch.setattr(ArknightsBackend, "_download_installer", lambda self, url: installer)
+        monkeypatch.setattr(wg, "stream", fake_stream)
+        monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
+        monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer)
 
         backend = _backend(
             tmp_path,
@@ -345,9 +347,9 @@ class TestInstall:
     def test_installer_nonzero_exit_raises(self, tmp_path, monkeypatch):
         prefix = tmp_path / "prefix"
         installer = write_exe(tmp_path / "Arknights-setup.exe", "MZ")
-        monkeypatch.setattr(ak, "stream", lambda *a, **k: 3)
-        monkeypatch.setattr(ArknightsBackend, "_ensure_prefix", lambda self: None)
-        monkeypatch.setattr(ArknightsBackend, "_download_installer", lambda self, url: installer)
+        monkeypatch.setattr(wg, "stream", lambda *a, **k: 3)
+        monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
+        monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer)
         backend = _backend(
             tmp_path,
             {
@@ -364,7 +366,7 @@ class TestInstall:
         def no_network(*a, **k):
             raise AssertionError("must not touch the network")
 
-        monkeypatch.setattr(ak.download, "fetch_json", no_network)
+        monkeypatch.setattr(wg.download, "fetch_json", no_network)
         backend = _backend(tmp_path, {"installer_url": "https://www.arknights.global/"})
         with pytest.raises(BackendError):
             backend.install()
@@ -378,8 +380,8 @@ class TestInstall:
             captured.update(kwargs)
             return type("R", (), {"path": Path(dest)})()
 
-        monkeypatch.setattr(ak.download, "download", fake_download)
-        monkeypatch.setattr(ak.download, "remote_size", lambda url, **kw: None)
+        monkeypatch.setattr(wg.download, "download", fake_download)
+        monkeypatch.setattr(wg.download, "remote_size", lambda url, **kw: None)
         backend = _backend(
             tmp_path,
             {
@@ -402,8 +404,8 @@ class TestInstall:
         def fake_size(url, **kwargs):
             sizes.update(kwargs)
 
-        monkeypatch.setattr(ak.download, "download", fake_download)
-        monkeypatch.setattr(ak.download, "remote_size", fake_size)
+        monkeypatch.setattr(wg.download, "download", fake_download)
+        monkeypatch.setattr(wg.download, "remote_size", fake_size)
         backend = _backend(
             tmp_path,
             {"installer_url": "https://launcher-pkg-ark-en.yo-star.com/a-setup.exe"},
@@ -489,7 +491,7 @@ class TestVerifyAndLogin:
 
     def test_uninstall_refuses_another_profile_dir(self, tmp_path):
         """A prefix pointing at another Nadare profile's tree is refused."""
-        other = ak.paths.profiles_dir() / "other-game"
+        other = wg.paths.profiles_dir() / "other-game"
         _install_launcher(other)
         backend = _backend(tmp_path, {"prefix": str(other), "installed_prefix": str(other)})
 
@@ -568,7 +570,7 @@ class TestVerifyAndLogin:
     def test_purge_refuses_profile_dir_symlinked_to_another_profile(self, tmp_path):
         """A profile data dir symlinked onto another profile's tree is refused."""
         data_dir = _backend(tmp_path)._data_dir()
-        other = ak.paths.profiles_dir() / "other"
+        other = wg.paths.profiles_dir() / "other"
         other.mkdir(parents=True)
         (other / "keep.txt").write_text("data")
         data_dir.rmdir()
@@ -620,7 +622,7 @@ class TestVerifyAndLogin:
                 return
             raise OSError("device busy")
 
-        monkeypatch.setattr(ak, "shutil", types.SimpleNamespace(rmtree=boom))
+        monkeypatch.setattr(wg, "shutil", types.SimpleNamespace(rmtree=boom))
         # No prefix/drive_c exists, so the only rmtree is the purge of the
         # profile tree; its OSError must surface instead of being ignored.
         assert not (backend.prefix() / "drive_c").is_dir()
@@ -631,24 +633,24 @@ class TestVerifyAndLogin:
 # ---------------------------------------------------------------------------
 # Visual C++ runtime wiring (shared nadare.core.vcredist)
 # ---------------------------------------------------------------------------
-_REAL_VCREDIST_ENSURE = ak.vcredist.ensure
+_REAL_VCREDIST_ENSURE = wg.vcredist.ensure
 
 
 @pytest.fixture(autouse=True)
 def _no_real_vcredist(monkeypatch):
     """The VC++ step always runs now; keep it out of tests about other things."""
-    monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: None)
+    monkeypatch.setattr(wg.vcredist, "ensure", lambda *a, **k: None)
 
 
 @pytest.fixture(autouse=True)
 def _hermetic_runners(monkeypatch):
     """No test may read the developer's real runners or download one."""
-    monkeypatch.setattr(ak.runners, "installed_pinned", lambda family="dwproton": None)
+    monkeypatch.setattr(wg.runners, "installed_pinned", lambda family="dwproton": None)
 
     def offline(*_a, **_k):
-        raise ak.runners.RunnerError("offline (no downloads in tests)")
+        raise wg.runners.RunnerError("offline (no downloads in tests)")
 
-    monkeypatch.setattr(ak.runners, "ensure_pinned", offline)
+    monkeypatch.setattr(wg.runners, "ensure_pinned", offline)
 
 
 def _offline(*_a, **_k):
@@ -662,13 +664,13 @@ class TestArknightsVcredist:
             tmp_path, {"prefix": str(prefix), "wine_binary": "/usr/bin/wine", "vcredist": True}
         )
         calls: list = []
-        monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: calls.append(k))
+        monkeypatch.setattr(wg.vcredist, "ensure", lambda *a, **k: calls.append(k))
 
         def fake_stream(argv, env, on_line=None, cancel=None):
             (prefix / "drive_c").mkdir(parents=True, exist_ok=True)
             return 0
 
-        monkeypatch.setattr(ak, "stream", fake_stream)
+        monkeypatch.setattr(wg, "stream", fake_stream)
         backend._ensure_prefix()
         assert len(calls) == 1
         assert callable(calls[0]["run_in_prefix"])
@@ -676,7 +678,7 @@ class TestArknightsVcredist:
     def test_is_off_by_default(self, tmp_path, monkeypatch):
         backend = _backend(tmp_path, {})
         calls: list = []
-        monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: calls.append(1))
+        monkeypatch.setattr(wg.vcredist, "ensure", lambda *a, **k: calls.append(1))
         backend._run_vcredist(created=False)
         backend._run_vcredist(created=True)
         assert calls == []
@@ -684,14 +686,14 @@ class TestArknightsVcredist:
     def test_runs_with_vcredist_true(self, tmp_path, monkeypatch):
         backend = _backend(tmp_path, {"vcredist": True})
         calls: list = []
-        monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: calls.append(1))
+        monkeypatch.setattr(wg.vcredist, "ensure", lambda *a, **k: calls.append(1))
         backend._run_vcredist(created=False)
         assert calls == [1]
 
     def test_vcredist_false_stays_off(self, tmp_path, monkeypatch):
         backend = _backend(tmp_path, {"vcredist": False})
         calls: list = []
-        monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: calls.append(1))
+        monkeypatch.setattr(wg.vcredist, "ensure", lambda *a, **k: calls.append(1))
         backend._run_vcredist(created=True)
         backend._run_vcredist(created=False)
         assert calls == []
@@ -700,18 +702,18 @@ class TestArknightsVcredist:
         manifest = write_exe(tmp_path / "manifest.exe", "MZ")
         backend = _backend(tmp_path, {"manifest_file": str(manifest)})
         calls: list = []
-        monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: calls.append(1))
+        monkeypatch.setattr(wg.vcredist, "ensure", lambda *a, **k: calls.append(1))
         backend._ensure_direct_prefix()
         assert calls == []
 
     def test_a_failure_never_breaks_install(self, tmp_path, monkeypatch):
         prefix = tmp_path / "prefix"
         installer = write_exe(tmp_path / "Arknights-setup.exe", "MZ")
-        monkeypatch.setattr(ArknightsBackend, "_ensure_prefix", lambda self: None)
-        monkeypatch.setattr(ArknightsBackend, "_download_installer", lambda self, url: installer)
-        monkeypatch.setattr(ak, "stream", lambda *a, **k: 0)
+        monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
+        monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer)
+        monkeypatch.setattr(wg, "stream", lambda *a, **k: 0)
         monkeypatch.setattr("urllib.request.urlopen", _offline)
-        monkeypatch.setattr(ak.vcredist, "ensure", _REAL_VCREDIST_ENSURE)
+        monkeypatch.setattr(wg.vcredist, "ensure", _REAL_VCREDIST_ENSURE)
         backend = _backend(
             tmp_path,
             {
@@ -742,13 +744,13 @@ class TestStellaSoraVcredist:
             )
         )
         calls: list = []
-        monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: calls.append(k))
+        monkeypatch.setattr(wg.vcredist, "ensure", lambda *a, **k: calls.append(k))
 
         def fake_stream(argv, env, on_line=None, cancel=None):
             (prefix / "drive_c").mkdir(parents=True, exist_ok=True)
             return 0
 
-        monkeypatch.setattr(ak, "stream", fake_stream)
+        monkeypatch.setattr(wg, "stream", fake_stream)
         backend._ensure_prefix()
         assert len(calls) == 1
 
@@ -759,7 +761,7 @@ class TestStellaSoraVcredist:
             make_context(tmp_path, StellaSoraBackend.kind, {"vcredist": True}, "stella")
         )
         calls: list = []
-        monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: calls.append(1))
+        monkeypatch.setattr(wg.vcredist, "ensure", lambda *a, **k: calls.append(1))
         backend._run_vcredist(created=False)
         assert calls == [1]
 
@@ -771,7 +773,7 @@ class TestStellaSoraVcredist:
                 make_context(tmp_path, StellaSoraBackend.kind, setting, "stella")
             )
             calls: list = []
-            monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, _c=calls, **k: _c.append(1))
+            monkeypatch.setattr(wg.vcredist, "ensure", lambda *a, _c=calls, **k: _c.append(1))
             backend._run_vcredist(created=True)
             backend._run_vcredist(created=False)
             assert calls == []

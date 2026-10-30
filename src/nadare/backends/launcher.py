@@ -5,7 +5,7 @@
 Nadare downloads the publisher's installer, runs it in the game's Wine/Proton
 prefix and then starts the installed launcher, which downloads and updates the
 game itself. Everything is inherited from
-:class:`~nadare.backends.arknights.ArknightsBackend`'s installer path; this module
+:class:`~nadare.backends.winegame.WineGameBackend`'s installer path; this module
 only supplies where the installer comes from and which hosts may serve it.
 
 Without a pinned ``installer_sha256`` the installer is only accepted from the
@@ -30,8 +30,8 @@ from ..core.events import Event
 from ..core.nte_launcher import INSTALLER_URL
 from . import arknights as _arknights
 from . import nikke_news, nte_news
-from .arknights import ArknightsBackend
 from .wine import profile_setting
+from .winegame import WineGameBackend
 
 #: The silent downloader still opens its window. This small Windows program (source in
 #: ``core/shim_src/quiet_start.c``, built with mingw-w64) starts it hidden and keeps hiding the
@@ -119,7 +119,7 @@ def _wine_user_dir(prefix: Path) -> Path:
     return other
 
 
-class LauncherBackend(ArknightsBackend):
+class LauncherBackend(WineGameBackend):
     """Base for the per-game classes below; never registered on its own."""
 
     kind = "launcher"

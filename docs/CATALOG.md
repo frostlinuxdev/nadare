@@ -52,6 +52,8 @@ publisher API  ->  nadare.core.sources.<game>.resolve()  ->  directdl.Plan  ->  
 * `nadare/backends/direct.py` is a thin class per game on top of the Wine/Proton machinery
   that Arknights and Stella Sora already share.
 
+Streamed archives can also be verified against published per-block checksums: see [ARCHIVE-PINS.md](ARCHIVE-PINS.md).
+
 ### Adding a direct game
 
 1. **Find the endpoints** (see "Finding the endpoints" below) and record the responses you
@@ -59,7 +61,8 @@ publisher API  ->  nadare.core.sources.<game>.resolve()  ->  directdl.Plan  ->  
 2. **Write the source** in `nadare/core/sources/<game>.py`: `resolve(fetch=None) -> Plan`.
    Validate every remote field. Use `directdl.safe_relative_path` on anything that becomes a
    path, accept only `https://` URLs, and raise `directdl.DirectError` (never `KeyError`) for
-   a bad response.
+   a bad response. A manifest format that needs different path rules gets a `RelativePolicy`
+   in `core/paths.py` instead of a new validator.
 3. **Write tests** in `tests/test_catalog_sources.py` against the recorded fixtures, with a
    fake `fetch`. No test touches the network.
 4. **Register the game**: one row in `nadare/core/directkinds.py` and one small class in

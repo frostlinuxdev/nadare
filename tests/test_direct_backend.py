@@ -12,8 +12,9 @@ import pytest
 from _backend_helpers import make_context
 from _httpserver import Server
 
-from nadare.backends import arknights as ak
 from nadare.backends import direct
+from nadare.backends import winegame as wg
+from nadare.backends.winegame import WineGameBackend
 from nadare.core import directdl as dd
 from nadare.core import directkinds as dk
 from nadare.core.backends import BackendError, get, kinds
@@ -63,8 +64,8 @@ def game(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(direct.BrownDust2Backend, "plan_factory", staticmethod(plan))
-    monkeypatch.setattr(ak.ArknightsBackend, "_ensure_default_runner", lambda self, strict: None)
-    monkeypatch.setattr(ak.ArknightsBackend, "_ensure_direct_prefix", lambda self: None)
+    monkeypatch.setattr(WineGameBackend, "_ensure_default_runner", lambda self, strict: None)
+    monkeypatch.setattr(WineGameBackend, "_ensure_direct_prefix", lambda self: None)
     backend = direct.BrownDust2Backend(
         make_context(tmp_path, "direct-bd2", {"prefix": str(tmp_path / "pfx")})
     )
@@ -182,7 +183,7 @@ def test_a_lost_archive_record_is_reported_by_name(game):
 
 def test_check_update_caches_the_published_version(game, monkeypatch):
     game.install()
-    monkeypatch.setattr(ak, "UPDATE_CHECK_INTERVAL", 0)  # the install just refreshed the cache
+    monkeypatch.setattr(wg, "UPDATE_CHECK_INTERVAL", 0)  # the install just refreshed the cache
     game.state["version"] = "9"
     game.check_update()
     st = game.status()
@@ -624,3 +625,21 @@ def test_the_gfl2_store_entries_have_distinct_titles():
 
     titles = [e.title for e in entries() if "gfl2" in e.kind]
     assert len(titles) == len(set(titles)) >= 2
+
+
+def _comparison_fails(*args, **kwargs):
+    raise dd.DirectError("could not compare the game files")
+
+
+def test_a_direct_error_while_comparing_files_is_not_swallowed_by_verify(game, monkeypatch):
+    game.install()
+    monkeypatch.setattr(game, "_missing_entries", _comparison_fails)
+    with pytest.raises(dd.DirectError, match="could not compare"):
+        game.verify()
+
+
+def test_a_direct_error_while_comparing_files_is_not_rewritten_by_repair(game, monkeypatch):
+    game.install()
+    monkeypatch.setattr(game, "_missing_entries", _comparison_fails)
+    with pytest.raises(dd.DirectError, match="could not compare"):
+        game.repair()

@@ -26,8 +26,10 @@ The `direct-*` kinds are `direct-bd2`, `direct-aethergazer`, `direct-mongil`,
 and how to add one.
 
 `stellasora-yostar` subclasses `arknights-yostar` (`backends/arknights.py`) so the
-Yostar/Wine machinery lives in one place; it adds the manifest requirement and
-game-specific paths. FGO is experimental and **optional** in builds (see
+Yostar manifest machinery lives in one place; it adds the manifest requirement and
+game-specific paths. The neutral Wine/Proton half (prefix, runner, launch, process
+detection, status) is `WineGameBackend` in `backends/winegame.py`, which
+`arknights-yostar` and the direct-download and launcher games all build on. FGO is experimental and **optional** in builds (see
 [Optional FGO](#optional-fgo)).
 
 ## Knows
@@ -47,7 +49,7 @@ src/nadare/
   __main__.py           # `python -m nadare` entry
   app.py                # CLI parser, run_cli, run_gui hook
   core/
-    paths.py            # XDG dirs for data/config/state/cache/logs
+    paths.py            # XDG dirs for data/config/state/cache/logs; check_relative(): untrusted relative paths
     events.py           # Event + Emitter; the only way backends talk to the UI
     config.py           # profiles, active profile, atomic save
     backends.py         # GameBackend ABC, BackendContext, Status, Option, registry
@@ -57,7 +59,7 @@ src/nadare/
     secrets.py          # OS keyring token store
     process.py          # subprocess helpers, env, running-process detection
     hosting.py          # the only place Nadare's own index/release URLs live
-    graphics.py hostlibs.py sandbox.py diskspace.py vcredist.py
+    graphics.py hostlibs.py sandbox.py diskspace.py vcredist.py webview2.py
     news.py artwork.py i18n.py logging.py shortcuts.py updatecheck.py yostar.py
   backends/
     czn/                # stove-czn: auth.py, backend.py, runners.py, update.py,
@@ -65,6 +67,7 @@ src/nadare/
     fgo/                # fgo-lepton: backend.py, installer.py, lepton.py,
                         # news.py, readiness.py
     arknights.py  arknights_news.py  stellasora.py   # Yostar backends
+    winegame.py                          # neutral Wine/Proton base class
     wine.py  steam.py  script.py         # generic backends
   gui/                  # PyQt6: main_window, library, game_view, settings,
                         # sidebar, add_game, notice, theme, workers, single_instance

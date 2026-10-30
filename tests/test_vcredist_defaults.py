@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 from _backend_helpers import make_context
 
-from nadare.backends import arknights as ak
+from nadare.backends import winegame as wg
 from nadare.core import backends
 
 SKIPPED = (
@@ -34,7 +34,7 @@ KEPT = ("direct-mongil",)
 
 def _run(tmp_path, monkeypatch, kind, **profile):
     calls = []
-    monkeypatch.setattr(ak.vcredist, "ensure", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(wg.vcredist, "ensure", lambda *a, **k: calls.append(1))
     values = {"prefix": str(tmp_path / "prefix"), "wine_binary": "/usr/bin/wine", **profile}
     backend = backends.get(kind)(make_context(tmp_path, kind, values))
     backend._run_vcredist(created=False)
