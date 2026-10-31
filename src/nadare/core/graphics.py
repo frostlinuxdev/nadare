@@ -111,26 +111,43 @@ def _devices(text: str) -> list[dict[str, str]]:
     return devices
 
 
+def _device_rank(device: Mapping[str, str], instance_version: str | None) -> tuple:
+    """Sort key: highest API version first, discrete GPU on a tie."""
+    version = _normalize_version(device.get("apiversion")) or instance_version
+    numbers = tuple(int(part) for part in re.findall(r"\d+", version or ""))
+    discrete = device.get("devicetype", "").upper().endswith(
+        "PHYSICAL_DEVICE_TYPE_DISCRETE_GPU"
+    )
+    return (numbers, discrete)
+
+
 def parse_vulkan_summary(text: str) -> VulkanInfo:
     """Parse ``vulkaninfo --summary`` into a :class:`VulkanInfo`.
 
-    Only physical devices are considered, and the first non-CPU device wins
-    (a machine may expose ``llvmpipe`` alongside a real GPU). The instance
-    version is used when a device block omits ``apiVersion``.
+    Only physical devices are considered. The device with the highest API version
+    wins, with a discrete GPU preferred on a tie (a hybrid laptop's 1.2 iGPU must
+    not hide a 1.3 dGPU and force OpenGL/DXVK-off). The instance version is used
+    when every device block omits ``apiVersion``.
     """
     instance_match = _INSTANCE_RE.search(text)
     instance_version = _normalize_version(instance_match.group(1)) if instance_match else None
+    best: Mapping[str, str] | None = None
+    best_rank: tuple | None = None
     for device in _devices(text):
         kind = device.get("devicetype", "").upper()
         if kind.endswith("PHYSICAL_DEVICE_TYPE_CPU"):
             continue
-        return VulkanInfo(
-            available=True,
-            api_version=_normalize_version(device.get("apiversion")) or instance_version,
-            device=device.get("devicename") or None,
-            driver=device.get("drivername") or None,
-        )
-    return VulkanInfo(available=False)
+        rank = _device_rank(device, instance_version)
+        if best_rank is None or rank > best_rank:
+            best, best_rank = device, rank
+    if best is None:
+        return VulkanInfo(available=False)
+    return VulkanInfo(
+        available=True,
+        api_version=_normalize_version(best.get("apiversion")) or instance_version,
+        device=best.get("devicename") or None,
+        driver=best.get("drivername") or None,
+    )
 
 
 def _instance_version() -> VulkanInfo:
@@ -272,10 +289,16 @@ def dxvk_ok() -> bool:
     return nums[:2] >= _MIN_DXVK_VERSION
 
 
+_LOADER_ONLY_NOTE = (
+    "Vulkan version could not be read from the driver (vulkan-tools is missing); "
+    "DXVK was assumed to work. If the game shows a black screen, try the OpenGL renderer."
+)
+
+
 def vulkan_note() -> str:
-    """One-line warning for game status when DXVK cannot work here."""
+    """One-line warning for game status when DXVK cannot work, or was only assumed."""
     if dxvk_ok():
-        return ""
+        return _LOADER_ONLY_NOTE if vulkan_info().loader_only else ""
     return (
         "Your graphics driver looks old for Vulkan games. If the game will not "
         "start, open Settings and try the OpenGL renderer."
@@ -297,12 +320,13 @@ def effective_renderer(profile: Mapping[str, Any] | None) -> tuple[str, str | No
     """Resolve ``auto`` to ``vulkan``/``opengl`` and explain a fallback.
 
     Returns ``(renderer, note)`` where the note is non-``None`` only when
-    ``auto`` had to fall back to OpenGL.
+    ``auto`` had to fall back to OpenGL, or picked Vulkan on a version that was
+    only assumed (no ``vulkaninfo``, #781).
     """
     choice = renderer_choice(profile)
     if choice == "auto":
         if dxvk_ok():
-            return "vulkan", None
+            return "vulkan", vulkan_note() or None
         return "opengl", "Vulkan < 1.3; falling back to OpenGL (WineD3D) for this launch"
     return choice, None
 

@@ -117,3 +117,51 @@ def test_body_text_meets_wcag_aa_and_muted_meets_aa_large():
     assert _contrast(theme.TEXT, theme.BG) >= 4.5
     assert _contrast(theme.TEXT, theme.PANEL) >= 4.5
     assert _contrast(theme.MUTED, theme.PANEL) >= 3.0
+
+
+# ---- a cover standing in for a hero banner ---------------------------------
+@pytest.fixture(scope="module")
+def banner_app():
+    from PyQt6.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
+
+
+def _two_tone(width: int, height: int, top_fraction: float):
+    from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
+
+    image = QImage(width, height, QImage.Format.Format_ARGB32)
+    image.fill(QColor("#ff0000"))
+    painter = QPainter(image)
+    painter.fillRect(0, 0, width, int(height * top_fraction), QColor("#0000ff"))
+    painter.end()
+    return QPixmap.fromImage(image)
+
+
+def _centre(pixmap) -> tuple[int, int, int]:
+    from PyQt6.QtGui import QColor
+
+    image = pixmap.toImage()
+    return QColor(image.pixel(image.width() // 2, image.height() // 2)).getRgb()[:3]
+
+
+def test_a_wide_cover_banner_keeps_the_top_of_the_art(banner_app):
+    # Top 40% blue, rest red. A centre crop of a 16:9 cover shows its middle, which is red; the
+    # banner keeps the top, where logos and faces are, so its middle is still blue.
+    banner = theme.banner_from_cover(_two_tone(1600, 900, 0.4), 830, 300)
+    assert (banner.width(), banner.height()) == (830, 300)
+    red, _, blue = _centre(banner)
+    assert blue > 200 and red < 60
+
+
+def test_a_portrait_cover_banner_shows_the_whole_poster_over_a_dim_blur(banner_app):
+    from PyQt6.QtGui import QColor
+
+    banner = theme.banner_from_cover(_two_tone(600, 900, 0.5), 830, 300)
+    image = banner.toImage()
+    # The poster's top half is blue and fills the banner height: its middle row is the seam,
+    # so look at the top: poster centred, blur at the sides.
+    top_middle = QColor(image.pixel(image.width() // 2, 5)).getRgb()[:3]
+    side = QColor(image.pixel(40, 150)).getRgb()[:3]
+    assert top_middle[2] > 200 and top_middle[0] < 60  # the poster, undimmed
+    assert max(side) < 200  # the blurred backdrop is darkened, never full colour

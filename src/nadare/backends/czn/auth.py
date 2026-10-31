@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
 import sys
 import time
@@ -74,10 +75,25 @@ class ReloginRequired(RuntimeError):
     """The saved refresh token is no longer accepted; a new QR login is needed."""
 
 
+class TermsNotAccepted(RuntimeError):
+    """STOVE wants the account to accept the game's terms of service first (exit 5)."""
+
+
 #: STOVE's "the launcher session was invalidated" code. Every signed call can
 #: return it, and the right answer is always "log in again" (exit 3), never a
 #: generic failure (exit 2).
 RELOGIN_CODE = "44010"
+
+#: ``gc/check`` answer for an account that never agreed to the game's terms of service.
+TERMS_NOT_ACCEPTED_CODE = "406401"
+
+#: The viewarea STOVE's own policy page sends to list and to agree to a game's terms.
+TERMS_AGREE_VIEWAREA = "SVC_AG"
+
+#: STOVE refuses the ``provider_cd=RT`` sign-in for some accounts (reported as an "OTP user",
+#: right after a good QR login). ``/sign/v2.0/pc/refresh`` still renews them; the official
+#: launcher never calls it, so it is only used after this refusal.
+RT_SIGNIN_DENIED_CODE = "44006"
 
 
 def _check_code(data: dict, what: str) -> None:
@@ -495,11 +511,170 @@ class StoveAuth:
         )
         data = self._parse(r, "signin_RT")
         code = str(data.get("code", "0"))
-        if code not in ("0", "None") and code != RELOGIN_CODE:
-            raise RuntimeError(f"renew failed code={code} msg={data.get('message')}")
-        _check_code(data, "renew")  # 44010 -> ReloginRequired
+        if code == RT_SIGNIN_DENIED_CODE:
+            data = self._renew_with_pc_refresh()
+        else:
+            if code not in ("0", "None") and code != RELOGIN_CODE:
+                raise RuntimeError(f"renew failed code={code} msg={data.get('message')}")
+            _check_code(data, "renew")  # 44010 -> ReloginRequired
         self._apply_signin(data)
         self._persist_launcher()
+
+    def _renew_with_pc_refresh(self) -> dict:
+        """Renew the launcher token through ``/sign/v2.0/pc/refresh``.
+
+        Nothing is applied here: the caller applies the returned envelope only after it
+        passed every check, so a failed fallback leaves the old token in place.
+        """
+        body = {
+            "client_id": CLIENT_ID,
+            "service_id": "Launcher",
+            "refresh_token": self.launcher_refresh,
+            "is_default": bool(self.gds.get("is_default", False)),
+            **{k: self.gds[k] for k in ("nation", "regulation", "timezone", "utc_offset", "lang")},
+            "gds_info": self.gds,
+        }
+        r = self.s.post(
+            API_BASE + "/sign/v2.0/pc/refresh", json=body, headers=self._headers(), timeout=15
+        )
+        data = self._parse(r, "pc_refresh")
+        _check_http(r, "pc_refresh")
+        _check_code(data, "pc_refresh")  # 44010 -> ReloginRequired
+        value = data.get("value")
+        if not isinstance(value, dict) or not all(
+            value.get(k) for k in ("access_token", "refresh_token")
+        ):
+            raise RuntimeError("PC refresh returned incomplete launcher tokens")
+        member = value.get("member")
+        member_no = value.get("member_no") or (
+            member.get("member_no") if isinstance(member, dict) else None
+        )
+        if self.member_no and member_no and str(self.member_no) != str(member_no):
+            raise ReloginRequired("PC refresh returned a different STOVE account")
+        return data
+
+    # ---- game terms of service ----------------------------------------------
+    def _terms_headers(self) -> dict:
+        if not self.launcher_access:
+            raise ReloginRequired("no launcher access token; run `login` first")
+        return self._headers({"Authorization": "bearer " + str(self.launcher_access)})
+
+    def terms_pending(self) -> list[int]:
+        """Numbers of the game's terms this account has not agreed to yet (``[]`` = all agreed)."""
+        headers = self._terms_headers()
+        params = {
+            "service_id": GAME_ID,
+            "viewarea_id": TERMS_AGREE_VIEWAREA,
+            "nation": self.gds["nation"],
+            "timestemp": int(time.time() * 1000),
+        }
+        r = self.s.get(API + "/stove-terms/v3.0/agree", params=params, headers=headers, timeout=15)
+        data = self._parse(r, "terms_status")
+        _check_http(r, "terms_status")
+        _check_code(data, "terms_status")
+        value = data.get("value")
+        listed = value.get("list") if isinstance(value, dict) else None
+        if not isinstance(listed, list) or not listed:
+            raise RuntimeError("[terms] STOVE gave no agreement status for this game")
+        pending: list[int] = []
+        for item in listed:
+            nos = item.get("disagree_terms_nos") if isinstance(item, dict) else None
+            if not isinstance(nos, list) or any(
+                not isinstance(n, int) or isinstance(n, bool) for n in nos
+            ):
+                raise RuntimeError("[terms] STOVE gave an agreement status that cannot be read")
+            if not nos and item.get("result") is not True:
+                # "not agreed" with nothing named must never read as "nothing to agree to"
+                raise RuntimeError("[terms] STOVE gave an agreement status that cannot be read")
+            pending += [n for n in nos if n not in pending]
+        return pending
+
+    def fetch_terms(self) -> list[dict]:
+        """The documents STOVE shows before this account agrees to the game's terms.
+
+        Each entry is ``{"no", "id", "title", "html", "required"}``; the text is STOVE's own HTML
+        and must be shown to the user before :meth:`accept_terms` is used.
+        """
+        headers = self._terms_headers()
+        params = {
+            "service_id": GAME_ID,
+            "viewarea_id": TERMS_AGREE_VIEWAREA,
+            "nation": self.gds["nation"],
+            "lang": "en",
+            "text_yn": "Y",
+            "timestemp": int(time.time() * 1000),
+        }
+        r = self.s.get(API + "/tos/v3.0/contents", params=params, headers=headers, timeout=15)
+        data = self._parse(r, "terms")
+        _check_http(r, "terms")
+        _check_code(data, "terms")
+        value = data.get("value")
+        infos = value.get("service_infos") if isinstance(value, dict) else None
+        docs = []
+        for info in infos if isinstance(infos, list) else []:
+            listed = info.get("contents_list") if isinstance(info, dict) else None
+            for item in listed if isinstance(listed, list) else []:
+                if not isinstance(item, dict) or not item.get("text"):
+                    continue
+                no = item.get("terms_type_no")
+                docs.append(
+                    {
+                        "no": no if isinstance(no, int) else 0,
+                        "id": str(item.get("terms_type_id") or ""),
+                        "title": str(item.get("title") or item.get("name") or ""),
+                        "html": str(item["text"]),
+                        "required": str(item.get("agree_type") or "").upper().endswith("MUST"),
+                    }
+                )
+        if not docs:
+            raise RuntimeError("[terms] STOVE returned no terms document for this game")
+        return docs
+
+    def accept_terms(self) -> None:
+        """Tell STOVE this account agrees to the game's terms (the caller got the user's yes).
+
+        Raises unless STOVE answers that every term is agreed; nothing is assumed.
+        """
+        if not self.launcher_access:
+            raise ReloginRequired("no launcher access token; run `login` first")
+        body = {
+            "service_infos": [{"service_id": GAME_ID}],
+            "viewarea_id": TERMS_AGREE_VIEWAREA,
+            "nation": self.gds["nation"],
+            "token": None,
+            "email": None,
+            "gds_info": {
+                "country_cd": self.gds["nation"],
+                # STOVE's own policy page sends "ko" whatever the page language is.
+                "language_cd": "ko",
+                "timezone": self.gds["timezone"],
+                "utc_offset": self.gds["utc_offset"],
+            },
+        }
+        extra = {"Authorization": "bearer " + str(self.launcher_access)}
+        r = self.s.post(
+            API + "/stove-terms/v3.0/agree",
+            json=body,
+            headers=self._headers(extra),
+            timeout=20,
+        )
+        data = self._parse(r, "terms_agree")
+        _check_http(r, "terms_agree")
+        _check_code(data, "terms_agree")  # 44010 -> ReloginRequired
+        value = data.get("value")
+        listed = value.get("list") if isinstance(value, dict) else None
+        ok = (
+            isinstance(listed, list)
+            and bool(listed)
+            and all(
+                isinstance(item, dict)
+                and item.get("result") is True
+                and not item.get("disagree_terms_nos")
+                for item in listed
+            )
+        )
+        if not ok:
+            raise RuntimeError("[terms_agree] STOVE did not confirm that the terms were accepted")
 
     def game_check(self):
         for attempt in range(2):
@@ -538,6 +713,10 @@ class StoveAuth:
             if code not in ("0", "None"):
                 if code == RELOGIN_CODE:
                     _check_code(data, "gc/check")  # -> ReloginRequired (exit 3)
+                if code == TERMS_NOT_ACCEPTED_CODE:
+                    raise TermsNotAccepted(
+                        "this STOVE account has not accepted the game's terms of service yet"
+                    )
                 raise RuntimeError(f"gc/check failed code={code} msg={data.get('message')}")
             v = data.get("value")
             v = v if isinstance(v, dict) else {}
@@ -790,16 +969,23 @@ def main(argv=None) -> int:
         "action",
         nargs="?",
         default="token",
-        choices=("login", "token", "restore", "status"),
+        choices=("login", "token", "restore", "status", "terms", "accept-terms"),
         help="login: QR login (once). token: refresh+exchange and "
         "write session.json (default). restore: refresh only, validate the "
-        "saved credential. status: show state.",
+        "saved credential. status: show state. terms: print the game's terms the "
+        "saved login has not agreed to. accept-terms: agree to them for that account "
+        "(needs --agree).",
     )
     ap.add_argument(
         "--out",
         type=Path,
         default=SESSION_JSON,
         help="session.json path (default: next to this script)",
+    )
+    ap.add_argument(
+        "--agree",
+        action="store_true",
+        help="accept-terms only: the user has read the terms and agrees to them",
     )
     ap.add_argument("--qr-png", type=Path, help="where to write the QR image")
     ap.add_argument("--qr-timeout", type=int, default=180)
@@ -818,6 +1004,12 @@ def main(argv=None) -> int:
     JSON_MODE = args.json
     if args.credential_out:
         os.environ["CZN_CREDENTIAL_OUT"] = str(args.credential_out)
+    if args.action == "accept-terms" and not args.agree:
+        # Agreeing is the user's decision: never infer it.
+        message = "accept-terms needs --agree (the user must have read and accepted the terms)"
+        say(f"[!] {message}")
+        event("error", kind="agree_required", message=message)
+        return 2
     if args.action != "status" and not os.environ.get("CZN_CREDENTIAL_OUT"):
         # The refresh token rotates on every use; without a sink the new one
         # would be dropped and the account logged out after this run.
@@ -862,6 +1054,35 @@ def main(argv=None) -> int:
         return code
 
     try:
+        if args.action == "terms":
+            auth.renew()
+            pending = auth.terms_pending()
+            docs = [d for d in auth.fetch_terms() if d["no"] in pending] if pending else []
+            shown = {d["no"] for d in docs}
+            missing = [n for n in pending if n not in shown]  # pending but no text to show
+            auth.write_credential()
+            if JSON_MODE:
+                event("terms", pending=bool(pending), documents=docs, missing=missing)
+            elif not docs:
+                print("nothing to accept: every term is already agreed" if not pending else "")
+            for doc in docs if not JSON_MODE else ():
+                print(f"== {doc['title']} ({'required' if doc['required'] else 'optional'})")
+                print(re.sub(r"<[^>]+>", "", doc["html"]).strip())
+            return 0
+    except ReloginRequired as e:
+        return fail("relogin_required", 3, e)
+    except RequestException as e:
+        return fail("network", 4, e)
+    except (RuntimeError, OSError, UnicodeError) as e:
+        return fail("terms_unavailable", 2, e)
+
+    try:
+        if args.action == "accept-terms":
+            auth.renew()
+            auth.accept_terms()
+            auth.write_credential()
+            event("terms_accepted")
+            return 0
         if args.action == "restore":
             auth.renew()
             auth.write_credential()
@@ -881,6 +1102,8 @@ def main(argv=None) -> int:
         auth.write_credential()
     except ReloginRequired as e:
         return fail("relogin_required", 3, e)
+    except TermsNotAccepted as e:
+        return fail("terms_required", 5, e)
     except RequestException as e:
         return fail("network", 4, e)
     except RuntimeError as e:

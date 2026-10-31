@@ -12,6 +12,8 @@ picking a tiny partition in the Add game wizard.
 from __future__ import annotations
 
 import os
+import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from .backends import BackendError
@@ -115,9 +117,134 @@ def check_space(
         )
 
 
+def tree_bytes(path: str | os.PathLike[str], *, limit: int = 500_000) -> int:
+    """Bytes of the regular files under ``path`` (0 when missing); symlinks are not followed.
+
+    Looks at no more than ``limit`` entries: a huge tree only needs to be "large".
+    """
+    total = 0
+    seen = 0
+    stack = [str(path)]
+    while stack and seen < limit:
+        try:
+            with os.scandir(stack.pop()) as entries:
+                for entry in entries:
+                    seen += 1
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total
+
+
+def _device(path: str | os.PathLike[str]) -> int:
+    """The id of the filesystem holding ``path`` (0 when it cannot be read)."""
+    try:
+        return os.stat(_existing(path)).st_dev
+    except OSError:
+        return 0
+
+
+@dataclass
+class _Promise:
+    amount: int  # bytes the install still had to write when it reserved
+    free_at_start: int
+    path: Path
+
+
+#: What running installs have promised, per filesystem and owner (#770).
+_PROMISES: dict[tuple[int, str], _Promise] = {}
+_LOCK = threading.Lock()
+
+
+def _outstanding(device: int, exclude: str) -> int:
+    """Bytes other installs on ``device`` have promised and not written yet.
+
+    A promise shrinks as free space drops: the bytes that left the disk since the install
+    reserved are taken as its own. With two installs writing at once that counts the same
+    bytes twice, so the estimate errs towards allowing, never towards refusing.
+    """
+    total = 0
+    for (dev, owner), promise in list(_PROMISES.items()):
+        if dev != device or owner == exclude:
+            continue
+        try:
+            written = max(0, promise.free_at_start - free_bytes(promise.path))
+        except BackendError:
+            written = 0
+        total += max(0, promise.amount - written)
+    return total
+
+
+class Reservation:
+    """Space an install has promised for as long as it runs; use it as a context manager."""
+
+    def __init__(self, owner: str, device: int, promise: _Promise) -> None:
+        self.owner = owner
+        self._device = device
+        self._promise = promise
+        self._released = False
+
+    def release(self) -> None:
+        with _LOCK:
+            if not self._released:
+                self._released = True
+                key = (self._device, self.owner)
+                # Only our own promise: a newer one for the same owner must survive.
+                if _PROMISES.get(key) is self._promise:
+                    del _PROMISES[key]
+
+    def __enter__(self) -> Reservation:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
+
+
+def reserve(
+    path: str | os.PathLike[str],
+    needed_bytes: int,
+    *,
+    owner: str,
+    margin: float = DEFAULT_MARGIN,
+) -> Reservation:
+    """Promise ``needed_bytes`` of ``path``'s filesystem to ``owner`` for one install.
+
+    A lone install is never refused here (the per-file checks keep deciding that, and a size
+    estimate must not block an install that would have fitted). It is refused only when other
+    running installs have promised so much of the same filesystem that the two cannot both fit.
+    """
+    needed = max(0, int(needed_bytes))
+    device = _device(path)
+    with _LOCK:
+        others = _outstanding(device, exclude=owner)
+        available = free_bytes(path)
+        if others > 0 and needed > 0:
+            required = int(needed * (1.0 + max(0.0, margin)))
+            if available - others < required:
+                raise BackendError(
+                    f"Not enough disk space on {mount_point(path)} for both installs: this one "
+                    f"needs about {human_size(needed)}, {human_size(available)} is free and "
+                    f"{human_size(others)} is still promised to other installs. Wait for the "
+                    "other install to finish, or choose another folder.",
+                    code=4,
+                )
+        promise = _Promise(needed, available, Path(path))
+        _PROMISES[(device, owner)] = promise
+    return Reservation(owner, device, promise)
+
+
 __all__ = [
     "DEFAULT_MARGIN",
+    "Reservation",
     "check_space",
+    "reserve",
+    "tree_bytes",
     "free_bytes",
     "human_size",
     "human_speed",

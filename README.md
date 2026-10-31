@@ -68,7 +68,7 @@ is covered by tests but has not been played end to end, or needs a workaround.
 
 | Game | Tier |
 |---|---|
-| Chaos Zero Nightmare | Verified (install, update, QR login, launch) |
+| Chaos Zero Nightmare | Verified (install, update, QR login including two-step (OTP) accounts, agreeing to the game's terms, launch) |
 | Arknights, Stella Sora | Verified |
 | Brown Dust 2, Aether Gazer, Punishing: Gray Raven | Verified |
 | Girls' Frontline 2 (Darkwinter build), Honkai Impact 3rd | Verified |

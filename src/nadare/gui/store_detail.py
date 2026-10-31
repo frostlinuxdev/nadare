@@ -6,9 +6,17 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QSize, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QKeyEvent, QPixmap
-from PyQt6.QtWidgets import QComboBox, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import (
+    QComboBox,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
-from ..core import diskspace
+from ..core import diskspace, steamstore
 from ..core.storecatalog import StoreEntry
 from . import theme
 
@@ -38,6 +46,7 @@ class StoreDetail(QWidget):
     """Present catalog facts and emit navigation/install requests."""
 
     install_requested = pyqtSignal(str)
+    play_requested = pyqtSignal(str)
     back_requested = pyqtSignal()
     #: The user picked another build of the same game (the kind of that build).
     variant_requested = pyqtSignal(str)
@@ -47,6 +56,7 @@ class StoreDetail(QWidget):
         self.setObjectName("Page")
         self._entry = entry
         self._hero: QPixmap | None = None
+        self._hero_is_cover = False
         self._variants: tuple[StoreEntry, ...] = ()
 
         layout = QVBoxLayout(self)
@@ -115,13 +125,22 @@ class StoreDetail(QWidget):
         self.installed_note = QLabel("Already in your library.")
         self.installed_note.setObjectName("Muted")
         layout.addWidget(self.installed_note)
+        self.play_button = QPushButton("Play")
+        self.play_button.setObjectName("Primary")
+        self.play_button.setMinimumHeight(44)
+        self.play_button.clicked.connect(lambda: self.play_requested.emit(self._entry.kind))
         self.install_button = QPushButton("Install")
         self.install_button.setObjectName("Primary")
         self.install_button.setMinimumHeight(44)
         self.install_button.clicked.connect(lambda: self.install_requested.emit(self._entry.kind))
-        layout.addWidget(self.install_button, 0, Qt.AlignmentFlag.AlignLeft)
+        actions = QHBoxLayout()
+        actions.addWidget(self.play_button)
+        actions.addWidget(self.install_button)
+        actions.addStretch(1)
+        layout.addLayout(actions)
         layout.addStretch(1)
         self.install_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.play_button.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.install_button.setFocus()
         self.set_entry(entry)
 
@@ -140,6 +159,7 @@ class StoreDetail(QWidget):
         # fetched; showing another build starts over, as its art is fetched afresh.
         if self._entry.kind != entry.kind:
             self._hero = None
+            self._hero_is_cover = False
         self._entry = entry
         if variants is None:
             variants = self._variants if any(v.kind == entry.kind for v in self._variants) else ()
@@ -173,9 +193,26 @@ class StoreDetail(QWidget):
             self._notice_url = ""
             self.notice_label.hide()
             self.notice_link.hide()
-        self.install_button.setText("Add another" if entry.installed else "Install")
+        steam_tile = steamstore.app_id_of(entry.kind) is not None
+        # A Steam tile reopens its one game, so "Add another" would promise a copy it never makes.
+        installed_label = "Open" if steam_tile else "Add another"
+        self.install_button.setText(installed_label if entry.installed else "Install")
+        # An installed game is played first; installing another copy is a quiet second choice.
+        self._restyle(self.install_button, "GhostButton" if entry.installed else "Primary")
+        self.play_button.setVisible(entry.installed)
+        if entry.installed:
+            self.play_button.setFocus()
         self.installed_note.setVisible(entry.installed)
         self._render_hero()
+
+    @staticmethod
+    def _restyle(button: QPushButton, name: str) -> None:
+        """Switch a button to another stylesheet id and repaint it."""
+        if button.objectName() == name:
+            return
+        button.setObjectName(name)
+        button.style().unpolish(button)
+        button.style().polish(button)
 
     def _fill_variants(self, entry: StoreEntry) -> None:
         self.variant_box.blockSignals(True)
@@ -194,17 +231,24 @@ class StoreDetail(QWidget):
         if 0 <= index < len(self._variants) and self._variants[index].kind != self._entry.kind:
             self.variant_requested.emit(self._variants[index].kind)
 
-    def set_hero(self, pixmap: QPixmap | None) -> None:
-        """Set caller-provided artwork, or restore the catalog placeholder."""
+    def set_hero(self, pixmap: QPixmap | None, *, is_cover: bool = False) -> None:
+        """Set caller-provided artwork, or restore the catalog placeholder.
+
+        ``is_cover`` says the image is the game's cover standing in for a hero, so it is
+        fitted to the banner instead of simply cropped.
+        """
         self._hero = pixmap
+        self._hero_is_cover = is_cover and pixmap is not None
         self._render_hero()
 
     def _render_hero(self) -> None:
         label = self.hero_label
         height = max(label.minimumHeight(), min(label.maximumHeight(), label.height()))
-        label.setPixmap(
-            theme.cover_pixmap(self._hero, max(1, self.width() - 48), height, self._entry.title)
-        )
+        width = max(1, self.width() - 48)
+        if self._hero is not None and not self._hero.isNull() and self._hero_is_cover:
+            label.setPixmap(theme.banner_from_cover(self._hero, width, height))
+            return
+        label.setPixmap(theme.cover_pixmap(self._hero, width, height, self._entry.title))
 
     def _on_hero_resized(self) -> None:
         pixmap = self.hero_label.pixmap()

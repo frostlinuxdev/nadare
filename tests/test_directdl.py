@@ -696,3 +696,120 @@ def test_an_uncancelled_scan_still_verifies_good_and_bad_files(tmp_path):
     (tmp_path / "f1.bin").write_bytes(b"\x07" * (2 << 20))  # same size, wrong content
     missing, _ = dd.plan_missing(plan, tmp_path, cancel=Cancel())
     assert [rf.path for rf in missing] == ["f1.bin"]
+
+
+def test_cancel_with_many_queued_files_returns_promptly(tmp_path, monkeypatch):
+    """#562: every queued file fails once Cancel is pressed; that must not cost N**2 work."""
+    import time
+
+    from nadare.core.events import Cancel, Cancelled
+
+    files = tuple(
+        dd.RemoteFile(f"f{i}.bin", f"https://example.invalid/{i}", 1) for i in range(12000)
+    )
+    plan = dd.Plan("T", "1", files=files)
+    cancel = Cancel()
+    monkeypatch.setattr(dd, "plan_missing", lambda *a, **k: (list(files), []))
+
+    def fake_download(rf, dest, *, emit=None, cancel=None, pool=None):
+        time.sleep(0.001)
+        user.cancel()
+        raise Cancelled("cancelled")
+
+    user = cancel
+    monkeypatch.setattr(dd, "_download_remote", fake_download)
+    started = time.monotonic()
+    with pytest.raises(Cancelled):
+        dd.sync(plan, tmp_path, cancel=cancel, workers=4)
+    assert time.monotonic() - started < 5
+
+
+def _many_files(server_url: str, count: int, body: bytes) -> dd.Plan:
+    return dd.Plan(
+        "T",
+        "1",
+        files=tuple(
+            dd.RemoteFile(f"f{i}.bin", f"{server_url}/f{i}.bin", len(body), md5=md5(body))
+            for i in range(count)
+        ),
+    )
+
+
+def test_loose_files_reuse_one_connection_per_worker(tmp_path):
+    """#767: a file must not cost a new connection (and DNS lookup) each."""
+    body = b"x" * 64
+    s = _Server({f"/f{i}.bin": body for i in range(24)}, keepalive=True)
+    try:
+        plan = _many_files(s.url, 24, body)
+        assert dd.sync(plan, tmp_path, workers=2) == {"downloaded": 24, "skipped": 0}
+        assert len(s.requests) == 24
+        assert s.connections <= 2
+    finally:
+        s.close()
+
+
+def test_loose_files_look_up_the_host_at_most_once_per_worker(tmp_path, monkeypatch):
+    import socket
+
+    body = b"y" * 64
+    s = _Server({f"/f{i}.bin": body for i in range(24)}, keepalive=True)
+    real = socket.getaddrinfo
+    lookups: list[object] = []
+
+    def counting(host, *args, **kwargs):
+        lookups.append(host)
+        return real(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", counting)
+    try:
+        dd.sync(_many_files(s.url, 24, body), tmp_path, workers=2)
+        assert len(lookups) <= 2
+    finally:
+        s.close()
+
+
+def test_pooled_download_still_rejects_a_missing_file(tmp_path):
+    s = _Server({"/ok.bin": b"ok"}, keepalive=True)
+    try:
+        plan = dd.Plan("T", "1", files=(dd.RemoteFile("gone.bin", s.url + "/gone.bin", 4),))
+        with pytest.raises(dd.DirectError):
+            dd.sync(plan, tmp_path, workers=2)
+        assert not (tmp_path / "gone.bin").exists()
+        assert not list(tmp_path.rglob("*.part"))
+    finally:
+        s.close()
+
+
+def test_sync_closes_its_connection_pool_even_when_a_file_fails(tmp_path, monkeypatch):
+    from nadare.core import download as dl
+
+    closed: list[int] = []
+    real_close = dl.HttpClientPool.close
+    monkeypatch.setattr(
+        dl.HttpClientPool, "close", lambda self: (closed.append(1), real_close(self))[1]
+    )
+    s = _Server({"/ok.bin": b"ok"}, keepalive=True)
+    try:
+        plan = dd.Plan("T", "1", files=(dd.RemoteFile("gone.bin", s.url + "/gone.bin", 4),))
+        with pytest.raises(dd.DirectError):
+            dd.sync(plan, tmp_path, workers=2)
+    finally:
+        s.close()
+    assert closed == [1]
+
+
+def test_sync_closes_its_connection_pool_after_a_successful_run(tmp_path, monkeypatch):
+    from nadare.core import download as dl
+
+    closed: list[int] = []
+    real_close = dl.HttpClientPool.close
+    monkeypatch.setattr(
+        dl.HttpClientPool, "close", lambda self: (closed.append(1), real_close(self))[1]
+    )
+    body = b"z" * 16
+    s = _Server({f"/f{i}.bin": body for i in range(3)}, keepalive=True)
+    try:
+        dd.sync(_many_files(s.url, 3, body), tmp_path, workers=2)
+    finally:
+        s.close()
+    assert closed == [1]

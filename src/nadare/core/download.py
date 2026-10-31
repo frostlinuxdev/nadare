@@ -18,6 +18,8 @@ import hashlib
 import http.client
 import json
 import os
+import random
+import socket
 import threading
 import time
 import urllib.error
@@ -37,6 +39,13 @@ DEFAULT_TIMEOUT = 60
 DEFAULT_RETRIES = 3
 DEFAULT_BACKOFF = 2.0
 MAX_BACKOFF = 60.0
+#: Extra delay drawn uniformly from ``[0, JITTER] * delay``, so a fleet of
+#: clients that failed together does not retry in lockstep.
+BACKOFF_JITTER = 0.5
+#: Longest ``Retry-After`` Nadare will honour (seconds).
+RETRY_AFTER_MAX = 60.0
+#: 4xx statuses that mean "try again" rather than "this will never work".
+_RETRYABLE_4XX = frozenset({408, 425, 429})
 #: Read caps: JSON/text fetches, and downloads that declare no expected size.
 #: Most of a redirect response's body Nadare will read before discarding it.
 REDIRECT_DRAIN_BYTES = 64 << 10
@@ -63,6 +72,29 @@ class DownloadError(RuntimeError):
     """A download failed after exhausting retries, or failed verification."""
 
 
+class HTTPStatusError(DownloadError):
+    """An HTTP response outside 2xx, carrying the status and ``Retry-After``."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int,
+        retry_after: float | None = None,
+        url: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.retry_after = (
+            None if retry_after is None else min(retry_after, RETRY_AFTER_MAX)
+        )
+        self.url = url
+
+
+class ProxyNotSupported(DownloadError):
+    """The environment routes a request through a proxy type the keep-alive pool cannot use."""
+
+
 class IntegrityError(DownloadError):
     """A completed download did not match the expected hash/size."""
 
@@ -84,6 +116,27 @@ def _request(url: str, headers: Mapping[str, str] | None = None) -> urllib.reque
     if headers:
         hdrs.update({str(k): str(v) for k, v in headers.items()})
     return urllib.request.Request(url, headers=hdrs)
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    """A numeric ``Retry-After`` in seconds, capped at :data:`RETRY_AFTER_MAX`."""
+    if not value:
+        return None
+    try:
+        seconds = float(value.strip())
+    except ValueError:  # the HTTP-date form; fall back to normal backoff
+        return None
+    if seconds < 0:
+        return None
+    return min(seconds, RETRY_AFTER_MAX)
+
+
+def retry_delay(
+    base: float, attempt: int = 1, *, rand: Callable[[], float] = random.random
+) -> float:
+    """Exponential backoff for ``attempt`` with bounded jitter, capped."""
+    delay = min(base * (2 ** max(0, attempt - 1)), MAX_BACKOFF)
+    return min(delay * (1.0 + BACKOFF_JITTER * rand()), MAX_BACKOFF)
 
 
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -166,9 +219,71 @@ def http_open(
     except DownloadError:
         raise
     except urllib.error.HTTPError as exc:
-        raise DownloadError(f"HTTP {exc.code} for {url}") from exc
+        raise HTTPStatusError(
+            f"HTTP {exc.code} for {url}",
+            status=exc.code,
+            retry_after=_parse_retry_after(
+                exc.headers.get("Retry-After") if exc.headers else None
+            ),
+            url=url,
+        ) from exc
     except (urllib.error.URLError, OSError, ValueError) as exc:
         raise DownloadError(f"cannot reach {url}: {exc}") from exc
+
+
+def _pool_can_serve(url: str) -> bool:
+    """False when the environment routes ``url`` through a proxy the pool cannot use.
+
+    The pool speaks to ``http://`` proxies only. For any other proxy it would silently go
+    straight to the origin, so those downloads keep the urllib path.
+    """
+    scheme, host = urllib.parse.urlparse(url).scheme, urllib.parse.urlparse(url).hostname or ""
+    try:
+        proxied = bool(urllib.request.getproxies().get(scheme)) and not (
+            urllib.request.proxy_bypass(host)
+        )
+    except ValueError:
+        proxied = False
+    return not proxied or _proxy_for(scheme, host) is not None
+
+
+def _open_pooled(
+    pool: HttpClientPool,
+    url: str,
+    *,
+    headers: Mapping[str, str] | None,
+    timeout: int,
+    redirect_allowed: Callable[[str], bool] | None,
+) -> HttpResponse:
+    """:func:`http_open` over a keep-alive pool: same errors, same 2xx-only rule."""
+    try:
+        response = pool.open(
+            url,
+            headers=headers,
+            timeout=timeout,
+            redirects=10,  # what urllib follows
+            redirect_allowed=redirect_allowed,
+            strict_proxy=True,
+        )
+    except DownloadError:
+        raise
+    except (http.client.HTTPException, OSError, ValueError) as exc:
+        raise DownloadError(f"cannot reach {url}: {exc}") from exc
+    if not 200 <= response.status < 300:
+        # Read a small declared error body so the connection can serve the next file. Anything
+        # else is not read (it could block until the timeout); closing then drops the connection.
+        length = response.header("Content-Length")
+        if length and length.isdigit() and int(length) <= REDIRECT_DRAIN_BYTES:
+            with contextlib.suppress(Exception):
+                response.read(int(length))
+        response.close()
+        raise HTTPStatusError(
+            f"HTTP {response.status} for {url}",
+            status=response.status,
+            retry_after=_parse_retry_after(response.header("Retry-After")),
+            url=url,
+        )
+    return response
 
 
 def http_get(
@@ -307,6 +422,7 @@ def _download_once(
     chunk: int,
     expected_size: int | None = None,
     redirect_allowed: Callable[[str], bool] | None = None,
+    pool: HttpClientPool | None = None,
 ) -> bool:
     """One attempt. Returns True if the server resumed, False if it restarted."""
     _drop_symlinked_part(part)
@@ -319,8 +435,23 @@ def _download_once(
     if redirect_allowed is not None:
         extra["redirect_allowed"] = redirect_allowed
     limit = expected_size if expected_size is not None else MAX_DOWNLOAD_BYTES
+    def open_url() -> Any:
+        if pool is None or not _pool_can_serve(url):
+            return http_open(url, headers=req_headers, timeout=timeout, **extra)
+        try:
+            return _open_pooled(
+                pool,
+                url,
+                headers=req_headers,
+                timeout=timeout,
+                redirect_allowed=redirect_allowed,
+            )
+        except ProxyNotSupported:
+            # A redirect reached a scheme whose proxy the pool cannot use: urllib can.
+            return http_open(url, headers=req_headers, timeout=timeout, **extra)
+
     try:
-        resp_cm = http_open(url, headers=req_headers, timeout=timeout, **extra)
+        resp_cm = open_url()
     except DownloadError as exc:
         if not (offset and "HTTP 416" in str(exc)):
             raise
@@ -329,7 +460,7 @@ def _download_once(
         part.unlink(missing_ok=True)
         offset = 0
         req_headers.pop("Range", None)
-        resp_cm = http_open(url, headers=req_headers, timeout=timeout, **extra)
+        resp_cm = open_url()
 
     with resp_cm as resp:
         status = getattr(resp, "status", None) or resp.getcode()
@@ -390,6 +521,7 @@ def download(
     emit: Emitter | None = None,
     cancel: Cancel | None = None,
     redirect_allowed: Callable[[str], bool] | None = None,
+    pool: HttpClientPool | None = None,
 ) -> DownloadResult:
     """Download ``url`` to ``dest`` atomically.
 
@@ -441,6 +573,7 @@ def download(
                 chunk=chunk,
                 expected_size=expected_size,
                 redirect_allowed=redirect_allowed,
+                pool=pool,
             )
             completed = True
             size = part.stat().st_size
@@ -498,11 +631,20 @@ def download(
                         f"not enough disk space to download {destination.name}"
                     ) from exc
                 raise DownloadError(f"cannot write to {destination}") from exc
+            status = getattr(exc, "status", None)
+            if status is not None and 400 <= status < 500 and status not in _RETRYABLE_4XX:
+                # A 403/404 (etc.) is permanent: re-requesting it only wastes
+                # time and can look like abuse. 408, 425 and 429 mean "try again
+                # later" (429 may carry Retry-After), so those keep retrying.
+                _remove_if_empty(part)
+                raise
             last_error = exc
             attempt += 1
             if attempt >= attempts:
                 break
-            delay = min(backoff * (2 ** (attempt - 1)), MAX_BACKOFF)
+            delay = getattr(exc, "retry_after", None)
+            if delay is None:
+                delay = retry_delay(backoff, attempt)
             say(
                 Event(
                     "log",
@@ -621,10 +763,16 @@ def _is_cancelled(exc: BaseException) -> bool:
 class HttpResponse:
     """Thin wrapper over ``http.client.HTTPResponse`` for streaming reads."""
 
-    __slots__ = ("status", "headers", "_response")
+    __slots__ = ("status", "headers", "_response", "_conn")
 
-    def __init__(self, response: http.client.HTTPResponse) -> None:
+    def __init__(
+        self,
+        response: http.client.HTTPResponse,
+        conn: http.client.HTTPConnection | None = None,
+    ) -> None:
         self._response = response
+        #: The pooled connection this response came from; closed with a half-read body.
+        self._conn = conn
         self.status = response.status
         self.headers = response.headers
 
@@ -635,10 +783,20 @@ class HttpResponse:
         return self._response.getheader(name, default)
 
     def close(self) -> None:
+        # http.client marks a response closed once its body is read to the end. Anything
+        # else leaves body bytes on the socket that the next request on this keep-alive
+        # connection would read as its own response (#767), so drop the connection;
+        # http.client reconnects on the next request.
+        unread = not getattr(self._response, "isclosed", lambda: True)()
         try:
             self._response.close()
         except OSError:
             pass
+        if unread and self._conn is not None:
+            try:
+                self._conn.close()
+            except OSError:
+                pass
 
     def __enter__(self) -> HttpResponse:
         return self
@@ -720,6 +878,7 @@ class HttpClientPool:
         timeout: int | None = None,
         redirects: int = 5,
         redirect_allowed: Callable[[str], bool] | None = None,
+        strict_proxy: bool = False,
     ) -> HttpResponse:
         """Issue a GET, following redirects, and return a streaming response.
 
@@ -737,8 +896,11 @@ class HttpClientPool:
         for _ in range(redirects + 1):
             scheme, host, port, path = _split_url(current)
             deadline = timeout or self.timeout
-            conn = self._connection(scheme, host, port, deadline)
             proxy = _proxy_for(scheme, host)
+            if strict_proxy and proxy is None and _proxy_configured(scheme, host):
+                # Every hop is checked: a redirect can move to a scheme the proxy covers.
+                raise ProxyNotSupported(f"the proxy configured for {scheme} is not supported here")
+            conn = self._connection(scheme, host, port, deadline)
             send_headers = request_headers
             if proxy is not None and scheme == "http":
                 # A plain-HTTP proxy wants the absolute URL and its own credentials.
@@ -747,6 +909,11 @@ class HttpClientPool:
             try:
                 conn.request("GET", path, headers=send_headers)
                 response = conn.getresponse()
+            except socket.gaierror:
+                # A failed lookup is not a stale connection: retrying at once only repeats
+                # the lookup, which a rate-limiting resolver counts against us (#767).
+                self._forget(scheme, host, port)
+                raise
             except (http.client.HTTPException, OSError):
                 # A pooled keep-alive connection may have been closed by the
                 # peer; drop it and retry once on a fresh socket.
@@ -784,7 +951,7 @@ class HttpClientPool:
                     raise DownloadError(f"redirect to disallowed URL: {target}")
                 current = target
                 continue
-            return HttpResponse(response)
+            return HttpResponse(response, conn)
         raise DownloadError(f"too many redirects for {url}")
 
     def close(self) -> None:
@@ -795,6 +962,16 @@ class HttpClientPool:
                 conn.close()
             except OSError:
                 pass
+
+
+def _proxy_configured(scheme: str, host: str) -> bool:
+    """Whether the environment names any proxy (of any type) for ``scheme``/``host``."""
+    try:
+        return bool(urllib.request.getproxies().get(scheme)) and not urllib.request.proxy_bypass(
+            host
+        )
+    except ValueError:
+        return False
 
 
 def _proxy_for(scheme: str, host: str) -> tuple[str, int, dict[str, str]] | None:

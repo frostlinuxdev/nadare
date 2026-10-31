@@ -10,11 +10,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 try:  # pragma: no cover - only when PyQt6 is missing
-    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtWidgets import QApplication, QMessageBox
 except Exception:  # noqa: BLE001
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
-from nadare.core.backends import get, kinds
+from nadare.core.backends import config_only, get, kinds
 from nadare.core.config import Config
 from nadare.gui.settings import SettingsPage, _env_to_text, _text_to_env
 
@@ -54,6 +54,8 @@ def test_every_backend_renders_all_options(tmp_path, qapp):
             config = _config(tmp_path / f"{kind}.json", kind)
             page.load(config, "sample")
             for option in get(kind).options:
+                if config_only(kind, option.key):
+                    continue
                 assert page.option_widget(option.key) is not None, f"{kind}:{option.key}"
     finally:
         page.deleteLater()
@@ -108,21 +110,25 @@ def test_advanced_toggle_hides_and_shows_rows(tmp_path, qapp):
     page = SettingsPage()
     try:
         page.load(config, "sample")
-        advanced = page.option_widget("wine_binary")
+        advanced = page.option_widget("extra_env")
         assert advanced is not None
-        assert not advanced.isVisibleTo(page), "advanced options start hidden"
+        assert not advanced.isVisibleTo(page.tabs.widget(1)), "advanced options start hidden"
         page.show_advanced.setChecked(True)
-        assert advanced.isVisibleTo(page)
+        assert advanced.isVisibleTo(page.tabs.widget(1))
         page.show_advanced.setChecked(False)
-        assert not advanced.isVisibleTo(page)
+        assert not advanced.isVisibleTo(page.tabs.widget(1))
         # A basic option is never hidden by the toggle.
-        assert page.option_widget("exe_name").isVisibleTo(page)
+        assert page.option_widget("exe_name").isVisibleTo(page.tabs.widget(1))
     finally:
         page.deleteLater()
         qapp.processEvents()
 
 
-def test_env_is_edited_as_key_value_lines(tmp_path, qapp):
+def test_env_is_edited_as_key_value_lines(tmp_path, qapp, monkeypatch):
+    monkeypatch.setattr(
+        "nadare.gui.settings.QMessageBox.question",
+        lambda *a, **k: QMessageBox.StandardButton.Yes,
+    )
     assert _text_to_env("DXVK_HUD=fps\n\n# comment\nFOO=bar") == {
         "DXVK_HUD": "fps",
         "FOO": "bar",
@@ -150,7 +156,9 @@ def test_env_is_edited_as_key_value_lines(tmp_path, qapp):
         qapp.processEvents()
 
 
-def test_int_options_use_a_bounded_spin_box(tmp_path, qapp):
+def test_int_options_use_a_bounded_spin_box(tmp_path, qapp, monkeypatch):
+    # Download workers is config-only now; the spin box still works for any int option.
+    monkeypatch.setattr("nadare.core.backends.CONFIG_ONLY_KEYS", frozenset())
     config = _config(tmp_path, "arknights-yostar")
     page = SettingsPage()
     try:
@@ -224,7 +232,7 @@ def test_switching_backends_does_not_leak_option_editors(tmp_path, qapp):
         strays = [
             w
             for w in page._options_host.findChildren(QLineEdit)
-            if id(w) not in current and w.isVisibleTo(page)
+            if id(w) not in current and w.isVisibleTo(page.tabs.widget(1))
         ]
         assert strays == [], f"{len(strays)} stale editor(s) still visible"
     finally:

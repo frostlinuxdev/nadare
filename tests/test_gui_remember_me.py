@@ -112,7 +112,8 @@ def test_a_failed_save_puts_the_box_back(tmp_path, qapp, monkeypatch):
 def test_page_has_the_shared_text(qapp):
     view = game_view.GameView()
     assert view.remember.text() == "Remember me on this device"
-    assert "keyring" in view.remember.toolTip()
+    assert "saved login" in view.remember.toolTip()
+    assert "keyring" not in view.remember.toolTip()
     view.deleteLater()
 
 
@@ -134,7 +135,7 @@ def test_no_keyring_turns_remember_me_back_off(tmp_path, qapp, monkeypatch):
     assert not window.game.remember.isChecked()
     assert not window.game.qr_frame.remember.isChecked()
     assert not _remembers(tmp_path / "config.json")
-    assert shown and "turned off" in shown[0] and "keyring" in shown[0]
+    assert shown and "turned off" in shown[0] and "store your login" in shown[0]
     window.close()
 
 

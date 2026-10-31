@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 
-from nadare.core import backends
+from nadare.core import backends, steamstore
 from nadare.core.directkinds import (
     CATALOG_KINDS,
     DIRECT_LABEL,
@@ -25,7 +25,11 @@ def test_entries_cover_catalog_once_and_sort_verified_first() -> None:
     result = entries()
     kinds = [entry.kind for entry in result]
     assert len(kinds) == len(set(kinds))
-    assert set(kinds) == (set(CATALOG_KINDS) | LEGACY_KINDS) - set(backends.unavailable())
+    steam_tiles = {kind for kind in kinds if steamstore.app_id_of(kind)}
+    assert steam_tiles  # Steam games are tiles of their own (see test_steamstore.py)
+    assert set(kinds) - steam_tiles == (set(CATALOG_KINDS) | LEGACY_KINDS) - set(
+        backends.unavailable()
+    )
     assert [entry.tier == TIER_VERIFIED for entry in result] == sorted(
         [entry.tier == TIER_VERIFIED for entry in result], reverse=True
     )
@@ -89,7 +93,8 @@ def test_store_lists_exactly_the_games_the_wizard_offers() -> None:
     from nadare.gui.add_game import ADVANCED_GROUP, available_catalog
 
     wizard = {game.kind for game in available_catalog() if game.group != ADVANCED_GROUP}
-    assert {entry.kind for entry in entries()} == wizard
+    # Steam games are Store-only tiles: the wizard reaches them through its "Steam game" row.
+    assert {e.kind for e in entries() if not steamstore.app_id_of(e.kind)} == wizard
 
 
 def test_older_games_get_their_tiers_and_delivery_labels() -> None:

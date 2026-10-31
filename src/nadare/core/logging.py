@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from . import paths
-from .events import _REDACTED, is_secret_key, mask
+from .events import _REDACTED, is_secret_key, mask, mask_traceback
 
 LOGGER_NAME = "nadare"
 DEFAULT_FILE = "nadare.log"
@@ -77,6 +77,14 @@ class MaskingFilter(logging.Filter):
     """Mask secret-looking values in the message and its arguments."""
 
     def filter(self, record: logging.LogRecord) -> bool:
+        # Tracebacks are formatted at emit time, after this filter runs, so a
+        # secret in an exception message would otherwise reach the file intact.
+        if record.exc_info and not record.exc_text:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = mask_traceback(record.exc_text)
+        if record.stack_info:
+            record.stack_info = mask_traceback(record.stack_info)
         if isinstance(record.msg, str) and not isinstance(record.args, dict):
             try:
                 record.msg = mask(record.getMessage())

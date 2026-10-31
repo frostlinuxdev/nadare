@@ -41,7 +41,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import userns
+from ..core import steamsetup, userns
 from ..core.backends import Status, page_notice, supports_news, supports_update
 from ..core.eta import EtaEstimator, format_eta
 from ..core.events import Event
@@ -51,6 +51,9 @@ from .library import backend_label, profile_art_candidates, profile_title
 from .logs_dialog import LogsDialog
 from .theme import badge_style, cover_pixmap, set_state_property
 from .userns_dialog import UsernsDialog
+
+#: Backends whose label ("Steam game", "Wine / Proton game") adds nothing on the game page.
+_SELF_EVIDENT_BACKENDS = frozenset({"steam", "wine"})
 
 
 @dataclass
@@ -141,8 +144,8 @@ _STATE_CHANGING = frozenset({"install", "update", "repair", "remake_prefix", "un
 
 #: Under the login QR: what to do, and the one safety rule for QR logins.
 _QR_SCAN_HINT = (
-    "Scan this QR code with the STOVE mobile app. "
-    "Only scan a code shown here, in your own Nadare window."
+    "Scan this QR code with the STOVE mobile app (new to STOVE? get it at "
+    "https://www.onstove.com). Only scan a code shown here, in your own Nadare window."
 )
 
 
@@ -316,6 +319,20 @@ def _format_news_date(published_at: Any) -> str:
         return datetime.fromtimestamp(millis / 1000).strftime("%Y-%m-%d")
     except (OverflowError, OSError, ValueError):
         return ""
+
+
+class _NotifyLabel(QLabel):
+    """A label that says when its text changed, so the box around it can hide when empty."""
+
+    text_changed = pyqtSignal()
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt override
+        super().setText(text)
+        self.text_changed.emit()
+
+    def clear(self) -> None:
+        super().clear()
+        self.text_changed.emit()
 
 
 class ElidedLabel(QLabel):
@@ -498,8 +515,8 @@ def _version_text(version: object) -> str:
 
 _REMEMBER_TEXT = "Remember me on this device"
 _REMEMBER_TIP = (
-    "Keeps you logged in by storing the login in your system keyring, so you "
-    "do not need to scan the QR code each time. Turning it off deletes the saved login."
+    "Keeps you logged in on this device, so you do not need to scan the QR code "
+    "each time. Turning it off deletes the saved login."
 )
 
 
@@ -568,6 +585,13 @@ class _QrPanel(QFrame):
         self.move(x, y)
 
 
+def can_pause_kind(kind: str) -> bool:
+    """Whether installs of backend ``kind`` resume from what is already on disk."""
+    from ..core.directkinds import DIRECT_KINDS
+
+    return kind in DIRECT_KINDS or kind == "stellasora-yostar"
+
+
 class GameView(QWidget):
     """The single-game launch page."""
 
@@ -576,9 +600,12 @@ class GameView(QWidget):
     skip_step_requested = pyqtSignal()
     pause_requested = pyqtSignal()
     resume_requested = pyqtSignal()
+    queue_next_requested = pyqtSignal()
+    queue_now_requested = pyqtSignal()
     back_requested = pyqtSignal()
     settings_requested = pyqtSignal()
     report_requested = pyqtSignal(str)
+    steam_setup_requested = pyqtSignal()
     remember_toggled = pyqtSignal(bool)  # the user ticked/unticked Remember me
 
     #: Text shown under the login QR for each coarse auth state.
@@ -598,6 +625,7 @@ class GameView(QWidget):
         self._status: Status | None = None
         self._busy_op: str | None = None
         self._paused_op: str | None = None
+        self._queue_waiting = False  # waits for an install slot (#770)
         #: True between a successful install/update/... and the status that
         #: follows it, so the stale status cannot offer the same action again.
         self._awaiting_status = False
@@ -725,6 +753,28 @@ class GameView(QWidget):
         self.pause_button.setVisible(False)
         copy.addWidget(self.pause_button)
 
+        # Only while the install waits for a free slot: no dragging, just two plain choices.
+        self.queue_row = QWidget()
+        queue_layout = QHBoxLayout(self.queue_row)
+        queue_layout.setContentsMargins(0, 0, 0, 0)
+        queue_layout.setSpacing(8)
+        self.queue_next_btn = QPushButton("Download next")
+        self.queue_next_btn.setObjectName("GhostButton")
+        self.queue_next_btn.setToolTip("Move this game to the front of the waiting line.")
+        self.queue_next_btn.clicked.connect(self.queue_next_requested.emit)
+        self.queue_now_btn = QPushButton("Download now")
+        self.queue_now_btn.setObjectName("GhostButton")
+        self.queue_now_btn.setToolTip(
+            "Pause the download that is running, start this one, and carry on with the other "
+            "afterwards. Nothing already downloaded is lost."
+        )
+        self.queue_now_btn.clicked.connect(self.queue_now_requested.emit)
+        queue_layout.addWidget(self.queue_next_btn)
+        queue_layout.addWidget(self.queue_now_btn)
+        queue_layout.addStretch(1)
+        self.queue_row.setVisible(False)
+        copy.addWidget(self.queue_row)
+
         secondary = QHBoxLayout()
         secondary.setSpacing(8)
         self.login = QPushButton("Log in")
@@ -751,6 +801,14 @@ class GameView(QWidget):
             "Re-check every game file and re-download the ones that are missing or damaged"
         )
         self.repair_btn.clicked.connect(lambda: self.action_requested.emit("repair"))
+        self.steam_setup_btn = QPushButton("Set up")
+        self.steam_setup_btn.setObjectName("GhostButton")
+        self.steam_setup_btn.setToolTip(
+            "Checks this Steam game and fixes what is missing: video support, a prefix "
+            "component, an optional runner. Asks before changing anything."
+        )
+        self.steam_setup_btn.setVisible(False)
+        self.steam_setup_btn.clicked.connect(self.steam_setup_requested.emit)
         self.logs = QPushButton("Open logs")
         self.logs.setObjectName("GhostButton")
         self.logs.clicked.connect(self._open_logs)
@@ -763,6 +821,7 @@ class GameView(QWidget):
             self.update_btn,
             self.verify,
             self.repair_btn,
+            self.steam_setup_btn,
             self.logs,
             self.report,
         ):
@@ -842,8 +901,9 @@ class GameView(QWidget):
         progress_layout.setContentsMargins(16, 12, 16, 14)
         progress_layout.setSpacing(8)
         step_row = QHBoxLayout()
-        self.step_label = QLabel("")
+        self.step_label = _NotifyLabel("")
         self.step_label.setObjectName("Hint")
+        self.step_label.text_changed.connect(self._sync_progress_frame)
         self.step_label.setWordWrap(True)
         step_row.addWidget(self.step_label, 1)
         self.skip_button = QPushButton("Skip this step")
@@ -867,7 +927,9 @@ class GameView(QWidget):
         self.progress.setTextVisible(True)
         self.progress.setVisible(False)
         progress_layout.addWidget(self.progress)
+        self.progress_frame = progress_frame
         root.addWidget(progress_frame)
+        self._sync_progress_frame()
 
         # ---- QR (STOVE login only) -----------------------------------------
         # The auth worker emits a step event whose data carries the QR png path;
@@ -879,7 +941,9 @@ class GameView(QWidget):
         self.qr_frame.remember_clicked.connect(self._on_remember_clicked)
 
         # ---- console --------------------------------------------------------
-        log_head = QHBoxLayout()
+        self.output_head = QWidget()
+        log_head = QHBoxLayout(self.output_head)
+        log_head.setContentsMargins(0, 0, 0, 0)
         log_label = QLabel("OUTPUT")
         log_label.setObjectName("LogHeader")
         log_head.addWidget(log_label)
@@ -890,9 +954,9 @@ class GameView(QWidget):
         log_head.addWidget(self.console_toggle)
         clear = QPushButton("Clear")
         clear.setObjectName("GhostButton")
-        clear.clicked.connect(lambda: self.console.clear())
+        clear.clicked.connect(self._clear_console)
         log_head.addWidget(clear)
-        root.addLayout(log_head)
+        root.addWidget(self.output_head)
 
         self.console = QPlainTextEdit()
         self.console.setObjectName("Console")
@@ -949,7 +1013,11 @@ class GameView(QWidget):
         title = profile_title(name, profile)
         self.title.setText(title)
         self.kicker.setText("NOT PLAYED YET")
-        self.backend_label.setText(backend_label(str(profile.get("backend") or "")))
+        self.kicker.setVisible(False)
+        kind = str(profile.get("backend") or "")
+        self.backend_label.setText(backend_label(kind))
+        # "Steam game" and "Wine / Proton game" say what the page already shows.
+        self.backend_label.setVisible(kind.strip().lower() not in _SELF_EVIDENT_BACKENDS)
         self._set_page_notice(str(profile.get("backend") or ""))
         self.version_label.setText("")
         self.hero.set_source(None)
@@ -1035,12 +1103,15 @@ class GameView(QWidget):
 
     def _apply_status(self, status: Status) -> None:
         self._status = status
-        if status.running or status.state == "running":
+        playing = status.running or status.state == "running"
+        if playing:
             self.kicker.setText("NOW PLAYING")
         elif status.state == "not_installed":
             self.kicker.setText("NOT PLAYED YET")
         else:
             self.kicker.setText("GAME")
+        # Only "now playing" says something; the other two just repeat the page.
+        self.kicker.setVisible(playing)
         self._set_badge(status.state, status.message)
         self.version_label.setText(_version_text(status.version))
         self._set_account(status)
@@ -1063,9 +1134,12 @@ class GameView(QWidget):
         self.badge.setText(label)
         set_state_property(self.badge, pill_state)
         self.badge.setToolTip(message or "")
+        # An idle, installed game is "ready" by its Launch button; say it only when odd.
+        self.badge.setVisible(state != "installed")
 
     def _set_detail(self, text: str) -> None:
         self.detail_label.setText(text)
+        self.detail_label.setVisible(bool(text))
 
     # ---- primary action ----------------------------------------------------
     def _primary_op(self) -> str | None:
@@ -1090,6 +1164,8 @@ class GameView(QWidget):
         return "launch"
 
     def _refresh_actions(self) -> None:
+        self._refresh_steam_setup()
+        self.queue_row.setVisible(self._busy_op is not None and self._queue_waiting)
         if self._busy_op is not None:
             self.pause_button.setVisible(self._can_pause())
             # A launch that is busy means the game process is up: say so and
@@ -1131,7 +1207,9 @@ class GameView(QWidget):
         status = None if self._awaiting_status else self._status
         installed = bool(status and status.state == "installed")
         running = bool(status and (status.running or status.state == "running"))
-        self.login.setEnabled(installed and not running)
+        # Signing in does not need the game files: STOVE and the login page are
+        # remote, and an install started later keeps the saved login.
+        self.login.setEnabled(bool(status) and not running)
         # Log out only needs an idle account: it must be reachable even when the
         # game is not installed (e.g. to drop a saved login).
         self.logout.setEnabled(bool(status) and not running)
@@ -1149,6 +1227,25 @@ class GameView(QWidget):
         )
         can_repair = bool(((status.data if status else {}) or {}).get("can_repair"))
         self.repair_btn.setEnabled(self.verify.isEnabled() and can_repair)
+
+    def _refresh_steam_setup(self) -> None:
+        """Set up is offered only for a known Steam game with no operation running."""
+        self.steam_setup_btn.setVisible(self._steam_setup_available())
+
+    def _steam_setup_available(self) -> bool:
+        if self._busy_op is not None:
+            return False
+        status = self._status
+        if status is not None and (status.running or status.state == "running"):
+            return False  # the runner step closes Steam, which would end the play session
+        if str(self._profile_data.get("backend") or "") != "steam":
+            return False
+        data = self._profile_data
+        extra = data.get("extra")
+        app_id = data.get("steam_app_id") or data.get("app_id")
+        if not app_id and isinstance(extra, dict):
+            app_id = extra.get("steam_app_id") or extra.get("app_id")
+        return bool(app_id) and steamsetup.game_for(str(app_id)) is not None
 
     def set_account_controls(self, supported: bool) -> None:
         """Show account controls only for backends that log in."""
@@ -1195,6 +1292,10 @@ class GameView(QWidget):
             return
         op = self._primary_op()
         if op == "retry":
+            # Show CHECKING (primary disabled) until the status lands: a second
+            # click used to race the first and open a modal "Busy" (#624).
+            self._awaiting_status = True
+            self._refresh_actions()
             self.action_requested.emit("status")
         elif op == "settings":
             self.settings_requested.emit()
@@ -1205,6 +1306,7 @@ class GameView(QWidget):
     def set_busy(self, operation: str) -> None:
         """Mark ``operation`` as running and start the elapsed clock."""
         self._paused_op = None
+        self._queue_waiting = False
         self._busy_op = operation
         self._primary_grace_until = time.monotonic() + _CANCEL_GRACE_S
         self.news_frame.setVisible(False)
@@ -1230,6 +1332,31 @@ class GameView(QWidget):
         self._set_console_expanded(True)
         self._refresh_actions()
 
+    def set_waiting(self, operation: str, ahead: int = 0, can_now: bool = False) -> None:
+        """Show that ``operation`` waits for another install to finish (#770).
+
+        ``ahead`` is how many waiting installs come before this one; ``can_now`` whether the
+        running one can be paused so this one starts at once.
+        """
+        self.set_busy(operation)
+        self._timer.stop()
+        self.elapsed_label.setText("")
+        self.progress.setRange(0, 0)  # the busy animation: nothing is downloading yet
+        self._queue_waiting = True
+        self.set_queue_position(ahead, can_now)
+        self._append_line("waiting for another install to finish", "status")
+
+    def set_queue_position(self, ahead: int, can_now: bool) -> None:
+        """Update the waiting message and which queue buttons make sense."""
+        if ahead > 0:
+            noun = "install" if ahead == 1 else "installs"
+            self.step_label.setText(f"Waiting · {ahead} {noun} ahead of this one")
+        else:
+            self.step_label.setText("Waiting for another install to finish…")
+        self.queue_next_btn.setVisible(ahead > 0)
+        self.queue_now_btn.setVisible(can_now)
+        self._refresh_actions()
+
     def _on_skip_clicked(self) -> None:
         # Hide first: a second click must not skip whatever step comes next.
         self.skip_button.setHidden(True)
@@ -1237,6 +1364,7 @@ class GameView(QWidget):
 
     def _clear_busy_progress(self) -> None:
         """Return the progress area to its idle shape when an operation ends."""
+        self._queue_waiting = False
         self.skip_button.setHidden(True)
         self.progress.setRange(0, 100)  # never leave the busy animation running
         self.progress.setValue(0)
@@ -1317,12 +1445,11 @@ class GameView(QWidget):
 
     def _can_pause(self) -> bool:
         """Pause only where the downloads really resume from what is already on disk."""
-        from ..core.directkinds import DIRECT_KINDS
         from .workers import PAUSABLE
 
-        kind = str(self._profile_data.get("backend") or "")
-        resumable = kind in DIRECT_KINDS or kind == "stellasora-yostar"
-        return self._busy_op in PAUSABLE and resumable
+        return self._busy_op in PAUSABLE and can_pause_kind(
+            str(self._profile_data.get("backend") or "")
+        )
 
     def set_paused(self, operation: str) -> None:
         """Show that ``operation`` is paused, with RESUME ready on the primary button."""
@@ -1566,10 +1693,25 @@ class GameView(QWidget):
         self.news_retry.setVisible(False)
         self._set_news_visible(False)
 
+    def _output_has_content(self) -> bool:
+        return self._busy_op is not None or not self.console.document().isEmpty()
+
+    def _sync_progress_frame(self) -> None:
+        """Show the progress strip only while there is a step to report."""
+        self.progress_frame.setVisible(
+            self._busy_op is not None or bool(self.step_label.text().strip())
+        )
+
     def _set_console_expanded(self, expanded: bool) -> None:
         self._console_expanded = bool(expanded)
-        self.console.setVisible(self._console_expanded)
+        has_content = self._output_has_content()
+        self.output_head.setVisible(has_content)
+        self.console.setVisible(self._console_expanded and has_content)
         self.console_toggle.setText("Hide output" if self._console_expanded else "Show output")
+
+    def _clear_console(self) -> None:
+        self.console.clear()
+        self._set_console_expanded(self._console_expanded)
 
     def _toggle_console(self) -> None:
         self._set_console_expanded(not self._console_expanded)
@@ -1588,6 +1730,7 @@ class GameView(QWidget):
         color = _LOG_COLORS.get(kind, _LOG_COLORS["log"])
         safe = html.escape(str(message)).replace("\n", "<br>")
         self.console.appendHtml(f'<span style="color:{color}">{safe}</span>')
+        self._set_console_expanded(self._console_expanded)
         scrollbar = self.console.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 

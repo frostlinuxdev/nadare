@@ -47,7 +47,7 @@ def test_restore_button_is_hidden_for_a_backend_without_options(
     page = SettingsPage()
     try:
         page.load(config, "sample")
-        assert not page.restore_defaults.isVisibleTo(page)
+        assert not page.restore_defaults.isVisibleTo(page.tabs.widget(1))
     finally:
         _dispose(page, qapp)
 
@@ -57,7 +57,7 @@ def test_restore_button_is_visible_when_the_backend_has_options(tmp_path, qapp):
     page = SettingsPage()
     try:
         page.load(config, "sample")
-        assert page.restore_defaults.isVisibleTo(page)
+        assert page.restore_defaults.isVisibleTo(page.tabs.widget(1))
         assert page.restore_defaults.text() == "Restore defaults"
         assert page.restore_defaults.objectName() == "GhostButton"
         assert "Nothing is saved until you press Save changes." in (
@@ -92,7 +92,9 @@ def test_restore_resets_choice_bool_and_text_without_saving(tmp_path, qapp):
         _dispose(page, qapp)
 
 
-def test_restore_resets_int_to_the_option_default(tmp_path, qapp):
+def test_restore_resets_int_to_the_option_default(tmp_path, qapp, monkeypatch):
+    # Download workers is config-only now; the int editor still restores like any other.
+    monkeypatch.setattr("nadare.core.backends.CONFIG_ONLY_KEYS", frozenset())
     config = _config(tmp_path, "arknights-yostar")
     page = SettingsPage()
     try:
@@ -131,7 +133,9 @@ def test_saving_restored_defaults_does_not_store_option_keys(tmp_path, qapp):
         _dispose(page, qapp)
 
 
-def test_saving_a_restored_int_default_does_not_store_the_key(tmp_path, qapp):
+def test_saving_a_restored_int_default_does_not_store_the_key(tmp_path, qapp, monkeypatch):
+    # Download workers is config-only now; the int editor still restores like any other.
+    monkeypatch.setattr("nadare.core.backends.CONFIG_ONLY_KEYS", frozenset())
     config = _config(tmp_path, "arknights-yostar")
     page = SettingsPage()
     try:

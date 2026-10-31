@@ -37,6 +37,10 @@ if _SRC not in sys.path:
 from nadare.core import archivepins  # noqa: E402
 
 UNCHANGED = 3
+#: Games whose publisher gives no md5 for the archive. Their pin is built from what the node
+#: streamed (trust on first use): it still stops a later swap on the CDN, but it cannot prove
+#: the first copy was genuine. Every other game needs the publisher's md5 on each part.
+FIRST_USE_GAMES = frozenset({"gfl2"})
 DEFAULT_MAX_BYTES = 128 << 30
 DEFAULT_DEADLINE = 2 * 3600
 _READ_CHUNK = 1 << 20
@@ -65,9 +69,15 @@ def _check_block_size(block_size: int) -> None:
 
 def resolver_for(tag: str) -> Callable[[], Any]:
     """The resolver that produces the latest plan for ``tag``."""
-    from nadare.core.sources import aethergazer, mongil
+    from nadare.core.sources import aethergazer, endfield, gfl2, hoyo, mongil
 
-    resolvers = {"aethergazer": aethergazer.resolve, "mongil": mongil.resolve}
+    resolvers = {
+        "aethergazer": aethergazer.resolve,
+        "mongil": mongil.resolve,
+        "endfield": endfield.resolve,
+        "gfl2": gfl2.resolve,
+        "hi3": lambda: hoyo.resolve("bh3_global"),
+    }
     resolver = resolvers.get(tag)
     if resolver is None:
         raise PublishPinError(f"unknown game {tag!r}")
@@ -197,20 +207,51 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         raise
 
 
-def _validate_plan(plan: Any) -> None:
+def _validate_plan(plan: Any, tag: str) -> None:
     """Refuse a plan the client could not use, before any byte is downloaded."""
     if not plan.archives:
         raise PublishPinError(f"plan for {plan.game_tag} has no archives")
     for archive in plan.archives:
-        source = archive.source
-        if archive.parts:
-            raise PublishPinError(f"multi-part archives are not supported: {archive.name}")
-        if not isinstance(source.md5, str) or not source.md5:
-            raise PublishPinError(f"no publisher md5 for {archive.name}")
-        if not isinstance(source.url, str):
-            raise PublishPinError(f"url for {archive.name} is not a string")
-        if not archivepins.is_safe_pin_url(source.url):
-            raise PublishPinError(f"unsafe url for {archive.name}: {source.url}")
+        parts = archive.parts or (archive.source,)
+        for part in parts:
+            first_use = len(parts) == 1 and tag in FIRST_USE_GAMES
+            if not first_use and (not isinstance(part.md5, str) or not part.md5):
+                raise PublishPinError(f"no publisher md5 for {archive.name} ({part.path})")
+            if not isinstance(part.url, str):
+                raise PublishPinError(f"url for {archive.name} is not a string")
+            if not archivepins.is_safe_pin_url(part.url):
+                raise PublishPinError(f"unsafe url for {archive.name}: {part.url}")
+
+
+def _build_archive_pin(
+    archive: Any,
+    open_stream: Callable[[str, Mapping[str, str]], Iterator[bytes]],
+    *,
+    block_size: int,
+    max_bytes: int,
+) -> archivepins.ArchivePin:
+    """Stream every part once; each part must match its own publisher md5 when it has one."""
+    from nadare.core import pinbuild
+
+    parts = archive.parts or (archive.source,)
+    built: list[archivepins.PinPart] = []
+    remaining = max_bytes
+    for part in parts:
+        try:
+            pin = pinbuild.build_pin(
+                part.url,
+                open_stream(part.url, dict(part.headers)),
+                block_size=block_size,
+                size=part.size,
+                publisher_md5=part.md5,
+                max_bytes=remaining,
+            )
+        except pinbuild.PinBuildError as exc:
+            raise PublishPinError(str(exc)) from exc
+        built.append(pin.parts[0])
+        remaining -= pin.parts[0].size
+    md5 = parts[0].md5 if len(parts) == 1 else None
+    return archivepins.ArchivePin(block_size, tuple(built), md5.lower() if md5 else None)
 
 
 def publish_pin(
@@ -224,44 +265,34 @@ def publish_pin(
     max_bytes: int = DEFAULT_MAX_BYTES,
 ) -> str:
     """Publish or refresh the pin document for ``tag``; return ``published`` or ``unchanged``."""
-    from nadare.core import pinbuild
-
     _validate_tag(tag)
     _check_block_size(block_size)
     path = _pin_path(index, tag)
     with game_lock(index, tag), _deadline(deadline) as disarm:
         plan = (resolve or resolver_for(tag))()
-        _validate_plan(plan)
+        _validate_plan(plan, tag)
         existing = _read_pins(path)
         wanted: dict[str, Any] = {}
         probed = False
         for archive in plan.archives:
-            source = archive.source
+            parts = archive.parts or (archive.source,)
+            md5 = parts[0].md5 if len(parts) == 1 else None
+            expected_md5 = md5.lower() if md5 else None
             pinned = existing.get(archive.name)
             if (
                 pinned is not None
-                and pinned.matches([source], source.md5)
+                and pinned.matches(parts, md5)
                 and pinned.block_size == block_size
-                and pinned.publisher_md5 is not None
-                and pinned.publisher_md5 == source.md5.lower()
+                and pinned.publisher_md5 == expected_md5
             ):
                 wanted[archive.name] = pinned
                 continue
             if not probed:
                 _ensure_writable(path)
                 probed = True
-            try:
-                pin = pinbuild.build_pin(
-                    source.url,
-                    open_stream(source.url, dict(source.headers)),
-                    block_size=block_size,
-                    size=source.size,
-                    publisher_md5=source.md5,
-                    max_bytes=max_bytes,
-                )
-            except pinbuild.PinBuildError as exc:
-                raise PublishPinError(str(exc)) from exc
-            wanted[archive.name] = pin
+            wanted[archive.name] = _build_archive_pin(
+                archive, open_stream, block_size=block_size, max_bytes=max_bytes
+            )
         doc = archivepins.document(wanted)
         data = (json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
         if len(data) > archivepins.MAX_DOCUMENT_BYTES:

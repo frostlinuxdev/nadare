@@ -58,6 +58,10 @@ turns the block off, so it is not affected); if the install stops there, use the
 32-bit libraries). `nadare doctor` shows a `32-bit libs:` line and a
 `user namespaces:` line.
 
+Leave **Display backend** on *Auto*: CZN is tested on native Wayland only. X11
+(XWayland) can show a blank, flat-coloured window while the game itself runs.
+
+
 Only if that runtime cannot be used (no network for the download, or you would rather
 not allow the namespace) do you need your distro's 32-bit libraries (FreeType, udev,
 Xext, xkbcommon). Nadare then stops with "Missing 32-bit libraries"; this is the fix

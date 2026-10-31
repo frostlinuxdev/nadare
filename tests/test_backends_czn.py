@@ -1267,6 +1267,176 @@ def _auth_runner(
     return run
 
 
+def _terms_runner(calls, events, credential=None, code=0):
+    """Like ``_auth_runner`` but also feeds parsed JSON events to ``collect=``."""
+    inner = _auth_runner(calls, credential, code, write_session=False)
+
+    def run(module, args, **kwargs):
+        result = inner(module, args, **kwargs)
+        sink = kwargs.get("collect")
+        if sink is not None:
+            sink.extend(events)
+        return result
+
+    return run
+
+
+_TERMS_DOC = {
+    "no": 1502,
+    "id": "STOVE_CHAOSZEROSERVICE",
+    "title": "[Chaos Zero Nightmare] Terms of Service",
+    "html": "<h1>Terms</h1>",
+    "required": True,
+}
+
+
+class TestGameTerms:
+    def _logged_in(self, make_backend_context, tmp_path):
+        backend = _cred_backend(make_backend_context, tmp_path)
+        backend._refresh_token = SENTINEL
+        backend._member_no = "42"
+        return backend
+
+    def test_terms_asks_the_auth_worker_and_returns_what_is_pending(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = self._logged_in(make_backend_context, tmp_path)
+        calls: list[list[str]] = []
+        events = [{"event": "terms", "pending": True, "documents": [_TERMS_DOC]}]
+        monkeypatch.setattr(
+            backend,
+            "_run_module",
+            _terms_runner(calls, events, {"refresh_token": "ROTATED", "member_no": "42"}),
+        )
+        result = backend.terms()
+        assert result["pending"] is True and result["documents"] == [_TERMS_DOC]
+        assert result["missing"] == []
+        assert calls[0][0] == "terms"
+        assert backend._refresh_token == "ROTATED"  # the renewal rotated it: keep the new one
+
+    def test_terms_passes_on_what_it_could_not_show_and_the_account_it_is_for(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = self._logged_in(make_backend_context, tmp_path)
+        events = [{"event": "terms", "pending": True, "documents": [_TERMS_DOC], "missing": [7]}]
+        monkeypatch.setattr(backend, "_run_module", _terms_runner([], events))
+        result = backend.terms()
+        assert result["missing"] == [7] and result["member_no"] == "42"
+
+    def test_accept_terms_refuses_when_the_logged_in_account_is_not_the_one_shown(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = self._logged_in(make_backend_context, tmp_path)
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_run_module", _terms_runner(calls, []))
+        with pytest.raises(BackendError) as exc:
+            backend.accept_terms(expect_member="999")
+        assert exc.value.code == 3 and calls == []
+        backend.accept_terms(expect_member="42")
+        assert calls and calls[0][:2] == ["accept-terms", "--agree"]
+
+    @pytest.mark.parametrize("action", ["terms", "accept"])
+    def test_a_credential_for_another_account_is_not_adopted(
+        self, make_backend_context, tmp_path, monkeypatch, action
+    ):
+        backend = self._logged_in(make_backend_context, tmp_path)
+        events = [{"event": "terms", "pending": True, "documents": [_TERMS_DOC], "missing": []}]
+        monkeypatch.setattr(
+            backend,
+            "_run_module",
+            _terms_runner([], events, {"refresh_token": "OTHER-ACCOUNT", "member_no": "999"}),
+        )
+        with pytest.raises(BackendError) as exc:
+            backend.terms() if action == "terms" else backend.accept_terms()
+        assert exc.value.code == 3
+        assert backend._refresh_token != "OTHER-ACCOUNT"
+
+    def test_terms_with_nothing_pending(self, make_backend_context, tmp_path, monkeypatch):
+        backend = self._logged_in(make_backend_context, tmp_path)
+        events = [{"event": "terms", "pending": False, "documents": []}]
+        monkeypatch.setattr(backend, "_run_module", _terms_runner([], events))
+        result = backend.terms()
+        assert result["pending"] is False and result["documents"] == []
+
+    def test_terms_needs_a_login_and_does_not_start_the_worker(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = _cred_backend(make_backend_context, tmp_path)
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_run_module", _terms_runner(calls, []))
+        with pytest.raises(BackendError) as exc:
+            backend.terms()
+        assert exc.value.code == 3 and calls == []
+
+    def test_terms_failure_uses_the_auth_messages(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = self._logged_in(make_backend_context, tmp_path)
+        monkeypatch.setattr(backend, "_run_module", _terms_runner([], [], code=4))
+        with pytest.raises(BackendError) as exc:
+            backend.terms()
+        assert exc.value.message == czn_backend.AUTH_EXIT_MESSAGES[4]
+
+    def test_terms_without_the_expected_event_is_an_error(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = self._logged_in(make_backend_context, tmp_path)
+        monkeypatch.setattr(backend, "_run_module", _terms_runner([], [{"event": "other"}]))
+        with pytest.raises(BackendError, match="terms"):
+            backend.terms()
+
+    def test_accept_terms_passes_the_explicit_agree_flag_and_keeps_the_rotated_token(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = self._logged_in(make_backend_context, tmp_path)
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            backend,
+            "_run_module",
+            _terms_runner(calls, [], {"refresh_token": "ROTATED", "member_no": "42"}),
+        )
+        backend.accept_terms()
+        assert calls[0][:2] == ["accept-terms", "--agree"]
+        assert backend._refresh_token == "ROTATED"
+
+    def test_accept_terms_failure_raises(self, make_backend_context, tmp_path, monkeypatch):
+        backend = self._logged_in(make_backend_context, tmp_path)
+        monkeypatch.setattr(backend, "_run_module", _terms_runner([], [], code=2))
+        with pytest.raises(BackendError) as exc:
+            backend.accept_terms()
+        assert exc.value.code == 2
+
+    def test_accept_terms_needs_a_login(self, make_backend_context, tmp_path, monkeypatch):
+        backend = _cred_backend(make_backend_context, tmp_path)
+        calls: list[list[str]] = []
+        monkeypatch.setattr(backend, "_run_module", _terms_runner(calls, []))
+        with pytest.raises(BackendError) as exc:
+            backend.accept_terms()
+        assert exc.value.code == 3 and calls == []
+
+    def test_login_that_stops_at_the_terms_keeps_the_login_and_names_the_terms(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = _cred_backend(make_backend_context, tmp_path)
+        monkeypatch.setattr(
+            backend,
+            "_run_module",
+            _auth_runner([], {"refresh_token": "NEW", "member_no": "42"}, code=5),
+        )
+        with pytest.raises(BackendError) as exc:
+            backend.login()
+        assert exc.value.code == 5
+        assert exc.value.message == CznBackend.TERMS_MESSAGE
+        assert backend._refresh_token == "NEW"  # logged in; only the terms are missing
+
+    def test_the_policy_link_is_the_one_stove_gives_for_this_game(self):
+        assert CznBackend.TERMS_URL == (
+            "https://policy.onstove.com/?inflow_path=LAUNCHER&show_play_button=Y"
+            "&game_id=STOVE_CHAOSZERO&lang=en"
+        )
+        assert CznBackend.TERMS_URL in czn_backend.AUTH_EXIT_MESSAGES[5]
+
+
 class TestCredentialStorage:
     def test_remember_off_persists_nothing(self, make_backend_context, tmp_path, fake_keyring):
         backend = _cred_backend(make_backend_context, tmp_path, remember=False)
@@ -2590,6 +2760,18 @@ class TestExitCodeMapping:
         assert exc.value.code == 4
         assert exc.value.message == czn_backend.AUTH_EXIT_MESSAGES[4]
 
+    def test_login_maps_exit_5_to_the_game_terms_message(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = _cred_backend(make_backend_context, tmp_path)
+        monkeypatch.setattr(backend, "_run_module", _auth_runner([], None, code=5))
+        with pytest.raises(BackendError) as exc:
+            backend.login()
+        assert exc.value.code == 5
+        assert exc.value.message == czn_backend.AUTH_EXIT_MESSAGES[5]
+        assert "terms" in exc.value.message.lower()
+        assert "try again in a minute" not in exc.value.message
+
     def test_launch_token_refresh_uses_the_auth_table(
         self, make_backend_context, tmp_path, monkeypatch
     ):
@@ -3755,6 +3937,26 @@ class TestImpl2CznFixes:
 
         assert exc.value.code == 3
         assert "expired or was used elsewhere" in exc.value.message
+        assert "log in first" not in exc.value.message
+
+    def test_launch_stopped_by_the_terms_offers_them_instead_of_log_in_first(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        _install_game(backend.prefix())
+        (backend.prefix() / "drive_c").mkdir(parents=True, exist_ok=True)
+        stub = backend._stub()
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_bytes(b"MZ")
+        monkeypatch.setenv("CZN_SKIP_UPDATE", "1")
+        backend._refresh_token = "saved-token"
+        monkeypatch.setattr(backend, "_mint_session", lambda: 5)
+
+        with pytest.raises(BackendError) as exc:
+            backend.launch()
+
+        assert exc.value.code == 5
+        assert exc.value.message == CznBackend.TERMS_MESSAGE
         assert "log in first" not in exc.value.message
 
     def test_enabling_remember_without_a_live_login_reports_the_keyring(

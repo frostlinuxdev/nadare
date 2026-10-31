@@ -308,8 +308,8 @@ Syncs are parallel and keep-alive by default: `yostar.sync(..., workers=N)`
 fetches up to 16 files at once (default 6) over per-thread reused HTTP(S)
 connections, and the CRC-64/XZ is computed from the bytes as they are written
 (liblzma's `lzma_crc64` via ctypes when available, else a pure-Python table), so
-no second read is needed. The `download_workers` profile option (1-16, set in
-Settings) selects the worker count for `arknights-yostar`, `stellasora-yostar`
+no second read is needed. The `download_workers` profile option (1-16, config-only: see
+`CONFIG-ONLY-OPTIONS.md`) selects the worker count for `arknights-yostar`, `stellasora-yostar`
 and the `direct-*` catalog backends. Progress is aggregated and emitted at most
 every 250 ms with `speed_bps`/`eta_s`.
 

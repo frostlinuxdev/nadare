@@ -385,13 +385,13 @@ def test_settings_shows_the_rebuild_button_only_for_managed_prefixes(tmp_path, q
         managed = Config.load(tmp_path / "managed.json")
         managed.add_profile("czn", backend="stove-czn")
         page.load(managed, "czn")
-        assert page.remake_prefix_btn.isVisibleTo(page)
+        assert page.remake_prefix_btn.isVisibleTo(page.tabs.widget(1))
         assert "not deleted" in page.remake_prefix_btn.toolTip()
 
         wine = Config.load(tmp_path / "wine.json")
         wine.add_profile("wine", backend="wine")
         page.load(wine, "wine")
-        assert not page.remake_prefix_btn.isVisibleTo(page)
+        assert not page.remake_prefix_btn.isVisibleTo(page.tabs.widget(1))
     finally:
         page.deleteLater()
         qapp.processEvents()

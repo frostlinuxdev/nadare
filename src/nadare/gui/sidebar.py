@@ -17,6 +17,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFontMetrics
 from PyQt6.QtWidgets import (
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QScrollArea,
@@ -98,6 +99,8 @@ class GameRow(QFrame):
         self._content_key: tuple[Any, ...] | None = None
         self.setObjectName("GameRow")
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName(str(title))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(ROW_HEIGHT)
         self.setToolTip(title)
@@ -145,6 +148,7 @@ class GameRow(QFrame):
         )
         self.title_label.setToolTip(title)
         self.setToolTip(title)
+        self.setAccessibleName(str(title))
         self.set_icon_art(None, title)
 
     def set_icon_art(self, art: Any, title: str) -> None:
@@ -165,6 +169,18 @@ class GameRow(QFrame):
         label = {"running": "Running", "update": "Update available"}.get(kind, "")
         self.dot.setAccessibleName(label)
         self.dot.setToolTip(label)
+        # Steam dims what is in the library but not on disk. Only a reported "not installed"
+        # dims: no status yet (the first probe is running) or an error keeps the normal look.
+        state = (status.state or "").strip().lower() if status is not None else ""
+        dim = state == "not_installed" and not _updatable(status)
+        self.title_label.setProperty("dim", "true" if dim else "false")
+        repolish(self.title_label)
+        if dim and self.icon.graphicsEffect() is None:
+            effect = QGraphicsOpacityEffect(self.icon)
+            effect.setOpacity(0.45)
+            self.icon.setGraphicsEffect(effect)
+        elif not dim and self.icon.graphicsEffect() is not None:
+            self.icon.setGraphicsEffect(None)
 
     def set_active(self, active: bool) -> None:
         value = "true" if active else "false"
@@ -180,6 +196,14 @@ class GameRow(QFrame):
             self.clicked.emit(self.profile)
         super().mouseReleaseEvent(event)
 
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """Enter/Space open the game, like a library card."""
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.clicked.emit(self.profile)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
 
 class SidebarGames(QWidget):
     """Scrollable list of installed games, ordered running-first then A-Z."""
@@ -192,6 +216,7 @@ class SidebarGames(QWidget):
         self._profiles: dict[str, dict[str, Any]] = {}
         self._statuses: dict[str, Status] = {}
         self._active = ""
+        self._hide_uninstalled = False
         self._rows: dict[str, GameRow] = {}
         self._images = ImageLoader(capacity=128, parent=self)
         self._icon_tokens: dict[str, tuple] = {}
@@ -240,11 +265,27 @@ class SidebarGames(QWidget):
 
     def set_status(self, profile: str, status: Status) -> None:
         """Record one backend status result and refresh the list live."""
+        previous_order = list(self._rows)
         self._statuses[profile] = status
-        self._rebuild()
+        if self._ordered() != previous_order:
+            self._rebuild()
+            return
+        row = self._rows.get(profile)
+        if row is not None:
+            row.set_state(status)
+
+    def set_hide_uninstalled(self, hide: bool) -> None:
+        """Hide games that are known not to be installed (the open game always stays)."""
+        if bool(hide) != self._hide_uninstalled:
+            self._hide_uninstalled = bool(hide)
+            self._rebuild()
 
     def set_active(self, profile: str) -> None:
         self._active = profile or ""
+        # The open game is never hidden: leaving it may hide it again.
+        if self._ordered() != list(self._rows):
+            self._rebuild()
+            return
         for name, row in self._rows.items():
             row.set_active(name == self._active)
 
@@ -257,10 +298,23 @@ class SidebarGames(QWidget):
         return list(self._rows)
 
     # ---- rendering ---------------------------------------------------------
+    def _hidden(self, name: str, status: Status | None) -> bool:
+        # Only a reported "not installed" hides a row: a game with no status yet (the first
+        # probe is still running) or an error state stays visible.
+        return (
+            self._hide_uninstalled
+            and name != self._active
+            and status is not None
+            and (status.state or "").strip().lower() == "not_installed"
+            and not _updatable(status)
+        )
+
     def _ordered(self) -> list[str]:
         entries: list[tuple[int, str, str]] = []
         for name in self._profiles:
             status = self._statuses.get(name)
+            if self._hidden(name, status):
+                continue
             if _running(status):
                 rank = 0
             elif is_installed(status):

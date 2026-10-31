@@ -78,6 +78,15 @@ def safe_relative(path: str) -> str:
     return norm
 
 
+def _resolve_inside(root: Path, rel: str) -> Path:
+    """Resolve ``rel`` under ``root``, refusing any escape through a symlink."""
+    target = (root / rel).resolve()
+    base = root.resolve()
+    if target != base and base not in target.parents:
+        raise JournalError(f"journal path escapes root: {rel!r}")
+    return target
+
+
 class Transaction:
     """A durable, reversible set of file operations under ``root``."""
 
@@ -119,12 +128,7 @@ class Transaction:
 
     # ---- path helpers ------------------------------------------------------
     def _target(self, rel: str) -> Path:
-        rel = safe_relative(rel)
-        target = (self.root / rel).resolve()
-        root = self.root.resolve()
-        if target != root and root not in target.parents:
-            raise JournalError(f"journal path escapes root: {rel!r}")
-        return target
+        return _resolve_inside(self.root, safe_relative(rel))
 
     @staticmethod
     def _temporary(index: int) -> str:
@@ -293,6 +297,7 @@ class Transaction:
             if not isinstance(op, dict):
                 raise JournalError("invalid journal operation")
             rel = safe_relative(str(op.get("path", "")))
+            _resolve_inside(root_p, rel)
             if rel in seen:
                 raise JournalError(f"duplicate journal path: {rel}")
             seen.add(rel)

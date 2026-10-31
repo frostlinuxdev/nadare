@@ -26,7 +26,10 @@ if str(_SRC) not in sys.path:
 
 @pytest.fixture(autouse=True)
 def _isolated_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> None:
     """Redirect HOME/XDG and force the plaintext secret fallback.
 
@@ -42,7 +45,15 @@ def _isolated_environment(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg / "state"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(xdg / "cache"))
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    # Outside tmp_path (some tests list it). Without a real folder the single-instance socket
+    # falls back to one name shared by every parallel worker.
+    runtime = tmp_path_factory.mktemp("runtime")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+
+    # The desktop session the tests run in must not change what they expect (the Steam Set up
+    # checklist has an extra step on a Wayland session); a test that needs one sets it itself.
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
 
     # Never talk to a real keyring during tests; use the documented fallback.
     monkeypatch.setenv("NADARE_NO_KEYRING", "1")
@@ -143,3 +154,61 @@ def _fresh_wineserver_cooldown() -> None:
     from nadare.backends import wine
 
     wine._WINESERVER_KILLED.clear()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _one_qapplication():
+    """Keep one QApplication alive for the whole run.
+
+    PyQt destroys the C++ application when the last Python reference goes, and the
+    module-scoped ``qapp`` fixtures drop theirs at module teardown while widgets may
+    still exist. One session-wide reference makes that teardown deterministic.
+    """
+    try:
+        from PyQt6.QtWidgets import QApplication
+    except ImportError:  # PyQt-less interpreters skip the GUI tests anyway
+        yield None
+        return
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_message_boxes():
+    """Sweep QMessageBoxes a test built but never ran.
+
+    Tests replace ``QMessageBox.exec`` with a stub far more often than they show a box. A
+    never-shown box left alive makes the next app-wide ``setStyleSheet`` (the runtime font
+    refresh in ``theme.apply_theme``) segfault in Qt's ``QMessageBox::changeEvent`` ->
+    ``setIcon`` -> ``QGridLayout::addWidget`` path. Only boxes are swept here: flushing every
+    deferred delete would also tear down windows whose worker threads are still winding down.
+    """
+    yield
+    try:
+        from PyQt6.QtCore import QEvent
+        from PyQt6.QtWidgets import QApplication, QMessageBox
+    except ImportError:
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    for box in [w for w in QApplication.allWidgets() if isinstance(w, QMessageBox)]:
+        box.deleteLater()
+        QApplication.sendPostedEvents(box, QEvent.Type.DeferredDelete)
+    app.processEvents()
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_detached_workers():
+    """A test double left in the process-wide detached set must not reach the next test."""
+    yield
+    try:
+        from PyQt6.QtCore import QThread
+
+        from nadare.gui import workers
+    except ImportError:
+        return
+    for worker in list(workers._detached):
+        if isinstance(worker, QThread) and worker.isRunning():
+            continue  # never drop a running thread
+        workers._detached.discard(worker)

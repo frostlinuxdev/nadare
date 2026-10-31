@@ -433,8 +433,7 @@ class LibraryPage(QWidget):
             self.subtitle.setText("Choose a game to launch it, or add a new one.")
         else:
             self.subtitle.setText(
-                "No games yet. Click Add game to install your first one. You can add "
-                "Chaos Zero Nightmare, Arknights or Stella Sora."
+                "No games yet. Click Add game to open the Store and install your first one."
             )
         # Not adjustSize(): while the page is hidden (a removal runs from the game
         # page) that shrinks the container to one card wide, and nothing re-flows it.

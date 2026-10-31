@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from . import backends
+from . import backends, steamstore
 from .artwork import publisher_art_kinds
 from .directkinds import (
     ART,
@@ -78,6 +78,10 @@ def _catalog_rows() -> list[tuple[str, str, str, str]]:
             for kind, title, *_ in LAUNCHER_WIZARD
         ),
         *_LEGACY_ROWS,
+        *(
+            (game.kind, game.title, steamstore.DELIVERY_LABEL, TIER_VERIFIED)
+            for game in steamstore.store_games()
+        ),
     ]
 
 
@@ -122,10 +126,14 @@ def entries(
                 kind=kind,
                 title=title,
                 tier=game_tier,
-                tier_help=TIER_HELP[game_tier],
+                tier_help=steamstore.TIER_HELP
+                if steamstore.app_id_of(kind)
+                else TIER_HELP[game_tier],
                 delivery_label=delivery,
                 size_bytes=backends.install_size_hint(kind),
-                has_art=kind in ART or kind in publisher_art_kinds(),
+                has_art=kind in ART
+                or kind in publisher_art_kinds()
+                or steamstore.app_id_of(kind) is not None,
                 notice=backends.page_notice(kind),
                 installed=kind in installed_kinds,
                 group=group,

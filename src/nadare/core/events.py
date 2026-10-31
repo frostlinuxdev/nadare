@@ -23,7 +23,11 @@ _TOKEN_KEYS = re.compile(
 #: value is redacted: a short or punctuation-bearing secret would otherwise slip
 #: past the length heuristic below.
 _TOKEN_VALUE_RE = re.compile(
-    _TOKEN_KEYS.pattern + r"\s*[:=]\s*((?:(?:Bearer|Basic|Token|Digest)\s+)?\S+)"
+    _TOKEN_KEYS.pattern
+    # A quoted value runs to its closing quote (escapes allowed) plus anything glued to it,
+    # so a secret that itself contains a quote does not leak its tail.
+    + r"""\s*[:=]\s*((?:(?:Bearer|Basic|Token|Digest)\s+)?"""
+    + r"""(?:"(?:[^"\\]|\\.)*"\S*|'(?:[^'\\]|\\.)*'\S*|\S+))"""
 )
 
 #: A ``%(name)s`` / ``%(name)-10s`` placeholder must survive masking so that
@@ -120,6 +124,37 @@ def mask_known(text: str) -> str:
     """
     out = _USERINFO_RE.sub(f"{_REDACTED}@", text)
     return _TOKEN_VALUE_RE.sub(lambda m: f"{m.group(1)}={_REDACTED}", out)
+
+
+_TRACEBACK_STRUCTURE = (
+    "Traceback (most recent call last)",
+    "Stack (most recent call last)",
+    "During handling of the above exception",
+    "The above exception was the direct cause",
+)
+_EXCEPTION_LINE = re.compile(r"^([A-Za-z_][\w.]*)(?:(: )(.*))?$")
+
+
+def mask_traceback(text: str) -> str:
+    """Mask a formatted traceback but keep what makes it readable.
+
+    Frames and source lines are left alone, and an exception line keeps its type
+    (``FileNotFoundError: ...``): only the message is masked, so the log can still be searched
+    for the exception, while a token inside the message does not reach the file.
+    """
+    out: list[str] = []
+    for line in text.split("\n"):
+        if not line or line[0] in " \t" or line.startswith(_TRACEBACK_STRUCTURE):
+            out.append(line)
+            continue
+        match = _EXCEPTION_LINE.match(line)
+        if match is None:
+            out.append(mask(line))
+        elif match.group(2) is None:
+            out.append(line)  # a bare exception name
+        else:
+            out.append(f"{match.group(1)}{match.group(2)}{mask(match.group(3))}")
+    return "\n".join(out)
 
 
 def mask(text: str) -> str:

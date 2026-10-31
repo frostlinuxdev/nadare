@@ -13,6 +13,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from . import paths
+
 
 class RelinkError(ValueError):
     """The new place cannot be used; the message says why."""
@@ -149,6 +151,54 @@ def _inside_other(profiles: Mapping[str, Any], name: str | None, path: Path) -> 
     return None
 
 
+def _is_profile_dir(home: Path) -> bool:
+    """True for ``<data>/profiles/<id>``, the folder older Nadare kept a game in."""
+    try:
+        return _same(home.parent, paths.profiles_dir())
+    except OSError:
+        return False
+
+
+#: Profile keys ``plan_home_move`` re-roots when the folder moves.
+_REROOTED_KEYS = frozenset(
+    {"prefix", "install_dir", "installed_prefix", "prefix_backups", "owned_dirs", "owned_paths"}
+)
+
+
+def _strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Mapping):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _strings(item)
+
+
+def _profile_dir_moves_whole(profile: Mapping[str, Any], home: Path, *, exists: bool) -> bool:
+    """True when ``<data>/profiles/<id>`` holds nothing but the game and its prefix.
+
+    The backends keep their own state (sign-in, stubs, caches) in that folder, found by the game's
+    name, so moving it whole would strand that state in the library. Paths the profile keeps
+    elsewhere (an absolute exe, a script, an ``extra`` setting) inside it would be left pointing at
+    the old place. Either keeps the game on the prefix-only move.
+    """
+    if exists:
+        try:
+            if any(entry.name not in {"prefix", "install"} for entry in home.iterdir()):
+                return False
+        except OSError:
+            return False
+    for key, value in profile.items():
+        if key in _REROOTED_KEYS:
+            continue
+        for text in _strings(value):
+            if text.startswith(("/", "~")) and _under(_absolute(text), home) is not None:
+                return False
+    return True
+
+
 def _legacy_dirs(owned: list[Any], prefix: str, install: str) -> list[str]:
     """The home of a profile older Nadare made, which recorded no ``owned_dirs``.
 
@@ -157,7 +207,9 @@ def _legacy_dirs(owned: list[Any], prefix: str, install: str) -> list[str]:
     taken to be that layout; anything else is left to the user.
     """
     home = Path(prefix).expanduser().parent
-    if Path(prefix).name != "prefix" or home.parent.name != "Nadare":
+    if Path(prefix).name != "prefix" or not (
+        home.parent.name == "Nadare" or _is_profile_dir(home)
+    ):
         return []
     if install and (Path(install).expanduser() != home / "install" or "install_dir" not in owned):
         return []
@@ -189,13 +241,52 @@ def managed_home(profile: dict[str, Any], *, exists: bool = True) -> Path | None
             continue
         if install and _under(Path(install).expanduser(), home) is None:
             continue
+        # A game kept in Nadare's own profiles folder may not have its game folder yet (a launcher
+        # installs it later); a Nadare/<Game> layout must have both.
+        waits = _is_profile_dir(home)
+        if waits and not _profile_dir_moves_whole(profile, home, exists=exists):
+            continue
         if exists and not (
             Path(prefix).expanduser().is_dir()
-            and (not install or Path(install).expanduser().is_dir())
+            and (not install or waits or Path(install).expanduser().is_dir())
         ):
             continue  # a half-missing layout cannot move as one unit: re-rooting would fail
         return home
     return None
+
+
+def home_name(profile: Mapping[str, Any], home: Path) -> str:
+    """The folder name a game gets in a library: its own for ``Nadare/<Game>``, else its title.
+
+    A game kept in Nadare's profiles folder is named by an id (``nikke-goddess-of-victory``); in
+    a library it takes its title, as Add Game would name it. A title cannot reach outside the
+    library, so path separators are dropped.
+    """
+    if home.parent.name == "Nadare" or not _is_profile_dir(home):
+        return home.name
+    title = str(profile.get("title") or "").replace("/", " ").replace("\\", " ").strip(" .")
+    return " ".join(title.split()) or home.name
+
+
+def prefix_destination(profile: Mapping[str, Any], old: Path, parent: str | Path) -> Path:
+    """Where a prefix-only move puts the prefix inside the folder the user picked.
+
+    A folder just called ``prefix`` says nothing about the game, and two games moved into the same
+    folder would collide, so it is named ``<Title> prefix``. A folder the user named is kept.
+    Taken names get `` 2``, `` 3``.
+    """
+    base = Path(parent).expanduser()
+    name = old.name
+    if name == "prefix":
+        title = str(profile.get("title") or "").replace("/", " ").replace("\\", " ")
+        title = " ".join(title.strip(" .").split())
+        name = f"{title} prefix" if title else name
+    candidate = base / name
+    index = 2
+    while candidate.exists() or candidate.is_symlink():
+        candidate = base / f"{name} {index}"
+        index += 1
+    return candidate
 
 
 def free_home(library: str | Path, name: str, profiles: Mapping[str, Any]) -> Path:
@@ -226,7 +317,7 @@ def check_home_target(
     if home is None:
         raise RelinkError("This game's folders were not laid out by Nadare.")
     chosen = _absolute(library)
-    if _same(chosen / "Nadare" / home.name, home):
+    if _same(chosen / "Nadare" / home_name(profile, home), home):
         raise RelinkError("The game is already there. Pick a different folder.")
     if _under(chosen, home) is not None:
         raise RelinkError("That folder is inside the game's own folder. Pick another one.")
@@ -242,7 +333,9 @@ def check_home_target(
             raise RelinkError(f"That folder is inside {who}'s files. Pick another one.")
 
 
-def plan_home_move(profile: dict[str, Any], new_home: str | Path) -> Relink:
+def plan_home_move(
+    profile: dict[str, Any], new_home: str | Path, *, install_existed: bool = True
+) -> Relink:
     """What changes after Nadare moved the whole ``Nadare/<Game>`` folder to ``new_home``.
 
     Every path under the old folder is re-rooted, the ownership records follow (Nadare made the
@@ -267,7 +360,7 @@ def plan_home_move(profile: dict[str, Any], new_home: str | Path) -> Relink:
     if not prefix.is_dir() or not _has_drive_c(prefix):
         raise RelinkError(f"The prefix did not arrive at the new place ({prefix}).")
     install = changes.get("install_dir")
-    if install and not Path(install).is_dir():
+    if install and install_existed and not Path(install).is_dir():
         raise RelinkError(f"The game folder did not arrive at the new place ({install}).")
     notes.append(f"Wine prefix: {prefix}")
     if install:

@@ -40,11 +40,13 @@ def test_command_hint_uses_nadare_outside_a_package(monkeypatch):
     assert command_hint("doctor") == "nadare doctor"
 
 
-def test_remember_notice_names_the_appimage_command(appimage):
+def test_remember_notice_is_plain_and_actionable(appimage):
     from nadare.backends.czn.backend import REMEMBER_NOTICE
 
-    assert f"{APPIMAGE} doctor" in REMEMBER_NOTICE
-    assert "nadare doctor" not in REMEMBER_NOTICE
+    assert "Remember me unavailable" in REMEMBER_NOTICE
+    assert "keyring" not in REMEMBER_NOTICE.lower()
+    assert "doctor" not in REMEMBER_NOTICE.lower()
+    assert "sign in again" in REMEMBER_NOTICE
 
 
 def test_add_game_fgo_tooltip_names_the_appimage_command(appimage):

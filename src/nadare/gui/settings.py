@@ -10,12 +10,14 @@ scan of the Nadare runners directory when that module is unavailable.
 from __future__ import annotations
 
 import copy
+import re
 import shlex
 from pathlib import Path
 from typing import Any
 
 from PyQt6 import sip
-from PyQt6.QtCore import QObject, Qt, QThreadPool, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, QThreadPool, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -29,16 +31,19 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from ..core import community, monitors
 from ..core import process as process_core
 from ..core import relink as relink_core
 from ..core import relocate as relocate_core
 from ..core import runners as runners_core
-from ..core.backends import BackendError, Option, kinds, supports_remember_me
+from ..core.backends import BackendError, Option, config_only, kinds, supports_remember_me
 from ..core.backends import create as create_backend
 from ..core.backends import get as backend_get
 from ..core.config import Config
@@ -58,6 +63,12 @@ LEGACY_PROFILE_KEYS = {"runner": "proton_runner", "prefix": "wineprefix"}
 
 #: Native language names for the picker; an unknown code shows as-is.
 LANGUAGE_NAMES = {"en": "English"}
+
+#: Help under the Settings "Remember me" tick.
+REMEMBER_HINT = (
+    "Keeps you logged in on this device, so you do not need to sign in each time. "
+    "Off by default; turning it off deletes the saved login when you press Save."
+)
 
 
 def _runner_label(path: Path) -> str:
@@ -101,6 +112,50 @@ def _env_to_text(value: Any) -> str:
     return "\n".join(f"{key}={val}" for key, val in sorted(value.items()))
 
 
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_ENV_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def args_env_warning(text: str) -> str | None:
+    """Explain why environment text in Launch arguments will not work, else ``None``.
+
+    The field is argv appended after the executable, so Steam's
+    ``VAR=value %command%`` reaches the game as plain arguments (#779). A
+    ``KEY=value`` token is only flagged when the key is upper case with no leading
+    dash, so ``--width=1920`` and ``-logFile=a`` pass.
+    """
+    try:
+        tokens = shlex.split(text)
+    except ValueError:
+        return None
+    if "%command%" in tokens or any(
+        _ENV_TOKEN.match(token) and token.split("=", 1)[0].isupper() for token in tokens
+    ):
+        return (
+            "Launch arguments: this looks like environment variables (KEY=value or "
+            "%command%), which the game receives as plain arguments and ignores. Put "
+            "variables in the Environment field instead."
+        )
+    return None
+
+
+def _fill_monitor_combo(combo: QComboBox, saved: Any = None) -> None:
+    """Fill ``combo`` with Auto and the connected monitors.
+
+    A saved name that is not connected here (a config copied from another PC) stays
+    in the list, marked, so saving does not silently drop the choice.
+    """
+    name = str(saved or "").strip()
+    combo.clear()
+    combo.addItem("Auto", "")
+    listed = set()
+    for monitor in monitors.connected():
+        combo.addItem(monitor.label, monitor.name)
+        listed.add(monitor.name)
+    if name and name != "auto" and name not in listed:
+        combo.addItem(f"{name} (not connected)", name)
+
+
 def _text_to_env(text: str, warnings: list[str] | None = None) -> dict[str, str]:
     """Parse ``KEY=VALUE`` lines into a mapping (blank lines ignored).
 
@@ -114,8 +169,13 @@ def _text_to_env(text: str, warnings: list[str] | None = None) -> dict[str, str]
             continue
         key, sep, value = line.partition("=")
         key = key.strip()
-        if sep and key:
+        if sep and _ENV_NAME.fullmatch(key):
             out[key] = value.strip()
+        elif sep and key and warnings is not None:
+            warnings.append(
+                f"Environment: '{key}' is not a valid variable name (letters, digits and "
+                "underscores, not starting with a digit), so the line was not saved."
+            )
         elif warnings is not None:
             warnings.append(
                 f"Environment: '{line}' is not KEY=VALUE, so it was not saved. "
@@ -159,6 +219,7 @@ class SettingsPage(QWidget):
     remake_prefix_requested = pyqtSignal(str)  # profile name
     report_requested = pyqtSignal(str)
     logs_requested = pyqtSignal(str)
+    system_check_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -215,15 +276,13 @@ class SettingsPage(QWidget):
         intro.addWidget(subtitle)
         root.addLayout(intro)
 
-        # Scroll so the grouped cards never clip on short displays.
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        content = QWidget()
-        content.setObjectName("SettingsContent")
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(2, 2, 2, 2)
-        content_layout.setSpacing(16)
+        # One tab per area. Each tab scrolls on its own so the cards never clip on short displays.
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.tabBar().setDrawBase(False)
+        general_layout = self._tab_page("General")
+        game_layout = self._tab_page("Game")
+        launcher_tab_layout = self._tab_page("Nadare (all games)")
 
         # ---- profile --------------------------------------------------------
         profile_card, profile_form = self._section(
@@ -238,23 +297,20 @@ class SettingsPage(QWidget):
         self._backend_kind = ""
         profile_form.addRow("Profile ID", self.profile_name)
         profile_form.addRow("Title", self.title)
-        content_layout.addWidget(profile_card)
+        general_layout.addWidget(profile_card)
 
         # ---- account --------------------------------------------------------
         account_card, account_form = self._section(
             "Account", "Whether this device remembers the STOVE login for this game."
         )
         self.remember = QCheckBox("Remember me on this device")
-        self.remember_hint = QLabel(
-            "Stores the login in your system keyring. Off by default; turning it off "
-            "removes the saved login when you press Save."
-        )
+        self.remember_hint = QLabel(REMEMBER_HINT)
         self.remember_hint.setObjectName("Subtitle")
         self.remember_hint.setWordWrap(True)
         account_form.addRow("", self.remember)
         account_form.addRow("", self.remember_hint)
         self.account_card = account_card
-        content_layout.addWidget(account_card)
+        general_layout.addWidget(account_card)
 
         # ---- game files -----------------------------------------------------
         files_card, files_form = self._section(
@@ -294,7 +350,20 @@ class SettingsPage(QWidget):
         )
         files_form.addRow("Wine prefix", self.remake_prefix_btn)
         self._remake_prefix_row = files_form.rowCount() - 1
-        content_layout.addWidget(files_card)
+        open_row = QWidget()
+        open_layout = QHBoxLayout(open_row)
+        open_layout.setContentsMargins(0, 0, 0, 0)
+        self.open_game_button = QPushButton("Open game folder")
+        self.open_game_button.setObjectName("GhostButton")
+        self.open_game_button.clicked.connect(self._open_game_folder)
+        self.open_prefix_button = QPushButton("Open Wine prefix")
+        self.open_prefix_button.setObjectName("GhostButton")
+        self.open_prefix_button.clicked.connect(self._open_prefix_folder)
+        open_layout.addWidget(self.open_game_button)
+        open_layout.addWidget(self.open_prefix_button)
+        open_layout.addStretch(1)
+        files_form.addRow("Open", open_row)
+        game_layout.addWidget(files_card)
 
         # ---- game options ---------------------------------------------------
         options_card, options_form = self._section(
@@ -324,7 +393,7 @@ class SettingsPage(QWidget):
         self._options_host_layout.setSpacing(0)
         options_form.addRow(self._options_host)
         self.options_card = options_card
-        content_layout.addWidget(options_card)
+        game_layout.addWidget(options_card)
 
         # ---- appearance -----------------------------------------------------
         appearance_card, appearance_form = self._section(
@@ -336,29 +405,67 @@ class SettingsPage(QWidget):
             "Custom background",
             self._with_browse(self.background, "image", clear=True, fetch=True),
         )
-        content_layout.addWidget(appearance_card)
+        general_layout.addWidget(appearance_card)
 
         # ---- launcher -------------------------------------------------------
         launcher_card, launcher_form = self._section(
-            "Launcher", "Shared options for the whole installation."
+            "Nadare — all games",
+            "These settings belong to Nadare itself and apply to every game in Nadare, "
+            "not only this one.",
         )
         self.language = QComboBox()
         for code in i18n.available():
             self.language.addItem(LANGUAGE_NAMES.get(code, code), code)
         self.language_label = QLabel("Language")
         self.check_updates = QCheckBox("Check for launcher and game updates")
+        self.hide_uninstalled = QCheckBox("Hide games that are not installed in the sidebar")
         launcher_form.addRow(self.language_label, self.language)
         launcher_form.addRow("", self.check_updates)
+        launcher_form.addRow("", self.hide_uninstalled)
+        self.default_monitor = QComboBox()
+        self.default_monitor.setToolTip(
+            "The monitor every game opens on, unless a game has its own choice. "
+            "Works only with native Wayland. Steam games are not affected."
+        )
+        _fill_monitor_combo(self.default_monitor)
+        launcher_form.addRow("Monitor for all games", self.default_monitor)
+        self.default_monitor_hint = QLabel(
+            "Applies to all games, not to one installation. A game's own Monitor setting "
+            "wins; Steam games are not affected. Works only with native Wayland."
+        )
+        self.default_monitor_hint.setObjectName("Muted")
+        self.default_monitor_hint.setWordWrap(True)
+        launcher_form.addRow("", self.default_monitor_hint)
+        # In the body, not the footer: at the minimum window width the footer already clips.
+        self.system_check_button = QPushButton("System check")
+        self.system_check_button.setObjectName("GhostButton")
+        self.system_check_button.setToolTip(
+            "Check graphics, Vulkan and runners. Nothing is changed or uploaded."
+        )
+        self.system_check_button.clicked.connect(self.system_check_requested)
+        self.system_check_button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        launcher_form.addRow("", self.system_check_button)
+        self.discord_button = QPushButton("Join our Discord")
+        self.discord_button.setObjectName("GhostButton")
+        self.discord_button.setToolTip("Open the Nadare community on Discord in your browser.")
+        self.discord_button.clicked.connect(self._open_discord)
+        self.discord_button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        launcher_form.addRow("", self.discord_button)
+        self.open_config_button = QPushButton("Open config file")
+        self.open_config_button.setObjectName("GhostButton")
+        self.open_config_button.setToolTip("Open the file where Nadare keeps all your settings.")
+        self.open_config_button.clicked.connect(self._open_config_file)
+        self.open_config_button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        launcher_form.addRow("", self.open_config_button)
         # With a single shipped locale the picker is meaningless: hide the row
         # until a second catalogue makes it actionable.
         multiple_languages = len(i18n.available()) > 1
         self.language_label.setVisible(multiple_languages)
         self.language.setVisible(multiple_languages)
-        content_layout.addWidget(launcher_card)
-        content_layout.addStretch(1)
-
-        scroll.setWidget(content)
-        root.addWidget(scroll, 1)
+        launcher_tab_layout.addWidget(launcher_card)
+        for layout in (general_layout, game_layout, launcher_tab_layout):
+            layout.addStretch(1)
+        root.addWidget(self.tabs, 1)
 
         footer = QHBoxLayout()
         self.remove_button = QPushButton("Remove from library…")
@@ -386,6 +493,59 @@ class SettingsPage(QWidget):
         footer.addWidget(save)
         root.addLayout(footer)
 
+    def _tab_page(self, title: str) -> QVBoxLayout:
+        """Add a scrolling tab called ``title`` and return the layout its cards go into."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        content.setObjectName("SettingsContent")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(2, 12, 2, 2)
+        layout.setSpacing(16)
+        scroll.setWidget(content)
+        self.tabs.addTab(scroll, title)
+        return layout
+
+    def _open_path(self, path: str, what: str) -> None:
+        """Open ``path`` in the desktop's file manager/editor, or say why not."""
+        text = path.strip()
+        if not text:
+            self.note.setText(f"No {what} is set yet.")
+            return
+        target = Path(text).expanduser()
+        if not target.exists():
+            self.note.setText(f"The {what} does not exist yet: {target}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
+    def _open_game_folder(self) -> None:
+        self._open_path(self.install_dir.text(), "game folder")
+
+    def _open_prefix_folder(self) -> None:
+        editor = self._option_widgets.get("prefix")
+        text = editor.text() if isinstance(editor, QLineEdit) else ""
+        self._open_path(text or self._probed_prefix, "Wine prefix")
+
+    def _open_discord(self) -> None:
+        """Look up the invite off the GUI thread (it may ask the index), then open it."""
+        self.discord_button.setEnabled(False)
+        task = CallTask(community.discord_url)
+        task.signals.done.connect(self._discord_ready)
+        task.signals.failed.connect(lambda _message: self._discord_ready(None))
+        QThreadPool.globalInstance().start(task)
+
+    def _discord_ready(self, url: object) -> None:
+        self.discord_button.setEnabled(True)
+        if not community.is_discord_invite(url):
+            url = community.DISCORD_FALLBACK  # never open anything that is not an invite
+        QDesktopServices.openUrl(QUrl(str(url)))
+
+    def _open_config_file(self) -> None:
+        if self._config is None:
+            return
+        self._open_path(str(self._config.path), "config file")
+
     def _request_back(self) -> None:
         """Leave Settings, asking first when the form has unsaved edits."""
         if self._has_unsaved_changes():
@@ -408,6 +568,8 @@ class SettingsPage(QWidget):
             "remember": self.remember.isChecked(),
             "language": self.language.currentData(),
             "check_updates": self.check_updates.isChecked(),
+            "hide_uninstalled": self.hide_uninstalled.isChecked(),
+            "default_monitor": self.default_monitor.currentData(),
         }
         for key, widget in self._option_widgets.items():
             if key == "runner":
@@ -610,9 +772,12 @@ class SettingsPage(QWidget):
     def _backend_options(kind: str) -> tuple[Option, ...]:
         """The declared options for ``kind`` (empty for unknown backends)."""
         try:
-            return backend_get(kind).options
+            options = backend_get(kind).options
         except Exception:  # noqa: BLE001 - an unknown backend simply has none
             return ()
+        # Config-only options keep working from the profile but get no editor, so a
+        # Save never touches them (#778).
+        return tuple(option for option in options if not config_only(kind, option.key))
 
     def option_widget(self, key: str) -> QWidget | None:
         """The editor widget for an option key, or ``None`` when not shown."""
@@ -667,6 +832,8 @@ class SettingsPage(QWidget):
                 row_widget = self._with_help(option, row_widget)
             form.addRow(label, row_widget)
             self._option_rows.append((option.advanced, form.rowCount() - 1))
+        self.open_game_button.setVisible(has_install_dir)
+        self.open_prefix_button.setVisible(any(option.key == "prefix" for option in options))
         self._apply_advanced(self.show_advanced.isChecked())
 
     def _restore_option_defaults(self) -> None:
@@ -777,6 +944,10 @@ class SettingsPage(QWidget):
             for label, value in option.choices or ():
                 editor.addItem(label, value)
             return editor, editor
+        if kind == "monitor":
+            editor = QComboBox()
+            _fill_monitor_combo(editor)
+            return editor, editor
         if kind == "runner":
             return self.runner, self.runner
         editor = QLineEdit()
@@ -849,11 +1020,11 @@ class SettingsPage(QWidget):
         self.relink_button.setEnabled(locked and self._game_idle)
         self.move_button.setVisible(locked)
         self.move_button.setEnabled(locked and self._game_idle and not self._moving)
+        self.move_button.setText(self._move_label())
         self.move_button.setToolTip(
             "Available once Nadare has confirmed the game is not running."
             if not self._game_idle
-            else "Move the Wine prefix to another folder. Nadare keeps your original "
-            "if it has to copy to another disk."
+            else self._move_tip()
         )
         self.relink_button.setToolTip(
             "Available once Nadare has confirmed the game is not running."
@@ -1042,6 +1213,25 @@ class SettingsPage(QWidget):
         button.clicked.connect(self._move_prefix)
         return button
 
+    def _managed_home(self) -> Path | None:
+        config, name = self._config, self._profile
+        data = config.profiles.get(name) if config is not None and name else None
+        return relink_core.managed_home(data) if isinstance(data, dict) else None
+
+    def _move_label(self) -> str:
+        return "Move game and prefix…" if self._managed_home() else "Move prefix only…"
+
+    def _move_tip(self) -> str:
+        if self._managed_home():
+            return (
+                "Move the game folder and its Wine prefix together into a library folder you "
+                "pick. Nadare keeps your original if it has to copy to another disk."
+            )
+        return (
+            "Move only the Wine prefix to another folder; the game folder stays where it is. "
+            "Nadare keeps your original if it has to copy to another disk."
+        )
+
     def _move_prefix(self) -> None:
         """Move the prefix (and the game folder inside it) to a folder the user picks."""
         config, name = self._config, self._profile
@@ -1094,7 +1284,14 @@ class SettingsPage(QWidget):
         )
         if not parent:
             return False
-        dst = Path(parent) / old.name
+        if Path(parent).resolve() == old.parent.resolve():
+            QMessageBox.warning(
+                self,
+                "Wine prefix",
+                "The prefix is already in that folder. Pick a different folder.",
+            )
+            return False
+        dst = relink_core.prefix_destination(data, old, parent)
         message = (
             f"Move {old} to {dst}?\n\nOn the same disk this is instant. On another disk "
             "Nadare copies it, checks the copy, and keeps your original, so you can delete "
@@ -1112,8 +1309,9 @@ class SettingsPage(QWidget):
     def _ask_and_move_home(self, config: Config, name: str, home: Path) -> bool:
         """Move a game Nadare laid out as ``<library>/Nadare/<Game>`` as one unit."""
         data = config.profiles[name]
+        title = data.get("title") or name
         library = QFileDialog.getExistingDirectory(
-            self, "Move the game into which folder?", str(home.parent.parent)
+            self, f"Move {title} into which folder?", str(home.parent.parent)
         )
         if not library:
             return False
@@ -1122,22 +1320,35 @@ class SettingsPage(QWidget):
         except relink_core.RelinkError as exc:
             QMessageBox.warning(self, "Move the game", str(exc))
             return False
-        dst = relink_core.free_home(library, home.name, config.profiles)
-        answer = QMessageBox.question(
-            self,
-            "Move the game?",
+        dst = relink_core.free_home(library, relink_core.home_name(data, home), config.profiles)
+        install = str(data.get("install_dir") or "")
+        install_exists = bool(install) and Path(install).expanduser().is_dir()
+        text = (
             f"Move {home} to {dst}?\n\nThe game folder and its Wine prefix move together. "
             "On the same disk this is instant. On another disk Nadare copies them, checks the "
             "copy, and keeps your original, so you can delete it yourself when you are happy. "
-            "Nothing is deleted.",
+            "Nothing is deleted."
         )
+        if install and not install_exists:
+            text += (
+                "\n\nThe game folder does not exist yet (the game's own launcher installs it), "
+                f"so only the Wine prefix is copied now; the game will install into {dst}."
+            )
+        answer = QMessageBox.question(self, "Move the game?", text)
         if answer != QMessageBox.StandardButton.Yes:
             return False
-        self._run_move(config, name, home, dst, managed=True)
+        self._run_move(config, name, home, dst, managed=True, install_existed=install_exists)
         return True
 
     def _run_move(
-        self, config: Config, name: str, old: Path, dst: Path, *, managed: bool = False
+        self,
+        config: Config,
+        name: str,
+        old: Path,
+        dst: Path,
+        *,
+        managed: bool = False,
+        install_existed: bool = True,
     ) -> None:
         from PyQt6.QtWidgets import QProgressDialog
 
@@ -1148,7 +1359,13 @@ class SettingsPage(QWidget):
         self._move_running = True
         cancel = Cancel()
         signals = _MoveSignals(self)
-        dialog = QProgressDialog("Moving the Wine prefix…", "Cancel", 0, 100, self)
+        dialog = QProgressDialog(
+            "Moving the game and prefix…" if managed else "Moving the Wine prefix…",
+            "Cancel",
+            0,
+            100,
+            self,
+        )
         dialog.setWindowTitle("Moving")
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.setMinimumDuration(0)
@@ -1222,7 +1439,9 @@ class SettingsPage(QWidget):
             )
             try:
                 if managed:
-                    plan = relink_core.plan_home_move(config.profiles[name], dst)
+                    plan = relink_core.plan_home_move(
+                        config.profiles[name], dst, install_existed=install_existed
+                    )
                 else:
                     plan = relink_core.plan_relink(
                         config.profiles[name], dst, made_by_nadare=True
@@ -1327,6 +1546,10 @@ class SettingsPage(QWidget):
             if index < 0 and value not in (None, ""):
                 index = editor.findText(str(value))
             editor.setCurrentIndex(index if index >= 0 else 0)
+        elif kind == "monitor":
+            _fill_monitor_combo(editor, value)
+            index = editor.findData("" if value in (None, "auto") else str(value))
+            editor.setCurrentIndex(index if index >= 0 else 0)
         elif kind == "runner":
             text = str(value or "")
             if not self._reload_runners(text):
@@ -1353,6 +1576,10 @@ class SettingsPage(QWidget):
                         f"{option.label}: has an opening quote with no closing quote, so the "
                         "game will fail to start. Fix it and save again."
                     )
+                else:
+                    message = args_env_warning(value)
+                    if message:
+                        warnings.append(message)
             return value
         if kind == "env":
             return _text_to_env(editor.toPlainText(), warnings)
@@ -1369,7 +1596,7 @@ class SettingsPage(QWidget):
             return editor.value()
         if kind == "bool":
             return editor.isChecked()
-        if kind == "choice":
+        if kind in ("choice", "monitor"):
             return editor.currentData()
         if kind == "runner":
             text = editor.currentText().strip()
@@ -1382,7 +1609,7 @@ class SettingsPage(QWidget):
     @staticmethod
     def _is_default_option_value(option: Option, value: Any) -> bool:
         """Whether ``value`` means "use the backend default" for ``option``."""
-        if option.kind in ("text", "args", "path_dir", "path_file", "env"):
+        if option.kind in ("text", "args", "path_dir", "path_file", "env", "monitor"):
             if value in (None, "", {}):
                 return True
         return value == option.default
@@ -1412,6 +1639,7 @@ class SettingsPage(QWidget):
         self._config = config
         self._profile = profile
         self._pending_art = {}
+        self.tabs.setCurrentIndex(0)
         data = config.profile(profile)
 
         self.profile_name.setText(profile)
@@ -1446,8 +1674,36 @@ class SettingsPage(QWidget):
         lang_index = self.language.findData(language)
         self.language.setCurrentIndex(lang_index if lang_index >= 0 else 0)
         self.check_updates.setChecked(bool(config.data.get("check_updates", True)))
+        self.hide_uninstalled.setChecked(bool(config.data.get("sidebar_hide_uninstalled", False)))
+        saved_monitor = config.data.get("default_monitor")
+        _fill_monitor_combo(self.default_monitor, saved_monitor)
+        monitor_index = self.default_monitor.findData(str(saved_monitor or ""))
+        self.default_monitor.setCurrentIndex(monitor_index if monitor_index >= 0 else 0)
         self.note.setText(f"Saved in {config.path}")
         self._loaded_state = self._form_state()
+
+    def _confirm_environment(self, data: dict[str, Any]) -> bool:
+        """Ask before saving a changed, non-empty Environment; True means go ahead.
+
+        A wrong variable can stop a game launching, so a change needs a deliberate
+        yes. Unchanged or cleared text never asks.
+        """
+        editor = self._option_widgets.get("extra_env")
+        if editor is None:
+            return True
+        new = _text_to_env(editor.toPlainText())
+        old = self._option_value(data, "extra_env")
+        if not new or new == (old if isinstance(old, dict) else {}):
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Change Environment?",
+            "These variables change how the game starts, and a wrong one can stop it "
+            "from launching. Keep them?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     def save(self) -> None:
         if self._config is None or not self._profile:
@@ -1478,6 +1734,9 @@ class SettingsPage(QWidget):
             # The user typed a custom runner path/tag.
             runner_value = runner_text
 
+        if not self._confirm_environment(data):
+            return
+
         # The mutation and the write are taken under the config lock (as the
         # worker-side ``BackendContext.set`` does); otherwise a worker save can
         # serialise this profile dict while it is being changed.
@@ -1488,6 +1747,7 @@ class SettingsPage(QWidget):
                 _copy.deepcopy(data),
                 config.data.get("language"),
                 config.data.get("check_updates"),
+                config.data.get("sidebar_hide_uninstalled"),
             )
         warnings: list[str] = []
         custom_runner = not (
@@ -1543,6 +1803,11 @@ class SettingsPage(QWidget):
                     self.language.currentData() or i18n.DEFAULT_LANGUAGE
                 )
                 config.data["check_updates"] = bool(self.check_updates.isChecked())
+                config.data["sidebar_hide_uninstalled"] = bool(self.hide_uninstalled.isChecked())
+                if self.default_monitor.currentData():
+                    config.data["default_monitor"] = self.default_monitor.currentData()
+                else:
+                    config.data.pop("default_monitor", None)
                 for kind, path in self._pending_art.items():
                     artwork.record_thirdparty(data, path, kind)
                 config.save()
@@ -1550,7 +1815,11 @@ class SettingsPage(QWidget):
             with config.locked():
                 data.clear()
                 data.update(backup[0])
-                for key, old in zip(("language", "check_updates"), backup[1:], strict=True):
+                for key, old in zip(
+                    ("language", "check_updates", "sidebar_hide_uninstalled"),
+                    backup[1:],
+                    strict=True,
+                ):
                     if old is None:
                         config.data.pop(key, None)
                     else:

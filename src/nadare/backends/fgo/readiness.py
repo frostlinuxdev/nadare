@@ -446,7 +446,13 @@ def _gpu_check(probe: Probe) -> Check:
         if name and name not in vendors:
             vendors.append(name)
     if not vendors:
-        return Check("GPU", "info", True, f"no DRM render nodes found ({_GPU_NOTE})", "")
+        return Check(
+            "GPU",
+            "warning",
+            False,
+            f"no DRM render nodes found ({_GPU_NOTE})",
+            "FGO needs an NVIDIA or AMD GPU with a working driver; none was detected.",
+        )
     if vendors == ["Intel"]:
         return Check(
             "GPU",

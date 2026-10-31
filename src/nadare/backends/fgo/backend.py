@@ -196,6 +196,13 @@ class FgoLeptonBackend(GameBackend):
         if not report.get("ok"):
             missing_list = list(report.get("missing") or [])
             missing = "; ".join(missing_list)
+            if any("check-host.sh" in str(item) for item in missing_list):
+                raise BackendError(
+                    "lepton-fgo's check-host.sh was not found in "
+                    f"{self.adapter.repo}. Re-run the FGO install so Nadare downloads "
+                    "the bundled lepton-fgo release again, or point the profile's "
+                    "'repo' option (or $LEPTON_FGO_REPO) at a complete lepton-fgo checkout."
+                )
             message = (
                 f"host is missing required pieces: {missing}"
                 if missing

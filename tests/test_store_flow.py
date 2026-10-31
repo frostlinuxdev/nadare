@@ -292,6 +292,97 @@ def test_hero_for_the_shown_game_replaces_the_placeholder(tmp_path, qapp, monkey
         qapp.processEvents()
 
 
+def _by_kind(**paths):
+    return lambda profile, title=None, kind="cover": paths.get(kind)
+
+
+def test_a_wide_cover_stands_in_when_the_game_has_no_hero(tmp_path, qapp, monkeypatch):
+    cover = _red_image(tmp_path / "cover.png")  # 160x90, wide
+    monkeypatch.setattr(artwork, "fetch", _by_kind(cover=cover))
+    flow = StoreFlow()
+    try:
+        flow.show_detail("direct-aethergazer")
+        _settle(flow, qapp)
+        assert _is(_hero_colour(flow), "#ff0000")
+    finally:
+        flow.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_portrait_cover_still_stands_in_for_the_hero(tmp_path, qapp, monkeypatch):
+    image = QImage(90, 160, QImage.Format.Format_ARGB32)
+    image.fill(QColor("#ff0000"))
+    assert image.save(str(tmp_path / "portrait.png"))
+    monkeypatch.setattr(artwork, "fetch", _by_kind(cover=tmp_path / "portrait.png"))
+    flow = StoreFlow()
+    try:
+        flow.show_detail("direct-aethergazer")
+        _settle(flow, qapp)
+        assert _is(_hero_colour(flow), "#ff0000")  # the poster, whole, in the middle
+    finally:
+        flow.deleteLater()
+        qapp.processEvents()
+
+
+def _two_tone_image(path: Path, width: int, height: int, top: float) -> Path:
+    """A picture whose top ``top`` fraction is blue and the rest red."""
+    image = QImage(width, height, QImage.Format.Format_ARGB32)
+    image.fill(QColor("#ff0000"))
+    for y in range(int(height * top)):
+        for x in range(width):
+            image.setPixelColor(x, y, QColor("#0000ff"))
+    assert image.save(str(path))
+    return path
+
+
+def test_the_cover_reaches_the_banner_whole_not_pre_cropped(tmp_path, qapp, monkeypatch):
+    # The loader used to centre-crop every hero to 4:1 before the banner was built, which threw
+    # away the top of a 16:9 cover (logo, faces) that the banner keeps. A cover that is 40% blue
+    # on top must still show blue in the middle of the banner.
+    cover = _two_tone_image(tmp_path / "cover.png", 160, 90, 0.4)
+    monkeypatch.setattr(artwork, "fetch", _by_kind(cover=cover))
+    flow = StoreFlow()
+    try:
+        flow.show_detail("direct-aethergazer")
+        _settle(flow, qapp)
+        assert _is(_hero_colour(flow), "#0000ff")
+    finally:
+        flow.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_portrait_cover_reaches_the_banner_whole(tmp_path, qapp, monkeypatch):
+    # Top 40% blue: a whole poster centred in the banner shows its seam at 40% of the height, so
+    # the banner's top middle is blue; a poster pre-cropped to a sliver would be one colour.
+    cover = _two_tone_image(tmp_path / "poster.png", 90, 160, 0.4)
+    monkeypatch.setattr(artwork, "fetch", _by_kind(cover=cover))
+    flow = StoreFlow()
+    try:
+        flow.show_detail("direct-aethergazer")
+        _settle(flow, qapp)
+        image = flow.detail.hero_label.pixmap().toImage()
+        top = QColor(image.pixel(image.width() // 2, 4))
+        bottom = QColor(image.pixel(image.width() // 2, image.height() - 5))
+        assert _is(top, "#0000ff") and _is(bottom, "#ff0000")
+    finally:
+        flow.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_real_hero_wins_over_the_cover(tmp_path, qapp, monkeypatch):
+    hero = _red_image(tmp_path / "hero.png", "#0000ff")
+    cover = _red_image(tmp_path / "cover.png", "#ff0000")
+    monkeypatch.setattr(artwork, "fetch", _by_kind(hero=hero, cover=cover))
+    flow = StoreFlow()
+    try:
+        flow.show_detail("direct-aethergazer")
+        _settle(flow, qapp)
+        assert _is(_hero_colour(flow), "#0000ff")
+    finally:
+        flow.deleteLater()
+        qapp.processEvents()
+
+
 def test_a_hero_for_a_game_the_user_left_is_ignored(tmp_path, qapp, monkeypatch):
     colours = {"direct-pgr": _red_image(tmp_path / "a.png", "#ff0000"),
                "direct-nte": _red_image(tmp_path / "b.png", "#0000ff")}

@@ -53,9 +53,10 @@ def test_main_window_first_run_takes_half_the_screen(tmp_path, qapp):
     window = MainWindow(_empty_config(tmp_path))
     try:
         area = window.screen().availableGeometry()
-        # The minimum size wins on tiny screens (the offscreen test screen).
-        assert window.width() == max(880, min(area.width() // 2, area.width()))
-        assert window.height() == max(560, area.height() - 48)
+        # The screen wins over the designed minimum when it is smaller.
+        assert window.width() == min(max(880, area.width() // 2), area.width())
+        assert window.height() == min(max(560, area.height() - 48), area.height())
+        assert window.minimumWidth() <= area.width()
     finally:
         window.close()
         window.deleteLater()
@@ -581,6 +582,8 @@ def test_game_view_console_collapses_with_news_and_expands_on_busy_or_error(tmp_
         assert view.console.isHidden()
         assert view.console_toggle.text() == "Show output"
 
+        view.append_event(Event("log", "something to read"))  # the panel needs output to show
+        assert not view.output_head.isHidden()
         view.console_toggle.click()
         assert view._console_expanded is True
         assert not view.console.isHidden()
@@ -603,12 +606,14 @@ def test_game_view_console_collapses_with_news_and_expands_on_busy_or_error(tmp_
 
 def test_game_view_without_news_source_keeps_console_expanded(tmp_path, qapp):
     """A backend with no official feed hides the section and leaves the log."""
+    from nadare.core.events import Event
     from nadare.core.news import NewsResult
     from nadare.gui.game_view import GameView
 
     view = GameView()
     try:
         view.set_profile("sample", {"backend": "wine"})
+        view.append_event(Event("log", "something to read"))  # an empty log is hidden
         qapp.processEvents()
         assert view.news_frame.isHidden()
         assert not view.console.isHidden()
@@ -2240,7 +2245,8 @@ def test_tab_skips_scroll_frames_and_reaches_the_add_game_card(tmp_path, qapp):
             qapp.processEvents()
             focus = qapp.focusWidget()
             reached.append(focus.objectName() if focus else "")
-        assert "AddGameCard" in reached[:2]
+        # Library -> Downloads -> Settings -> the card: one more stop since the Downloads entry.
+        assert "AddGameCard" in reached[:3]
         assert not any("Scroll" in name for name in reached)
     finally:
         window.close()

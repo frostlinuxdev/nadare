@@ -9,17 +9,22 @@ controller. It never calls a backend method directly — every request goes thro
 
 from __future__ import annotations
 
+import contextlib
+import copy
 import logging
 import os
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 from PyQt6.QtCore import (
     QByteArray,
     QEvent,
+    QRect,
     QSettings,
+    QSize,
     Qt,
     QThreadPool,
     QTimer,
@@ -36,6 +41,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QStackedWidget,
     QVBoxLayout,
@@ -44,7 +50,7 @@ from PyQt6.QtWidgets import (
 
 from .. import __version__
 from ..core import backends as core_backends
-from ..core import diskspace, paths, secrets, shortcuts
+from ..core import diskspace, paths, secrets, selfupdate, shortcuts, steamstore
 from ..core import runners as core_runners
 from ..core.backends import (
     Status,
@@ -55,29 +61,67 @@ from ..core.backends import (
 )
 from ..core.config import Config
 from ..core.directkinds import DIRECT_KINDS
+from ..core.eta import EtaEstimator, format_eta
 from ..core.events import Event
 from ..core.news import NewsResult
-from . import i18n
+from . import i18n, steam_setup, steam_wiring
 from .add_game import PREFIX_ONLY_KINDS, AddGameDialog
 from .banner import InfoBanner
-from .game_view import OPERATION_TITLES, GameSnapshot, GameView
+from .downloads_page import DownloadRow, DownloadsPage
+from .game_view import OPERATION_TITLES, GameSnapshot, GameView, can_pause_kind
 from .library import LibraryPage, count_text, profile_title
 from .notice import AccountNoticeDialog
 from .quick_install import QuickInstallDialog
+from .selfupdate_flow import SelfUpdateFlow
 from .settings import SettingsPage
 from .sidebar import SidebarGames
 from .store_flow import StoreFlow
+from .terms_dialog import TermsDialog
 from .theme import app_icon, apply_theme, brand_pixmap, repolish
-from .workers import BackendController, CallTask
+from .workers import CAPPED, PAUSABLE, BackendController, CallTask
 
 PAGE_LIBRARY = 0
 PAGE_GAME = 1
 PAGE_SETTINGS = 2
 #: Appended last so the older page indexes never move.
 PAGE_STORE = 3
+PAGE_DOWNLOADS = 4
 
 #: Operations that must not run until the account notice is acknowledged.
 NOTICE_OPERATIONS = frozenset({"install", "update", "launch"})
+
+
+def _window_minimum(minimum: QSize, area: QRect) -> QSize:
+    """The window minimum, lowered when the screen is smaller than it.
+
+    A minimum larger than the desktop is what pushes footer buttons off a
+    scaled laptop screen; the layout can still scroll, so the screen wins.
+    """
+    return QSize(
+        min(minimum.width(), area.width()),
+        min(minimum.height(), area.height()),
+    )
+
+
+def _window_size(minimum: QSize, area: QRect) -> QSize:
+    """First-run window size: half the screen wide, almost all of it high, never over it."""
+    width = max(minimum.width(), area.width() // 2)
+    # leave room for the title bar and window border, which resize() excludes
+    height = max(minimum.height(), area.height() - 48)
+    return QSize(min(width, area.width()), min(height, area.height()))
+
+
+def _ask_check_files(parent, title: str) -> bool:
+    """Ask before a post-import check; No is the default so Enter never starts it."""
+    answer = QMessageBox.question(
+        parent,
+        "Check game files",
+        f"Check {title}'s game files against the official list now?",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.No,
+    )
+    return answer == QMessageBox.StandardButton.Yes
+
 
 #: Operations before which the one-time "unofficial launcher" notice is shown.
 UNOFFICIAL_OPERATIONS = frozenset({"install", "login", "launch"})
@@ -101,6 +145,12 @@ UPDATE_CHECK_INTERVAL = 6 * 60 * 60
 STATUS_REFRESH_INTERVAL_MS = 30_000
 #: Ceiling for the retry backoff after consecutive failed status probes of one game.
 STATUS_ERROR_MAX_INTERVAL_MS = 10 * 60_000
+#: Most profiles probed at once at startup; the rest follow as each one ends (#388 F-07).
+STARTUP_PROBE_LIMIT = 3
+#: How long one process-list snapshot is shared by startup probes before a fresh one is taken.
+PROBE_ROUND_MAX_AGE = 2.0
+#: A startup probe that reports nothing for this long stops holding one of the probe slots.
+STARTUP_PROBE_TIMEOUT = 60.0
 
 
 def _unknown_backend_message(value: str) -> str:
@@ -139,6 +189,11 @@ log = logging.getLogger(__name__)
 _OPERATION_LABELS = {"set_remember": "Saving"}
 
 
+def capitalised(text: str) -> str:
+    """``text`` with its first letter in upper case (reasons are written to follow a sentence)."""
+    return text[:1].upper() + text[1:]
+
+
 class MainWindow(QMainWindow):
     """Nadare's main window."""
 
@@ -156,11 +211,21 @@ class MainWindow(QMainWindow):
         self.config = config
         self._current_profile = ""
         self._busy: dict[str, str] = {}
+        #: Profiles whose install/update/repair waits for a free install slot (#770).
+        self._waiting: set[str] = set()
+        self._steam_setup_dialog = None  # the one open Set up window, if any
+        self._finish_timer = QTimer(self)
+        self._finish_timer.setSingleShot(True)
+        self._finish_timer.timeout.connect(self._maybe_finish_background_close)
+        #: Latest ``(fraction, detail, eta text)`` and the ETA estimator per install (#773).
+        self._download_progress: dict[str, tuple[float | None, str, str]] = {}
+        self._download_eta: dict[str, EtaEstimator] = {}
         #: Set when the window was closed while a game ran: Nadare stays alive,
         #: hidden, and quits once the last game exits.
         self._quit_after_games = False
         #: True once the window is really closing: callbacks must not start new work.
         self._closing = False
+        self._terms_dialog: TermsDialog | None = None
         #: A SIGTERM/SIGINT close skips the "still installing" question.
         self._close_requested_by_signal = False
         #: Last rendered state per profile (status/news/media + monotonic stamp).
@@ -184,6 +249,11 @@ class MainWindow(QMainWindow):
         self._update_checked: dict[str, float] = {}
         #: Profiles whose Remember-me change arrived while a worker owned them.
         self._remember_pending: set[str] = set()
+        #: Startup status probes waiting for a free slot, and the ones running (#388 F-07).
+        self._probe_queue: deque[str] = deque()
+        self._probe_active: dict[str, float] = {}  # profile -> when its probe started
+        self._probe_round: Any = None
+        self._probe_round_at = 0.0
 
         # A hand-edited/imported language must never be used to build a path;
         # only codes with a real catalogue are accepted.
@@ -200,6 +270,7 @@ class MainWindow(QMainWindow):
         self._build_shell()
 
         self.store.install_requested.connect(lambda kind: self._store_install(kind))
+        self.store.play_requested.connect(self._store_play)
         self.store.own_game_requested.connect(lambda: self._add_game_dialog(advanced=True))
 
         self.controller = BackendController(config, self)
@@ -315,12 +386,14 @@ class MainWindow(QMainWindow):
         self.game = GameView()
         self.settings = SettingsPage()
         self.store = StoreFlow()
+        self.downloads = DownloadsPage()
         self.stack.addWidget(self.library)
         self.stack.addWidget(self.game)
         self.stack.addWidget(self.settings)
         self.stack.addWidget(self.store)
+        self.stack.addWidget(self.downloads)
         self.update_banner = InfoBanner()
-        self.update_banner.action_clicked.connect(self._open_update_page)
+        self.update_banner.action_clicked.connect(self._on_update_clicked)
         self.update_banner.dismissed.connect(self._dismiss_update)
         right = QWidget()
         right_column = QVBoxLayout(right)
@@ -344,15 +417,19 @@ class MainWindow(QMainWindow):
         self.game.skip_step_requested.connect(self._on_skip_step)
         self.game.pause_requested.connect(self._on_pause)
         self.game.resume_requested.connect(self._on_resume)
+        self.game.queue_next_requested.connect(self._on_queue_next)
+        self.game.queue_now_requested.connect(self._on_queue_now)
         self.game.remember_toggled.connect(self._on_remember_toggled)
         self.game.settings_requested.connect(self.open_settings)
         self.game.report_requested.connect(self._show_support_report)
+        self.game.steam_setup_requested.connect(self._open_steam_setup)
         self.settings.saved.connect(self._on_settings_saved)
         self.settings.cancelled.connect(self.show_library)
         self.settings.remove_requested.connect(self._on_remove_requested)
         self.settings.remake_prefix_requested.connect(self._on_remake_prefix_requested)
         self.settings.report_requested.connect(self._show_support_report)
         self.settings.logs_requested.connect(self._show_logs)
+        self.settings.system_check_requested.connect(self._show_system_check)
         self.sidebar_games.open_game.connect(self.open_game)
 
     def _build_sidebar(self) -> QWidget:
@@ -403,9 +480,24 @@ class MainWindow(QMainWindow):
         self.update_button.setObjectName("GhostButton")
         self.update_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.update_button.setVisible(False)
-        self.update_button.clicked.connect(self._open_update_page)
+        self.update_button.clicked.connect(self._on_update_clicked)
         self._update_url = ""
         self._update_version = ""
+        #: In-place AppImage update (#771): the release offered, the file installed and waiting
+        #: for a restart, the progress dialog, and the worker that does the download.
+        self._update_info: Any = None
+        self._restart_target: Path | None = None
+        self._update_progress: QProgressDialog | None = None
+        self._self_update = SelfUpdateFlow(self)
+        self._self_update.progress.connect(self._on_update_progress)
+        self._self_update.installed.connect(self._on_update_installed)
+        self._self_update.failed.connect(self._on_update_failed)
+        self._self_update.cancelled.connect(self._on_update_cancelled)
+        # The new version is running, so the copy of the old one kept for a bad update can go.
+        with contextlib.suppress(Exception):
+            running = selfupdate.appimage_target()
+            if running is not None:
+                selfupdate.cleanup_previous(running)
         side.addSpacing(8)
         side.addWidget(self.update_button)
         side.addSpacing(26)
@@ -426,6 +518,12 @@ class MainWindow(QMainWindow):
         self.library_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.library_button.clicked.connect(self.show_library)
         side.addWidget(self.library_button)
+
+        self.downloads_button = QPushButton("Downloads")
+        self.downloads_button.setObjectName("NavItem")
+        self.downloads_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.downloads_button.clicked.connect(self.show_downloads)
+        side.addWidget(self.downloads_button)
 
         self.settings_button = QPushButton("Settings")
         self.settings_button.setObjectName("NavItem")
@@ -468,12 +566,26 @@ class MainWindow(QMainWindow):
         self.controller.cancelled.connect(self._on_cancelled)
         self.controller.paused.connect(self._on_paused)
         self.controller.busy.connect(self._on_busy)
+        self.controller.queued.connect(self._on_queued)
+        self.controller.queue_changed.connect(self._refresh_queue_view)
+        self.controller.queue_changed.connect(self._refresh_downloads)
+        self.controller.busy.connect(lambda *_args: self._refresh_downloads())
+        self.controller.paused.connect(lambda *_args: self._refresh_downloads())
+        self.downloads.pause_requested.connect(lambda name: self.controller.pause(name))
+        self.downloads.resume_requested.connect(lambda name: self.controller.resume(name))
+        self.downloads.cancel_requested.connect(lambda name: self.controller.cancel(name))
+        self.downloads.next_requested.connect(lambda name: self.controller.move_to_front(name))
+        self.downloads.now_requested.connect(
+            lambda name: self.controller.start_now(name, self._can_pause_profile)
+        )
+        self.downloads.open_requested.connect(self.open_game)
 
     # ---- navigation chrome -------------------------------------------------
     def _set_active_nav(self, active: str) -> None:
         buttons = (
             ("store", self.store_button),
             ("library", self.library_button),
+            ("downloads", self.downloads_button),
             ("settings", self.settings_button),
         )
         for name, button in buttons:
@@ -506,11 +618,11 @@ class MainWindow(QMainWindow):
             st = snap.get("status")
             if st is not None and name in self.config.profiles:
                 self.library.set_state(name, st.state, st.running)
+        self.sidebar_games.set_hide_uninstalled(
+            bool(self.config.data.get("sidebar_hide_uninstalled", False))
+        )
         self.sidebar_games.set_profiles(self.config.profiles)
-        self.store.set_installed_kinds(frozenset(
-            str(data.get("backend") or "") for data in self.config.profiles.values()
-            if data.get("backend")
-        ))
+        self.store.set_installed_kinds(frozenset(steamstore.installed_kinds(self.config.profiles)))
 
     def _remember_active(self, name: str) -> None:
         """Reopen this game next start (the config's ``active_profile``)."""
@@ -538,6 +650,77 @@ class MainWindow(QMainWindow):
         self.sidebar_games.set_active("")
         self._set_side_status("Store")
         self.store.grid.focus_search()
+
+    def show_downloads(self) -> None:
+        self._refresh_downloads(force=True)
+        self.stack.setCurrentIndex(PAGE_DOWNLOADS)
+        self._current_profile = ""
+        self._set_active_nav("downloads")
+        self.sidebar_games.set_active("")
+        self._set_side_status("Downloads")
+
+    def _download_rows(self) -> list[DownloadRow]:
+        overview = self.controller.install_overview()
+        rows: list[DownloadRow] = []
+        for name, operation in overview.running:
+            if name not in self.config.profiles:
+                continue
+            fraction, detail, eta = self._download_progress.get(name, (None, "", ""))
+            rows.append(
+                DownloadRow(
+                    name,
+                    self._game_title(name),
+                    operation,
+                    "running",
+                    detail=detail,
+                    fraction=fraction,
+                    eta=eta,
+                    can_pause=operation in PAUSABLE and self._can_pause_profile(name),
+                )
+            )
+        for index, (name, operation) in enumerate(overview.waiting):
+            if name not in self.config.profiles:
+                continue
+            rows.append(
+                DownloadRow(
+                    name,
+                    self._game_title(name),
+                    operation,
+                    "waiting",
+                    ahead=index,
+                    can_pause=operation in PAUSABLE and self._can_pause_profile(name),
+                    can_now=self.controller.can_start_now(name, self._can_pause_profile),
+                )
+            )
+        for name, operation in overview.paused:
+            if name in self.config.profiles:
+                rows.append(DownloadRow(name, self._game_title(name), operation, "paused"))
+        return rows
+
+    def _refresh_downloads(self, force: bool = False) -> None:
+        """Keep the Downloads entry's count current, and the list when the page is open."""
+        if self._closing:
+            return
+        overview = self.controller.install_overview()
+        active = len(overview.running) + len(overview.waiting)
+        self.downloads_button.setText(f"Downloads ({active})" if active else "Downloads")
+        if force or self.stack.currentIndex() == PAGE_DOWNLOADS:
+            self.downloads.set_rows(self._download_rows())
+
+    def _track_download_progress(self, profile: str, event: Event) -> None:
+        """Remember the latest progress of an install for the Downloads page."""
+        if event.progress is None and event.kind not in ("step", "progress"):
+            return
+        fraction, detail, eta = self._download_progress.get(profile, (None, "", ""))
+        if event.progress is not None:
+            fraction = max(0.0, min(1.0, float(event.progress)))
+            estimator = self._download_eta.setdefault(profile, EtaEstimator())
+            eta = format_eta(estimator.update(fraction, time.monotonic())) or ""
+        if event.kind in ("step", "progress") and event.message:
+            detail = event.message
+        self._download_progress[profile] = (fraction, detail, eta)
+        if self.stack.currentIndex() == PAGE_DOWNLOADS:
+            self.downloads.update_progress(profile, fraction, detail, eta)
 
     def open_game(self, profile: str) -> None:
         """Show the per-game page for ``profile``."""
@@ -577,6 +760,8 @@ class MainWindow(QMainWindow):
             self.game.set_busy(self._busy[profile])
             for past in snp.get("events", ()):
                 self.game.append_event(past)
+            if profile in self._waiting:
+                self._show_waiting(profile, self._busy[profile])
             # A live login QR is a one-shot event; restore it from the snapshot
             # so leaving and returning does not lose the code for the rest of
             # the (up to 300 s) auth run.
@@ -609,6 +794,69 @@ class MainWindow(QMainWindow):
         task.signals.finished.connect(self._report_dialog.set_report)
         QThreadPool.globalInstance().start(task)
 
+    def _open_steam_setup(self) -> None:
+        """Open the Set up checklist for the Steam game on the open page."""
+        profile = self.config.profiles.get(self._current_profile) or {}
+        app_id = steam_wiring.steam_app_id(profile)
+        if not app_id:
+            return
+        existing = self._steam_setup_dialog
+        if existing is not None:
+            # One Set up window at a time: two could change the same files at once.
+            try:
+                if existing.isVisible():
+                    if getattr(existing, "app_id", "") == app_id:
+                        existing.raise_()
+                        existing.activateWindow()
+                        existing.refresh()  # the game may have been installed meanwhile
+                        return
+                    if steam_setup.steps_running():
+                        self._tell_steam_problem(
+                            "Another Set up step is still running. Wait for it to finish, "
+                            "then open Set up for this game."
+                        )
+                        return
+                    existing.close()  # an idle checklist for another game makes way
+            except RuntimeError:  # already deleted
+                pass
+            self._steam_setup_dialog = None
+        try:
+            dialog = steam_wiring.build_dialog(
+                self, app_id, binary=str(steam_wiring.profile_value(profile, "steam_binary"))
+            )
+        except steam_wiring.SteamUnavailable as exc:
+            self._tell_steam_problem(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - never leave the click without an answer
+            log.debug("could not open Steam Set up", exc_info=True)
+            self._tell_steam_problem(f"Set up could not start: {exc}")
+            return
+        self._steam_setup_dialog = dialog
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.show()
+
+    def _ask_steam_step_close(self) -> bool:
+        answer = QMessageBox.warning(
+            self,
+            "Steam Set up is working",
+            "A Steam Set up step is still running.\n\nClosing now can leave Steam closed or a "
+            "game's files half changed. Close anyway?",
+            QMessageBox.StandardButton.Close | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Close
+
+    def _tell_steam_problem(self, text: str) -> None:
+        QMessageBox.information(self, "Set up", text)
+
+    def _show_system_check(self) -> None:
+        from .system_check import SystemCheckDialog
+
+        self._system_check_dialog = SystemCheckDialog(self, dict(self.config.data))
+        self._system_check_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._system_check_dialog.show()
+        self._system_check_dialog.run_check()
+
     def _show_logs(self, profile: str) -> None:
         from .logs_dialog import LogsDialog
 
@@ -640,7 +888,7 @@ class MainWindow(QMainWindow):
         box.setText(f"Remove {title} from Nadare?")
         box.setInformativeText(
             "This removes the game from your library, its shortcuts and its saved login. "
-            "Your game files are not deleted."
+            "Your game files are kept unless you tick them below."
         )
         delete_data = QCheckBox(
             f"Also delete Nadare's logs and settings for this game ({data_dir}); "
@@ -681,26 +929,31 @@ class MainWindow(QMainWindow):
         box.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
         box.button(QMessageBox.StandardButton.Yes).setText("Remove")
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
-        if box.exec() != QMessageBox.StandardButton.Yes:
-            return
-        chosen = [key for key, check in tree_boxes.items() if check.isChecked()]
-        if chosen:
-            paths_text = "\n".join(
-                str(t.path)
-                for t in removal.removable_trees(self.config, profile)
-                if t.key in chosen
-            )
-            answer = QMessageBox.warning(
-                self,
-                "Delete game files?",
-                "This permanently deletes these folders and everything in them:\n\n"
-                f"{paths_text}\n\nThis cannot be undone.",
-                QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
-                QMessageBox.StandardButton.Cancel,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
+        try:
+            if box.exec() != QMessageBox.StandardButton.Yes:
                 return
-        self._remove_game(profile, delete_data.isChecked(), chosen)
+            chosen = [key for key, check in tree_boxes.items() if check.isChecked()]
+            if chosen:
+                paths_text = "\n".join(
+                    str(t.path)
+                    for t in removal.removable_trees(self.config, profile)
+                    if t.key in chosen
+                )
+                answer = QMessageBox.warning(
+                    self,
+                    "Delete game files?",
+                    "This permanently deletes these folders and everything in them:\n\n"
+                    f"{paths_text}\n\nThis cannot be undone.",
+                    QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+            self._remove_game(profile, delete_data.isChecked(), chosen)
+        finally:
+            # Parented to the window, the box would otherwise stay alive (hidden) after the
+            # dialog closes and pile up; let the event loop reap it.
+            box.deleteLater()
 
     def _remove_game(
         self, profile: str, delete_data: bool, delete_trees: list[str] | None = None
@@ -722,9 +975,18 @@ class MainWindow(QMainWindow):
         self._busy[profile] = "remove"
         self._set_side_status(f"Removing {self._game_title(profile)}…")
 
+        # The worker does not read the live Config: a Settings save on this
+        # thread could resize ``profiles`` while removal iterates it (#27). A
+        # deep copy is taken under the lock, so the worker sees one consistent
+        # snapshot and the profile itself is still dropped here.
+        with self.config.locked():
+            worker_config = Config(
+                path=self.config.path, data=copy.deepcopy(self.config.data)
+            )
+
         def run() -> object:
             return removal.remove_game(
-                self.config,
+                worker_config,
                 profile,
                 delete_data=delete_data,
                 delete_trees=delete_trees or (),
@@ -850,12 +1112,66 @@ class MainWindow(QMainWindow):
         if profile == self._current_profile:
             self._set_side_status("Could not remove the saved login")
 
+    def _store_play(self, kind: str) -> None:
+        """Store Play: open the page of the game already installed for ``kind``.
+
+        The page's own Launch button then applies every check the Library does (an install
+        in progress, login, notices). With several copies the first one opens.
+        """
+        for name, data in self.config.profiles.items():
+            if kind in steamstore.installed_kinds({name: data}):
+                self.open_game(name)
+                return
+
+    def _ask_steam_tile(self, title: str) -> bool:
+        box = QMessageBox(self)
+        box.setWindowTitle("Add from Steam")
+        box.setText(
+            f"Add {title} to your library?\n\nThe game itself comes from your own Steam. "
+            "Next, Nadare opens a checklist that installs it there and fixes what needs "
+            "fixing, one step at a time."
+        )
+        box.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+        return box.exec() == QMessageBox.StandardButton.Ok
+
+    def _store_steam_install(self, kind: str) -> None:
+        """A Steam tile: add (or reopen) its steam profile, then show the Set up checklist."""
+        fields = steamstore.profile_for(kind)
+        if fields is None:
+            return
+        name = next(
+            (n for n, data in self.config.profiles.items()
+             if kind in steamstore.installed_kinds({n: data})),
+            "",
+        )
+        if not name:
+            title = steamstore.default_name(kind)
+            if not self._ask_steam_tile(title):
+                return
+            name, number = title, 2
+            while name in self.config.profiles:
+                name, number = f"{title} {number}", number + 1
+            try:
+                with self.config.locked():
+                    self.config.add_profile(name, title=title, **fields)
+                    self.config.save()
+            except OSError as exc:
+                QMessageBox.warning(self, "Add from Steam", f"Could not save the game: {exc}")
+                self.config.profiles.pop(name, None)
+                return
+            self.refresh_library()
+        self.open_game(name)
+        self._open_steam_setup()
+
     def _store_install(self, kind: str) -> None:
         """Store Install: one confirm, then create the profile and start the install.
 
         Uses the same defaults, validation and paths as the Add game dialog (it is built
         but never shown); the full dialog stays behind Advanced and the sidebar.
         """
+        if steamstore.app_id_of(kind) is not None:
+            self._store_steam_install(kind)
+            return
         helper = AddGameDialog(self.config, self, kind=kind)
         try:
             game = helper._selected_game()
@@ -989,12 +1305,7 @@ class MainWindow(QMainWindow):
 
         if not yostar.configured_manifest(data):
             return
-        answer = QMessageBox.question(
-            self,
-            "Check game files",
-            f"Check {self._game_title(profile)}'s game files against the official list now?",
-        )
-        if answer == QMessageBox.StandardButton.Yes:
+        if _ask_check_files(self, self._game_title(profile)):
             self._start(profile, "verify")
 
     # ---- backend control ---------------------------------------------------
@@ -1088,7 +1399,13 @@ class MainWindow(QMainWindow):
             return
         if operation == "repair" and not self._confirm_repair(profile):
             return
-        self._start(profile, operation)
+        started = self._start(profile, operation)
+        if not started and operation == "status" and profile == self._current_profile:
+            # RETRY disabled the button expecting a status; give it back when the
+            # request could not start (another operation owns the profile).
+            previous = self._snapshot(profile).get("status")
+            if previous is not None:
+                self.game.set_status(previous)
 
     def _on_remake_prefix_requested(self, profile: str) -> None:
         """Confirm from Settings, return to the game page and rebuild the prefix."""
@@ -1231,7 +1548,10 @@ class MainWindow(QMainWindow):
             # Background status/news/media refreshes never mark the game busy:
             # no CANCEL, no "CHECKING…" and no console expansion.
             return
+        self._waiting.discard(profile)  # a waiting game is told again right after (_on_queued)
         if active:
+            self._download_progress.pop(profile, None)
+            self._download_eta.pop(profile, None)
             self._busy[profile] = operation
             self._snapshot(profile).pop("events", None)  # a new run starts a new log
         else:
@@ -1251,6 +1571,42 @@ class MainWindow(QMainWindow):
                     "This check cannot be cancelled. Wait for it to finish."
                 )
                 self.game.primary.setEnabled(False)
+
+    def _on_queued(self, profile: str, operation: str) -> None:
+        """The game's install/update/repair waits for a free slot (#770)."""
+        if self._closing:
+            return
+        self._waiting.add(profile)
+        if profile == self._current_profile:
+            self._show_waiting(profile, operation)
+            self._set_side_status(f"Waiting · {self._game_title(profile)}")
+
+    def _can_pause_profile(self, profile: str) -> bool:
+        return can_pause_kind(str((self.config.profiles.get(profile) or {}).get("backend") or ""))
+
+    def _show_waiting(self, profile: str, operation: str) -> None:
+        order = self.controller.queue_order()
+        ahead = order.index(profile) if profile in order else 0
+        can_now = self.controller.can_start_now(profile, self._can_pause_profile)
+        self.game.set_waiting(operation, ahead, can_now)
+
+    def _refresh_queue_view(self) -> None:
+        """The waiting line changed: the open game's place and buttons may have too."""
+        profile = self._current_profile
+        if not profile or self._closing or not self.controller.is_waiting(profile):
+            return
+        order = self.controller.queue_order()
+        self.game.set_queue_position(
+            order.index(profile), self.controller.can_start_now(profile, self._can_pause_profile)
+        )
+
+    def _on_queue_next(self) -> None:
+        if self._current_profile:
+            self.controller.move_to_front(self._current_profile)
+
+    def _on_queue_now(self) -> None:
+        if self._current_profile:
+            self.controller.start_now(self._current_profile, self._can_pause_profile)
 
     def _on_cancel(self) -> None:
         if self._current_profile:
@@ -1278,6 +1634,8 @@ class MainWindow(QMainWindow):
     # ---- controller fan-out -------------------------------------------------
     def _on_event(self, profile: str, event: Event) -> None:
         data = event.data or {}
+        if self.controller.running_operation(profile) in CAPPED:
+            self._track_download_progress(profile, event)
         if event.kind == "step" and data.get("png"):
             self._snapshot(profile)["qr"] = data["png"]
         elif event.kind in ("done", "error") or data.get("qr_state") == "expired":
@@ -1373,6 +1731,8 @@ class MainWindow(QMainWindow):
     def _on_succeeded(self, profile: str, operation: str, exit_code: int) -> None:
         if self._closing:
             return
+        if operation == "status":
+            self._probe_finished(profile)
         if operation == "news":
             # One operation per profile: media runs after news, never alongside.
             self._maybe_start_media(profile)
@@ -1554,6 +1914,8 @@ class MainWindow(QMainWindow):
     def _on_failed(self, profile: str, operation: str, message: str) -> None:
         if self._closing:
             return
+        if operation == "status":
+            self._probe_finished(profile)
         if operation in ("news", "media", "check_update"):
             # News/media/update checks are best-effort: never a dialog, just the
             # muted UI line.
@@ -1574,9 +1936,10 @@ class MainWindow(QMainWindow):
             # A status probe is background noise; show it as a badge, never a dialog.
             self._mark_status_error(profile, message)
             return
+        terms = self._is_terms_failure(profile, operation, message)
         if profile == self._current_profile:
             self.game.fail(message)
-        else:
+        elif not terms:
             # Not the page on screen: say which game this is about.
             operation_title = OPERATION_TITLES.get(operation, operation.capitalize())
             QMessageBox.warning(
@@ -1592,10 +1955,71 @@ class MainWindow(QMainWindow):
         if operation == "launch":
             self.controller.launch_ended(profile)
             self._maybe_finish_background_close()
+        if terms:
+            self._offer_terms(profile, operation)
+
+    def _is_terms_failure(self, profile: str, operation: str, message: str) -> bool:
+        """True when a login/launch stopped only because the game's terms are not accepted."""
+        if operation not in ("login", "launch"):
+            return False
+        kind = str(self.config.profiles.get(profile, {}).get("backend") or "")
+        try:
+            expected = getattr(core_backends.get(kind), "TERMS_MESSAGE", None)
+        except Exception:  # noqa: BLE001 - an unknown backend has no terms flow
+            return False
+        return bool(expected) and message == expected
+
+    def _offer_terms(self, profile: str, operation: str) -> None:
+        """Show the terms and let the user agree (nothing is sent before they press Agree)."""
+        if self._terms_dialog is not None or self._closing:
+            return
+        kind = str(self.config.profiles.get(profile, {}).get("backend") or "")
+        backend_class = core_backends.get(kind)
+        # The worker threads must not read the live Config (a Settings save could resize it).
+        with self.config.locked():
+            worker_config = Config(
+                path=self.config.path, data=copy.deepcopy(self.config.data)
+            )
+
+        shown: dict[str, object] = {}
+
+        def terms() -> dict:
+            result = core_backends.create(profile, worker_config).terms()
+            shown["member"] = result.get("member_no")  # the account these terms were read for
+            return result
+
+        def accept() -> None:
+            member = shown.get("member")
+            core_backends.create(profile, worker_config).accept_terms(
+                str(member) if member else None
+            )
+
+        dialog = TermsDialog(
+            self._game_title(profile), terms, accept, backend_class.TERMS_URL, parent=self
+        )
+        dialog.agreed.connect(lambda: self._on_terms_agreed(profile, operation))
+        dialog.finished.connect(lambda _result: setattr(self, "_terms_dialog", None))
+        self._terms_dialog = dialog
+        dialog.open()
+        dialog.start()
+
+    def _on_terms_agreed(self, profile: str, operation: str) -> None:
+        if self._closing:
+            return
+        title = self._game_title(profile)
+        # A login that stopped at the terms is a valid login: only Launch is left to press.
+        self._set_side_status(
+            f"Terms accepted for {title}. Press Launch again."
+            if operation == "launch"
+            else f"Terms accepted for {title}. You are logged in: press Launch."
+        )
+        self._start(profile, "status", silent=True)
 
     def _on_cancelled(self, profile: str, operation: str) -> None:
         if self._closing:
             return
+        if operation == "status":
+            self._probe_finished(profile)
         if operation not in SILENT_OPERATIONS:
             self._busy.pop(profile, None)
         if operation == "set_remember":
@@ -1613,11 +2037,40 @@ class MainWindow(QMainWindow):
         profiles = [profile for profile in self.config.profiles if profile != self._current_profile]
         if not profiles:
             return
+        self._probe_round = None
+        self._probe_queue.extend(profiles)
+        self._pump_probes()
+
+    def _probe_scan_round(self) -> Any:
+        """The process-list snapshot for a probe: shared within a burst, never long-lived.
+
+        Probes held back by the limit can start seconds later; reusing the first snapshot
+        would report a game that started or ended in between with its old state.
+        """
         from ..core.process import ProcessScanRound
 
-        scan_round = ProcessScanRound()
-        for profile in profiles:
-            self._start(profile, "status", payload=scan_round, silent=True)
+        now = time.monotonic()
+        if self._probe_round is None or now - self._probe_round_at >= PROBE_ROUND_MAX_AGE:
+            self._probe_round = ProcessScanRound()
+            self._probe_round_at = now
+        return self._probe_round
+
+    def _pump_probes(self) -> None:
+        """Start queued startup probes, never more than the limit at once."""
+        now = time.monotonic()
+        for stuck in [p for p, t in self._probe_active.items() if now - t >= STARTUP_PROBE_TIMEOUT]:
+            del self._probe_active[stuck]  # it never reported back: do not let it hold the queue
+        while self._probe_queue and len(self._probe_active) < STARTUP_PROBE_LIMIT:
+            profile = self._probe_queue.popleft()
+            if not self._start(profile, "status", payload=self._probe_scan_round(), silent=True):
+                continue
+            self._probe_active[profile] = now
+
+    def _probe_finished(self, profile: str) -> None:
+        """Make room for the next startup probe after ``profile``'s status ended."""
+        if profile in self._probe_active:
+            del self._probe_active[profile]
+            self._pump_probes()
 
     # ---- shutdown -----------------------------------------------------------
     # ---- update check ---------------------------------------------------------
@@ -1694,14 +2147,16 @@ class MainWindow(QMainWindow):
 
     def _show_update(self, info: Any) -> None:
         self._update_url = str(info.url)
+        self._update_info = info
         self.update_button.setText(f"Update available: v{info.version}")
         self.update_button.setToolTip(f"{info.name}\n{info.url}")
         self.update_button.setVisible(True)
         self._update_version = str(info.version)
         if self.config.data.get("dismissed_update") != self._update_version:
+            action = "Update" if self._self_update.can_update(info) else "Download"
             self.update_banner.show_message(
                 f"Nadare v{info.version} is available (you have v{__version__}).",
-                "Download",
+                action,
             )
 
     def _dismiss_update(self) -> None:
@@ -1717,6 +2172,140 @@ class MainWindow(QMainWindow):
         if self._update_url.startswith("https://"):
             QDesktopServices.openUrl(QUrl(self._update_url))
 
+    # ---- in-place update (#771) -----------------------------------------------
+    def _on_update_clicked(self) -> None:
+        """Update in place when this AppImage can replace itself, else open the release page."""
+        if self._restart_target is not None:
+            self._offer_restart()
+        elif self._self_update.running and self._update_info is not None:
+            if self._update_progress is not None:
+                self._update_progress.show()
+        elif self._update_info is not None and self._self_update.can_update(self._update_info):
+            self._begin_self_update()
+        else:
+            self._open_update_page()
+
+    def _begin_self_update(self) -> None:
+        info = self._update_info
+        dialog = QProgressDialog(
+            f"Downloading Nadare v{info.version}…", "Cancel", 0, 0, self
+        )
+        dialog.setWindowTitle("Updating Nadare")
+        dialog.setWindowModality(Qt.WindowModality.NonModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.canceled.connect(self._self_update.cancel)
+        self._update_progress = dialog
+        if self._self_update.start(info):
+            dialog.show()
+        else:
+            self._close_update_progress()
+
+    def _close_update_progress(self) -> None:
+        dialog, self._update_progress = self._update_progress, None
+        if dialog is not None:
+            with contextlib.suppress(Exception):
+                dialog.canceled.disconnect()
+            dialog.close()
+            dialog.deleteLater()
+
+    def _on_update_progress(self, done: int, total: int) -> None:
+        dialog = self._update_progress
+        if dialog is None:
+            return
+        if total > 0:
+            dialog.setMaximum(total)
+            dialog.setValue(min(done, total))
+            dialog.setLabelText(
+                f"Downloading Nadare v{self._update_version}… "
+                f"{diskspace.human_size(done)} of {diskspace.human_size(total)}"
+            )
+
+    def _on_update_installed(self, new: object) -> None:
+        self._close_update_progress()
+        self._restart_target = Path(str(new))
+        self.update_button.setText("Restart to finish updating")
+        self.update_banner.show_message(
+            f"Nadare v{self._update_version} is installed. Restart to start using it.",
+            "Restart",
+        )
+        self._offer_restart()
+
+    def _on_update_failed(self, message: str) -> None:
+        self._close_update_progress()
+        # Not again this run: the release page is the way to get this version.
+        self._update_info = None
+        self.update_banner.show_message(
+            f"Nadare v{self._update_version} is available (you have v{__version__}).",
+            "Download",
+        )
+        self._show_update_failure(message)
+
+    def _on_update_cancelled(self) -> None:
+        self._close_update_progress()
+
+    def _show_update_failure(self, message: str) -> None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Update not installed")
+        box.setText("Nadare could not update itself. Nothing was changed.")
+        box.setInformativeText(
+            f"{capitalised(message)}\n\nYou can download the new version by hand."
+        )
+        page = box.addButton("Open the download page", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Close)
+        box.exec()
+        if box.clickedButton() is page:
+            self._open_update_page()
+
+    def _ask_restart(self, version: str) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Update installed")
+        box.setText(f"Nadare v{version} is installed.")
+        box.setInformativeText("Restart now to start using it, or restart later yourself.")
+        restart = box.addButton("Restart now", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        return box.clickedButton() is restart
+
+    def _offer_restart(self) -> None:
+        if self._restart_target is not None and self._ask_restart(self._update_version):
+            self._restart_now()
+
+    def _inform_busy_restart(self) -> None:
+        QMessageBox.information(
+            self,
+            "Restart later",
+            "A game or an install is still running. Finish or stop it first, then restart "
+            "Nadare to start the new version.",
+        )
+
+    def _restart_now(self) -> None:
+        target = self._restart_target
+        if target is None:
+            return
+        removing = any(operation == "remove" for operation in self._busy.values())
+        if self.controller.mutating_profiles() or self.controller.launching_profiles() or removing:
+            self._inform_busy_restart()
+            return
+        # Close first and only go on if the window really closed: a prompt the user cancels
+        # (or refuses) must stop the restart, not be overridden by it.
+        if not self._close_window_for_update():
+            return
+        selfupdate.restart(target)
+        self._quit_app()
+
+    def _close_window_for_update(self) -> bool:
+        self.close()
+        return not self.isVisible()
+
+    def _quit_app(self) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
     # ---- window geometry ------------------------------------------------------
     def _geometry_settings(self) -> QSettings:
         """Window size/position, kept beside the config (not inside it)."""
@@ -1725,18 +2314,24 @@ class MainWindow(QMainWindow):
 
     def _restore_geometry(self) -> None:
         """Reopen where the user left it; first run takes half the screen."""
-        saved = self._geometry_settings().value("geometry")
-        if isinstance(saved, QByteArray) and self.restoreGeometry(saved):
-            return
         screen = self.screen() or QGuiApplication.primaryScreen()
         if screen is None:
             self.resize(1180, 780)
             return
         area = screen.availableGeometry()
-        width = max(self.minimumWidth(), area.width() // 2)
-        # leave room for the title bar and window border, which resize() excludes
-        height = max(self.minimumHeight(), area.height() - 48)
-        self.resize(min(width, area.width()), min(height, area.height()))
+        # A 150%-scaled laptop can report a logical screen shorter than the
+        # designed minimum; never keep a minimum the desktop cannot show.
+        self.setMinimumSize(_window_minimum(self.minimumSize(), area))
+        saved = self._geometry_settings().value("geometry")
+        if isinstance(saved, QByteArray) and self.restoreGeometry(saved):
+            # The saved size can belong to a larger monitor.
+            size = self.size()
+            if size.width() > area.width() or size.height() > area.height():
+                self.resize(
+                    min(size.width(), area.width()), min(size.height(), area.height())
+                )
+            return
+        self.resize(_window_size(self.minimumSize(), area))
         self.move(area.topLeft())
 
     def _save_geometry(self) -> None:
@@ -1796,6 +2391,9 @@ class MainWindow(QMainWindow):
             and not self.controller.launching_profiles()
             and not self.controller.mutating_profiles()
         ):
+            if steam_setup.steps_running():  # a Set up step must not be cut off: look again soon
+                self._finish_timer.start(1000)
+                return
             self._quit_after_games = False
             QTimer.singleShot(0, self._finish_background_close)
 
@@ -1807,6 +2405,8 @@ class MainWindow(QMainWindow):
         choose that knowingly. A running game never needs a warning: closing
         the window keeps it running.
         """
+        if steam_setup.steps_running():
+            return self._ask_steam_step_close()
         playing = set(self.controller.launching_profiles())
         removing = sorted(n for n, op in self._busy.items() if op == "remove")
         if removing:
@@ -1829,13 +2429,14 @@ class MainWindow(QMainWindow):
         # Only an install/update/removal leaves half-written game files; a login
         # just gets cancelled.
         writes_files = any(
-            self.controller.running_operation(n) in {"install", "update", "repair", "uninstall"}
+            self.controller.running_operation(n)
+            in {"install", "update", "repair", "uninstall", "remake_prefix"}
             for n in active
         )
         if writes_files:
             title = "Operation in progress"
             text = (
-                f"{names} is still installing or updating.\n\n"
+                f"{names} is still installing, updating or rebuilding its Wine prefix.\n\n"
                 "Closing stops it. What is already downloaded is kept and INSTALL carries on "
                 "from there, but the game files stay incomplete until you do. Close anyway?"
             )
@@ -1852,4 +2453,11 @@ class MainWindow(QMainWindow):
         return answer == QMessageBox.StandardButton.Close
 
 
-__all__ = ["MainWindow", "PAGE_LIBRARY", "PAGE_GAME", "PAGE_SETTINGS", "PAGE_STORE"]
+__all__ = [
+    "MainWindow",
+    "PAGE_LIBRARY",
+    "PAGE_GAME",
+    "PAGE_SETTINGS",
+    "PAGE_STORE",
+    "PAGE_DOWNLOADS",
+]

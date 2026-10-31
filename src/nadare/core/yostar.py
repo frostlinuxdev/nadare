@@ -51,6 +51,11 @@ from .events import Cancel, Cancelled, Emitter, Event, emitter
 
 log = logging.getLogger(__name__)
 
+#: Pacing between retries of one failed file: short, jittered, and capped so a
+#: dead CDN does not turn a six-worker sync into a burst of requests.
+RETRY_SLEEP_BASE = 0.5
+RETRY_SLEEP_MAX = 2.0
+
 #: DownloadError text that describes a refused URL/host rather than a network fault.
 _SECURITY_DOWNLOAD_MARKERS = (
     "refusing",
@@ -983,6 +988,7 @@ def _sync_entry(
     allowed_hosts: set[str] | None,
     base_host: str | None,
     chunk: int,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> None:
     """Download and verify one manifest file (runs inside a worker thread)."""
     url = file_url(manifest, entry)
@@ -1033,6 +1039,9 @@ def _sync_entry(
                         "connection and try again."
                     ) from exc
                 raise ManifestError(f"download failed for {entry.path}: {exc}") from exc
+            sleeper(
+                min(download.retry_delay(RETRY_SLEEP_BASE, attempt + 1), RETRY_SLEEP_MAX)
+            )
             continue
 
         if hasher.value != entry.crc64:
@@ -1041,6 +1050,9 @@ def _sync_entry(
             progress.set(key, 0)
             if attempt == attempts - 1:
                 raise ManifestError(last_error)
+            sleeper(
+                min(download.retry_delay(RETRY_SLEEP_BASE, attempt + 1), RETRY_SLEEP_MAX)
+            )
             continue
 
         try:

@@ -509,3 +509,200 @@ def test_the_deadline_covers_the_whole_run_not_each_game(pp, tmp_path, capsys):
     assert out.count("FAILED") == 2
     assert "deadline" in out
     assert elapsed < 1.7
+
+
+# --- multi-part archives (Endfield) and first-use pins (GFL2) -----------------------------
+
+PART_A = DATA[:6000]
+PART_B = DATA[6000:]
+URL_A = "https://cdn.example/game.zip.001"
+URL_B = "https://cdn.example/game.zip.002"
+
+
+def multipart_plan(md5_a: str | None = None, md5_b: str | None = None, url_b: str = URL_B):
+    parts = (
+        directdl.RemoteFile(
+            path="game.zip.001",
+            url=URL_A,
+            size=len(PART_A),
+            md5=hashlib.md5(PART_A).hexdigest() if md5_a is None else md5_a,
+        ),
+        directdl.RemoteFile(
+            path="game.zip.002",
+            url=url_b,
+            size=len(PART_B),
+            md5=hashlib.md5(PART_B).hexdigest() if md5_b is None else md5_b,
+        ),
+    )
+    source = directdl.RemoteFile(path="game.zip", url=URL_A, size=len(DATA))
+    archive = directdl.Archive(
+        name="game.zip", source=source, parts=parts, unwrap=("zip",), stream=True
+    )
+    return directdl.Plan(game_tag="game", version="1", archives=(archive,), exe="g.exe")
+
+
+class PartStreams:
+    """One fake stream per part URL, counting the opens."""
+
+    def __init__(self, bodies=None):
+        self.bodies = bodies or {URL_A: PART_A, URL_B: PART_B}
+        self.opened: list[str] = []
+
+    def __call__(self, url, headers):
+        self.opened.append(url)
+        body = self.bodies[url]
+        yield body[:2500]
+        yield body[2500:]
+
+
+def test_a_multi_part_archive_is_pinned_part_by_part(pp, tmp_path):
+    streams = PartStreams()
+    result = pp.publish_pin(
+        tmp_path, "game", resolve=multipart_plan, open_stream=streams, block_size=4096
+    )
+    assert result == "published"
+    pin = archivepins.parse_document(json.loads(pin_path(tmp_path).read_text()))["game.zip"]
+    assert [part.url for part in pin.parts] == [URL_A, URL_B]
+    assert [part.size for part in pin.parts] == [len(PART_A), len(PART_B)]
+    assert list(pin.parts[0].blocks) == archivepins.hash_blocks(PART_A, 4096)
+    assert list(pin.parts[1].blocks) == archivepins.hash_blocks(PART_B, 4096)
+    archive = multipart_plan().archives[0]
+    assert pin.matches(archive.parts, archive.source.md5)
+
+
+def test_a_part_that_misses_its_md5_publishes_nothing(pp, tmp_path):
+    with pytest.raises(pp.PublishPinError, match="md5"):
+        pp.publish_pin(
+            tmp_path,
+            "game",
+            resolve=lambda: multipart_plan(md5_b="0" * 32),
+            open_stream=PartStreams(),
+            block_size=4096,
+        )
+    assert not pin_path(tmp_path).exists()
+
+
+def test_every_part_needs_a_publisher_md5(pp, tmp_path):
+    def plan():
+        built = multipart_plan()
+        archive = built.archives[0]
+        loose = directdl.RemoteFile(
+            path="game.zip.002", url=URL_B, size=len(PART_B), md5=None
+        )
+        parts = (archive.parts[0], loose)
+        return directdl.Plan(
+            game_tag="game",
+            version="1",
+            archives=(directdl.Archive(
+                name="game.zip", source=archive.source, parts=parts, unwrap=("zip",), stream=True
+            ),),
+            exe="g.exe",
+        )
+
+    with pytest.raises(pp.PublishPinError, match="md5"):
+        pp.publish_pin(tmp_path, "game", resolve=plan, open_stream=PartStreams(), block_size=4096)
+    assert not pin_path(tmp_path).exists()
+
+
+def test_an_unchanged_multi_part_archive_is_not_downloaded_again(pp, tmp_path):
+    streams = PartStreams()
+    pp.publish_pin(tmp_path, "game", resolve=multipart_plan, open_stream=streams, block_size=4096)
+    before = pin_path(tmp_path).read_bytes()
+    again = pp.publish_pin(
+        tmp_path, "game", resolve=multipart_plan, open_stream=streams, block_size=4096
+    )
+    assert again == "unchanged"
+    assert len(streams.opened) == 2
+    assert pin_path(tmp_path).read_bytes() == before
+
+
+def test_a_changed_part_url_rebuilds_the_multi_part_pin(pp, tmp_path):
+    streams = PartStreams()
+    pp.publish_pin(tmp_path, "game", resolve=multipart_plan, open_stream=streams, block_size=4096)
+    moved = "https://cdn.example/v2/game.zip.002"
+    streams.bodies[moved] = PART_B
+    result = pp.publish_pin(
+        tmp_path,
+        "game",
+        resolve=lambda: multipart_plan(url_b=moved),
+        open_stream=streams,
+        block_size=4096,
+    )
+    assert result == "published"
+    assert len(streams.opened) == 4
+
+
+FIRST_USE = "firstuse"
+
+
+def test_a_game_without_a_publisher_md5_is_refused_unless_it_is_trusted_on_first_use(
+    pp, tmp_path, monkeypatch
+):
+    with pytest.raises(pp.PublishPinError, match="md5"):
+        pp.publish_pin(
+            tmp_path, FIRST_USE, resolve=lambda: plan_for(md5=None),
+            open_stream=Stream(), block_size=4096,
+        )
+    monkeypatch.setattr(pp, "FIRST_USE_GAMES", frozenset({FIRST_USE}))
+    stream = Stream()
+    result = pp.publish_pin(
+        tmp_path, FIRST_USE, resolve=lambda: plan_for(md5=None), open_stream=stream,
+        block_size=4096,
+    )
+    assert result == "published"
+    path = tmp_path / "catalog" / "archive-pins" / f"{FIRST_USE}.json"
+    pin = archivepins.parse_document(json.loads(path.read_text()))["game.zip"]
+    assert pin.publisher_md5 is None
+    assert pin.parts[0].size == len(DATA)
+    source = plan_for(md5=None).archives[0].source
+    assert pin.matches([source], None)
+    again = pp.publish_pin(
+        tmp_path, FIRST_USE, resolve=lambda: plan_for(md5=None), open_stream=stream,
+        block_size=4096,
+    )
+    assert again == "unchanged"
+    assert stream.opened == 1
+
+
+def test_the_resolvers_for_endfield_and_gfl2_are_known(pp):
+    from nadare.core.sources import endfield, gfl2
+
+    assert pp.resolver_for("endfield") is endfield.resolve
+    assert pp.resolver_for("gfl2") is gfl2.resolve
+    assert "gfl2" in pp.FIRST_USE_GAMES
+    assert "endfield" not in pp.FIRST_USE_GAMES
+
+
+def test_hi3_resolves_the_global_hoyo_plan(pp, monkeypatch):
+    from nadare.core.sources import hoyo
+
+    seen = []
+    monkeypatch.setattr(hoyo, "resolve", lambda biz, *a, **k: seen.append(biz) or "plan")
+    assert pp.resolver_for("hi3")() == "plan"
+    assert seen == ["bh3_global"]
+    assert "hi3" not in pp.FIRST_USE_GAMES
+
+
+def test_a_multi_part_base_with_an_audio_archive_gets_one_pin_each(pp, tmp_path):
+    audio_url = "https://cdn.example/audio-en-us.zip"
+    audio = directdl.Archive(
+        name="audio-en-us",
+        source=directdl.RemoteFile(
+            path="audio-en-us", url=audio_url, size=len(DATA), md5=hashlib.md5(DATA).hexdigest()
+        ),
+        unwrap=("zip",),
+        stream=True,
+    )
+
+    def plan():
+        base = multipart_plan()
+        return directdl.Plan(
+            game_tag="game", version="1", archives=(*base.archives, audio), exe="g.exe"
+        )
+
+    streams = PartStreams({URL_A: PART_A, URL_B: PART_B, audio_url: DATA})
+    result = pp.publish_pin(tmp_path, "game", resolve=plan, open_stream=streams, block_size=4096)
+    assert result == "published"
+    pins = archivepins.parse_document(json.loads(pin_path(tmp_path).read_text()))
+    assert sorted(pins) == ["audio-en-us", "game.zip"]
+    assert len(pins["game.zip"].parts) == 2 and len(pins["audio-en-us"].parts) == 1

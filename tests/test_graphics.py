@@ -485,3 +485,25 @@ def test_missing_vulkaninfo_and_no_icd_is_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(graphics, "_ICD_DIRS", (str(tmp_path / "nope"),))
     monkeypatch.setattr(graphics, "_vulkaninfo_path", lambda: None)
     assert graphics._query_vulkan().available is False
+
+
+def test_loader_only_probe_is_disclosed_by_note_and_renderer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The optimistic gate stays, but the status line and the launch log carry the caveat (#781)."""
+    info = graphics.VulkanInfo(available=True, api_version="1.3.204", loader_only=True)
+    monkeypatch.setattr(graphics, "vulkan_info", lambda **k: info)
+    assert graphics.dxvk_ok() is True
+    assert "assumed" in graphics.vulkan_note()
+    renderer, note = graphics.effective_renderer({})
+    assert renderer == "vulkan"
+    assert note == graphics.vulkan_note()
+    # an explicit choice is the user's own call: no caveat
+    assert graphics.effective_renderer({"renderer": "vulkan"}) == ("vulkan", None)
+
+
+def test_verified_probe_has_no_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = graphics.VulkanInfo(available=True, api_version="1.3.204")
+    monkeypatch.setattr(graphics, "vulkan_info", lambda **k: info)
+    assert graphics.vulkan_note() == ""
+    assert graphics.effective_renderer({}) == ("vulkan", None)

@@ -26,6 +26,7 @@ from ..core import (
     directdl,
     endfield_shim,
     graphics,
+    monitors,
     nte_launcher,
     paths,
     webview2,
@@ -93,6 +94,7 @@ class DirectBackend(WineGameBackend):
         Option("wine_binary", "Wine binary", "path_file", advanced=True),
         Option("umu_binary", "umu-run binary", "path_file", advanced=True),
         Option("extra_env", "Environment", "env", "One KEY=VALUE per line.", advanced=True),
+        monitors.OPTION,
         Option("process_match", "Process match", "text", advanced=True),
     )
 
@@ -328,7 +330,7 @@ class Gfl2HaoplayBackend(Gfl2Backend):
     game_tag = "gfl2-haoplay"
     display_name = "Girls' Frontline 2 (Haoplay global build)"
     install_subdir = _subdir("GF2Haoplay")
-    install_size_hint = int(1 * GB)  # the small client; the game downloads ~60 GB itself
+    install_size_hint = int(1 * GB)  # the small client; the game downloads ~88 GB itself
     plan_factory = staticmethod(gfl2.resolve_haoplay)
     #: The game only starts under umu's id 0 (``wine start /wait /unix``); a named id or a Steam
     #: app id makes Proton run it through steam.exe and it hangs. A profile ``extra_env`` wins.
@@ -425,7 +427,8 @@ class Gfl2HaoplayBackend(Gfl2Backend):
     page_notice = (
         "This is the Haoplay global build; the Darkwinter build is a separate listing. Nadare "
         "installs only the small Haoplay client straight from Haoplay's servers "
-        "(no launcher); the game downloads and updates its ~60 GB itself on first start. "
+        "(no launcher); the game downloads and updates itself on first start, about 90 GB "
+        "with one voice language (more with others). "
         "Nadare installs Microsoft's WebView2 Runtime into this game's prefix for sign-in. "
         "If the sign-in page misbehaves, try the other Display backend in Settings.",
         "https://gf2.haoplay.com/",

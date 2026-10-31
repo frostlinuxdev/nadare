@@ -350,6 +350,7 @@ def _download_remote(
     *,
     emit: Emitter | None,
     cancel: Cancel | None,
+    pool: download_module.HttpClientPool | None = None,
 ) -> None:
     if cancel is not None:
         cancel.raise_if_cancelled()
@@ -381,6 +382,7 @@ def _download_remote(
             emit=emit,
             cancel=cancel,
             resume=True,
+            pool=pool,
         )
         if (rf.md5 or rf.crc32) and not _verify_remote(destination, rf):
             raise DirectError(f"hash mismatch for {rf.path}")
@@ -1496,6 +1498,8 @@ def sync(
     counting files plus archives. Idempotent: a second run fetches nothing."""
     _validate_plan(plan)
     root = Path(dest).expanduser()
+    if root.exists() and not root.is_dir():
+        raise DirectError(f"install path is not a folder: {root}")
     with _install_lock(root):
         return _sync(
             plan, root, emit=emit, cancel=cancel, workers=workers, check_workers=check_workers
@@ -1526,25 +1530,38 @@ def _sync(
     if missing_files:
         max_workers = max(1, min(workers, MAX_WORKERS))
 
+        # One keep-alive connection (and one DNS lookup) per worker thread and host, not per
+        # file: tens of thousands of lookups a minute trip a resolver's rate limit (#767).
+        connections = download_module.HttpClientPool()
+
         def fetch(rf: RemoteFile) -> None:
             combined.raise_if_cancelled()
             _download_remote(
-                rf, _safe_destination_path(root, rf.path), emit=emit, cancel=combined
+                rf,
+                _safe_destination_path(root, rf.path),
+                emit=emit,
+                cancel=combined,
+                pool=connections,
             )
 
         first_error: BaseException | None = None
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = [pool.submit(fetch, rf) for rf in missing_files]
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                    downloaded += 1
-                except BaseException as exc:
-                    if first_error is None:
-                        first_error = exc
-                    stop.cancel()
-                    for other in futures:
-                        other.cancel()
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = [pool.submit(fetch, rf) for rf in missing_files]
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                        downloaded += 1
+                    except BaseException as exc:
+                        if first_error is None:
+                            first_error = exc
+                            stop.cancel()
+                            # Once only: every queued file then ends here as cancelled, and
+                            # walking all futures for each of them is quadratic (#562).
+                            for other in futures:
+                                other.cancel()
+        finally:
+            connections.close()
         if first_error is not None:
             raise first_error
 

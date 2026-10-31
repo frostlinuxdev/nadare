@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QThreadPool, pyqtSignal
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QDialog,
@@ -48,6 +48,7 @@ from ..core.directkinds import (
 )
 from ..core.shortcuts import command_hint
 from .theme import apply_theme
+from .workers import CallTask
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,8 @@ class GameType:
     badge: str = ""
     #: Tooltip explaining the badge.
     badge_help: str = ""
+    #: Longer name for the wizard list, when the profile title should stay short.
+    display: str = ""
 
 
 #: The wizard group for profiles that need the user's own game files.
@@ -75,6 +78,7 @@ _CATALOG: tuple[GameType, ...] = (
     GameType(
         "Fate/Grand Order",
         "fgo-lepton",
+        display="Fate/Grand Order (NA)",
         badge="Experimental",
         # The command half of this hint is filled in by _catalog() at display time.
         badge_help=(
@@ -178,7 +182,11 @@ PREFIX_KINDS = frozenset(
 
 #: Prefix kinds whose whole install lives inside the Wine prefix (no separate
 #: game folder), so a picked "install folder" is really the prefix.
-PREFIX_ONLY_KINDS = frozenset({"stove-czn"})
+PREFIX_ONLY_KINDS = frozenset({"stove-czn", "fgo-lepton"})
+
+#: Kinds whose "prefix" is a host lepton install (``lepton-x86_64/lepton-fgo``),
+#: not a Wine prefix.
+LEPTON_KINDS = frozenset({"fgo-lepton"})
 
 
 def available_catalog() -> tuple[GameType, ...]:
@@ -330,6 +338,18 @@ def _drive_c_prefix(folder: Path) -> Path | None:
     return None
 
 
+def _lepton_prefix(folder: Path) -> Path | None:
+    """The lepton-fgo install prefix holding ``lepton-x86_64/lepton-fgo``.
+
+    Users may pick the prefix or the ``lepton-x86_64`` folder inside it, so walk
+    up the same way :func:`_drive_c_prefix` does.
+    """
+    for candidate in (folder, *folder.parents):
+        if (candidate / "lepton-x86_64" / "lepton-fgo").is_file():
+            return candidate
+    return None
+
+
 def detect_import(kind: str, folder: str | Path | None, prefix: str | Path | None) -> dict:
     """Best-effort, read-only detection of an existing install.
 
@@ -339,6 +359,16 @@ def detect_import(kind: str, folder: str | Path | None, prefix: str | Path | Non
     info: dict[str, Any] = {"install_dir": "", "prefix": "", "notes": []}
     folder_path = Path(folder).expanduser() if folder else None
     prefix_path = Path(prefix).expanduser() if prefix else None
+    if kind in LEPTON_KINDS:
+        for candidate in (folder_path, prefix_path):
+            if candidate is None or not candidate.is_dir():
+                continue
+            found = _lepton_prefix(candidate)
+            if found is not None:
+                info["prefix"] = str(found)
+                info["notes"].append(f"Found the lepton-fgo install at {found}.")
+                break
+        return info
     game = next((g for g in _catalog() if g.kind == kind), None)
     adopted = (
         _drive_c_prefix(folder_path)
@@ -372,8 +402,12 @@ def detect_import(kind: str, folder: str | Path | None, prefix: str | Path | Non
                 if not info["install_dir"]:
                     info["install_dir"] = str(candidate)
         if not info["install_dir"] and info["prefix"]:
-            # Keep the backend's own default so the profile is usable.
-            info["install_dir"] = str(Path(info["prefix"]) / subdir)
+            # The prefix exists but the game is not installed in it: do not invent
+            # ``<prefix>/<subdir>`` as the install folder (#598c). The backend's own
+            # default applies, and INSTALL can put the game there.
+            if not any("prefix" in note.lower() for note in info["notes"]):
+                info["notes"].append(f"Found the Wine prefix at {info['prefix']}.")
+            info["notes"].append(f"{game.title} is not installed in it yet.")
     else:
         if folder_path and folder_path.is_dir():
             if kind in PREFIX_ONLY_KINDS:
@@ -451,6 +485,10 @@ class AddGameDialog(QDialog):
         self._name_touched = False
         self._folder_touched = False
         self._prefix_touched = False
+        #: Bumped per background detection / free-space read so a stale result cannot
+        #: overwrite the hints. Separate counters: typing must not cancel an import check.
+        self._detect_generation = 0
+        self._free_generation = 0
 
         self.setWindowTitle("Add game")
         self.setMinimumWidth(560)
@@ -517,7 +555,7 @@ class AddGameDialog(QDialog):
         self.folder.setPlaceholderText("folder the game will live in")
         self.folder.textEdited.connect(lambda _t: setattr(self, "_folder_touched", True))
         self.folder.textChanged.connect(self._folder_changed)
-        self.folder.editingFinished.connect(self.detect)
+        self.folder.editingFinished.connect(self._detect_async)
         folder_field = QWidget()
         folder_layout = QVBoxLayout(folder_field)
         folder_layout.setContentsMargins(0, 0, 0, 0)
@@ -549,7 +587,7 @@ class AddGameDialog(QDialog):
         self.prefix.setPlaceholderText("Created automatically")
         self.prefix.textEdited.connect(lambda _t: setattr(self, "_prefix_touched", True))
         self.prefix.textChanged.connect(self._update_prefix_summary)
-        self.prefix.editingFinished.connect(self.detect)
+        self.prefix.editingFinished.connect(self._detect_async)
         prefix_layout.addWidget(self.prefix, 1)
         prefix_browse = QPushButton("Browse")
         prefix_browse.setObjectName("GhostButton")
@@ -637,7 +675,8 @@ class AddGameDialog(QDialog):
             for game in available_catalog():
                 if game.group != group:
                     continue
-                label = f"{game.title}  ·  {game.badge}" if game.badge else game.title
+                shown = game.display or game.title
+                label = f"{shown}  ·  {game.badge}" if game.badge else shown
                 item = QListWidgetItem(label)
                 if game.badge_help:
                     item.setToolTip(game.badge_help)
@@ -689,10 +728,12 @@ class AddGameDialog(QDialog):
         self.folder.setText(str(path))
         self._folder_touched = True
         self._folder_changed()
+        self.detect()
 
     def set_prefix(self, path: str | Path) -> None:
         self._prefix_touched = True
         self.prefix.setText(str(path))
+        self.detect()
 
     def set_profile_name(self, name: str) -> None:
         self.name.setText(name)
@@ -750,7 +791,7 @@ class AddGameDialog(QDialog):
             else:
                 self.prefix.clear()
         self._update_size_hint()
-        self.detect()
+        self._detect_async()
 
     def _toggle_location(self) -> None:
         self._location_open = not self._location_open
@@ -770,7 +811,7 @@ class AddGameDialog(QDialog):
             if game is not None and game.kind in PREFIX_KINDS:
                 self.prefix.setText(self._matching_prefix(self.folder.text()))
         self._update_prefix_summary()
-        self._update_free_space()
+        self._update_free_space_async()
 
     def _toggle_prefix(self) -> None:
         self._prefix_open = not self._prefix_open
@@ -785,7 +826,9 @@ class AddGameDialog(QDialog):
         importing = self.import_existing.isChecked()
         show = importing or self._location_open
         game = self._selected_game()
-        uses_prefix = game is not None and game.kind in PREFIX_KINDS
+        uses_prefix = game is not None and (
+            game.kind in PREFIX_KINDS or game.kind in LEPTON_KINDS
+        )
         prefix_only = game is not None and game.kind in PREFIX_ONLY_KINDS
         form = self._form
         # A prefix-only kind has no separate game folder: the prefix *is* the
@@ -821,10 +864,18 @@ class AddGameDialog(QDialog):
 
     def _apply_prefix_label(self, prefix_only: bool) -> None:
         """Call CZN's prefix what it is to users: the game folder."""
+        game = self._selected_game()
         label = self._form.labelForField(self.prefix_row)
         if label is None:
             return
-        if prefix_only:
+        if game is not None and game.kind in LEPTON_KINDS:
+            label.setText("lepton-fgo install folder")
+            for widget in (label, self.prefix, self.prefix_row):
+                widget.setToolTip(
+                    "The folder that holds lepton-x86_64/lepton-fgo "
+                    "(usually ~/.local/share/lepton-nv)."
+                )
+        elif prefix_only:
             label.setText("Game folder")
             for widget in (label, self.prefix, self.prefix_row):
                 widget.setToolTip("Wine prefix")
@@ -855,7 +906,7 @@ class AddGameDialog(QDialog):
                     self.prefix.setText(self._matching_prefix(self.folder.text()))
         self._update_size_hint()
         self._folder_changed()
-        self.detect()
+        self._detect_async()
 
     def _update_prefix_summary(self) -> None:
         game = self._selected_game()
@@ -898,7 +949,7 @@ class AddGameDialog(QDialog):
             self.folder.setText(chosen)
             self._folder_touched = True
             self._folder_changed()
-            self.detect()
+            self._detect_async()
 
     def _browse_prefix(self) -> None:
         start = self.prefix.text().strip() or str(Path.home())
@@ -906,7 +957,7 @@ class AddGameDialog(QDialog):
         if chosen:
             self._prefix_touched = True
             self.prefix.setText(chosen)
-            self.detect()
+            self._detect_async()
 
     def _free_hint(self, path: str) -> str:
         text = path.strip()
@@ -924,15 +975,80 @@ class AddGameDialog(QDialog):
         self.folder_free.setText(self._free_hint(self.folder.text()))
         self.prefix_free.setText(self._free_hint(self.prefix.text()))
 
-    def detect(self) -> dict:
-        """Run read-only detection and update the hints; returns the result."""
-        self._update_free_space()
+    def _update_free_space_async(self) -> None:
+        """Read ``statvfs`` off the GUI thread; a hung mount must not freeze the dialog."""
+        self._free_generation += 1
+        generation = self._free_generation
+        folder = self.folder.text().strip()
+        prefix = self.prefix.text().strip()
+
+        def run() -> tuple:
+            return folder, prefix, self._free_hint(folder), self._free_hint(prefix)
+
+        task = CallTask(run)
+        task.signals.done.connect(
+            lambda result: self._apply_free_space(generation, result)
+        )
+        QThreadPool.globalInstance().start(task)
+
+    def _apply_free_space(self, generation: int, result: tuple) -> None:
+        folder, prefix, folder_hint, prefix_hint = result
+        if generation != self._free_generation:
+            return
+        try:
+            current = (self.folder.text().strip(), self.prefix.text().strip())
+        except RuntimeError:
+            return  # the dialog was closed before the worker answered
+        if current != (folder, prefix):
+            return
+        self.folder_free.setText(folder_hint)
+        self.prefix_free.setText(prefix_hint)
+
+    def _detect_async(self) -> None:
+        """Run import detection and free-space reads on a worker thread (#102)."""
+        self._detect_generation += 1
+        generation = self._detect_generation
+        folder = self.folder.text().strip()
+        prefix = self.prefix.text().strip()
         kind = self.selected_kind()
-        if not kind or not self.import_existing.isChecked():
+        importing = self.import_existing.isChecked()
+        # Add stays as it was while the worker runs: a click on a disabled button is simply
+        # lost, and create_profile() re-checks the folder itself before writing anything.
+        # With no folder and no prefix there is nothing to look at, so say so at once.
+        if importing and not folder and not prefix:
+            self._show_detection(True, {})
+
+        def run() -> tuple:
+            hints = (self._free_hint(folder), self._free_hint(prefix))
+            info = detect_import(kind, folder, prefix) if kind and importing else {}
+            return folder, prefix, hints, info
+
+        task = CallTask(run)
+        task.signals.done.connect(
+            lambda result: self._apply_detection(generation, result)
+        )
+        QThreadPool.globalInstance().start(task)
+
+    def _apply_detection(self, generation: int, result: tuple) -> None:
+        folder, prefix, hints, info = result
+        if generation != self._detect_generation:
+            return
+        try:
+            current = (self.folder.text().strip(), self.prefix.text().strip())
+            importing = self.import_existing.isChecked()
+        except RuntimeError:
+            return  # the dialog was closed before the worker answered
+        if current != (folder, prefix):
+            return
+        self.folder_free.setText(hints[0])
+        self.prefix_free.setText(hints[1])
+        self._show_detection(importing, info)
+
+    def _show_detection(self, importing: bool, info: dict) -> None:
+        if not importing:
             self.detect_label.setText("")
             self.create_button.setEnabled(True)
-            return {}
-        info = detect_import(kind, self.folder.text().strip(), self.prefix.text().strip())
+            return
         notes = list(info.get("notes") or [])
         if info.get("install_dir"):
             notes.append(f"Game folder: {info['install_dir']}")
@@ -946,6 +1062,18 @@ class AddGameDialog(QDialog):
         self.create_button.setToolTip(
             "" if found else "Pick the folder where the game is already installed."
         )
+
+    def detect(self) -> dict:
+        """Run read-only detection and update the hints; returns the result."""
+        self._update_free_space()
+        kind = self.selected_kind()
+        importing = bool(kind) and self.import_existing.isChecked()
+        info = (
+            detect_import(kind, self.folder.text().strip(), self.prefix.text().strip())
+            if importing
+            else {}
+        )
+        self._show_detection(importing, info)
         return info
 
     # ---- creation ----------------------------------------------------------
@@ -1034,6 +1162,12 @@ class AddGameDialog(QDialog):
                         f"that contains {game.exes[0] if game.exes else 'the game'} or its "
                         "Wine prefix."
                     )
+                elif kind in LEPTON_KINDS:
+                    self.error_label.setText(
+                        "No lepton-fgo install was found there. Pick the folder that "
+                        "holds lepton-x86_64/lepton-fgo (usually "
+                        "~/.local/share/lepton-nv)."
+                    )
                 elif kind in PREFIX_ONLY_KINDS:
                     self.error_label.setText(
                         f"No {game.title} Wine prefix was found there. Pick the folder "
@@ -1045,7 +1179,7 @@ class AddGameDialog(QDialog):
                         "this game."
                     )
                 return None
-            install_dir = info.get("install_dir") or info.get("prefix") or ""
+            install_dir = info.get("install_dir") or ""
             prefix_value = info.get("prefix") or prefix or ""
         else:
             install_dir = folder
@@ -1084,7 +1218,7 @@ class AddGameDialog(QDialog):
         values: dict[str, Any] = {"backend": kind, "title": game.title}
         if install_dir and kind not in PREFIX_ONLY_KINDS:
             values["install_dir"] = install_dir
-        if prefix_value and kind in PREFIX_KINDS:
+        if prefix_value and (kind in PREFIX_KINDS or kind in LEPTON_KINDS):
             values["prefix"] = prefix_value
         if owned:
             values["owned_trees"] = owned

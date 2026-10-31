@@ -150,7 +150,7 @@ def test_a_game_nadare_did_not_lay_out_moves_only_its_prefix_and_says_so(make, t
     profile = _make(tmp_path / "mine", managed=False)
     rig = make([tmp_path / "big"], {"game": profile})
     saved = rig.move("game")
-    assert saved["prefix"] == str(tmp_path / "big" / "prefix")
+    assert saved["prefix"] == str(tmp_path / "big" / "Game prefix")
     assert saved["install_dir"] == profile["install_dir"]
     assert "stays" in rig.questions[0].lower() and profile["install_dir"] in rig.questions[0]
 
@@ -198,7 +198,7 @@ def test_a_missing_game_folder_never_leaves_a_half_moved_profile(make, tmp_path)
     shutil.rmtree(profile["install_dir"])
     rig = make([tmp_path / "big"], {"game": profile})
     saved = rig.move("game")
-    assert saved["prefix"] == str(tmp_path / "big" / "prefix")  # the prefix-only move
+    assert saved["prefix"] == str(tmp_path / "big" / "Game prefix")  # the prefix-only move
     assert Path(saved["prefix"]).is_dir() and not Path(profile["prefix"]).exists()
     assert not any("did not arrive" in text for text in rig.shown)
     assert "stays" in rig.questions[0].lower()

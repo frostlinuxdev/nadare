@@ -35,7 +35,25 @@ arch="$(dpkg --print-architecture 2>/dev/null || uname -m | sed -e 's/x86_64/amd
 pkg="dist/nadare_${version}_${arch}"
 
 echo "[*] Nadare ${version}: building PyInstaller onedir bundle"
+# The bundle embeds src/nadare/assets/7zzs through the spec; fetch the pinned
+# binary first, or the .deb silently ships without it (#599).
+bash scripts/fetch_7zip.sh
 "$PY" -m PyInstaller --clean -y packaging/nadare.spec
+
+# The real glibc floor is the newest GLIBC_x.y symbol any shipped ELF needs.
+# The documented build host is Ubuntu 22.04 (2.35), but a newer host would
+# otherwise produce a package that claims to run on a libc it does not.
+glibc_floor=2.35
+if command -v readelf >/dev/null 2>&1; then
+    glibc_found="$(find dist/nadare -type f \
+            \( -name 'nadare' -o -name '*.so' -o -name '*.so.*' \) -print0 \
+        | xargs -0 -r readelf -V 2>/dev/null \
+        | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//' \
+        | sort -Vu | tail -1 || true)"
+    [[ -z "$glibc_found" ]] || glibc_floor="$glibc_found"
+else
+    echo "[!] readelf not found: keeping the documented glibc ${glibc_floor} floor" >&2
+fi
 
 echo "[*] Staging ${pkg}"
 rm -rf "$pkg"
@@ -51,7 +69,14 @@ install -d "$pkg/DEBIAN" \
 cp -a dist/nadare/. "$pkg/opt/nadare/"
 chmod 755 "$pkg/opt/nadare/nadare"
 
-ln -sf /opt/nadare/nadare "$pkg/usr/bin/nadare"
+# apt owns updates for this package: the wrapper tells Nadare not to offer a second, manual
+# AppImage download that dpkg would overwrite (see docs/PACKAGING.md).
+cat > "$pkg/usr/bin/nadare" <<'WRAPPER'
+#!/bin/sh
+export NADARE_MANAGED_UPDATES=1
+exec /opt/nadare/nadare "$@"
+WRAPPER
+chmod 755 "$pkg/usr/bin/nadare"
 cp packaging/nadare.desktop "$pkg/usr/share/applications/nadare.desktop"
 
 # Icon is optional: Nadare ships a generated placeholder (packaging/nadare.svg).
@@ -85,7 +110,7 @@ Section: games
 Priority: optional
 Architecture: ${arch}
 Maintainer: Nadare contributors <nadare@example.invalid>
-Depends: libc6 (>= 2.35), libgl1, libegl1, libxkbcommon0, libdbus-1-3, libfontconfig1, libxcb-cursor0
+Depends: libc6 (>= ${glibc_floor}), libgl1, libegl1, libxkbcommon0, libdbus-1-3, libfontconfig1, libxcb-cursor0
 Recommends: umu-launcher, mingw-w64, wine
 Homepage: https://example.invalid/nadare
 Description: open-source Linux launcher for anime gacha games

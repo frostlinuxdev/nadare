@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
-from . import download, hosting, paths, sandbox
+from . import download, hosting, paths, sandbox, tls
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +208,9 @@ def _github_latest_redirect(page: str, timeout: int = 10) -> str | None:
 
     The web page is not behind the API's rate limit.
     """
-    opener = urllib.request.build_opener(_StopAtRedirect())
+    opener = urllib.request.build_opener(
+        _StopAtRedirect(), urllib.request.HTTPSHandler(context=tls.ssl_context())
+    )
     try:
         with opener.open(download._request(page), timeout=timeout):  # noqa: S310
             return None

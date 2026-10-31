@@ -103,7 +103,9 @@ def _make_server(files: dict[str, bytes], *, delay: float = 0.0, corrupt_once=()
 
     server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
     server.daemon_threads = True
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     thread.start()
     return server, state
 

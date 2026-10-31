@@ -15,13 +15,15 @@ import logging
 import os
 import time
 import traceback
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QRunnable, QThread, pyqtSignal
 
 from .. import __version__
-from ..core import logview, paths, vcredist
+from ..core import diskspace, logview, paths, vcredist
 from ..core.backends import BackendError, BackendUnsupported, create
 from ..core.config import Config
 from ..core.events import Cancel, Cancelled, Event, mask
@@ -59,6 +61,11 @@ LOCKED_OPERATIONS = frozenset({"install", "update", "repair", "remake_prefix", "
 
 #: Operations that can be paused and later resumed from their partial downloads.
 PAUSABLE = frozenset({"install", "update", "repair"})
+
+#: Heavy operations only a few of which run at once; the rest wait their turn (#770).
+CAPPED = frozenset({"install", "update", "repair"})
+DEFAULT_ACTIVE_INSTALLS = 1
+MAX_ACTIVE_INSTALLS = 4
 
 #: Operations that mutate the installation and therefore take a per-profile lock.
 MUTATING = frozenset(
@@ -173,9 +180,29 @@ class BackendWorker(QThread):
         """Ask the step that offers a skip to stop; the operation itself carries on."""
         self._cancel_token.skip_step()
 
+    def _reserve_install_space(self, backend) -> diskspace.Reservation | None:
+        """Promise an install's space so a second install cannot claim the same bytes (#770).
+
+        Only fresh installs reserve; what already sits in the folder (a resumed install)
+        counts as written. A backend without a size or a folder just installs as before.
+        """
+        if self._operation != "install":
+            return None
+        size = getattr(backend, "install_size_hint", None)
+        folder = getattr(backend, "install_dir", None)
+        if not size or not callable(folder):
+            return None
+        try:
+            path = Path(folder())
+        except Exception:  # noqa: BLE001 - no reservation is better than a failed install
+            return None
+        needed = max(0, int(size) - diskspace.tree_bytes(path))
+        return diskspace.reserve(path, needed, owner=self._profile)
+
     def run(self) -> None:  # noqa: D401 - QThread entry point
         code: int | None = None
         lock = None
+        reservation = None
         try:
             if self._operation in LOCKED_OPERATIONS:
                 lock = OperationLock(self._profile)
@@ -189,6 +216,7 @@ class BackendWorker(QThread):
             backend = create(
                 self._profile, self._config, emit=self._on_event, cancel=self._cancel_token
             )
+            reservation = self._reserve_install_space(backend)
             if self._operation == "status":
                 from ..core.process import ProcessScanRound, use_process_scan_round
 
@@ -214,6 +242,8 @@ class BackendWorker(QThread):
             self._fail_exception(exc)
             return
         finally:
+            if reservation is not None:
+                reservation.release()
             if lock is not None:
                 lock.release()
             self._close_log()
@@ -515,6 +545,15 @@ class _WorkerBridge(QObject):
             self.deleteLater()
 
 
+@dataclass
+class InstallOverview:
+    """``(profile, operation)`` pairs: what runs now, what waits (in order), what is paused."""
+
+    running: list[tuple[str, str]]
+    waiting: list[tuple[str, str]]
+    paused: list[tuple[str, str]]
+
+
 class BackendController(QObject):
     """Serialize backend operations per profile and fan their signals out.
 
@@ -535,6 +574,8 @@ class BackendController(QObject):
     cancelled = pyqtSignal(str, str)  # profile, operation
     paused = pyqtSignal(str, str)  # profile, operation
     busy = pyqtSignal(str, str, bool)  # profile, operation, active
+    queued = pyqtSignal(str, str)  # profile, operation: waiting for a free install slot
+    queue_changed = pyqtSignal()  # the waiting line gained, lost or reordered a game
 
     def __init__(self, config: Config, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -547,8 +588,12 @@ class BackendController(QObject):
         self._launch_ended: set[str] = set()
         #: Exactly one user operation waiting for a cancellable background refresh.
         self._pending: dict[str, tuple[str, object]] = {}
+        #: Capped operations waiting for a free slot, first come first served (#770).
+        self._waiting: dict[str, tuple[str, object]] = {}
         #: Profiles whose running worker was asked to pause.
         self._pausing: set[str] = set()
+        #: Installs paused to let another one go first; they rejoin the front of the line.
+        self._requeue: set[str] = set()
         #: Paused operations, with the payload needed to run them again.
         self._paused: dict[str, tuple[str, object]] = {}
         #: Once shutdown starts, no new worker may be spawned (a queued success
@@ -557,13 +602,29 @@ class BackendController(QObject):
 
     # ---- queries -----------------------------------------------------------
     def is_busy(self, profile: str) -> bool:
-        if profile in self._pending:
+        if profile in self._pending or profile in self._waiting:
             return True
         worker = self._workers.get(profile)
         return worker is not None and worker.isRunning()
 
     def worker(self, profile: str) -> BackendWorker | None:
         return self._workers.get(profile)
+
+    def is_waiting(self, profile: str) -> bool:
+        """Whether ``profile``'s install/update/repair waits for a free slot."""
+        return profile in self._waiting
+
+    def max_active_installs(self) -> int:
+        """How many installs, updates and repairs may run at once (the setting, kept sane)."""
+        value = self._config.data.get("max_concurrent_installs", DEFAULT_ACTIVE_INSTALLS)
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            return DEFAULT_ACTIVE_INSTALLS
+        return max(1, min(MAX_ACTIVE_INSTALLS, count))
+
+    def _active_installs(self) -> int:
+        return sum(1 for worker in self._workers.values() if worker.operation in CAPPED)
 
     def busy_profiles(self) -> list[str]:
         return [name for name in self._workers if self.is_busy(name)]
@@ -608,12 +669,13 @@ class BackendController(QObject):
         pending = self._pending.get(profile)
         worker = self._workers.get(profile)
         running = worker is not None and worker.isRunning()
+        waiting = profile in self._waiting
 
-        if running or pending is not None:
+        if running or pending is not None or waiting:
             if operation in BACKGROUND:
                 # Background refreshes are best-effort and never queue up.
                 return False
-            if pending is not None:
+            if pending is not None or waiting:
                 return False
             if worker is not None and worker.operation in BACKGROUND:
                 self._pending[profile] = (operation, payload)
@@ -636,13 +698,105 @@ class BackendController(QObject):
 
         if operation not in BACKGROUND:
             self._paused.pop(profile, None)
+        return self._start_or_wait(profile, operation, payload)
+
+    def _start_or_wait(self, profile: str, operation: str, payload: object = None) -> bool:
+        """Run ``operation`` now, or hold a capped one until a slot frees up (#770)."""
+        if operation in CAPPED and self._active_installs() >= self.max_active_installs():
+            self._waiting[profile] = (operation, payload)
+            self.busy.emit(profile, operation, True)
+            self.queued.emit(profile, operation)
+            self.queue_changed.emit()
+            return True
         self._spawn(profile, operation, payload)
+        return True
+
+    def _release_waiting(self) -> None:
+        """Start waiting operations, oldest first, while slots are free."""
+        while (
+            self._waiting
+            and not self._closed
+            and self._active_installs() < self.max_active_installs()
+        ):
+            profile = next(iter(self._waiting))
+            operation, payload = self._waiting.pop(profile)
+            self.queue_changed.emit()
+            self._spawn(profile, operation, payload)
+
+    def install_overview(self) -> InstallOverview:
+        """Every install, update and repair that is running, waiting or paused, for one list."""
+        running = [
+            (name, worker.operation)
+            for name, worker in self._workers.items()
+            if worker.operation in CAPPED and worker.isRunning()
+        ]
+        waiting = [(name, entry[0]) for name, entry in self._waiting.items()]
+        paused = [(name, entry[0]) for name, entry in self._paused.items() if entry[0] in CAPPED]
+        return InstallOverview(running, waiting, paused)
+
+    def queue_order(self) -> list[str]:
+        """The games waiting for an install slot, first in line first."""
+        return list(self._waiting)
+
+    def _front(self, profile: str) -> None:
+        entry = self._waiting.pop(profile)
+        self._waiting = {profile: entry, **self._waiting}
+        self.queue_changed.emit()
+
+    def move_to_front(self, profile: str) -> bool:
+        """Put a waiting install first in line. False when it is not waiting or already first."""
+        if profile not in self._waiting or next(iter(self._waiting)) == profile:
+            return False
+        self._front(profile)
+        return True
+
+    def _victim(self, pausable: Callable[[str], bool]) -> str | None:
+        """The running install to pause so another can go first (the newest that can pause)."""
+        for name in reversed(list(self._workers)):
+            worker = self._workers[name]
+            if (
+                worker.operation in CAPPED
+                and worker.isRunning()
+                and name not in self._pausing
+                and pausable(name)
+            ):
+                return name
+        return None
+
+    def can_start_now(self, profile: str, pausable: Callable[[str], bool]) -> bool:
+        """Whether :meth:`start_now` would work: ``profile`` waits and a running one can pause."""
+        return profile in self._waiting and self._victim(pausable) is not None
+
+    def start_now(self, profile: str, pausable: Callable[[str], bool]) -> bool:
+        """Pause a running install and give its slot to the waiting ``profile``.
+
+        The paused install keeps its downloads and goes back to the front of the line, so it
+        carries on as soon as this one is done. ``pausable`` says which running games can pause
+        (only those that resume from what is already on disk).
+        """
+        if profile not in self._waiting:
+            return False
+        victim = self._victim(pausable)
+        if victim is None:
+            return False
+        self._requeue.add(victim)
+        self._pausing.add(victim)
+        self._front(profile)
+        self._workers[victim].cancel()
         return True
 
     def pause(self, profile: str) -> bool:
         """Ask the running pausable operation for ``profile`` to stop and remember it."""
         if profile in self._pausing:
             return False
+        waiting = self._waiting.pop(profile, None)
+        if waiting is not None:
+            # Still waiting for a slot: pausing it means it simply does not start.
+            self.queue_changed.emit()
+            self._paused[profile] = waiting
+            self.busy.emit(profile, waiting[0], False)
+            self.paused.emit(profile, waiting[0])
+            return True
         queued = self._pending.get(profile)
         if queued is not None:
             # INSTALL was clicked while a status/news probe still ran, so it is only queued and
@@ -668,7 +822,10 @@ class BackendController(QObject):
     def forget(self, profile: str) -> None:
         """Drop a paused (or pausing) operation: the game was removed, nothing may resume it."""
         self._pausing.discard(profile)
+        self._requeue.discard(profile)
         self._paused.pop(profile, None)
+        if self._waiting.pop(profile, None) is not None:
+            self.queue_changed.emit()
 
     def resume(self, profile: str) -> bool:
         """Run the operation paused for ``profile`` again with its payload."""
@@ -723,6 +880,13 @@ class BackendController(QObject):
         # Cancel beats a pause that has not landed yet, even when the worker thread has already
         # exited and only its queued "cancelled" slot is left to run.
         self._pausing.discard(profile)
+        self._requeue.discard(profile)
+        waiting = self._waiting.pop(profile, None)
+        if waiting is not None:
+            self.queue_changed.emit()
+            self.busy.emit(profile, waiting[0], False)
+            self.cancelled.emit(profile, waiting[0])
+            return
         pending = self._pending.pop(profile, None)
         if pending is not None:
             # The queued user operation never started. Free the profile's slot
@@ -789,7 +953,13 @@ class BackendController(QObject):
             self.busy.emit(profile, operation, False)
             self.cancelled.emit(profile, operation)
         self._pending.clear()
+        for profile, (operation, _payload) in list(self._waiting.items()):
+            self.busy.emit(profile, operation, False)
+            self.cancelled.emit(profile, operation)
+        self._waiting.clear()
+        self.queue_changed.emit()
         self._pausing.clear()
+        self._requeue.clear()
         self._paused.clear()
         workers = [
             worker
@@ -822,6 +992,7 @@ class BackendController(QObject):
         if operation == "launch":
             self.launch_ended(profile)
         self.busy.emit(profile, operation, False)
+        self._release_waiting()
 
     def _on_worker_finished(self, profile: str, worker: BackendWorker) -> None:
         """Start a queued user operation once the background refresh has ended."""
@@ -840,21 +1011,33 @@ class BackendController(QObject):
         if self._workers.get(profile) is worker:
             self._workers.pop(profile, None)
         self._pending.pop(profile, None)
-        self._spawn(profile, pending[0], pending[1])
+        self._start_or_wait(profile, pending[0], pending[1])
 
     def _on_succeeded(self, profile: str, operation: str, code: int, worker) -> None:
         self._pausing.discard(profile)
+        self._requeue.discard(profile)
         self._finish(profile, operation, worker)
         self.succeeded.emit(profile, operation, code)
 
     def _on_failed(self, profile: str, operation: str, message: str, worker) -> None:
         self._pausing.discard(profile)
+        self._requeue.discard(profile)
         self._finish(profile, operation, worker)
         self.failed.emit(profile, operation, message)
 
     def _on_cancelled(self, profile: str, operation: str, worker) -> None:
         if profile in self._pausing:
             self._pausing.discard(profile)
+            if profile in self._requeue:
+                # Paused to let another install go first: back to the front of the line.
+                self._requeue.discard(profile)
+                current = self._workers.get(profile) is worker
+                self._finish(profile, operation, worker)
+                if current and not self._closed:
+                    self._start_or_wait(profile, operation, getattr(worker, "payload", None))
+                    if profile in self._waiting:
+                        self._front(profile)
+                return
             self._paused[profile] = (operation, getattr(worker, "payload", None))
             self._finish(profile, operation, worker)
             self.paused.emit(profile, operation)

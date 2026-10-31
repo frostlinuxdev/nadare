@@ -946,3 +946,222 @@ def test_http_client_pool_tunnels_https_through_the_proxy(
     conn = pool._connection("https", "origin.invalid", 443, 5)
     assert (conn.host, conn.port) == ("127.0.0.1", 3128)
     assert (conn._tunnel_host, conn._tunnel_port) == ("origin.invalid", 443)
+
+
+def test_pool_does_not_retry_a_failed_dns_lookup_at_once(monkeypatch):
+    """#767: a refused lookup must not trigger a second lookup straight away."""
+    import socket
+
+    calls: list[str] = []
+
+    def failing(host, *args, **kwargs):
+        calls.append(host)
+        raise socket.gaierror(-3, "Temporary failure in name resolution")
+
+    monkeypatch.setattr(socket, "getaddrinfo", failing)
+    pool = dl.HttpClientPool()
+    try:
+        with pytest.raises(OSError):
+            pool.open("http://example.invalid/x")
+        assert not pool._store()  # the failed connection is not kept for reuse
+    finally:
+        pool.close()
+    assert len(calls) == 1
+
+
+def test_download_through_a_pool_restarts_on_http_416(tmp_path: Path) -> None:
+    import io
+
+    body = b"runner-archive" * 5
+    (tmp_path / "r.tar.part").write_bytes(body)  # as long as the file: resuming cannot work
+    seen: list[str | None] = []
+
+    class _Resp(io.BytesIO):
+        def __init__(self, status: int, data: bytes) -> None:
+            super().__init__(data)
+            self.status = status
+            self.headers = {"Content-Length": str(len(data))}
+
+        def header(self, name: str, default: str | None = None) -> str | None:
+            return self.headers.get(name, default)
+
+        def close(self) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _Pool:
+        def open(self, url, *, headers=None, timeout=None, **kwargs):
+            seen.append((headers or {}).get("Range"))
+            if (headers or {}).get("Range"):
+                return _Resp(416, b"")
+            return _Resp(200, body)
+
+    dl._download_once(
+        "https://x/r.tar",
+        tmp_path / "r.tar.part",
+        headers=None,
+        timeout=5,
+        resume=True,
+        emit=lambda e: None,
+        cancel=None,
+        chunk=1024,
+        pool=_Pool(),
+    )
+    assert seen == [f"bytes={len(body)}-", None]
+    assert (tmp_path / "r.tar.part").read_bytes() == body
+
+
+def test_download_through_a_pool_reports_http_errors(tmp_path):
+    from _httpserver import Server
+
+    s = Server({}, keepalive=True)
+    pool = dl.HttpClientPool()
+    try:
+        with pytest.raises(dl.DownloadError, match="404"):
+            dl.download(s.url + "/nope", tmp_path / "x", pool=pool, retries=1)
+    finally:
+        pool.close()
+        s.close()
+    assert not (tmp_path / "x").exists()
+
+
+class _BodyStub:
+    def __init__(self, status: int, length: str | None, data: bytes = b"") -> None:
+        self.status = status
+        self.reads: list[int] = []
+        self.closed = False
+        self._length = length
+        self._data = data
+
+    def header(self, name: str, default: str | None = None) -> str | None:
+        return self._length if name == "Content-Length" else default
+
+    def read(self, amount: int = -1) -> bytes:
+        self.reads.append(amount)
+        return self._data
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _PoolStub:
+    def __init__(self, response: _BodyStub) -> None:
+        self.response = response
+        self.kwargs: dict = {}
+
+    def open(self, url, **kwargs):
+        self.kwargs = kwargs
+        return self.response
+
+
+def test_closing_a_partly_read_response_drops_its_connection() -> None:
+    """#767: unread body bytes must never be served to the next request on that socket."""
+    from _httpserver import Server
+
+    s = Server({"/big": b"z" * 200_000, "/small": b"ok"}, keepalive=True)
+    pool = dl.HttpClientPool()
+    try:
+        partly = pool.open(s.url + "/big")
+        partly.read(10)
+        conn = next(iter(pool._store().values()))
+        partly.close()
+        assert conn.sock is None  # dropped, not left holding 200 KB of the old body
+
+        whole = pool.open(s.url + "/small")
+        assert whole.read() == b"ok"
+        conn = next(iter(pool._store().values()))
+        whole.close()
+        assert conn.sock is not None  # a fully read response keeps the connection
+    finally:
+        pool.close()
+        s.close()
+
+
+def test_pooled_error_body_is_only_drained_when_it_is_small() -> None:
+    small = _BodyStub(404, "12", b"x" * 12)
+    with pytest.raises(dl.DownloadError, match="404"):
+        dl._open_pooled(
+            _PoolStub(small), "https://x/f", headers=None, timeout=5, redirect_allowed=None
+        )
+    assert small.reads == [12] and small.closed
+
+    huge = _BodyStub(500, str(10**6))
+    with pytest.raises(dl.DownloadError, match="500"):
+        dl._open_pooled(
+            _PoolStub(huge), "https://x/f", headers=None, timeout=5, redirect_allowed=None
+        )
+    assert huge.reads == [] and huge.closed  # never blocks reading a body it cannot finish
+
+    unknown = _BodyStub(502, None)  # no length: reading could wait for the whole timeout
+    with pytest.raises(dl.DownloadError, match="502"):
+        dl._open_pooled(
+            _PoolStub(unknown), "https://x/f", headers=None, timeout=5, redirect_allowed=None
+        )
+    assert unknown.reads == [] and unknown.closed
+
+
+def test_pooled_open_follows_as_many_redirects_as_urllib_and_keeps_the_allow_list() -> None:
+    pool = _PoolStub(_BodyStub(200, "0"))
+    guard = lambda url: True  # noqa: E731
+    dl._open_pooled(pool, "https://x/f", headers=None, timeout=5, redirect_allowed=guard)
+    assert pool.kwargs["redirects"] == 10
+    assert pool.kwargs["redirect_allowed"] is guard
+
+
+def test_a_proxy_the_pool_cannot_use_keeps_the_urllib_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("https_proxy", "https://proxy.example:8443")
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    assert dl._pool_can_serve("https://cdn.example/f") is False
+    monkeypatch.setenv("https_proxy", "http://proxy.example:3128")
+    assert dl._pool_can_serve("https://cdn.example/f") is True
+    monkeypatch.delenv("https_proxy")
+    assert dl._pool_can_serve("https://cdn.example/f") is True
+
+    monkeypatch.setenv("https_proxy", "https://proxy.example:8443")
+    opened: list[str] = []
+
+    def fake_http_open(url, **kw):
+        opened.append(url)
+        raise dl.DownloadError("stop here")
+
+    monkeypatch.setattr(dl, "http_open", fake_http_open)
+    with pytest.raises(dl.DownloadError):
+        dl._download_once(
+            "https://cdn.example/f",
+            tmp_path / "f.part",
+            headers=None,
+            timeout=5,
+            resume=False,
+            emit=lambda e: None,
+            cancel=None,
+            chunk=1024,
+            pool=_PoolStub(_BodyStub(200, "0")),
+        )
+    assert opened == ["https://cdn.example/f"]
+
+
+def test_only_a_416_throws_away_a_resumable_part_when_pooled(tmp_path: Path) -> None:
+    part = tmp_path / "r.part"
+    part.write_bytes(b"half")
+    pool = _PoolStub(_BodyStub(503, "0"))
+    with pytest.raises(dl.DownloadError, match="503"):
+        dl._download_once(
+            "https://x/r",
+            part,
+            headers=None,
+            timeout=5,
+            resume=True,
+            emit=lambda e: None,
+            cancel=None,
+            chunk=1024,
+            pool=pool,
+        )
+    assert part.read_bytes() == b"half"

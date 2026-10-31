@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..core import graphics, hostlibs, paths, process, runners, sandbox, umu, vcredist
+from ..core import graphics, hostlibs, monitors, paths, process, runners, sandbox, umu, vcredist
 from ..core.backends import BackendError, GameBackend, Option, Status
 from ..core.events import Cancel, Cancelled, Event, mask
 
@@ -285,14 +285,23 @@ def _same_path(first: str | None, second: str | None) -> bool:
     return os.path.normpath(first) == os.path.normpath(second)
 
 
+def _is_prefix(value: str, prefix: str) -> bool:
+    """``value`` is the prefix itself or the ``pfx`` folder Proton keeps inside it."""
+    return _same_path(value, prefix) or _same_path(value, os.path.join(prefix, "pfx"))
+
+
 def _query_matches(query: ProcessQuery, argv: list[str], env: dict[str, str]) -> bool:
     prefix = str(query.prefix).strip() if query.prefix else ""
     names = {name.lower() for name in query.names if name}
     extra = str(query.match).strip() if query.match else ""
     wanted_args = {arg for arg in query.args if arg}
-    env_prefix = env.get("WINEPREFIX") or env.get("STEAM_COMPAT_DATA_PATH")
-    belongs = bool(prefix) and _same_path(env_prefix, prefix)
-    if not belongs and names and not env_prefix:
+    # Proton and umu run Wine in <prefix>/pfx and say so in WINEPREFIX, while
+    # STEAM_COMPAT_DATA_PATH is the prefix itself: either one names the game's prefix.
+    env_prefixes = [
+        value for value in (env.get("WINEPREFIX"), env.get("STEAM_COMPAT_DATA_PATH")) if value
+    ]
+    belongs = bool(prefix) and any(_is_prefix(value, prefix) for value in env_prefixes)
+    if not belongs and names and not env_prefixes:
         basename = os.path.basename(argv[0]).lower()
         belongs = basename in names
     if not belongs and wanted_args:
@@ -479,6 +488,7 @@ class WineBackend(GameBackend):
             "One KEY=VALUE per line.",
             advanced=True,
         ),
+        monitors.OPTION,
         Option(
             "process_match",
             "Process match",
@@ -634,9 +644,13 @@ class WineBackend(GameBackend):
             env["WINEDLLOVERRIDES"] = ";".join(overrides)
         kind = "proton" if runner else "wine"
         env.update(graphics.renderer_env(self.ctx.profile, kind=kind, environ=env))
+        monitors.apply_env(env, self.ctx)
         extra_env = profile_setting(self.ctx.profile, "extra_env")
-        if isinstance(extra_env, dict):
-            env.update({str(k): str(v) for k, v in extra_env.items()})
+        process.apply_extra_env(
+            env,
+            extra_env if isinstance(extra_env, dict) else None,
+            reserved=process.LAUNCH_RESERVED_ENV,
+        )
         return argv, process.sanitize_game_env(env)
 
     def build(self) -> tuple[list[str], dict[str, str], Path, Path]:

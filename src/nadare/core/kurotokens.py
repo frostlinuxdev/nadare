@@ -15,11 +15,11 @@ import os
 import re
 import tempfile
 import time
-import urllib.request
+import urllib.parse
 from collections.abc import Callable
 from pathlib import Path
 
-from . import hosting, paths, tls
+from . import download, hosting, paths
 
 PREFIXES = {"wuwa": "50004", "pgr": "50015"}
 _TTL = 24 * 60 * 60
@@ -58,8 +58,17 @@ def _document_valid(payload: bytes) -> bool:
 
 
 def _fetch(url: str) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": "nadare"})
-    with tls.urlopen(req, timeout=10, context=tls.ssl_context()) as response:  # noqa: S310
+    host = urllib.parse.urlparse(url).hostname
+
+    def _same_host(target: str) -> bool:
+        return urllib.parse.urlparse(target).hostname == host
+
+    with download.http_open(
+        url,
+        headers={"User-Agent": "nadare"},
+        timeout=10,
+        redirect_allowed=_same_host,
+    ) as response:
         return response.read(65536)
 
 

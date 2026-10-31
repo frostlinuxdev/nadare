@@ -29,6 +29,7 @@ from ..core import (
     download,
     graphics,
     hostlibs,
+    monitors,
     paths,
     prefixmove,
     process,
@@ -561,12 +562,13 @@ class WineGameBackend(GameBackend):
             log.debug("%s: could not record the synced version: %s", self.display_name, exc)
 
     def check_update(self) -> None:
-        """Refresh the cached published version (direct mode only, offline-safe).
-
-        Never raises: a manifest/network failure only leaves the cache untouched.
-        """
+        """Refresh the cached published version (direct mode only, offline-safe)."""
         if not self.direct_mode():
             return
+        self._refresh_published_version()
+
+    def _refresh_published_version(self) -> None:
+        """Refresh a stale cached version, swallowing manifest and cache errors."""
         try:
             if not self.ctx.config.data.get("check_updates", True):
                 return
@@ -713,11 +715,15 @@ class WineGameBackend(GameBackend):
         return "1" if self.default_display == "wayland" else "0"
 
     def _runtime_note(self) -> str:
-        """One log line naming the runner build and display driver in use."""
+        """One log line naming the runner build, display driver and renderer requested."""
         proton, kind = self.resolve_runner()
         runner = runners.runner_version(Path(proton)).split(" ", 1)[-1] if proton else kind
         display = "wayland" if self._wayland_default() == "1" else "x11"
-        return f"runner: {runner or kind}, display: {display}"
+        renderer, _note = graphics.effective_renderer(self.ctx.profile)
+        requested = graphics.renderer_choice(self.ctx.profile)
+        api = "Vulkan (DXVK)" if renderer == "vulkan" else "OpenGL (WineD3D)"
+        source = f", requested {requested}" if requested == "auto" else ""
+        return f"runner: {runner or kind}, display: {display}, renderer: {api}{source}"
 
     def _prefix_command(
         self, args: list[str], extra_env: dict[str, str] | None = None
@@ -780,11 +786,14 @@ class WineGameBackend(GameBackend):
         env.update(graphics.renderer_env(self.ctx.profile, kind=kind, environ=env))
         if self.dxvk_config and "DXVK_CONFIG" not in env:
             env["DXVK_CONFIG"] = self.dxvk_config  # profile extra_env still wins
+        monitors.apply_env(env, self.ctx)
         profile_env = profile_setting(self.ctx.profile, "extra_env")
-        if isinstance(profile_env, dict):
-            env.update({str(k): str(v) for k, v in profile_env.items()})
-        if extra_env:
-            env.update({str(k): str(v) for k, v in extra_env.items()})
+        process.apply_extra_env(
+            env,
+            profile_env if isinstance(profile_env, dict) else None,
+            reserved=process.LAUNCH_RESERVED_ENV,
+        )
+        process.apply_extra_env(env, extra_env, reserved=process.LAUNCH_RESERVED_ENV)
         return argv, process.sanitize_game_env(env)
 
     def _run_in_prefix(self, argv: list[str]) -> int:
@@ -854,30 +863,13 @@ class WineGameBackend(GameBackend):
         }
         version: str | None = None
         if direct:
-            record = self._read_version_file()
-            version = str(record["version"]) if record else None
-            if version:
-                data["version"] = version
-            latest = self._read_latest()
-            published = str(latest["version"]) if latest else None
-            # Purely local: the published version is refreshed by check_update().
-            data["update_available"] = bool(version and published and published != version)
-        if direct and (target is None or not target.is_file() or incomplete):
-            # Files may already be on disk from a cancelled/failed install, but
-            # only a finished sync counts as installed.
-            message = (
-                "installation incomplete — click INSTALL to finish"
-                if incomplete
-                else f"{self.display_name} is not installed yet"
-            )
-            return Status(state="not_installed", version=version, message=message, data=data)
-        if not direct and target is None:
-            return Status(
-                state="not_installed",
-                version=version,
-                message=f"{self.display_name} is not installed yet",
-                data=data,
-            )
+            additions, version, early = self._direct_status_parts(target, incomplete)
+        else:
+            additions, version, early = self._official_status_parts(target)
+        data.update(additions)
+        if early is not None:
+            early.data = data
+            return early
         rid = self.runner_id()
         if rid and rid not in runners.RUNNERS:
             # An explicit runner that no longer resolves (e.g. its folder was
@@ -907,6 +899,49 @@ class WineGameBackend(GameBackend):
             message=message,
             data=data,
         )
+
+    def _direct_status_parts(
+        self, target: Path | None, incomplete: bool
+    ) -> tuple[dict[str, Any], str | None, Status | None]:
+        """The version/update fields and not-installed check of a direct install."""
+        additions: dict[str, Any] = {}
+        record = self._read_version_file()
+        version = str(record["version"]) if record else None
+        if version:
+            additions["version"] = version
+        latest = self._read_latest()
+        published = str(latest["version"]) if latest else None
+        # Purely local: the published version is refreshed by check_update().
+        additions["update_available"] = bool(version and published and published != version)
+        if target is None or not target.is_file() or incomplete:
+            # Files may already be on disk from a cancelled/failed install, but
+            # only a finished sync counts as installed.
+            message = (
+                "installation incomplete — click INSTALL to finish"
+                if incomplete
+                else f"{self.display_name} is not installed yet"
+            )
+            return (
+                additions,
+                version,
+                Status(state="not_installed", version=version, message=message),
+            )
+        return additions, version, None
+
+    def _official_status_parts(
+        self, target: Path | None
+    ) -> tuple[dict[str, Any], str | None, Status | None]:
+        """The not-installed check of an official launcher (no extra fields)."""
+        if target is None:
+            return (
+                {},
+                None,
+                Status(
+                    state="not_installed",
+                    message=f"{self.display_name} is not installed yet",
+                ),
+            )
+        return {}, None, None
 
     def _patterns(self, target: Path | None | object = _SEARCH) -> ProcessQuery:
         """Build the structured process query for this profile's launcher.

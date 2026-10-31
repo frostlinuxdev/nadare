@@ -3,6 +3,11 @@
   <id>io.github.frostlinuxdev.Nadare</id>
   <name>Nadare</name>
   <summary>Open-source Linux launcher for anime gacha games</summary>
+  <developer id="io.github.frostlinuxdev">
+    <name>Nadare contributors</name>
+  </developer>
+  <url type="homepage">https://github.com/frostlinuxdev/nadare</url>
+  <url type="bugtracker">https://github.com/frostlinuxdev/nadare/issues</url>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
   <description>
@@ -15,6 +20,7 @@
   <content_rating type="oars-1.1"/>
   <releases>
     <!-- Keep in sync with pyproject.toml [project].version. -->
+    <release version="0.1.0b20" date="2026-11-03"/>
     <release version="0.1.0b19" date="2026-10-30"/>
     <release version="0.1.0b18" date="2026-10-29"/>
     <release version="0.1.0b17" date="2026-10-29"/>

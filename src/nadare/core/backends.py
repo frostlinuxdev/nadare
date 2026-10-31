@@ -95,6 +95,7 @@ OPTION_KINDS = (
     "runner",
     "args",
     "env",
+    "monitor",
 )
 
 
@@ -120,6 +121,54 @@ class Option:
             raise ValueError(f"unknown option kind: {self.kind!r}")
         if self.kind == "choice" and not self.choices:
             raise ValueError(f"choice option {self.key!r} needs choices")
+
+
+#: Real profile settings a backend honours that Settings does not show: installer and
+#: manifest overrides, a download token, the Fate/Grand Order installer internals, and the
+#: Wine, umu-run and download-worker overrides almost nobody needs.
+#: Nothing is deleted; a value already in the profile keeps working and survives a Save.
+#: ``docs/CONFIG-ONLY-OPTIONS.md`` documents each one (a test keeps the two in step).
+CONFIG_ONLY_KEYS = frozenset(
+    {
+        "installer_url",
+        "installer_sha256",
+        "installer_args",
+        "manifest_index",
+        "manifest_file",
+        "media_file",
+        "kuro_token",
+        "repo",
+        "mode",
+        "size",
+        "release",
+        "data_dir",
+        "logs_dir",
+        "desktop_dir",
+        "cache",
+        "adopt",
+        "force_update",
+        "purge_cache",
+        "uninstall_all",
+        "wine_binary",
+        "umu_binary",
+        "download_workers",
+    }
+)
+
+#: Backends where Process match is the only way to find the game, so it is shown.
+PROCESS_MATCH_SHOWN = frozenset({"script"})
+
+#: Backends where the user picks the executable (nothing else knows it), so it is shown.
+EXE_NAME_SHOWN = frozenset({"wine", "script"})
+
+
+def config_only(kind: str, key: str) -> bool:
+    """True when option ``key`` of backend ``kind`` is honoured but not shown in Settings."""
+    if key == "process_match":
+        return kind not in PROCESS_MATCH_SHOWN
+    if key == "exe_name":
+        return kind not in EXE_NAME_SHOWN
+    return key in CONFIG_ONLY_KEYS
 
 
 class GameBackend(ABC):

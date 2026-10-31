@@ -22,7 +22,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -111,33 +111,39 @@ def sanitize_game_env(env: Mapping[str, str]) -> dict[str, str]:
     """A copy of ``env`` that is safe to hand to Proton/Wine/umu.
 
     Always drops credential-looking variables (``*_TOKEN``, ``*_SECRET``, and
-    ``AWS_``/``SSH_``/``GPG_``/``CZN_`` names). Drops the Python launcher
-    variables and takes version-manager shims, an active virtualenv's ``bin`` and
-    relative entries off ``PATH`` (a stale ``pyenv`` shim ahead of ``/usr/bin``
-    makes ``proton``'s ``env python3`` exit 127). The ``PATH`` and Python cleanup
-    is skipped when there is no system ``python3`` to fall back to, so a machine
-    whose only Python is a shim keeps working.
+    ``AWS_``/``SSH_``/``GPG_``/``CZN_`` names) and relative ``PATH`` entries (``.``
+    lets a cwd binary shadow a bare Proton/umu helper). When there is a system
+    ``python3`` it also drops the Python launcher variables and takes
+    version-manager shims and an active virtualenv's ``bin`` off ``PATH`` (a stale
+    ``pyenv`` shim ahead of ``/usr/bin`` makes ``proton``'s ``env python3`` exit
+    127). That last cleanup is skipped when there is no system ``python3`` to fall
+    back to, so a machine whose only Python is a shim keeps working.
     """
     out = {key: value for key, value in env.items() if not _is_secret_name(key)}
-    if not _system_python_exists():
-        return out
     venv = out.get("VIRTUAL_ENV", "").rstrip("/")
-    for name in _PYTHON_ENV_VARS:
-        out.pop(name, None)
+    has_system_python = _system_python_exists()
+    if has_system_python:
+        for name in _PYTHON_ENV_VARS:
+            out.pop(name, None)
     kept: list[str] = []
     for entry in out.get("PATH", "").split(":"):
         norm = entry.rstrip("/")
         if not norm.startswith("/"):
             continue
-        if any(marker in norm + "/" or norm.endswith(marker) for marker in _SHIM_MARKERS):
+        if (
+            has_system_python
+            and any(marker in norm + "/" or norm.endswith(marker) for marker in _SHIM_MARKERS)
+        ):
             continue
-        if venv and (norm == venv + "/bin" or norm.startswith(venv + "/")):
+        if has_system_python and venv and (norm == venv + "/bin" or norm.startswith(venv + "/")):
             continue
         kept.append(entry)
-    for system in _SYSTEM_DIRS:
-        if system not in kept:
-            kept.append(system)
-    out["PATH"] = ":".join(kept)
+    if has_system_python:
+        for system in _SYSTEM_DIRS:
+            if system not in kept:
+                kept.append(system)
+    if "PATH" in out:
+        out["PATH"] = ":".join(kept)
     return out
 
 
@@ -160,6 +166,33 @@ def child_environ(base: Mapping[str, str] | None = None) -> dict[str, str]:
             name.startswith("NADARE_") and name.endswith(_SECRET_ENV_SUFFIXES)
         ):
             del env[name]
+    return env
+
+
+#: Launch variables a backend pins itself. A profile or caller ``extra_env`` must
+#: not move them, or the game starts in a different prefix than the one status,
+#: Stop and the vcredist install use.
+LAUNCH_RESERVED_ENV = frozenset({"WINEPREFIX", "STEAM_COMPAT_DATA_PATH", "PROTONPATH"})
+
+
+def apply_extra_env(
+    env: dict[str, str],
+    extra: Mapping[str, str] | None,
+    *,
+    reserved: Iterable[str] = (),
+) -> dict[str, str]:
+    """Merge ``extra`` into ``env``; a ``reserved`` variable keeps its value.
+
+    A conflicting reserved value is ignored with a warning instead of silently
+    redirecting the launch.
+    """
+    for key, value in (extra or {}).items():
+        key, value = str(key), str(value)
+        if key in reserved:
+            if env.get(key) != value:
+                log.warning("ignoring %s from extra env: the launch pins it", key)
+            continue
+        env[key] = value
     return env
 
 
@@ -208,13 +241,7 @@ def build_env(
             reserved.add("PROTONPATH")
         env.setdefault("WINEDEBUG", env.get("WINEDEBUG", "-all"))
 
-    for key, value in (extra or {}).items():
-        key, value = str(key), str(value)
-        if key in reserved:
-            if env.get(key) != value:
-                log.warning("ignoring %s from extra env: the profile declares it", key)
-            continue
-        env[key] = value
+    apply_extra_env(env, extra, reserved=reserved)
     return env
 
 
@@ -594,6 +621,22 @@ def run(
             _drain()
             reader.join(timeout=0.05)
         _drain()
+        if reader.is_alive():
+            # The direct child is gone but a grandchild (a game or wineserver that
+            # outlived its launcher) still holds the pipe. Keep consuming it in the
+            # background: leaving the bounded queue full would block the child on
+            # its next write, and closing our end would turn that write into
+            # SIGPIPE. The reader ends when the last writer closes the pipe.
+            def _drain_rest() -> None:
+                while reader.is_alive():
+                    try:
+                        line_q.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+
+            threading.Thread(
+                target=_drain_rest, name="nadare-run-drain", daemon=True
+            ).start()
 
         cp = subprocess.CompletedProcess(
             list(str(a) for a in args),

@@ -200,7 +200,8 @@ echo "[*] Staging AppDir"
 rm -rf AppDir
 mkdir -p AppDir/usr/bin \
     AppDir/usr/share/applications \
-    AppDir/usr/share/icons/hicolor/scalable/apps
+    AppDir/usr/share/icons/hicolor/scalable/apps \
+    AppDir/usr/share/metainfo
 cp -a dist/nadare/. AppDir/usr/bin/
 
 # PyInstaller deliberately leaves the OpenGL stack to the host so a bundled
@@ -257,6 +258,8 @@ cp packaging/nadare.desktop AppDir/nadare.desktop
 cp packaging/nadare.svg AppDir/nadare.svg
 cp packaging/nadare.desktop AppDir/usr/share/applications/nadare.desktop
 cp packaging/nadare.svg AppDir/usr/share/icons/hicolor/scalable/apps/nadare.svg
+cp packaging/flatpak/io.github.frostlinuxdev.Nadare.metainfo.xml \
+    AppDir/usr/share/metainfo/io.github.frostlinuxdev.Nadare.metainfo.xml
 ln -sf usr/bin/nadare AppDir/AppRun
 
 echo "[*] Building $image"
@@ -272,3 +275,12 @@ echo "    sha256 $(sha256sum "$image" | cut -d' ' -f1)"
 # bare file names) so packagers and the release job have a single thing to fetch.
 ( cd "$(dirname "$image")" && sha256sum "$(basename "$image")" > SHA256SUMS )
 echo "[+] Wrote $(dirname "$image")/SHA256SUMS"
+
+# zsync metadata lets an updater fetch only the changed blocks of a new
+# AppImage. Optional: zsyncmake is a packaging tool, not a build requirement.
+if command -v zsyncmake >/dev/null 2>&1; then
+    zsyncmake -C -u "$(basename "$image")" -o "$image.zsync" "$image"
+    echo "[+] Wrote $image.zsync"
+else
+    echo "[*] zsyncmake not found: skipping $image.zsync" >&2
+fi

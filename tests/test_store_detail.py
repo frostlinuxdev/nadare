@@ -152,3 +152,10 @@ def test_construction_does_not_open_network(qapp, monkeypatch):
 
     monkeypatch.setattr(socket, "socket", forbidden)
     StoreDetail(_entry("direct-pgr"))
+
+
+def test_a_steam_tile_that_is_added_offers_open_not_add_another(qapp):
+    widget = StoreDetail(_entry("steam-5019180", installed=True))
+    assert widget.install_button.text() == "Open"  # it reopens the same game, adds no copy
+    widget.set_entry(_entry("steam-5019180", installed=False))
+    assert widget.install_button.text() == "Install"

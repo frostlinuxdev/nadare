@@ -226,6 +226,12 @@ def _parse_chunk(data: bytes) -> ChunkEntry:
             cmd5 = _string(value, "chunk compressed md5")
     if not name:
         raise SophonError("chunk has no name")
+    if size > _MAX_CHUNK_BYTES or csize > _MAX_CHUNK_BYTES:
+        raise SophonError(
+            f"chunk {name!r} declares an implausible size ({size}/{csize} bytes)"
+        )
+    if offset < 0 or size < 0 or csize < 0:
+        raise SophonError(f"chunk {name!r} declares a negative size")
     return ChunkEntry(name=name, md5=md5, offset=offset, size=size, csize=csize, cmd5=cmd5)
 
 
@@ -250,6 +256,11 @@ def _parse_file(data: bytes) -> FileEntry | None:
         return None
     if not path:
         raise SophonError("file has no name")
+    if size < 0 or size > _MAX_FILE_BYTES:
+        raise SophonError(f"file {path!r} declares an implausible size ({size} bytes)")
+    for chunk in chunks:
+        if chunk.offset + chunk.size > size:
+            raise SophonError(f"file {path!r} has a chunk outside its declared size")
     path = _safe_relative_path(path)
     return FileEntry(path=path, size=size, md5=md5, chunks=tuple(chunks))
 
@@ -469,6 +480,11 @@ def _cleanup_stale_files(
 _ATTEMPTS = 4
 #: Largest manifest body accepted (compressed); a real one is under ~30 MB.
 _MAX_MANIFEST_BYTES = 256 << 20
+#: Largest decompressed manifest accepted (a manifest is a few MB of paths).
+_MAX_MANIFEST_UNPACKED = 64 << 20
+#: Sanity caps on sizes a manifest declares: they drive allocations and truncate().
+_MAX_CHUNK_BYTES = 256 << 20
+_MAX_FILE_BYTES = 64 << 30
 #: Fewest seconds between two install progress events (the last one always goes out).
 _PROGRESS_INTERVAL = 0.1
 #: Chunks of one file handled by one task (a 1 MB-chunk file of 10 GB is spread over many workers).
@@ -502,7 +518,9 @@ def _fetch_bytes(
 def _load_manifest(pool: download_module.HttpClientPool, pkg: SophonPackage) -> list[FileEntry]:
     body = _fetch_bytes(pool, pkg.manifest_url, _MAX_MANIFEST_BYTES)
     try:
-        raw = _zstd().ZstdDecompressor().decompress(body, max_output_size=1 << 31)
+        raw = _zstd().ZstdDecompressor().decompress(
+            body, max_output_size=_MAX_MANIFEST_UNPACKED
+        )
     except _zstd().ZstdError as exc:
         raise SophonError(f"manifest for {pkg.name} is not a zstd frame: {exc}") from exc
     return parse_manifest(raw)
@@ -675,9 +693,10 @@ def sync_package(
                         future.result()
                     except BaseException as exc:  # noqa: BLE001 - re-raised below
                         errors.append(exc)
-                        stop.cancel()
-                        for other in futures:
-                            other.cancel()
+                        if len(errors) == 1:  # cancelling all queued work once is enough (#562)
+                            stop.cancel()
+                            for other in futures:
+                                other.cancel()
             for exc in errors:
                 if not isinstance(exc, Cancelled):
                     raise exc

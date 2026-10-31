@@ -103,6 +103,10 @@ def test_initial_profile_probe_passes_one_shared_proc_round(window, monkeypatch)
             (profile, operation, payload, silent)
         ) or True,
     )
+    # The window probed its profiles when it was built; start this round clean so
+    # the new startup cap does not see those slots as taken (#388 F-07).
+    window._probe_queue.clear()
+    window._probe_active.clear()
     window._current_profile = ""
 
     window._probe_all()

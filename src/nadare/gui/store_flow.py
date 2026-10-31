@@ -15,7 +15,7 @@ from .store_detail import StoreDetail
 
 
 class _HeroSignals(QObject):
-    finished = pyqtSignal(int, str, object)  # generation, kind, path
+    finished = pyqtSignal(int, str, object, bool)  # generation, kind, path, path is a cover
 
 
 class _FetchHero(QRunnable):
@@ -34,17 +34,23 @@ class _FetchHero(QRunnable):
 
     def run(self) -> None:
         try:
-            path = artwork.fetch({"backend": self.kind}, self.title, "hero")
+            profile = {"backend": self.kind}
+            path = artwork.fetch(profile, self.title, "hero")
+            is_cover = False
+            if not path:  # most games have no hero source: stand in their cover
+                path = artwork.fetch(profile, self.title, "cover")
+                is_cover = bool(path)
         except Exception:  # noqa: BLE001 - artwork is optional
-            path = None
+            path, is_cover = None, False
         try:
-            self.signals.finished.emit(self.generation, self.kind, path)
+            self.signals.finished.emit(self.generation, self.kind, path, is_cover)
         except RuntimeError:  # the flow was destroyed while the fetch ran
             pass
 
 
 class StoreFlow(QStackedWidget):
     install_requested = pyqtSignal(str)
+    play_requested = pyqtSignal(str)
     own_game_requested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
@@ -89,6 +95,7 @@ class StoreFlow(QStackedWidget):
             self.addWidget(self.detail)
             self.detail.back_requested.connect(lambda: self.show_grid(focus_card=True))
             self.detail.install_requested.connect(self.install_requested.emit)
+            self.detail.play_requested.connect(self.play_requested.emit)
             self.detail.variant_requested.connect(self.show_detail)
             self.detail.set_entry(entry, variants)
         else:
@@ -99,20 +106,30 @@ class StoreFlow(QStackedWidget):
                 _FetchHero(self._generation, kind, entry.title, self._hero_signals)
             )
 
-    def _hero_fetched(self, generation: int, kind: str, path: object) -> None:
+    def _hero_fetched(self, generation: int, kind: str, path: object, is_cover: bool) -> None:
         if generation != self._generation or not path or self.detail is None:
             return
-        self._images.request([str(path)], 1600, 400, lambda pixmap: self._set_hero(
-            generation, kind, pixmap
-        ))
+        # A real hero is already banner-shaped, so the loader may crop it to 1600x400. A cover
+        # standing in for one is decoded whole (just kept within 1600 px): the banner decides
+        # what to crop or blur, and a loader crop first would lose the top of the art.
+        width, height, crop = (1600, 1600, False) if is_cover else (1600, 400, True)
+        self._images.request(
+            [str(path)],
+            width,
+            height,
+            lambda pixmap: self._set_hero(generation, kind, pixmap, is_cover),
+            crop=crop,
+        )
 
-    def _set_hero(self, generation: int, kind: str, pixmap: QPixmap | None) -> None:
+    def _set_hero(
+        self, generation: int, kind: str, pixmap: QPixmap | None, is_cover: bool = False
+    ) -> None:
         if (
             generation == self._generation
             and self.detail is not None
             and self._detail_kind == kind
         ):
-            self.detail.set_hero(pixmap)
+            self.detail.set_hero(pixmap, is_cover=is_cover)
 
     def show_grid(self, *, focus_card: bool = False) -> None:
         """Return to the grid; ``focus_card`` puts focus back on the game that was open."""

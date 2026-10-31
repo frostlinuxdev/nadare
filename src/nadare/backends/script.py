@@ -54,6 +54,12 @@ class ScriptBackend(GameBackend):
             "Base directory a relative script name resolves against.",
         ),
         Option(
+            "prefix",
+            "Wine prefix (.bat/.cmd)",
+            "path_dir",
+            "WINEPREFIX used when the script is a Windows .bat or .cmd file.",
+        ),
+        Option(
             "process_match",
             "Process match",
             "text",

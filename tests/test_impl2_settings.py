@@ -46,14 +46,15 @@ def test_game_folder_is_only_shown_for_backends_that_use_it(tmp_path, qapp):
     page = SettingsPage()
     try:
         page.load(_config(tmp_path, "stove-czn"), "sample")
-        assert not page.install_dir.isVisibleTo(page), "CZN derives its folder from the prefix"
+        game_tab = page.tabs.widget(1)
+        assert not page.install_dir.isVisibleTo(game_tab), "CZN derives its folder from the prefix"
         page.install_dir.setText("/tmp/ignored")
         page.save()
         saved = Config.load(tmp_path / "config.json").profile("sample")
         assert saved.get("install_dir") != "/tmp/ignored"
 
         page.load(_config(tmp_path, "arknights-yostar"), "sample")
-        assert page.install_dir.isVisibleTo(page)
+        assert page.install_dir.isVisibleTo(page.tabs.widget(1))
     finally:
         page.deleteLater()
         qapp.processEvents()
@@ -91,7 +92,7 @@ def test_option_help_is_visible_text_not_only_a_tooltip(tmp_path, qapp):
         display = next(o for o in get("stove-czn").options if o.key == "display")
         labels = [label for label in page.findChildren(QLabel) if label.text() == display.help]
         assert labels, "the NVIDIA/X11 warning must be shown as text"
-        assert labels[0].isVisibleTo(page)
+        assert labels[0].isVisibleTo(page.tabs.widget(1))
     finally:
         page.deleteLater()
         qapp.processEvents()

@@ -10,6 +10,7 @@ newer Nadare can add fields without clobbering them.
 from __future__ import annotations
 
 import copy
+import errno
 import fcntl
 import json
 import logging
@@ -122,6 +123,7 @@ TOP_DEFAULTS: dict[str, Any] = {
     "check_updates": True,
     "dismissed_update": "",  # release version whose banner the user closed
     "dismissed_notices": [],  # ids of notices the user closed
+    "sidebar_hide_uninstalled": False,  # hide games known not to be installed in the sidebar
     "language": "en",
     "telemetry": False,  # always false; kept explicit for the record
 }
@@ -331,6 +333,9 @@ class Config:
         Moving stops a later ``save()`` destroying the file; copying keeps a
         config that is still loadable in place.
         """
+        # Quarantine the file itself, not a symlink that points at it: moving
+        # only the link would leave the unreadable file where save() replaces it.
+        p = Path(os.path.realpath(p))
         stamp = time.strftime("%Y%m%d-%H%M%S")
         # A second-granularity stamp collides when two corrupt configs land in
         # the same second; a short uuid keeps every quarantine distinct.
@@ -458,7 +463,15 @@ class Config:
         lock_path = real.with_name(real.name + ".lock")
         fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError as exc:
+                # Some filesystems (and network home directories) do not
+                # implement flock. The write itself is still atomic; only the
+                # read-merge-write serialisation is lost, so carry on.
+                if exc.errno not in (errno.ENOLCK, errno.ENOTSUP, errno.EOPNOTSUPP):
+                    raise
+                log.warning("file locking is unsupported on %s: %s", lock_path, exc)
             yield
         finally:
             os.close(fd)
@@ -609,6 +622,18 @@ class Config:
                 self.data.setdefault(key, value)
             elif self.data.get(key) == self._top_snapshot[key]:
                 self.data[key] = value
+        # A key this process left untouched but the disk no longer has was
+        # deleted elsewhere; do not write our old value back. A setting with a
+        # default goes back to it (code reads ``data["language"]`` directly), any
+        # other key is dropped.
+        for key in list(self.data):
+            if key == "profiles" or key in raw:
+                continue
+            if key in self._top_snapshot and self.data[key] == self._top_snapshot[key]:
+                if key in TOP_DEFAULTS:
+                    self.data[key] = copy.deepcopy(TOP_DEFAULTS[key])
+                else:
+                    del self.data[key]
         active = self.data.get("active_profile")
         if not isinstance(active, str) or active not in self.profiles:
             self.data["active_profile"] = next(iter(self.profiles), "")

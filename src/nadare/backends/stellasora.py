@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..core import graphics
+from ..core import graphics, monitors
 from ..core.backends import BackendError, Option
 from .arknights import INSTALLED_PREFIX_KEY, ArknightsBackend
 from .arknights_news import IMAGE_HOSTS, fetch_stellasora_news
@@ -104,6 +104,7 @@ class StellaSoraBackend(ArknightsBackend):
         Option("wine_binary", "Wine binary", "path_file", advanced=True),
         Option("umu_binary", "umu-run binary", "path_file", advanced=True),
         Option("extra_env", "Environment", "env", "One KEY=VALUE per line.", advanced=True),
+        monitors.OPTION,
         Option("process_match", "Process match", "text", advanced=True),
     )
 

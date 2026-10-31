@@ -1775,3 +1775,94 @@ def test_the_news_cover_falls_through_to_the_next_image_when_a_body_is_not_an_im
     found = artwork.fetch_all({"backend": "arknights-yostar", "title": "A"}, kinds=("cover",))
     assert artwork.src_sidecar(found["cover"]).read_text(encoding="utf-8") == good
     assert not (tmp_path / "covers" / "a-cover.jpg").exists()
+
+
+# ---- Steam's hashed asset paths -----------------------------------------------------------------
+def test_a_steam_game_without_art_at_the_old_paths_uses_the_store_pages_own_image(monkeypatch):
+    from nadare.core import artwork
+
+    asked: list[str] = []
+
+    def fake_json(url, **kwargs):
+        asked.append(url)
+        image = "https://shared.akamai.steamstatic.com/x/header.jpg?t=1"
+        return {"5019180": {"success": True, "data": {"header_image": image}}}
+
+    monkeypatch.setattr(artwork, "_get_json", fake_json)
+    urls = list(artwork._steam_candidates({"backend": "steam-5019180"}, "cover"))
+    assert urls[:3] == [
+        f"https://cdn.cloudflare.steamstatic.com/steam/apps/5019180/{n}"
+        for n in ("library_600x900.jpg", "header.jpg", "hero.jpg")
+    ]
+    assert urls[-1] == "https://shared.akamai.steamstatic.com/x/header.jpg?t=1"
+    assert asked == ["https://store.steampowered.com/api/appdetails?appids=5019180&filters=basic"]
+
+
+def test_the_store_page_is_only_asked_when_the_first_paths_are_not_enough(monkeypatch):
+    from nadare.core import artwork
+
+    monkeypatch.setattr(artwork, "_get_json", lambda *a, **k: pytest.fail("no network yet"))
+    first = next(iter(artwork._steam_candidates({"backend": "steam-5019180"}, "cover")))
+    assert first.endswith("library_600x900.jpg")
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        None,
+        {},
+        {"5019180": {"success": False}},
+        {"5019180": {"data": {"header_image": "http://plain.example/a.jpg"}}},
+        {"5019180": {"data": {"header_image": 5}}},
+    ],
+)
+def test_a_bad_store_answer_adds_no_candidate(monkeypatch, answer):
+    from nadare.core import artwork
+
+    monkeypatch.setattr(artwork, "_get_json", lambda *a, **k: answer)
+    urls = list(artwork._steam_candidates({"backend": "steam-5019180"}, "cover"))
+    assert len(urls) == 3
+
+
+def test_a_failing_store_request_adds_no_candidate(monkeypatch):
+    from nadare.core import artwork
+
+    def boom(*a, **k):
+        raise OSError("offline")
+
+    monkeypatch.setattr(artwork, "_get_json", boom)
+    assert len(list(artwork._steam_candidates({"backend": "steam-5019180"}, "cover"))) == 3
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        {"backend": "steam", "steam_app_id": "5019180"},
+        {"backend": "steam", "app_id": "5019180"},
+        {"backend": "steam", "extra": {"steam_app_id": "5019180"}},
+        {"backend": "steam", "extra": {"app_id": " 5019180 "}},
+        {"backend": "steam", "steam_appid": 5019180},
+    ],
+)
+def test_a_steam_profile_finds_its_cover_by_any_spelling_of_its_app_id(monkeypatch, profile):
+    from nadare.core import artwork
+
+    monkeypatch.setattr(artwork, "_get_json", lambda *a, **k: None)
+    urls = list(artwork._steam_candidates(profile, "cover"))
+    assert urls and all("/5019180/" in url for url in urls)
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        {"backend": "wine", "steam_app_id": "5019180"},  # not a Steam game: do not guess
+        {"backend": "steam", "steam_app_id": "12 34"},
+        {"backend": "steam", "steam_app_id": "../../x"},
+        {"backend": "steam"},
+    ],
+)
+def test_a_profile_without_a_clean_steam_app_id_gets_no_steam_cover(monkeypatch, profile):
+    from nadare.core import artwork
+
+    monkeypatch.setattr(artwork, "_get_json", lambda *a, **k: pytest.fail("no lookup"))
+    assert list(artwork._steam_candidates(profile, "cover")) == []

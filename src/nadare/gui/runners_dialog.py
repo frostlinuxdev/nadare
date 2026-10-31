@@ -27,6 +27,12 @@ from ..core import diskspace, runners
 
 COLUMNS = ("Runner", "Status", "Size", "Used by", "")
 
+#: Shown before the first download, when there is no runner to list yet.
+EMPTY_RUNNERS_TEXT = (
+    "No runners downloaded by Nadare yet. One arrives with the first game install "
+    "that needs it; Nadare downloads the recommended build for you."
+)
+
 
 def human_size(size: int) -> str:
     """``1.6 GiB`` style size (the app-wide format)."""
@@ -101,7 +107,7 @@ class ManageRunnersDialog(QDialog):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table)
 
-        self.empty_label = QLabel("No runners downloaded by Nadare yet.")
+        self.empty_label = QLabel(EMPTY_RUNNERS_TEXT)
         self.empty_label.setObjectName("Muted")
         layout.addWidget(self.empty_label)
 

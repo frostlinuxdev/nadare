@@ -275,9 +275,9 @@ def test_settings_shows_the_backup_and_deletes_it_after_confirmation(env, qapp, 
     page = SettingsPage()
     try:
         page.load(cfg, "gone")
-        assert page._backup_label.isVisibleTo(page)
+        assert page._backup_label.isVisibleTo(page.tabs.widget(1))
         assert f"Old prefix backup: {backup}" in page._backup_label.text()
-        assert page._backup_button.isVisibleTo(page)
+        assert page._backup_button.isVisibleTo(page.tabs.widget(1))
         page._backup_button.click()
         assert calls == [(cfg, "gone", backup)]
     finally:
@@ -419,7 +419,7 @@ def test_settings_offers_the_first_backup_that_can_really_be_deleted(env, qapp, 
         assert f"Old prefix backup: {valid}" in page._backup_label.text()
         page._backup_button.click()
         assert not valid.exists() and stale.is_dir()
-        assert not page._backup_button.isVisibleTo(page)
+        assert not page._backup_button.isVisibleTo(page.tabs.widget(1))
     finally:
         page.deleteLater()
         qapp.processEvents()

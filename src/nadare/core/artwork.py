@@ -58,6 +58,7 @@ SOURCE_TIER = {SOURCE_USER: 0, SOURCE_OFFICIAL: 1, SOURCE_THIRDPARTY: 2}
 #: Files the old fetcher dropped in the cover cache (``*-cover.*`` etc.).
 _FETCHED_SUFFIX = re.compile(r".+-(?:cover|hero|logo|icon|thumb)\.[A-Za-z0-9]+$")
 
+STEAM_STORE_API = "https://store.steampowered.com/api/appdetails"
 STEAM_CDN = "https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/{name}"
 _STEAM_FILES: dict[str, tuple[str, ...]] = {
     "cover": ("library_600x900.jpg", "header.jpg", "hero.jpg"),
@@ -781,9 +782,24 @@ def _sgdb_key(profile: dict) -> str | None:
 
 def _catalog_appid(profile: dict) -> int | None:
     """The Steam app id a catalog game ships with, if it has one."""
-    from . import directkinds
+    from . import directkinds, steamstore
 
-    return directkinds.ART.get(str(profile.get("backend") or ""))
+    backend = str(profile.get("backend") or "")
+    app_id = steamstore.app_id_of(backend)  # a Store tile for a Steam game
+    return int(app_id) if app_id else directkinds.ART.get(backend)
+
+
+def _steam_profile_appid(profile: dict) -> int | None:
+    """The app id of a ``steam`` profile (as the Steam backend and Store tiles store it)."""
+    if str(profile.get("backend") or "") != "steam":
+        return None
+    extra = profile.get("extra")
+    for source in (profile, extra if isinstance(extra, dict) else {}):
+        for key in ("steam_app_id", "app_id"):
+            value = str(source.get(key) or "").strip()
+            if value.isascii() and value.isdigit():
+                return int(value)
+    return None
 
 
 def _steam_candidates(profile: dict, kind: str = "cover") -> Iterator[str]:
@@ -791,9 +807,28 @@ def _steam_candidates(profile: dict, kind: str = "cover") -> Iterator[str]:
     if not appid:
         appid = _catalog_appid(profile)
     if not appid:
+        appid = _steam_profile_appid(profile)
+    if not appid:
         return
     for name in _STEAM_FILES.get(kind, _STEAM_FILES["cover"]):
         yield STEAM_CDN.format(appid=appid, name=name)
+    # Newer Steam apps keep their art under a hashed path the fixed names above cannot reach;
+    # the store page's own answer names it. Asked last, and only once the lazy walk gets here.
+    image = _steam_store_image(appid)
+    if image:
+        yield image
+
+
+def _steam_store_image(appid: object) -> str | None:
+    """The store page's header image URL for ``appid``, or ``None`` (never raises)."""
+    try:
+        answer = _get_json(f"{STEAM_STORE_API}?appids={appid}&filters=basic")
+        data = answer[str(appid)]["data"] if isinstance(answer, dict) else None
+        image = data.get("header_image") if isinstance(data, dict) else None
+    except Exception as exc:  # noqa: BLE001 - this source is optional
+        log.debug("Steam store lookup failed for %s: %s", appid, exc)
+        return None
+    return image if isinstance(image, str) and image.startswith("https://") else None
 
 
 class _OgImageParser(HTMLParser):

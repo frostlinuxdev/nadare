@@ -197,5 +197,6 @@ def test_launcher_games_do_not_show_the_old_100_gib_placeholder(qapp):
     assert sizes["launcher-nikke"] == 27 * 1024**3
     # The launcher installs the same game as the direct kind.
     assert sizes["launcher-nte"] == backends.install_size_hint("direct-nte")
-    # GFL2: a tiny launcher, then the game downloads about 60 GB inside itself.
-    assert 55 * 10**9 <= sizes["launcher-gfl2-haoplay"] <= 65 * 10**9
+    # GFL2: a tiny launcher, then the game downloads about 88 GB inside itself (measured: 87.7 GB
+    # of game files for one voice language, plus the ~3 GB prefix).
+    assert 88 * 10**9 <= sizes["launcher-gfl2-haoplay"] <= 100 * 10**9

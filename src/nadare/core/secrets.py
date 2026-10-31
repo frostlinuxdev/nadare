@@ -285,26 +285,6 @@ class SecretStore:
             ]
 
 
-#: Module-level convenience store mirroring the old function style.
-_default = SecretStore()
-
-
-def get_token(profile: str) -> str | None:
-    return _default.get(profile)
-
-
-def set_token(profile: str, token: str) -> None:
-    _default.set(profile, token)
-
-
-def delete_token(profile: str) -> None:
-    _default.delete(profile)
-
-
-def keyring_available() -> bool:
-    return _default.secure
-
-
 def _secret_service_state(backend: object, name: str) -> tuple[bool, str] | None:
     """Look at the Secret Service default collection *without* prompting.
 

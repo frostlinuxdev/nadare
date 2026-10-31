@@ -190,7 +190,7 @@ def test_gfl2_haoplay_global_plan_is_only_the_small_client_from_the_intl_cdn():
     assert plan.game_tag == "gfl2-haoplay"
     assert plan.version == "2.0.3936.14886.28279+client-2.0.3936"
     assert plan.exe == "GF2_Exilium.exe"
-    assert plan.files == ()  # the game downloads its own ~60 GB of resources in-game
+    assert plan.files == ()  # the game downloads its own ~88 GB of resources in-game
     (arc,) = plan.archives
     assert arc.source.url == cdn + "package/PCClient/2.0.3936/GF2_Exilium_Origin.zip"
     all_paths_safe(plan)

@@ -11,12 +11,15 @@ injectable so tests run against recorded responses; the default is
 
 from __future__ import annotations
 
-import gzip
+import zlib
 from collections.abc import Callable, Mapping
 
 from .. import directdl, download
 
 Fetch = Callable[[str, Mapping[str, str] | None], bytes]
+
+#: A publisher API document is small JSON; a gzip bomb must not exhaust memory.
+MAX_UNZIP_BYTES = 64 << 20
 
 
 def default_fetch(url: str, headers: Mapping[str, str] | None = None) -> bytes:
@@ -27,6 +30,30 @@ def default_fetch(url: str, headers: Mapping[str, str] | None = None) -> bytes:
         raise directdl.DirectError(str(exc)) from exc
 
 
-def ungzip(data: bytes) -> bytes:
-    """Return ``data`` decompressed when it starts with the gzip magic."""
-    return gzip.decompress(data) if data[:2] == b"\x1f\x8b" else data
+def ungzip(data: bytes, *, limit: int = MAX_UNZIP_BYTES) -> bytes:
+    """Return ``data`` decompressed when it starts with the gzip magic.
+
+    Every gzip member is read, the decompressed size (all members together) is capped at
+    ``limit``, and a truncated or corrupt stream becomes a
+    :class:`~nadare.core.directdl.DirectError`, keeping the source contract.
+    """
+    if data[:2] != b"\x1f\x8b":
+        return data
+    out = bytearray()
+    rest = data
+    try:
+        while rest:
+            decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            out += decompressor.decompress(rest, limit + 1 - len(out))
+            if len(out) > limit:
+                raise directdl.DirectError(f"gzip payload exceeds {limit} bytes")
+            if not decompressor.eof:
+                raise directdl.DirectError("truncated gzip payload")
+            rest = decompressor.unused_data
+            if not rest.strip(b"\x00"):
+                break  # zero padding after the last member
+            if rest[:2] != b"\x1f\x8b":
+                raise directdl.DirectError("corrupt gzip payload: unexpected data after the end")
+    except zlib.error as exc:
+        raise directdl.DirectError(f"corrupt gzip payload: {exc}") from exc
+    return bytes(out)

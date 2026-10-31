@@ -49,10 +49,53 @@ MESSAGES: dict[int, str] = {
 }
 
 
+#: The Evergreen standalone x64 installer behind Microsoft's redirector, and the pin that ships
+#: with this release. Microsoft re-issues the file with each Edge release, so the pin goes stale;
+#: ``verify`` then accepts a hash listed in the Nadare index (``webview2/latest.json``). The CZN
+#: backend re-exports both names (its tests patch them there); Steam Set up reads them here.
+DEFAULT_URL = "https://go.microsoft.com/fwlink/?linkid=2124701"
+PINNED_SHA256: str | None = "2a6add76c37bfa872eb8c2b22d45b3216b8e2a1f193e0774006340ff62ac5fa0"
+
+
 def installed(prefix: Path) -> bool:
     """Whether the WebView2 runtime executable is already in ``prefix``."""
     root = prefix / "drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application"
     return any(root.glob("*/msedgewebview2.exe"))
+
+
+#: The key apps ask (through EdgeUpdate) for the runtime's place; only a finished install writes it.
+_CLIENT_KEY = (
+    "[Software\\\\Wow6432Node\\\\Microsoft\\\\EdgeUpdate\\\\Clients\\\\"
+    "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}]"
+)
+
+
+def registered(prefix: Path) -> bool:
+    """Whether the runtime is also registered, not just present as files.
+
+    An interrupted install can leave ``msedgewebview2.exe`` in place without the registry entry
+    apps look up, which :func:`installed` cannot tell. The entry must name a version whose
+    folder exists. Read from the prefix's ``system.reg`` text (no Wine needed).
+    """
+    try:
+        # Wine can write a stray non-UTF-8 byte in some value; that must not hide the key.
+        text = (Path(prefix) / "system.reg").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    start = text.find("\n" + _CLIENT_KEY)
+    if start < 0:
+        return False
+    end = text.find("\n[", start + 1)
+    section = text[start : end if end >= 0 else len(text)]
+    version = ""
+    for line in section.splitlines():
+        if line.startswith('"pv"='):
+            version = line.split("=", 1)[1].strip().strip('"').strip()
+            break
+    if not version or version == "0.0.0.0":
+        return False
+    root = Path(prefix) / "drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application"
+    return (root / version / "msedgewebview2.exe").is_file()
 
 
 def resolve_pin(profile: dict[str, Any], constant: str | None) -> str:

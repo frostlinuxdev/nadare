@@ -56,7 +56,7 @@ def test_download_file_rejects_a_size_mismatch(monkeypatch, tmp_path) -> None:
     with pytest.raises(ValueError):
         czn_update.download_file(
             "/a.bin", "3", "c0", hashlib.md5(payload).hexdigest(),
-            hashlib.md5(packed).hexdigest(), len(payload) + 1,
+            hashlib.md5(packed).hexdigest(), len(payload) + 1, attempts=1,
         )
     assert not (game_dir / "a.bin").exists()
 

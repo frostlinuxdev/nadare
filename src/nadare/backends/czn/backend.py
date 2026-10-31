@@ -43,6 +43,7 @@ from ...core import download as net
 from ...core import (
     graphics,
     hostlibs,
+    monitors,
     paths,
     prefixmove,
     process,
@@ -62,7 +63,6 @@ from ...core.events import Cancelled, Event, mask
 from ...core.removal import tree_safety
 from ...core.runtimewatch import RuntimeWatch
 from ...core.secrets import SecretStore, SecretStoreError, default_collection_exists
-from ...core.shortcuts import command_hint
 from .news import IMAGE_HOSTS, fetch_czn_news
 
 KIND = "stove-czn"
@@ -91,7 +91,7 @@ _INSTALLER_ENV = {"PROTON_ENABLE_WAYLAND": "0"}
 STUB_PREBUILT = Path(__file__).resolve().parents[2] / "assets" / STUB_NAME
 STUB_PREBUILT_SHA256 = "fe4a5bad970750e974cf999e31e3b87132fbb25f9c04c9eea69e3acc2e243185"
 DEFAULT_RUNNER = "dwproton"  # the tested DW-Proton release
-WEBVIEW2_URL = "https://go.microsoft.com/fwlink/?linkid=2124701"
+WEBVIEW2_URL = webview2.DEFAULT_URL
 #: The bootstrapper is fetched through a mutable Microsoft redirector, so the
 #: download is accepted only when it lands on a Microsoft host and matches a
 #: pinned SHA-256. AUDIT H1: the hash is never guessed; it is resolved at run
@@ -103,7 +103,7 @@ WEBVIEW2_URL = "https://go.microsoft.com/fwlink/?linkid=2124701"
 #: Last-Modified 2026-10-08, 214090448 B). Microsoft re-issues this file with each
 #: Edge release, so the pin goes stale; override with NADARE_WEBVIEW2_SHA256 or
 #: the profile's ``webview2_sha256`` until it is bumped.
-WEBVIEW2_SHA256: str | None = "2a6add76c37bfa872eb8c2b22d45b3216b8e2a1f193e0774006340ff62ac5fa0"
+WEBVIEW2_SHA256: str | None = webview2.PINNED_SHA256
 #: The WebView2 pipeline lives in :mod:`nadare.core.webview2` so every
 #: Wine-family backend shares one verifier and installer. Re-exported here
 #: because existing CZN tests (and callers) reference these names.
@@ -118,6 +118,12 @@ VCREDIST_URL = vcredist.VCREDIST_URL
 VCREDIST_SHA256: str | None = vcredist.VCREDIST_SHA256
 VCREDIST_INDEX_MAX_HASHES = vcredist.VCREDIST_INDEX_MAX_HASHES
 VCREDIST_HOST_SUFFIXES: tuple[str, ...] = vcredist.VCREDIST_HOST_SUFFIXES
+
+#: STOVE's own page where an account agrees to the game's terms (the ``406401`` answer links it).
+TERMS_URL = (
+    "https://policy.onstove.com/?inflow_path=LAUNCHER&show_play_button=Y"
+    "&game_id=STOVE_CHAOSZERO&lang=en"
+)
 
 #: czn-linux subprocess exit codes -> a user-safe message. The backend-side
 #: WebView2 codes live in their own map (below) so a helper that later returns
@@ -143,6 +149,9 @@ AUTH_EXIT_MESSAGES: dict[int, str] = {
     "(if it keeps happening, open the logs)",
     3: "STOVE rejected or expired the sign-in. Scan a fresh QR code and try again.",
     4: "Could not reach STOVE. Check your internet connection and try again.",
+    5: "This STOVE account has not accepted Chaos Zero Nightmare's terms of service yet. "
+    "Read and accept them in Nadare when it asks, or open " + TERMS_URL + " in your browser "
+    "while signed in to the same STOVE account, then try again.",
 }
 
 #: ``czn_update.py`` exit codes -> a user-safe message. Its own table: 1 is a
@@ -197,8 +206,11 @@ _STOPPED_EXIT_CODES = frozenset({-15, 143, 241, -2, 130, 254})
 
 
 def _remember_notice() -> str:
-    """The no-keyring notice, naming the command this build actually has."""
-    return f"Remember me unavailable: system keyring not usable (run: {command_hint('doctor')})"
+    """The notice when the saved login cannot be stored on this device."""
+    return (
+        "Remember me unavailable: this system cannot store your login securely. "
+        "Nadare will ask you to sign in again next time."
+    )
 
 
 def __getattr__(name: str) -> Any:
@@ -446,6 +458,16 @@ class CznBackend(GameBackend):
                 ("X11 (XWayland)", "x11"),
             ),
         ),
+        Option(
+            "extra_env",
+            "Environment",
+            "env",
+            "One KEY=VALUE per line, added to the game's environment. To open the "
+            "game on a given monitor (native Wayland only) add "
+            "WAYLANDDRV_PRIMARY_MONITOR=DP-1 with your monitor's connector name.",
+            advanced=True,
+        ),
+        monitors.OPTION,
     )
 
     #: Official STOVE/CZN news (publisher's own board); image host is the CZN CDN.
@@ -1240,6 +1262,9 @@ class CznBackend(GameBackend):
         if not logged_in and self._remember_enabled():
             logged_in = self._load_credential() is not None
         session = self._session_info()
+        nickname = ""
+        if session:
+            nickname = str(session.get("nickname") or "")
         if running:
             state, message = "running", "Chaos Zero Nightmare is running"
         elif installed:
@@ -1255,6 +1280,7 @@ class CznBackend(GameBackend):
             message=message,
             data={
                 "logged_in": logged_in,
+                "account": nickname,
                 "login_required": installed and not logged_in,
                 "session": session,
                 "prefix": str(self.prefix()),
@@ -1268,10 +1294,14 @@ class CznBackend(GameBackend):
         try:
             d = json.loads(self._session().read_text())
             exp = int(d.get("expire_time", "0")) // 1000
+            nickname = str(d.get("member_nickname") or "")
+            if nickname == "0":
+                nickname = ""
             return {
                 "path": str(self._session()),
                 "expires_at": exp,
                 "valid": bool(d.get("access_token")) and exp > time.time(),
+                "nickname": nickname,
             }
         except Exception:
             return None
@@ -1648,7 +1678,83 @@ class CznBackend(GameBackend):
             self._fail_auth("login", code)
         self.ctx.emit(Event("done", "Logged in to STOVE"))
 
-    def _run_auth(self, args: list[str]) -> tuple[int, dict[str, str] | None]:
+    # ---- the game's terms of service --------------------------------------
+    #: Shown by the GUI when a login or launch stops because the terms are not accepted.
+    TERMS_MESSAGE = AUTH_EXIT_MESSAGES[5]
+    #: STOVE's page for agreeing to them, for users who prefer their browser.
+    TERMS_URL = TERMS_URL
+
+    def _require_login_for_terms(self) -> None:
+        if not self._refresh_token:
+            raise BackendError("Log in to STOVE first, then Nadare can show the terms.", 3)
+
+    def _keep_terms_handoff(self, handoff: dict[str, str] | None) -> None:
+        """Store the rotated credential, but never one that belongs to another account."""
+        if not handoff:
+            return
+        member = handoff.get("member_no") or ""
+        if self._member_no and member and member != self._member_no:
+            self._forget_credential()
+            raise BackendError(
+                "The STOVE account changed since you logged in. Log in again.", 3
+            )
+        self._save_credential(handoff["refresh_token"], member)
+
+    def terms(self) -> dict[str, Any]:
+        """The terms this account still has to agree to.
+
+        Returns ``{"pending", "documents", "missing", "member_no"}``: ``missing`` lists pending
+        terms STOVE gave no text for (the caller must not ask the user to agree while any), and
+        ``member_no`` names the account these terms were read for. Renews the login (STOVE
+        rotates the token), so it runs under the same lock as a launch. Nothing is agreed here.
+        """
+        with self._rotation_lock(wait=30):
+            self._adopt_newer_credential()
+            self._require_login_for_terms()
+            events: list[dict[str, Any]] = []
+            code, handoff = self._run_auth(["terms"], collect=events)
+            self._keep_terms_handoff(handoff)
+        if code != 0:
+            self._fail_auth("terms", code)
+        found = [e for e in events if e.get("event") == "terms"]
+        documents = found[-1].get("documents") if found else None
+        if not found or not isinstance(documents, list):
+            raise BackendError(
+                "STOVE did not return the game's terms. Try again in a minute, or open "
+                + TERMS_URL
+                + " in your browser.",
+                2,
+            )
+        missing = found[-1].get("missing")
+        return {
+            "pending": bool(found[-1].get("pending")),
+            "documents": documents,
+            "missing": missing if isinstance(missing, list) else [],
+            "member_no": self._member_no,
+        }
+
+    def accept_terms(self, expect_member: str | None = None) -> None:
+        """Agree to the game's terms for this account. Call only after the user said yes.
+
+        ``expect_member`` is the account :meth:`terms` showed; if another account is logged in
+        by now nothing is sent.
+        """
+        with self._rotation_lock(wait=30):
+            self._adopt_newer_credential()
+            self._require_login_for_terms()
+            if expect_member and self._member_no and str(self._member_no) != str(expect_member):
+                raise BackendError(
+                    "A different STOVE account is logged in now. Open the terms again.", 3
+                )
+            code, handoff = self._run_auth(["accept-terms", "--agree"])
+            self._keep_terms_handoff(handoff)
+        if code != 0:
+            self._fail_auth("accept the terms", code)
+        self.ctx.emit(Event("done", "Terms accepted"))
+
+    def _run_auth(
+        self, args: list[str], collect: list[dict[str, Any]] | None = None
+    ) -> tuple[int, dict[str, str] | None]:
         """Run the auth worker and read its 0600 credential handoff."""
         self._last_auth_error = None
         handoff = self._handoff_path()
@@ -1668,6 +1774,7 @@ class CznBackend(GameBackend):
                     AUTH_MODULE,
                     [*args, "--json"],
                     parse_json=True,
+                    collect=collect,
                     extra_env=self._auth_env(),
                 )
             except BaseException:
@@ -1800,6 +1907,8 @@ class CznBackend(GameBackend):
                 "The saved STOVE login expired or was used elsewhere. Log in again.",
                 3,
             )
+        if self._restore_code == 5:
+            raise BackendError(self.TERMS_MESSAGE, 5)
         raise BackendError("log in first, or turn on 'Remember me on this device'", 3)
 
     # ---- launch ------------------------------------------------------------
@@ -1819,6 +1928,10 @@ class CznBackend(GameBackend):
         if self.ctx.profile.get("gl_threading", False) is True:
             env.setdefault("mesa_glthread", "true")  # Mesa (AMD/Intel/nouveau)
             env.setdefault("__GL_THREADED_OPTIMIZATIONS", "1")  # NVIDIA proprietary
+        monitors.apply_env(env, self.ctx)
+        profile_env = self.ctx.profile.get("extra_env")
+        if isinstance(profile_env, dict):
+            process.apply_extra_env(env, profile_env, reserved=process.LAUNCH_RESERVED_ENV)
         if extra_env:
             env.update(extra_env)
         if kind == "proton":
@@ -1842,8 +1955,10 @@ class CznBackend(GameBackend):
                     pass
             env["PROTONPATH"] = proton
             env.setdefault("GAMEID", "0")
-            env["PROTON_ENABLE_WAYLAND"] = os.environ.get(
-                "PROTON_ENABLE_WAYLAND", self._wayland_default()
+            env["PROTON_ENABLE_WAYLAND"] = (
+                env["PROTON_ENABLE_WAYLAND"]
+                if isinstance(profile_env, dict) and "PROTON_ENABLE_WAYLAND" in profile_env
+                else os.environ.get("PROTON_ENABLE_WAYLAND", self._wayland_default())
             )
             if extra_env and "PROTON_ENABLE_WAYLAND" in extra_env:
                 env["PROTON_ENABLE_WAYLAND"] = extra_env["PROTON_ENABLE_WAYLAND"]

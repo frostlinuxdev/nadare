@@ -17,6 +17,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
@@ -35,6 +36,20 @@ log = nadare_logging.get_logger("app")
 #: Set after the root warning has been shown, so a CLI ``gui`` command does not
 #: print it twice.
 _root_warned = False
+
+
+def _make_output_encoding_safe() -> None:
+    """Never crash a CLI command because stdout cannot encode a character.
+
+    Under ``LC_ALL=C`` (or a pipe with an ASCII encoding) ``print`` would raise
+    ``UnicodeEncodeError`` on titles and reports; backslash-replace instead.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        with contextlib.suppress(Exception):
+            reconfigure(errors="backslashreplace")
 
 
 def warn_if_root() -> None:
@@ -264,23 +279,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     remove_cmd = sub.add_parser(
         "remove",
-        help="remove a game from the library (keeps game files unless --delete-data)",
+        help="remove a game from your library (files are kept unless you ask to delete them)",
     )
     remove_cmd.add_argument("-p", "--profile", default=None, help="profile name (required)")
     remove_cmd.add_argument(
         "--delete-data",
         action="store_true",
-        help="also delete the profile's game data folder",
+        help="also delete Nadare's profile data (settings, saved login, cached files)",
     )
     remove_cmd.add_argument(
         "--delete-install-dir",
         action="store_true",
-        help="also delete the game's install folder",
+        help="also delete the game's install folder (these are the actual game files)",
     )
     remove_cmd.add_argument(
         "--delete-prefix",
         action="store_true",
-        help="also delete the game's Wine prefix",
+        help=(
+            "also delete the game's Wine/Proton prefix (this holds the game's "
+            "Windows files and save data)"
+        ),
     )
     remove_cmd.add_argument(
         "--delete-backups",
@@ -640,11 +658,16 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
     return finish()
 
 
+#: ``redirect_stdout`` swaps the process-wide ``sys.stdout``, so two captures at once would
+#: write into each other's buffer and restore it in the wrong order.
+_DOCTOR_CAPTURE_LOCK = threading.Lock()
+
+
 def _doctor_text(config: Config) -> str:
     """Capture the doctor output for embedding in a support report."""
     capture = io.StringIO()
     try:
-        with contextlib.redirect_stdout(capture):
+        with _DOCTOR_CAPTURE_LOCK, contextlib.redirect_stdout(capture):
             _run_doctor(config)
     except Exception as exc:  # noqa: BLE001 - a partial report is still useful
         return f"unavailable: {exc}"
@@ -966,6 +989,7 @@ def _run_remove(args: argparse.Namespace, config: Config) -> int:
 
 def run_cli(argv: Sequence[str] | None = None) -> int:
     """Parse ``argv`` and run one command. Returns a process exit code."""
+    _make_output_encoding_safe()
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.command is None:

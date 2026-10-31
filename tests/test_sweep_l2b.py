@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 try:  # pragma: no cover - only when PyQt6 is missing
-    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtWidgets import QApplication, QMessageBox
 except Exception:  # noqa: BLE001
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
@@ -39,11 +39,12 @@ def test_runner_picker_is_hidden_for_kinds_that_do_not_use_a_runner(tmp_path, qa
     try:
         for kind in ("steam", "fgo-lepton", "script"):
             page.load(_config(tmp_path / f"{kind}.json", kind), "sample")
-            assert not page.runner.isVisibleTo(page), f"{kind} must not offer a runner"
+            game_tab = page.tabs.widget(1)
+            assert not page.runner.isVisibleTo(game_tab), f"{kind} must not offer a runner"
 
         for kind in ("wine", "stove-czn", "arknights-yostar", "stellasora-yostar"):
             page.load(_config(tmp_path / f"{kind}.json", kind), "sample")
-            assert page.runner.isVisibleTo(page), f"{kind} still uses a runner"
+            assert page.runner.isVisibleTo(page.tabs.widget(1)), f"{kind} still uses a runner"
     finally:
         page.deleteLater()
         qapp.processEvents()
@@ -56,6 +57,10 @@ def test_malformed_environment_line_is_reported_and_valid_lines_are_saved(
     shown: list[str] = []
     monkeypatch.setattr(
         "nadare.gui.settings.QMessageBox.open", lambda self, *a: shown.append(self.text())
+    )
+    monkeypatch.setattr(
+        "nadare.gui.settings.QMessageBox.question",
+        lambda *a, **k: QMessageBox.StandardButton.Yes,
     )
     config = _config(tmp_path, "arknights-yostar")
     page = SettingsPage()

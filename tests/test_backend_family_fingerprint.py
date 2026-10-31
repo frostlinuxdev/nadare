@@ -2147,13 +2147,149 @@ TABLE = {
 
 
 #: Attributes every class gains on purpose: the hook that lets the shared repair and verify catch
-#: the Yostar manifest error without naming the yostar module (empty in the base).
-ADDED: frozenset[str] = frozenset({"_manifest_errors"})
+#: the Yostar manifest error without naming the yostar module (empty in the base), and the three
+#: methods the status/update split added to the shared base.
+ADDED: frozenset[str] = frozenset(
+    {
+        "_manifest_errors",
+        "_direct_status_parts",
+        "_official_status_parts",
+        "_refresh_published_version",
+    }
+)
 
 #: Attributes whose source differs on purpose, with the reason above each entry. Every one of
 #: these was checked against master by a differential run of status, check_update, verify and
 #: repair for the Yostar, direct and launcher families.
 CHANGED_BY_ATTRIBUTE: dict[str, frozenset[str]] = {
+    # every backend that runs Wine now offers the Monitor setting next to Environment (#779)
+    "options": frozenset(
+        {
+            "AetherGazerBackend",
+            "ArknightsBackend",
+            "BrownDust2Backend",
+            "DirectBackend",
+            "EndfieldBackend",
+            "GenshinBackend",
+            "Gfl2Backend",
+            "Hi3Backend",
+            "LauncherBackend",
+            "MongilBackend",
+            "NikkeBackend",
+            "NteBackend",
+            "NteDirectBackend",
+            "PgrBackend",
+            "StarRailBackend",
+            "StellaSoraBackend",
+            "WutheringWavesBackend",
+            "ZenlessBackend",
+            "direct.Gfl2HaoplayBackend",
+            "launcher.Gfl2HaoplayBackend",
+        }
+    ),
+    # the Haoplay build's size is now the measured one (87.7 GB of game files for one voice
+    # language, from a real in-game download), not the old guess of ~60 GB
+    "page_notice": frozenset({"direct.Gfl2HaoplayBackend"}),
+    "install_size_hint": frozenset({"launcher.Gfl2HaoplayBackend"}),
+    # the launch merge now reserves WINEPREFIX/STEAM_COMPAT_DATA_PATH/PROTONPATH
+    # against a profile extra_env (#595), and passes its caller env through the
+    # shared apply_extra_env helper instead of raw dict.update()
+    "_prefix_command": frozenset(
+        {
+            "AetherGazerBackend",
+            "ArknightsBackend",
+            "BrownDust2Backend",
+            "DirectBackend",
+            "EndfieldBackend",
+            "GenshinBackend",
+            "Gfl2Backend",
+            "Hi3Backend",
+            "LauncherBackend",
+            "MongilBackend",
+            "NteBackend",
+            "NteDirectBackend",
+            "PgrBackend",
+            "StarRailBackend",
+            "StellaSoraBackend",
+            "WutheringWavesBackend",
+            "ZenlessBackend",
+            "launcher.Gfl2HaoplayBackend",
+        }
+    ),
+    # the launch log names the renderer the game was asked to use (#670)
+    "_runtime_note": frozenset(
+        {
+            "AetherGazerBackend",
+            "ArknightsBackend",
+            "BrownDust2Backend",
+            "DirectBackend",
+            "EndfieldBackend",
+            "GenshinBackend",
+            "Gfl2Backend",
+            "Hi3Backend",
+            "LauncherBackend",
+            "MongilBackend",
+            "NikkeBackend",
+            "NteBackend",
+            "NteDirectBackend",
+            "PgrBackend",
+            "StarRailBackend",
+            "StellaSoraBackend",
+            "WutheringWavesBackend",
+            "ZenlessBackend",
+            "direct.Gfl2HaoplayBackend",
+            "launcher.Gfl2HaoplayBackend",
+        }
+    ),
+    # status now dispatches to the direct/official helpers instead of interleaving both modes
+    "status": frozenset(
+        {
+            "AetherGazerBackend",
+            "ArknightsBackend",
+            "BrownDust2Backend",
+            "DirectBackend",
+            "EndfieldBackend",
+            "GenshinBackend",
+            "Gfl2Backend",
+            "Hi3Backend",
+            "LauncherBackend",
+            "NikkeBackend",
+            "NteBackend",
+            "NteDirectBackend",
+            "PgrBackend",
+            "StarRailBackend",
+            "StellaSoraBackend",
+            "WutheringWavesBackend",
+            "ZenlessBackend",
+            "direct.Gfl2HaoplayBackend",
+            "launcher.Gfl2HaoplayBackend",
+        }
+    ),
+    # check_update now delegates the direct-only refresh to _refresh_published_version
+    "check_update": frozenset(
+        {
+            "AetherGazerBackend",
+            "ArknightsBackend",
+            "BrownDust2Backend",
+            "DirectBackend",
+            "EndfieldBackend",
+            "GenshinBackend",
+            "Gfl2Backend",
+            "Hi3Backend",
+            "LauncherBackend",
+            "MongilBackend",
+            "NikkeBackend",
+            "NteBackend",
+            "NteDirectBackend",
+            "PgrBackend",
+            "StarRailBackend",
+            "StellaSoraBackend",
+            "WutheringWavesBackend",
+            "ZenlessBackend",
+            "direct.Gfl2HaoplayBackend",
+            "launcher.Gfl2HaoplayBackend",
+        }
+    ),
     # the pin document for the archive is attached to the plan (block pins, issue #753)
     "plan": frozenset(
         {

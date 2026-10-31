@@ -197,9 +197,10 @@ def test_empty_library_and_cards_use_plain_language(qapp):
     try:
         page.refresh({})
         assert "No games yet" in page.subtitle.text()
-        assert "Chaos Zero Nightmare" in page.subtitle.text()
-        assert "Arknights" in page.subtitle.text()
-        assert "Stella Sora" in page.subtitle.text()
+        # The Store lists what can be installed, so the hint points there instead of naming
+        # a few games that the catalog has long outgrown.
+        assert "Store" in page.subtitle.text()
+        assert "Stella Sora" not in page.subtitle.text()
     finally:
         page.deleteLater()
         qapp.processEvents()

@@ -24,7 +24,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from ..core import endfield_shim, graphics, process, sevenzip
+from ..core import endfield_shim, graphics, monitors, process, sevenzip
 from ..core.backends import BackendError, BackendUnsupported, Option
 from ..core.events import Event
 from ..core.nte_launcher import INSTALLER_URL
@@ -177,6 +177,7 @@ class LauncherBackend(WineGameBackend):
         Option("wine_binary", "Wine binary", "path_file", advanced=True),
         Option("umu_binary", "umu-run binary", "path_file", advanced=True),
         Option("extra_env", "Environment", "env", "One KEY=VALUE per line.", advanced=True),
+        monitors.OPTION,
         Option("process_match", "Process match", "text", advanced=True),
     )
 
@@ -350,8 +351,9 @@ class Gfl2HaoplayBackend(LauncherBackend):
     """Girls' Frontline 2: Exilium, global build by Haoplay (the other build is ``direct-gfl2``)."""
 
     kind = "launcher-gfl2-haoplay"
-    #: A small launcher; the game downloads about 60 GB inside itself.
-    install_size_hint = 60 * 10**9
+    #: A small launcher; the game downloads about 88 GB inside itself (measured: 87.7 GB of game
+    #: files for one voice language) and the prefix takes about 3 GB.
+    install_size_hint = 91 * 10**9
     game_tag = "gfl2-haoplay"
     display_name = "Girls' Frontline 2 (Haoplay global build, publisher's launcher)"
     install_subdir = _subdir("drive_c/Program Files", "GF2")

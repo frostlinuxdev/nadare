@@ -14,6 +14,7 @@ stylesheet with ``setObjectName``.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -42,7 +43,7 @@ LINE_SOFT = "#141a25"
 TEXT = "#e6eaf2"
 TEXT_SOFT = "#c3cbd9"
 MUTED = "#8b93a6"
-DIM = "#69738c"
+DIM = "#7d879f"
 
 #: Cool-tinted neutrals. Every grey in the stylesheet is one of these so the
 #: whole surface keeps the same faint blue cast instead of drifting warm.
@@ -182,7 +183,8 @@ QFrame#GameRow[active="true"] {{
     background: rgba(61, 139, 253, 0.10);
     border: 1px solid rgba(61, 139, 253, 0.18);
 }}
-QLabel#GameRowTitle {{ color: {MUTED}; font-size: 12px; font-weight: 600; }}
+QLabel#GameRowTitle {{ color: {TEXT_SOFT}; font-size: 12px; font-weight: 600; }}
+QLabel#GameRowTitle[dim="true"] {{ color: #566073; }}
 QLabel#GameRowTitle[active="true"] {{ color: {ACCENT}; }}
 QFrame#GameRow:hover QLabel#GameRowTitle {{ color: {TEXT}; }}
 QLabel#GameRowIcon {{ background: {PANEL_3}; border-radius: 8px; }}
@@ -305,6 +307,19 @@ QFrame#Banner {{
     background: {PANEL_2};
     border-bottom: 1px solid {LINE};
 }}
+QTabWidget::pane {{ border: none; border-top: 1px solid {LINE}; top: -1px; }}
+QTabBar {{ background: transparent; }}
+QTabBar::tab {{
+    background: transparent;
+    color: {MUTED};
+    padding: 9px 18px;
+    margin-right: 4px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    font-weight: 600;
+}}
+QTabBar::tab:hover {{ color: {TEXT}; }}
+QTabBar::tab:selected {{ color: {TEXT}; border-bottom: 2px solid {ACCENT}; }}
 QPushButton#GhostButton {{
     background: transparent;
     border: 1px solid {LINE};
@@ -362,6 +377,16 @@ QLineEdit, QComboBox, QSpinBox {{
     selection-background-color: {ACCENT};
     selection-color: {ACCENT_INK};
 }}
+QPlainTextEdit {{
+    background: {FIELD_BG};
+    border: 1px solid {LINE};
+    border-radius: 8px;
+    padding: 6px 9px;
+    color: {TEXT};
+    selection-background-color: {ACCENT};
+    selection-color: {ACCENT_INK};
+}}
+QPlainTextEdit:focus {{ border: 1px solid {ACCENT}; }}
 QLineEdit:hover, QComboBox:hover, QSpinBox:hover {{ border-color: {BORDER_HI}; }}
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border: 1px solid {ACCENT}; }}
 QLineEdit:read-only, QLineEdit:disabled {{ color: {MUTED}; background: {PANEL}; }}
@@ -451,6 +476,16 @@ QPlainTextEdit#Console {{
     selection-background-color: #16283c;
     selection-color: {ACCENT};
 }}
+QTextBrowser#Report {{
+    background: {CONSOLE_BG};
+    border: 1px solid {LINE_SOFT};
+    border-radius: 12px;
+    font-size: 13px;
+    color: {TEXT_SOFT};
+    padding: 10px 12px;
+    selection-background-color: #16283c;
+    selection-color: {ACCENT};
+}}
 QProgressBar {{
     background: {PANEL_3};
     border: none;
@@ -486,9 +521,40 @@ QToolTip {{
 """
 
 
+def _font_scale() -> float:
+    """How much larger the desktop's text setting is than a stock 10 pt desktop.
+
+    Qt style sheets ignore the application font, so the px sizes below would
+    freeze the launcher at one size. Only scale up: a smaller system font must
+    not shrink text below the designed size.
+    """
+    from PyQt6.QtGui import QGuiApplication
+
+    app = QGuiApplication.instance()
+    if app is None:
+        return 1.0
+    font = app.font()
+    px = font.pixelSize()
+    if px <= 0:
+        point = font.pointSizeF()
+        if point <= 0:
+            return 1.0
+        px = point * 4.0 / 3.0  # 96 dpi; the point size already carries OS scaling
+    # 10 pt (13.33 px) is what a default KDE/GNOME desktop reports: it keeps the designed sizes.
+    return max(1.0, px / (10.0 * 4.0 / 3.0))
+
+
+_FONT_SIZE_RE = re.compile(r"font-size:\s*(\d+)px")
+
+
 def stylesheet() -> str:
-    """Return the launcher stylesheet."""
-    return STYLESHEET
+    """Return the launcher stylesheet, scaled to the desktop's text size."""
+    scale = _font_scale()
+
+    def scaled(match: re.Match[str]) -> str:
+        return f"font-size: {round(int(match.group(1)) * scale)}px"
+
+    return _FONT_SIZE_RE.sub(scaled, STYLESHEET)
 
 
 FONTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
@@ -516,7 +582,37 @@ def apply_theme(app) -> None:
         register_fonts()
     except Exception:  # noqa: BLE001 - a missing font must never block startup
         pass
-    app.setStyleSheet(STYLESHEET)
+    app.setStyleSheet(stylesheet())
+    try:
+        from .wheelguard import install_for
+
+        install_for(app)  # the wheel scrolls the page, not the dropdown under it
+    except Exception:  # noqa: BLE001 - a missing guard must never block startup
+        pass
+    try:
+        # The app font can change at runtime (a desktop "Large Text" toggle).
+        from PyQt6.QtCore import QTimer
+        from PyQt6.QtWidgets import QApplication
+
+        if isinstance(app, QApplication) and not getattr(app, "_nadare_font_watch", False):
+            app._nadare_font_watch = True
+            app._nadare_font_pending = False
+
+            def refresh() -> None:
+                app._nadare_font_pending = False
+                app.setStyleSheet(stylesheet())
+
+            def on_font_changed(_font) -> None:
+                # Setting the style sheet inside the font-change signal re-enters Qt's font
+                # machinery and can crash it, so the refresh runs on the next event-loop turn,
+                # once for any number of changes.
+                if not app._nadare_font_pending:
+                    app._nadare_font_pending = True
+                    QTimer.singleShot(0, refresh)
+
+            app.fontChanged.connect(on_font_changed)
+    except Exception:  # noqa: BLE001 - cosmetic only
+        pass
     try:
         from PyQt6.QtGui import QPalette
         from PyQt6.QtWidgets import QApplication
@@ -655,6 +751,58 @@ def rounded_pixmap(source: QPixmap, width: int, height: int, radius: int = 10) -
     painter.drawPixmap(0, 0, scaled)
     painter.end()
     return out
+
+
+#: How far down a wide cover's spare height the banner window starts: key art keeps its logo and
+#: faces in the upper part, so a centre crop would cut them off.
+_BANNER_TOP_BIAS = 0.15
+#: A cover at least this much wider than tall is cropped for the banner; anything squarer or
+#: taller is shown whole over a dim, blurred copy of itself.
+_BANNER_WIDE_RATIO = 1.2
+
+
+def banner_from_cover(source: QPixmap, width: int, height: int, radius: int = 10) -> QPixmap:
+    """A ``width``x``height`` hero banner made from a cover, for games with no hero art."""
+    width = max(1, int(width))
+    height = max(1, int(height))
+    if source.width() >= source.height() * _BANNER_WIDE_RATIO:
+        scaled = source.scaled(
+            width,
+            height,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = (scaled.width() - width) // 2
+        y = int((scaled.height() - height) * _BANNER_TOP_BIAS)
+        return rounded_pixmap(scaled.copy(x, y, width, height), width, height, radius)
+    backdrop = source.scaled(
+        width,
+        height,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    backdrop = backdrop.copy(
+        (backdrop.width() - width) // 2, (backdrop.height() - height) // 2, width, height
+    )
+    # Shrinking and re-growing is a cheap blur.
+    small = backdrop.scaled(
+        max(1, width // 24),
+        max(1, height // 24),
+        Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    canvas = small.scaled(
+        width,
+        height,
+        Qt.AspectRatioMode.IgnoreAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    painter = QPainter(canvas)
+    painter.fillRect(canvas.rect(), QColor(8, 10, 18, 150))
+    whole = source.scaledToHeight(height, Qt.TransformationMode.SmoothTransformation)
+    painter.drawPixmap((width - whole.width()) // 2, 0, whole)
+    painter.end()
+    return rounded_pixmap(canvas, width, height, radius)
 
 
 def cover_pixmap(

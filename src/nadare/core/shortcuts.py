@@ -544,7 +544,7 @@ def remove_steam_shortcut(shortcuts_vdf: str | os.PathLike[str], profile: str) -
         raise ShortcutError(
             f"{path} is unreadable or corrupt ({exc}); leaving it untouched"
         ) from exc
-    suffix = f'launch -p "{profile}"'
+    suffix = f'launch -p {_steam_quote(profile)}'
     kept = [e for e in existing if not str(e.get("LaunchOptions", "")).endswith(suffix)]
     if len(kept) == len(existing):
         return False
@@ -573,7 +573,12 @@ def remove_steam_shortcuts(profile: str) -> tuple[list[Path], list[str]]:
     return changed, warnings
 
 
-_LAUNCH_PROFILE = re.compile(r'(?:^|\s)launch\s+-p\s+(?:"([^"]*)"|(\S+))\s*$')
+_LAUNCH_PROFILE = re.compile(r'(?:^|\s)launch\s+-p\s+(?:"((?:[^"\\]|\\.)*)"|(\S+))\s*$')
+
+
+def _steam_unquote(value: str) -> str:
+    """Undo the backslash escapes :func:`_steam_quote` adds."""
+    return re.sub(r"\\([\\\"])", r"\1", value)
 
 
 def _steam_shortcut_profile(entry: Mapping[str, Any]) -> str | None:
@@ -581,7 +586,7 @@ def _steam_shortcut_profile(entry: Mapping[str, Any]) -> str | None:
     match = _LAUNCH_PROFILE.search(str(entry.get("LaunchOptions") or ""))
     if not match:
         return None
-    return match.group(1) if match.group(1) is not None else match.group(2)
+    return _steam_unquote(match.group(1)) if match.group(1) is not None else match.group(2)
 
 
 def installed_steam_shortcuts() -> list[tuple[Path, str, str]]:

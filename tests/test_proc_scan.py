@@ -130,3 +130,53 @@ def test_status_worker_uses_the_probe_round_payload(tmp_path, monkeypatch):
     worker.run()
 
     assert result[0].data["pids"] == ([810], [810])
+
+
+# ---- Proton / umu: the Wine processes carry WINEPREFIX=<prefix>/pfx and the data path ----------
+def test_proton_wine_processes_match_through_the_compat_data_path(tmp_path: Path) -> None:
+    """Seen on a real umu launch: Wine's own processes have WINEPREFIX=<prefix>/pfx/ and
+    STEAM_COMPAT_DATA_PATH=<prefix>. The renderer probe looked only at the python launchers."""
+    root = tmp_path / "proc"
+    pfx = {"WINEPREFIX": "/games/pfx/pfx/", "STEAM_COMPAT_DATA_PATH": "/games/pfx"}
+    _pid(root, 500, ["python3", "umu-run", "/games/game.exe"],
+         {"WINEPREFIX": "/games/pfx", "STEAM_COMPAT_DATA_PATH": "/games/pfx"})
+    _pid(root, 501, ["c:\\windows\\system32\\services.exe"], pfx)
+    _pid(root, 502, ["X:\\games\\game.exe"], pfx)
+    _pid(root, 503, ["C:\\windows\\system32\\explorer.exe"], pfx)
+
+    assert sorted(_prefix_scan(root, "/games/pfx")) == [500, 501, 502, 503]
+
+
+def test_a_proton_process_of_another_prefix_still_does_not_match(tmp_path: Path) -> None:
+    root = tmp_path / "proc"
+    other = {"WINEPREFIX": "/other/pfx/pfx/", "STEAM_COMPAT_DATA_PATH": "/other/pfx"}
+    _pid(root, 510, ["X:\\games\\game.exe"], other)  # same exe name, different prefix
+
+    assert _prefix_scan(root, "/games/pfx") == []
+
+
+def test_a_proton_prefix_reached_only_through_wineprefix_pfx_matches(tmp_path: Path) -> None:
+    root = tmp_path / "proc"
+    _pid(root, 520, ["X:\\games\\game.exe"], {"WINEPREFIX": "/games/pfx/pfx/"})
+
+    assert _prefix_scan(root, "/games/pfx") == [520]
+
+
+def test_the_renderer_probe_sees_the_wine_game_of_a_proton_launch(tmp_path: Path) -> None:
+    """The scan must reach the game process, or its DXVK libraries never get classified."""
+    from nadare.core import graphics
+
+    root = tmp_path / "proc"
+    _pid(root, 600, ["python3", "umu-run", "/games/game.exe"],
+         {"WINEPREFIX": "/games/pfx", "STEAM_COMPAT_DATA_PATH": "/games/pfx"})
+    (root / "600" / "maps").write_text("7f00 r-xp /usr/lib/libGL.so.1\n")
+    _pid(root, 601, ["X:\\games\\game.exe"],
+         {"WINEPREFIX": "/games/pfx/pfx/", "STEAM_COMPAT_DATA_PATH": "/games/pfx"})
+    (root / "601" / "maps").write_text(
+        "7f10 r-xp /games/pfx/pfx/drive_c/windows/system32/d3d11.dll\n"
+        "7f20 r-xp /games/pfx/pfx/drive_c/windows/system32/dxgi.dll\n"
+        "7f30 r-xp /usr/lib/x86_64-linux-gnu/libvulkan.so.1\n"
+    )
+    pids = _prefix_scan(root, "/games/pfx")
+
+    assert graphics.detect_renderer(pids, proc_root=root) == "DXVK on Vulkan"

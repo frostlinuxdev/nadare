@@ -181,13 +181,17 @@ def ensure_managed(
 ) -> Path:
     """Return an installed managed umu, downloading and verifying it once.
 
-    Raises :class:`UmuError` when ``python3`` is unavailable, the download
-    fails its pinned hash, the archive is malformed, or the resulting zipapp
-    cannot run. A failed install leaves nothing at :func:`managed_path`.
+    Raises :class:`UmuError` when the shebang interpreter or ``python3`` is
+    unavailable, the download fails its pinned hash, the archive is malformed, or
+    the resulting zipapp cannot run. A failed install leaves nothing at
+    :func:`managed_path`.
     """
     existing = managed()
     if existing is not None:
         return existing
+
+    if not (os.path.isfile(SHEBANG_PYTHON) and os.access(SHEBANG_PYTHON, os.X_OK)):
+        raise UmuError(f"python3 is needed to run umu ({SHEBANG_PYTHON} is missing)")
 
     python = shutil.which("python3")
     if python is None:

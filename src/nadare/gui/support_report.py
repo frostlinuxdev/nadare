@@ -54,6 +54,7 @@ class ReportDialog(QDialog):
             QLabel("Nothing is uploaded. Check the text, then paste it where you are getting help.")
         )
         self.text = QPlainTextEdit()
+        self.text.setObjectName("Console")  # the readable monospace style the log viewer uses
         self.text.setReadOnly(True)
         self.text.setPlainText("Building report…")
         layout.addWidget(self.text, 1)
