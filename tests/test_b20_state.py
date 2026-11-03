@@ -392,18 +392,19 @@ def test_a_logged_traceback_keeps_the_exception_type_readable(tmp_path):
     logger = logging.getLogger("nadare.test.traceback.keep")
     logger.addHandler(handler)
     logger.setLevel(logging.ERROR)
+    # Python 3.13 prints the whole failing statement in a traceback, so the secret must not be
+    # a literal inside the ``raise`` (a real secret is never in the source).
+    secret = "abcdefghijklmnopqrstuvwxyz" + "123456"
     try:
         try:
-            raise FileNotFoundError(
-                "[Errno 2] No such file: /x/y  token=abcdefghijklmnopqrstuvwxyz123456"
-            )
+            raise FileNotFoundError(f"[Errno 2] No such file: /x/y  token={secret}")
         except FileNotFoundError:
             logger.error("install failed", exc_info=True)
     finally:
         logger.removeHandler(handler)
     text = handler_stream.getvalue()
     assert "FileNotFoundError: [Errno 2]" in text  # greppable
-    assert "abcdefghijklmnopqrstuvwxyz123456" not in text  # the secret is still gone
+    assert secret not in text  # the secret is still gone
     assert "test_a_logged_traceback_keeps_the_exception_type_readable" in text  # frames intact
 
 
