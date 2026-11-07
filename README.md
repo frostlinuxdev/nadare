@@ -6,24 +6,9 @@ NIKKE, Brown Dust 2, Chaos Zero Nightmare and more. Pick a game in the Store, pr
 Install, press Play. Nadare downloads the game from the publisher, sets up the Wine/Proton
 environment, and keeps it updated, one profile per game.
 
-![The Nadare Store](docs/screenshots/store.png)
-
-![More games in the Store, including the Hoyoverse games](docs/screenshots/store-more.png)
-
 **Download:** the latest AppImage is on the
 [releases page](https://github.com/frostlinuxdev/nadare/releases). Source code and the
 issue tracker are at [github.com/frostlinuxdev/nadare](https://github.com/frostlinuxdev/nadare).
-
-> **Beta: expect bugs.** Installs, updates, logins and the GUI can break. Keep your own
-> backups and [report what you hit](#report-a-bug).
-
-> **Unofficial, use at your own risk.** Nadare is community software and is **not
-> affiliated with, endorsed by, or supported by** any game publisher. It stands in for
-> official launchers when talking to game servers, which may break a game's Terms of
-> Service and could get your account restricted. Read [Safety and ToS](#safety-and-tos)
-> before you install.
-
----
 
 ## Get started
 
@@ -40,6 +25,17 @@ issue tracker are at [github.com/frostlinuxdev/nadare](https://github.com/frostl
 3. Open the **Store** (first item in the sidebar), pick a game, choose an install folder,
    and press **Install**. Games that need a login ask for it on their page.
 
+> **Beta: expect bugs.** Installs, updates, logins and the GUI can break. Keep your own
+> backups and [report what you hit](#report-a-bug).
+
+> **Unofficial, use at your own risk.** Nadare is community software and is **not
+> affiliated with, endorsed by, or supported by** any game publisher. It stands in for
+> official launchers when talking to game servers, which may break a game's Terms of
+> Service and could get your account restricted. Read [Safety and ToS](#safety-and-tos)
+> before you install.
+
+## What you need
+
 You need a Linux x86_64 desktop (Wayland or X11) with `glibc` 2.35 or newer (Ubuntu 22.04+,
 Debian 12+, Fedora 36+, current Arch) and a working Vulkan driver (NVIDIA, or Mesa for
 AMD/Intel) **including its 32-bit Vulkan support**. Nothing else is needed on most systems:
@@ -55,8 +51,8 @@ New here? Read the [tester guide](docs/TESTERS.md). Something wrong?
 Run `./Nadare-*.AppImage doctor` and see [Troubleshooting](docs/TROUBLESHOOTING.md).
 
 Tested on NVIDIA + CachyOS and on AMD (RX 7900 XTX, Mesa, Debian 13), and the AppImage
-starts on Ubuntu 22.04 and 24.04, Debian 12, Fedora 44, Arch and Mint 22.1. Real game runs on Intel
-GPUs are not verified yet.
+starts on Ubuntu 22.04 and 24.04, Debian 12, Fedora 44, Arch and Mint 22.1. Real game runs on
+Intel GPUs are not verified yet.
 
 ---
 
