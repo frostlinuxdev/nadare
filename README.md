@@ -25,6 +25,8 @@ issue tracker are at [github.com/frostlinuxdev/nadare](https://github.com/frostl
 3. Open the **Store** (first item in the sidebar), pick a game, choose an install folder,
    and press **Install**. Games that need a login ask for it on their page.
 
+![The Nadare Store: every supported game with its tier and install size](docs/screenshots/store.webp)
+
 > **Beta: expect bugs.** Installs, updates, logins and the GUI can break. Keep your own
 > backups and [report what you hit](#report-a-bug).
 
@@ -61,6 +63,8 @@ Intel GPUs are not verified yet.
 Every game has a tier, shown on its Store card. **Verified** means a maintainer installed
 it through Nadare and played it past the title screen. **Experimental** means the install
 is covered by tests but has not been played end to end, or needs a workaround.
+
+![A game's Store page: its tier, how it installs and its install size](docs/screenshots/store-detail.webp)
 
 | Game | Tier |
 |---|---|
