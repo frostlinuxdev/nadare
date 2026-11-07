@@ -184,12 +184,14 @@ def _fresh() -> dict[str, list[ArtCandidate]] | None:
 
 def _load_now() -> dict[str, list[ArtCandidate]]:
     global _parsed, _valid_until
+    # Taken before waiting for the lock: a load that waits across a reset belongs to the state
+    # that was reset and must not store its answer into the new one.
+    with _state_lock:
+        generation = _generation
     with _load_lock:
         again = _fresh()
         if again is not None:  # another thread loaded it while this one waited
             return again
-        with _state_lock:
-            generation = _generation
         try:
             parsed, ttl = parse(_loader()), TTL
         except Exception as exc:  # noqa: BLE001 - offline or broken index: the old sources stay

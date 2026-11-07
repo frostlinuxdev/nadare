@@ -55,6 +55,7 @@ class StoreDetail(QWidget):
         super().__init__(parent)
         self.setObjectName("Page")
         self._entry = entry
+        self._opened = False  # set_entry has not run yet
         self._hero: QPixmap | None = None
         self._hero_is_cover = False
         self._variants: tuple[StoreEntry, ...] = ()
@@ -157,7 +158,20 @@ class StoreDetail(QWidget):
         """
         # A refresh of the same build (it only became installed, say) keeps the art already
         # fetched; showing another build starts over, as its art is fetched afresh.
-        if self._entry.kind != entry.kind:
+        kind_changed = self._entry.kind != entry.kind
+        # Focus moves to Play only when the page opens, shows another build, or the build the
+        # user just installed (focus on Install) becomes installed. A background refresh of the
+        # same build must leave the user's place alone (#942).
+        move_focus = (
+            entry.installed
+            and (
+                not self._opened
+                or kind_changed
+                or (not self._entry.installed and self.focusWidget() is self.install_button)
+            )
+        )
+        self._opened = True
+        if kind_changed:
             self._hero = None
             self._hero_is_cover = False
         self._entry = entry
@@ -194,13 +208,14 @@ class StoreDetail(QWidget):
             self.notice_label.hide()
             self.notice_link.hide()
         steam_tile = steamstore.app_id_of(entry.kind) is not None
-        # A Steam tile reopens its one game, so "Add another" would promise a copy it never makes.
-        installed_label = "Open" if steam_tile else "Add another"
+        # A Steam tile reopens its one game, so "Add another copy" would promise a copy it
+        # never makes.
+        installed_label = "Open" if steam_tile else "Add another copy"
         self.install_button.setText(installed_label if entry.installed else "Install")
         # An installed game is played first; installing another copy is a quiet second choice.
         self._restyle(self.install_button, "GhostButton" if entry.installed else "Primary")
         self.play_button.setVisible(entry.installed)
-        if entry.installed:
+        if move_focus:
             self.play_button.setFocus()
         self.installed_note.setVisible(entry.installed)
         self._render_hero()

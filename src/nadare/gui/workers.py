@@ -23,7 +23,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, QRunnable, QThread, pyqtSignal
 
 from .. import __version__
-from ..core import diskspace, logview, paths, vcredist
+from ..core import diskspace, paths, runlog, vcredist
 from ..core.backends import BackendError, BackendUnsupported, create
 from ..core.config import Config
 from ..core.events import Cancel, Cancelled, Event, mask
@@ -415,13 +415,17 @@ class BackendWorker(QThread):
         if self._log is not None:
             return self._log
         try:
-            paths.logs_dir().mkdir(parents=True, exist_ok=True)
-            path = paths.logs_dir() / f"{self._profile}-{self._operation}.log"
-            # Keep the per-operation logs bounded: drop old runs before appending.
-            try:
-                logview.trim_sessions(path)
-            except Exception:  # noqa: BLE001 - trimming is best effort
-                pass
+            logs = paths.logs_dir()
+            logs.mkdir(parents=True, exist_ok=True)
+            background = self._operation in BACKGROUND
+            if background:
+                # Status/news/media checks share one small rolling file per game.
+                path = runlog.background_log_path(logs, self._profile)
+            else:
+                path = runlog.run_log_path(logs, self._profile, self._operation)
+            path.parent.mkdir(mode=0o700, exist_ok=True)
+            if background:
+                runlog.trim_rolling(path)
             # Owner-only, whatever the umask: logs can quote paths and account state.
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             self._log = os.fdopen(fd, "a", encoding="utf-8")
@@ -430,6 +434,12 @@ class BackendWorker(QThread):
                 f"{self._operation} ({self._profile}) | nadare {__version__} =====\n"
             )
             self._log.flush()
+            if not background:
+                # Keep the game's folder bounded: drop old runs, never this one.
+                try:
+                    runlog.prune_game(path.parent, protect=[path])
+                except Exception:  # noqa: BLE001 - pruning is best effort
+                    pass
         except OSError:
             self._log = None
         return self._log
@@ -696,6 +706,8 @@ class BackendController(QObject):
                 return True
             return False
 
+        if operation in ("verify", "repair") and profile in self._paused:
+            return False  # a check must not throw away a paused download's RESUME entry (#855)
         if operation not in BACKGROUND:
             self._paused.pop(profile, None)
         return self._start_or_wait(profile, operation, payload)

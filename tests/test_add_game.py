@@ -284,3 +284,16 @@ def test_a_fresh_install_hides_folder_and_prefix_until_asked(tmp_path, qapp):
     finally:
         dialog.close()
         qapp.processEvents()
+
+
+def test_a_second_fgo_copy_gets_its_own_android_context():
+    """#921: every FGO profile without a context used the one named "fgo"."""
+    from nadare.gui.add_game import unique_context
+
+    assert unique_context({}) is None  # the first copy keeps the default name
+    first = {"a": {"backend": "fgo-lepton"}}
+    assert unique_context(first) == "fgo-2"
+    both = {**first, "b": {"backend": "fgo-lepton", "context": "fgo-2"}}
+    assert unique_context(both) == "fgo-3"
+    other = {"w": {"backend": "wine"}}
+    assert unique_context(other) is None  # only FGO profiles use contexts

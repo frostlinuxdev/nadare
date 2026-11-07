@@ -219,6 +219,10 @@ def install_update(new: Path, target: Path, filename: str) -> Path:
 
     The running AppImage stays valid after being renamed (Linux keeps the open file), so
     nothing is copied. If the new file cannot be moved into place the old one is put back.
+
+    A desktop or Steam shortcut made earlier holds the old file's exact path, so that path (and
+    any older link left by a former update) becomes a relative link to the new file: the
+    shortcut keeps starting Nadare (#869). A folder that refuses links just loses that nicety.
     """
     dest = target.with_name(filename)
     backup = target.with_name(target.name + BACKUP_SUFFIX)
@@ -235,7 +239,33 @@ def install_update(new: Path, target: Path, filename: str) -> Path:
         except OSError:  # pragma: no cover - nothing sensible left to do
             log.error("self-update: could not restore %s from %s", target, backup)
         raise SelfUpdateError(f"could not put the new version in place: {exc}") from exc
+    if dest != target:
+        _leave_links(target, dest)
     return dest
+
+
+def _leave_links(old: Path, dest: Path) -> None:
+    """Make ``old``, and every link in its folder that led to it, point at ``dest``."""
+    stale = [old]
+    try:
+        for entry in old.parent.glob("*.AppImage"):
+            if entry != old and entry.is_symlink() and entry.name != dest.name:
+                if os.path.normpath(os.readlink(entry)) in (old.name, str(old)):
+                    stale.append(entry)
+    except OSError:
+        pass
+    for path in stale:
+        temp = path.with_name(path.name + ".link")
+        try:
+            temp.unlink(missing_ok=True)
+            os.symlink(dest.name, temp)
+            os.replace(temp, path)
+        except OSError:
+            log.debug("self-update: could not leave a link at %s", path, exc_info=True)
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def cleanup_previous(running: Path) -> None:

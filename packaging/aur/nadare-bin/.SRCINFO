@@ -11,6 +11,7 @@ pkgbase = nadare-bin
 	optdepends = mingw-w64-gcc: build the Arknights: Endfield launch helper and the Chaos Zero Nightmare PCSDK stub
 	optdepends = p7zip: unpack the Endfield and Neverness to Everness launcher installers
 	optdepends = podman: Fate/Grand Order (experimental, lepton-fgo)
+	optdepends = bubblewrap: Sandbox (hides your home folder from a game)
 	optdepends = gnome-keyring: Secret Service keyring for account tokens
 	optdepends = kwallet: Secret Service keyring for account tokens
 	provides = nadare=0.1.0b8

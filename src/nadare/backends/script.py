@@ -17,8 +17,11 @@ Profile keys (top level or under ``extra``):
 
 from __future__ import annotations
 
+import os
 import shlex
+import signal
 from pathlib import Path
+from typing import Any
 
 from ..core import process
 from ..core.backends import BackendError, GameBackend, Option, Status
@@ -34,6 +37,37 @@ from .wine import (
 )
 
 WINE_SCRIPT_SUFFIXES = (".bat", ".cmd")
+
+
+class _BatchWine(WineBackend):
+    """The Wine backend, told which file the script backend resolved.
+
+    A profile can hold ``launch_exe``, ``script`` and ``exe_name`` together; Wine and the script
+    backend rank them differently, so a stale ``exe_name`` made a .bat profile run another file
+    (#862). The delegate runs exactly what the script backend identified.
+    """
+
+    def __init__(self, ctx: Any, chosen: Path) -> None:
+        super().__init__(ctx)
+        self._chosen = chosen
+
+    def _target(self) -> Path:
+        return self._chosen
+
+
+
+def _own_groups(pids: list[int]) -> set[int]:
+    """Process groups led by one of ``pids`` (never Nadare's own group)."""
+    mine = os.getpgrp()
+    groups: set[int] = set()
+    for pid in pids:
+        try:
+            group = os.getpgid(pid)
+        except OSError:
+            continue
+        if group == pid and group != mine:
+            groups.add(group)
+    return groups
 
 
 class ScriptBackend(GameBackend):
@@ -142,7 +176,7 @@ class ScriptBackend(GameBackend):
         self.ctx.cancel.raise_if_cancelled()
         if self._is_batch():
             # A batch file needs the profile's wine/Proton; one code path only.
-            return WineBackend(self.ctx).launch()
+            return _BatchWine(self.ctx, self._script()).launch()
         script = self._script()
         argv = ["bash", str(script)]
         self.ctx.emit(Event("step", f"Script: launching {script.name}"))
@@ -162,16 +196,25 @@ class ScriptBackend(GameBackend):
             on_line=lambda line: self.info(mask(line)),
             cancel=self.ctx.cancel,
             stop_wine=False,
+            cwd=str(script.parent),  # relative paths in the script mean its own folder
         )
 
     def stop(self) -> None:
         if self._is_batch():
-            WineBackend(self.ctx).stop()
+            _BatchWine(self.ctx, self._script()).stop()
             return
         pids = scan_pids(self._patterns())
         if pids:
             self.info(f"stopping {len(pids)} process(es): {pids}")
+            # Nadare starts the script in its own session, so what the script started shares its
+            # group; signalling only the shell would leave the game running (#932).
+            groups = _own_groups(pids)
             stop_pids(pids)
+            for group in groups:
+                try:
+                    os.killpg(group, signal.SIGTERM)
+                except OSError:
+                    pass
 
     def verify(self) -> dict:
         try:

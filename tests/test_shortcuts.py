@@ -182,3 +182,34 @@ def test_desktop_entry_newline_in_argv_cannot_inject_keys() -> None:
     lines = text.splitlines()
     assert sum(1 for ln in lines if ln.startswith("Exec=")) == 1
     assert not any(ln.startswith("X-Evil=") for ln in lines)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        b"\x00other\x00\x08\x08",  # wrong header
+        b"\x00shortcuts\x00\x000\x00\x01AppName\x00x\x00",  # ends without terminators
+        b"\x00shortcuts\x00\x000\x00\x07weird\x00\x00\x08\x08\x08",  # unsupported type
+        b"\x00shortcuts\x00\x01junk\x00",  # entry that is not a map
+    ],
+)
+def test_strict_parsing_refuses_corrupt_input_that_lenient_parsing_accepts(bad) -> None:
+    shortcuts.vdf_loads(bad)  # lenient: never raises
+    with pytest.raises(ValueError):
+        shortcuts.vdf_loads(bad, strict=True)
+
+
+def test_strict_parsing_accepts_what_vdf_dumps_writes() -> None:
+    entries = [{"AppName": "A", "appid": 5}, {"AppName": "B"}]
+    assert shortcuts.vdf_loads(shortcuts.vdf_dumps(entries), strict=True) == entries
+    assert shortcuts.vdf_loads(shortcuts.vdf_dumps([]), strict=True) == []
+
+
+def test_adding_a_shortcut_leaves_a_wrong_header_file_untouched(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(shortcuts, "steam_running", lambda: False)
+    vdf = tmp_path / "shortcuts.vdf"
+    original = b"\x00other\x00\x08\x08"
+    vdf.write_bytes(original)
+    with pytest.raises(shortcuts.ShortcutError):
+        shortcuts.add_steam_shortcut(vdf, "p", "T", ["/bin/x"])
+    assert vdf.read_bytes() == original

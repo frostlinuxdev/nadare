@@ -212,3 +212,38 @@ def test_bundle_with_no_logs_still_writes_a_readme_and_no_partial_file_on_error(
     except OSError:
         pass
     assert not broken.exists() and not list(tmp_path.glob("broken.zip*"))
+
+
+def test_a_redacted_bundle_hides_personal_names_in_entry_names_and_the_readme(tmp_path):
+    """#914: the redaction covers the zip entry names and the README, not just the log text."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write(logs, "alice@example.com-launch.log", "alice@example.com crashed\n", 100)
+    out = tmp_path / "bundle.zip"
+    logview.bundle(
+        ["alice@example.com"], logs, out, profile="alice@example.com", redact=True
+    )
+    files = _zip_names(out)
+    everything = "\n".join(files) + "\n".join(files.values())
+    assert "alice@example.com" not in everything
+    assert len([n for n in files if n != "README.txt"]) == 1
+
+
+def test_names_that_redact_to_the_same_text_do_not_overwrite_each_other(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write(logs, "a@x.com-launch.log", "one\n", 100)
+    write(logs, "b@y.org-launch.log", "two\n", 200)
+    out = tmp_path / "bundle.zip"
+    assert logview.bundle(["a@x.com", "b@y.org"], logs, out, redact=True) == 2
+    files = _zip_names(out)
+    assert sorted(v for k, v in files.items() if k != "README.txt") == ["one\n", "two\n"]
+
+
+def test_an_unredacted_bundle_keeps_the_real_names(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write(logs, "alice@example.com-launch.log", "x\n", 100)
+    out = tmp_path / "bundle.zip"
+    logview.bundle(["alice@example.com"], logs, out, redact=False)
+    assert "alice@example.com-launch.log" in _zip_names(out)

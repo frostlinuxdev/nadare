@@ -27,8 +27,10 @@ from typing import Any
 from ..core import (
     diskspace,
     download,
+    gamesandbox,
     graphics,
     hostlibs,
+    linkrelay,
     monitors,
     paths,
     prefixmove,
@@ -486,6 +488,11 @@ class WineGameBackend(GameBackend):
         """Only the Yostar backend has a manifest; direct mode never reaches this."""
         raise NotImplementedError
 
+    def _refuse_if_running(self, what: str) -> None:
+        """Stop before replacing game files under a running game (#933)."""
+        if scan_pids(self._patterns()):
+            raise BackendError(f"Stop the game before {what}", 8)
+
     def _sync_direct(self) -> dict[str, Any]:
         """Only the Yostar backend has a manifest; direct mode never reaches this."""
         raise NotImplementedError
@@ -496,6 +503,24 @@ class WineGameBackend(GameBackend):
 
     def _install_marker_path(self) -> Path:
         return self.install_dir() / INSTALL_MARKER
+
+    def _write_install_marker(self) -> None:
+        """Write the install-incomplete marker without following a link planted at its path.
+
+        The marker sits in a folder a game can write to. A plain ``write_text`` would truncate
+        whatever a symlink there points at; a fresh sibling file moved over the name replaces the
+        link itself (#964).
+        """
+        marker = self._install_marker_path()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix=marker.name + ".", dir=marker.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write("sync in progress\n")
+            os.replace(name, marker)
+        except BaseException:
+            Path(name).unlink(missing_ok=True)
+            raise
 
     def _install_incomplete(self) -> bool:
         return self._install_marker_path().is_file()
@@ -530,8 +555,17 @@ class WineGameBackend(GameBackend):
             },
         )
 
+    def _latest_variant(self) -> str:
+        """What besides the game decides the version published to this profile (default: nothing).
+
+        A game whose download differs by an option (Wuthering Waves' resource quality) gives it
+        here, so each variant caches its own latest version (#975)."""
+        return ""
+
     def _latest_path(self) -> Path:
-        return paths.cache_dir() / "yostar-latest" / f"{self.game_tag}.json"
+        variant = self._latest_variant()
+        name = f"{self.game_tag}-{variant}" if variant else self.game_tag
+        return paths.cache_dir() / "yostar-latest" / f"{name}.json"
 
     def _read_latest(self) -> dict[str, Any] | None:
         """The cached published version, or ``None`` when absent/corrupt."""
@@ -629,6 +663,7 @@ class WineGameBackend(GameBackend):
             self._direct_argv(target),
             self.launch_extra_env() or None,
         )
+        argv, env = self._secure_wrap(argv, env)
         self.ctx.emit(Event("step", f"{self.display_name}: launching {target.name}"))
         self.info(self._runtime_note())
         self.info(self._redacted("exec: " + " ".join(shlex.quote(part) for part in argv)))
@@ -641,6 +676,7 @@ class WineGameBackend(GameBackend):
                 argv, env, on_line=self._on_line, cancel=self.ctx.cancel
             )
         finally:
+            self._stop_link_relay()
             probe.stop()
             probe.join(timeout=1.0)
             self._renderer = probe.result
@@ -724,6 +760,78 @@ class WineGameBackend(GameBackend):
         api = "Vulkan (DXVK)" if renderer == "vulkan" else "OpenGL (WineD3D)"
         source = f", requested {requested}" if requested == "auto" else ""
         return f"runner: {runner or kind}, display: {display}, renderer: {api}{source}"
+
+    #: Whether this game offers the Sandbox (the home folder hidden while it plays).
+    supports_secure_mode = False
+    _link_relay: linkrelay.LinkRelay | None = None
+
+    def secure_mode_enabled(self) -> bool:
+        asked = profile_setting(self.ctx.profile, "secure_mode") is True
+        return self.supports_secure_mode and asked
+
+    def _secure_wrap(
+        self, argv: list[str], env: dict[str, str]
+    ) -> tuple[list[str], dict[str, str]]:
+        """Run the game inside bubblewrap with the home hidden, when the profile asks for it.
+
+        Only Play goes through here; installs, prefix setup and runtime installers stay
+        unwrapped. A user who turned the Sandbox on must never get an unprotected launch
+        without being told, so a missing bubblewrap or Flatpak is an error, not a fallback.
+        """
+        if not self.secure_mode_enabled():
+            return argv, env
+        if sandbox.in_flatpak():
+            raise BackendError("Sandbox is not available in the Flatpak version yet.")
+        located = gamesandbox.locate()
+        if located.binary is None:
+            if not located.found:
+                command = gamesandbox.install_hint(hostlibs.distro_family())
+                raise BackendError(
+                    "Sandbox needs bubblewrap and Nadare could not find a copy. It comes "
+                    "with the game runtime Nadare downloads the first time a game runs; or "
+                    f"install it with: {command}. Turn Sandbox off to play without it."
+                )
+            raise BackendError(
+                f"Sandbox cannot start here ({located.why}). On Ubuntu 24.04 and newer the "
+                "system blocks it; `nadare doctor` shows the fix and docs/SECURE-MODE.md "
+                "explains it. Turn Sandbox off to play without it."
+            )
+        self.info("Sandbox: your home folder is hidden from this game.")
+        # Links the game opens (a "Sign in with Google" button) reach the browser through
+        # Nadare, because the session bus the Steam Runtime would use is hidden too.
+        self._stop_link_relay()
+        self._link_relay = linkrelay.LinkRelay(on_open=self._note_link)
+        try:
+            pipe = self._link_relay.start()
+        except OSError as exc:
+            self._link_relay = None
+            pipe = None
+            self.info(f"Sandbox: links in the game cannot open your browser ({exc}).")
+        try:
+            return gamesandbox.wrap(
+                argv,
+                env,
+                prefix=self.prefix(),
+                install_dir=self.install_dir(),
+                runner_dir=Path(env["PROTONPATH"]) if env.get("PROTONPATH") else None,
+                link_pipe=pipe,
+                bwrap=located.binary,
+            )
+        except gamesandbox.BroadBindError as exc:
+            self._stop_link_relay()
+            raise BackendError(
+                f"Sandbox cannot hide your home folder from this game: {exc}. Move the game to "
+                "a folder of its own in Settings (Game options), or turn Sandbox off."
+            ) from exc
+
+    def _note_link(self, url: str) -> None:
+        host = urllib.parse.urlsplit(url).hostname or "a site"
+        self.info(f"Sandbox: the game opened a link to {host} in your browser.")
+
+    def _stop_link_relay(self) -> None:
+        relay, self._link_relay = self._link_relay, None
+        if relay is not None:
+            relay.stop()
 
     def _prefix_command(
         self, args: list[str], extra_env: dict[str, str] | None = None
@@ -844,6 +952,7 @@ class WineGameBackend(GameBackend):
         """Return ``(argv, env, target)`` for launching the client."""
         target = self._target()
         argv, env = self._prefix_command([str(target), *self._extra_args("launch_args")])
+        argv, env = self._secure_wrap(argv, env)
         return argv, env, target
 
     def status(self) -> Status:
@@ -917,10 +1026,13 @@ class WineGameBackend(GameBackend):
             # Files may already be on disk from a cancelled/failed install, but
             # only a finished sync counts as installed.
             message = (
-                "installation incomplete — click INSTALL to finish"
+                "installation incomplete — click RESUME to finish; "
+                "what is already downloaded is kept"
                 if incomplete
                 else f"{self.display_name} is not installed yet"
             )
+            if incomplete:
+                additions["incomplete"] = True
             return (
                 additions,
                 version,
@@ -1001,8 +1113,10 @@ class WineGameBackend(GameBackend):
         if not self._ensure_prefix():
             self._run_vcredist(created=False)
         installer = self._download_installer(url)
+        had_launcher = self.find_launcher() is not None
         code = self._run_installer(installer)
-        if self.find_launcher() is None:
+        # A launcher left by an earlier install says nothing about this attempt (#934).
+        if self.find_launcher() is None or (had_launcher and code != 0):
             self.info(f"{self.display_name} installer exited with code {code} and left no launcher")
             raise BackendError(
                 self._watch.explain(
@@ -1076,6 +1190,9 @@ class WineGameBackend(GameBackend):
         """Move the corrupted prefix aside and rebuild it, keeping the game files."""
         if scan_pids(self._patterns()):
             raise BackendError("Stop the game before rebuilding its Wine prefix", 8)
+        # The rebuild restores only this game's folder, so a game of another profile in the
+        # same prefix would be left in the backup (#919).
+        self._refuse_if_shared(self.prefix(), "rebuild")
         # Make sure a runner exists BEFORE anything is moved: wineboot needs it.
         self._ensure_default_runner(strict=True)
         self.ctx.emit(Event("step", "Moving the old Wine prefix aside"))
@@ -1130,6 +1247,7 @@ class WineGameBackend(GameBackend):
                 argv, env, on_line=self._on_line, cancel=self.ctx.cancel
             )
         finally:
+            self._stop_link_relay()
             probe.stop()
             probe.join(timeout=1.0)
             self._renderer = probe.result
@@ -1201,15 +1319,30 @@ class WineGameBackend(GameBackend):
             "exe": str(target) if target else "",
         }
 
-    def _refuse_if_shared(self, tree: Path) -> None:
-        """Never delete a tree another profile's install dir or prefix overlaps."""
+    def _refuse_if_shared(self, tree: Path, action: str = "remove") -> None:
+        """Never delete or move a tree another profile's install dir or prefix overlaps."""
         from ..core.removal import _shared_with
 
         other = _shared_with(self.ctx.config.profiles, self.ctx.name, tree.resolve())
         if other:
-            raise BackendError(f"refusing to remove {tree}: it is shared with profile {other!r}")
+            raise BackendError(f"refusing to {action} {tree}: it is shared with profile {other!r}")
+
+    def _remove_tree_safely(self, tree: Path) -> None:
+        """Delete ``tree`` without entering a mounted drive; report what was left (#947)."""
+        from ..core import removal
+
+        outcome = removal._rmtree_safely(tree)
+        left = [f"{m} is a separate mounted drive, left in place" for m in outcome.mounts]
+        left += [removal._leftover_warning(p, e) for p, e in outcome.leftovers]
+        if left:
+            raise BackendError(
+                f"{tree} was only partly removed ({'; '.join(left)}). "
+                "Everything else in it is gone; the profile is kept."
+            )
 
     def uninstall(self, purge: bool = False) -> None:
+        if scan_pids(self._patterns()):
+            raise BackendError("Stop the game before uninstalling it", 8)
         prefix = self.prefix()
         data_dir = self._data_dir()
         recorded = profile_setting(self.ctx.profile, INSTALLED_PREFIX_KEY)
@@ -1239,7 +1372,7 @@ class WineGameBackend(GameBackend):
             else:
                 self._refuse_if_shared(prefix)
                 self.ctx.emit(Event("step", f"Removing the game prefix {prefix}"))
-                shutil.rmtree(prefix)
+                self._remove_tree_safely(prefix)
         if purge:
             self.ctx.emit(Event("step", "Purging profile data (cache, prefix)"))
             target = _purge_target(
@@ -1255,7 +1388,7 @@ class WineGameBackend(GameBackend):
                 )
             else:
                 self._refuse_if_shared(target)
-                shutil.rmtree(target)
+                self._remove_tree_safely(target)
             if data_dir.is_symlink():
                 data_dir.unlink(missing_ok=True)
         self.ctx.emit(Event("done", "Uninstalled"))

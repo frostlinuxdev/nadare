@@ -929,3 +929,123 @@ def test_a_half_installed_webview2_is_installed_again_not_skipped(tmp_path, monk
         '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}] 1\n"pv"="150.0.1"\n'
     )
     assert installed() is True
+
+
+# ---- an undo made for one Steam account is not applied to another (#894) -----------------------
+def test_an_undo_saved_for_another_account_is_refused_and_changes_nothing(
+    qapp, tmp_path, monkeypatch
+):
+    from nadare.core import steamglue, steamundo, steamwayland
+
+    root, local_a = _wayland_root(tmp_path)
+    other = root / "userdata" / "2" / "config"
+    other.mkdir(parents=True)
+    local_b = other / "localconfig.vdf"
+    local_b.write_text(_WAYLAND_LOCAL.replace('"LastPlayed"\t\t"1"', '"LaunchOptions"\t\t"--b"'))
+    steamundo.save(UMA, "set_wayland", steamwayland.LaunchUndo("--previous-A"), where=str(local_a))
+    before = local_b.read_text()
+    dialog = _wayland_dialog(root)
+    monkeypatch.setattr(steamglue, "active_localconfig_path", lambda r: local_b)
+    try:
+        result = dialog._undo_fn(steamwayland.LaunchUndo("--previous-A"))
+        assert not result.ok and "another Steam account" in result.line
+        assert local_b.read_text() == before
+    finally:
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_next_window_does_not_offer_an_undo_made_for_another_account(
+    qapp, tmp_path, monkeypatch
+):
+    from nadare.core import steamglue, steamundo, steamwayland
+
+    root, local_a = _wayland_root(tmp_path)
+    other = root / "userdata" / "2" / "config"
+    other.mkdir(parents=True)
+    local_b = other / "localconfig.vdf"
+    local_b.write_text(_WAYLAND_LOCAL)
+    steamundo.save(UMA, "set_wayland", steamwayland.LaunchUndo("x"), where=str(local_a))
+    monkeypatch.setattr(steamglue, "active_localconfig_path", lambda r: local_b)
+    assert steam_wiring._undo_for_this_account(UMA, root) is None
+    monkeypatch.setattr(steamglue, "active_localconfig_path", lambda r: local_a)
+    assert steam_wiring._undo_for_this_account(UMA, root) is not None
+
+
+# ---- the game is looked for once more right before the installer starts (#898) -----------------
+def test_a_game_started_during_the_download_stops_the_installer(tmp_path, monkeypatch):
+    root, prefix, _proton = _e7_tree(tmp_path)
+    edges = _Edges(monkeypatch)
+    calls = {"n": 0}
+
+    def blockers(*args):
+        calls["n"] += 1
+        return [] if calls["n"] <= 2 else ["wineserver"]  # the two checks before pass
+
+    monkeypatch.setattr(steam_wiring.steamfix, "running_blockers", blockers)
+    result = steam_wiring.install_webview2(E7, root=root)
+    assert not result.ok and "started" in result.line and "Close it" in result.line
+    assert edges.spawned == []
+    assert result.backup is not None and result.backup.is_dir()  # the backup is kept
+
+
+def test_with_no_game_running_the_installer_starts_after_the_last_check(tmp_path, monkeypatch):
+    root, prefix, _proton = _e7_tree(tmp_path)
+    edges = _Edges(monkeypatch)
+    result = steam_wiring.install_webview2(E7, root=root)
+    assert result.ok and len(edges.spawned) == 1
+
+
+# ---- a runner undo belongs to the Steam install it was made in (#970) ----------------------
+def _compat_entry():
+    from nadare.core import steamtools
+
+    return steamtools.CompatEntry(UMA, {"name": "GE-Proton10-1", "config": ""}, "BLOCK")
+
+
+def test_a_runner_undo_made_in_another_steam_install_is_not_offered_or_applied(
+    qapp, tmp_path, monkeypatch
+):
+    from nadare.core import steamundo
+
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    root, _local = _wayland_root(tmp_path)
+    other = tmp_path / "flatpak-steam" / "config" / "config.vdf"
+    steamundo.save(UMA, "set_runner", _compat_entry(), where=str(other))
+    restored: list[object] = []
+    dialog = _wayland_dialog(
+        root,
+        restore_fn=lambda app_id, previous, **kw: restored.append(previous)
+        or steamrun.ActionResult(True, "restored"),
+    )
+    try:
+        assert dialog.undo_button.isHidden()  # not offered here
+        result = dialog._undo_fn(_compat_entry())  # and not applied if asked anyway
+        assert not result.ok and restored == []
+        assert steamundo.load(UMA) is not None  # the other install's undo is kept
+    finally:
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_runner_undo_made_in_this_steam_install_is_kept_for_it_and_applied(
+    qapp, tmp_path, monkeypatch
+):
+    from nadare.core import steamundo
+
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    root, _local = _wayland_root(tmp_path)
+    steamundo.save(UMA, "set_runner", _compat_entry(), where=str(steamglue.config_vdf(root)))
+    assert steam_wiring._undo_for_this_account(UMA, root) is not None
+    assert steam_wiring._undo_for_this_account(UMA, tmp_path / "flatpak-steam") is None
+    restored: list[object] = []
+    dialog = _wayland_dialog(
+        root,
+        restore_fn=lambda app_id, previous, **kw: restored.append(previous)
+        or steamrun.ActionResult(True, "restored"),
+    )
+    try:
+        assert dialog._undo_fn(_compat_entry()).ok and len(restored) == 1
+    finally:
+        dialog.deleteLater()
+        qapp.processEvents()

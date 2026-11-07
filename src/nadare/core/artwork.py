@@ -1199,12 +1199,17 @@ def migrate_cached_covers() -> int:
                 # Verify the durable temporary file before installing it.
                 if QImage.fromData(part.read_bytes()).isNull():
                     continue
-                if source_sidecar.is_file():
-                    _copy_sidecar_atomically(source_sidecar, src_sidecar(target))
-                os.replace(part, target)
-                _sync_dir(root)
-                if news_marker(source).is_file():  # a news cover stays a news cover
-                    news_marker(target).touch()
+                # The image and its sidecar go in as one step against a download of the same
+                # cover; a download that got there first keeps its WebP.
+                with _pair_lock:
+                    if target.exists():
+                        continue
+                    if source_sidecar.is_file():
+                        _copy_sidecar_atomically(source_sidecar, src_sidecar(target))
+                    os.replace(part, target)
+                    _sync_dir(root)
+                    if news_marker(source).is_file():  # a news cover stays a news cover
+                        news_marker(target).touch()
             finally:
                 part.unlink(missing_ok=True)
             if source_sidecar.is_file():

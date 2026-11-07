@@ -97,8 +97,10 @@ def test_no_display_skips_at_once_and_is_not_remembered(tmp_path):
 def test_an_installed_runtime_never_asks_for_a_display(tmp_path):
     prefix = _prefix(tmp_path)
     root = prefix / "drive_c" / "windows" / "system32"
-    (root / "vcruntime140.dll").write_bytes(b"real")
-    (root / "msvcp140.dll").write_bytes(b"real")
+    from test_vcredist import x64_dll
+
+    (root / "vcruntime140.dll").write_bytes(x64_dll(b"real"))
+    (root / "msvcp140.dll").write_bytes(x64_dll(b"real"))
     events: list = []
     _ensure(prefix, lambda: pytest.fail("ran"), events, display_fn=lambda: False)
     assert events == []

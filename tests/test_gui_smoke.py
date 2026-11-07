@@ -763,6 +763,21 @@ def test_sidebar_shows_beta_pill(tmp_path, qapp):
         qapp.processEvents()
 
 
+def test_sidebar_shows_the_version(tmp_path, qapp):
+    """The running version is on screen, so a screenshot or bug report always carries it."""
+    from nadare import __version__
+
+    window = MainWindow(_empty_config(tmp_path))
+    try:
+        assert window.version_label.text() == f"v{__version__}"
+        assert not window.version_label.isHidden()
+        assert __version__ in window.beta_pill.toolTip()
+    finally:
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()
+
+
 def test_branding_is_the_snowflake_and_cjk_mark(tmp_path, qapp):
     """The mark renders from the SVG and 雪崩 sits on the BETA row."""
     from nadare.gui.theme import app_icon, brand_pixmap
@@ -1535,7 +1550,7 @@ def test_busy_badge_resets_after_fail_and_cancel(qapp, monkeypatch):
         assert view.badge.text() == "READY", "a failed op kept the busy pill"
 
         view.set_busy("launch")
-        assert view.badge.text() == "RUNNING"
+        assert view.badge.text() == "PLAYING"
         view.cancelled()
         assert view.badge.text() == "READY", "a cancelled op kept the busy pill"
     finally:

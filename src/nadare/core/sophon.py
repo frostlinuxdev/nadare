@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import io
 import logging
 import os
 import shutil
@@ -22,6 +23,7 @@ import stat
 import tempfile
 import threading
 import time
+from concurrent.futures import CancelledError as FutureCancelled
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -261,6 +263,17 @@ def _parse_file(data: bytes) -> FileEntry | None:
     for chunk in chunks:
         if chunk.offset + chunk.size > size:
             raise SophonError(f"file {path!r} has a chunk outside its declared size")
+    # The chunks must tile the file: an uncovered stretch would be written as zeros and the file
+    # called complete (#865).
+    cursor = 0
+    for chunk in sorted(chunks, key=lambda c: c.offset):
+        if chunk.offset != cursor:
+            raise SophonError(f"the chunks of {path!r} do not cover the file without gaps")
+        cursor += chunk.size
+    if cursor != size:
+        raise SophonError(
+            f"the chunks of {path!r} do not cover the file ({cursor} of {size} bytes)"
+        )
     path = _safe_relative_path(path)
     return FileEntry(path=path, size=size, md5=md5, chunks=tuple(chunks))
 
@@ -268,10 +281,14 @@ def _parse_file(data: bytes) -> FileEntry | None:
 def parse_manifest(data: bytes) -> list[FileEntry]:
     """Parse a decompressed ``Manifest`` protobuf into its files (directories dropped)."""
     entries: list[FileEntry] = []
+    seen: set[str] = set()
     for number, wire, value in _read_fields(data):
         if number == 1 and wire == 2:
             entry = _parse_file(value)
             if entry is not None:
+                if entry.path in seen:
+                    raise SophonError(f"the manifest lists {entry.path!r} twice")
+                seen.add(entry.path)
                 entries.append(entry)
     return entries
 
@@ -515,12 +532,27 @@ def _fetch_bytes(
     raise SophonError(f"cannot download {url}: {last}") from last
 
 
-def _load_manifest(pool: download_module.HttpClientPool, pkg: SophonPackage) -> list[FileEntry]:
-    body = _fetch_bytes(pool, pkg.manifest_url, _MAX_MANIFEST_BYTES)
+def _unzstd(body: bytes, limit: int, what: str) -> bytes:
+    """Decompress one zstd frame, reading at most ``limit`` bytes of output.
+
+    ``ZstdDecompressor.decompress(max_output_size=...)`` only sizes the buffer for a frame that
+    does not say how big it is; a frame that declares a content size is allocated in full, so a
+    tiny hostile frame could use gigabytes (#863). The stream reader is asked for ``limit + 1``
+    bytes, so nothing larger is ever produced.
+    """
+    reader = _zstd().ZstdDecompressor().stream_reader(io.BytesIO(body))
+    out = reader.read(limit + 1)
+    if len(out) > limit:
+        raise SophonError(f"{what} is larger than the {limit} bytes it may be")
+    return out
+
+
+def _load_manifest(
+    pool: download_module.HttpClientPool, pkg: SophonPackage, cancel: Any = None
+) -> list[FileEntry]:
+    body = _fetch_bytes(pool, pkg.manifest_url, _MAX_MANIFEST_BYTES, cancel)
     try:
-        raw = _zstd().ZstdDecompressor().decompress(
-            body, max_output_size=_MAX_MANIFEST_UNPACKED
-        )
+        raw = _unzstd(body, _MAX_MANIFEST_UNPACKED, f"manifest for {pkg.name}")
     except _zstd().ZstdError as exc:
         raise SophonError(f"manifest for {pkg.name} is not a zstd frame: {exc}") from exc
     return parse_manifest(raw)
@@ -544,7 +576,7 @@ def _fetch_chunk(
     if chunk.cmd5 and hashlib.md5(body).hexdigest().lower() != chunk.cmd5.lower():
         raise SophonError(f"compressed md5 mismatch for chunk {chunk.name!r}")
     try:
-        data = _zstd().ZstdDecompressor().decompress(body, max_output_size=chunk.size)
+        data = _unzstd(body, chunk.size, f"chunk {chunk.name!r}")
     except _zstd().ZstdError as exc:
         raise SophonError(f"cannot decompress chunk {chunk.name!r}: {exc}") from exc
     if len(data) != chunk.size:
@@ -576,7 +608,7 @@ def sync_package(
     pool = download_module.HttpClientPool()
     staging_paths: list[Path] = []
     try:
-        files = _load_manifest(pool, pkg)
+        files = _load_manifest(pool, pkg, cancel)
         previous, previous_text = _read_ledger(pkg, root)
         root.mkdir(parents=True, exist_ok=True)
         total = sum(entry.size for entry in files)
@@ -615,8 +647,14 @@ def sync_package(
 
         def inspect_file(entry: FileEntry) -> set[ChunkEntry]:
             target = _target_path(root, entry.path)
+            matched: set[ChunkEntry] = set()
             with open(target, "rb") as old_file:
-                return {chunk for chunk in entry.chunks if _chunk_matches(old_file, chunk)}
+                for chunk in entry.chunks:
+                    if cancel is not None:
+                        cancel.raise_if_cancelled()  # a scan of tens of GB must stop (#867)
+                    if _chunk_matches(old_file, chunk):
+                        matched.add(chunk)
+            return matched
 
         # Check installed files concurrently. The matching chunk set is reused
         # below, so changed files do not hash the old bytes a second time.
@@ -630,6 +668,8 @@ def sync_package(
                 for future in as_completed(futures):
                     entry = futures[future]
                     matched_chunks[entry.path] = future.result()
+        if cancel is not None:
+            cancel.raise_if_cancelled()
 
         unchanged: set[str] = set()
         for entry in files:
@@ -697,11 +737,13 @@ def sync_package(
                             stop.cancel()
                             for other in futures:
                                 other.cancel()
+            # A queued task cancelled to stop the rest raises FutureCancelled: that is the user's
+            # cancel (or the first failure) taking effect, never an error of its own.
             for exc in errors:
-                if not isinstance(exc, Cancelled):
+                if not isinstance(exc, Cancelled | FutureCancelled):
                     raise exc
             if errors:
-                raise errors[0]
+                raise next((e for e in errors if isinstance(e, Cancelled)), Cancelled())
 
         def batches(entry: FileEntry) -> list[tuple[ChunkEntry, ...]]:
             return [
@@ -764,6 +806,8 @@ def sync_package(
 
     current = list(dict.fromkeys(entry.path for entry in files))
     ledger = _ledger_path(pkg, root)
+    if cancel is not None:
+        cancel.raise_if_cancelled()  # never publish "done" for a package the user cancelled
     marker = _marker_path(pkg, root)
     # Publish the union of the old and new ownership sets before the marker and
     # the best-effort cleanup: if the process dies from here on, the next sync

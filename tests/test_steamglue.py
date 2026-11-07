@@ -373,6 +373,9 @@ def test_a_link_that_cannot_be_made_is_reported_not_swallowed(tmp_path):
     tools = root / "compatibilitytools.d"
     tools.mkdir()
     tools.chmod(0o500)  # read-only: the symlink cannot be created
+    if os.access(tools, os.W_OK):
+        tools.chmod(0o700)
+        pytest.skip("directory permissions do not apply to this user (root)")
     runner = tmp_path / "runners" / "dwproton-11.0-15-x86_64"
     runner.mkdir(parents=True)
     try:

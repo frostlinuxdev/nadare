@@ -26,9 +26,37 @@ class LaunchUndo:
     previous: str | None
 
 
+def _split(options: str) -> tuple[str, str]:
+    """``(what comes before %command%, %command% and the arguments)``.
+
+    Only the part before ``%command%`` is the launcher's environment and wrappers; what follows
+    is the game's own arguments, which must never be read or rewritten as a setting (#897).
+    Options without ``%command%`` are all arguments (Steam appends them to the game)."""
+    index = options.find("%command%")
+    if index < 0:
+        return "", options
+    return options[:index], options[index:]
+
+
 def has_wayland(options: str | None) -> bool:
-    """Whether these launch options already switch native Wayland on."""
-    return any(match.group(2) == "1" for match in _ASSIGNMENT.finditer(options or ""))
+    """Whether these launch options already switch native Wayland on.
+
+    The shell keeps the last assignment of a repeated variable, so that one decides (#970)."""
+    head, _tail = _split(options or "")
+    found = [match.group(2) for match in _ASSIGNMENT.finditer(head)]
+    return bool(found) and found[-1] == "1"
+
+
+def _sets(head: str, pair: str) -> bool:
+    return re.search(rf"(^|\s){re.escape(pair.split('=', 1)[0])}=", head) is not None
+
+
+def has_variables(options: str | None, pairs: tuple[str, ...]) -> bool:
+    """Whether every variable in ``pairs`` is set before ``%command%``, with any value.
+
+    A value the player chose counts: only a missing variable is something to add (#970)."""
+    head, _tail = _split(options or "")
+    return all(_sets(head, pair) for pair in pairs)
 
 
 _PAIR = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_.:/+-]*$")
@@ -38,23 +66,31 @@ def with_wayland(options: str | None, extra: tuple[str, ...] = ()) -> str:
     """The launch options with native Wayland on, keeping everything the player wrote.
 
     ``extra`` are ``NAME=value`` pairs the game needs together with it (``UMU_ID=0``): each is
-    added in front unless the player already set that variable, whose value then stays.
+    added in front unless the player already set that variable before ``%command%``, whose value
+    then stays. Text after ``%command%`` is never touched.
     """
     for pair in extra:
         if not _PAIR.fullmatch(pair):
             raise ValueError(f"not a plain NAME=value launch variable: {pair!r}")
     text = (options or "").strip()
-    if _ASSIGNMENT.search(text):
-        text = _ASSIGNMENT.sub(rf"\g<1>{VARIABLE}=1", text, count=1)
-    elif "%command%" in text:
-        text = f"{VARIABLE}=1 {text}"
-    else:
+    if "%command%" not in text:
         text = f"{VARIABLE}=1 %command%" + (f" {text}" if text else "")
-    missing = [
-        pair for pair in extra if not re.search(rf"(^|\s){re.escape(pair.split('=', 1)[0])}=", text)
-    ]
+    else:
+        head, tail = _split(text)
+        found = list(_ASSIGNMENT.finditer(head))
+        if found:
+            # The shell keeps the last of a repeated variable: leave one, set to 1 (#970).
+            for match in reversed(found[1:]):
+                head = head[: match.start()] + head[match.end() :]
+            head = _ASSIGNMENT.sub(rf"\g<1>{VARIABLE}=1", head, count=1)
+        else:
+            head = f"{VARIABLE}=1 {head}"
+        text = head + tail
+    head, tail = _split(text)
+    missing = [pair for pair in extra if not _sets(head, pair)]
     if missing:
-        text = text.replace(f"{VARIABLE}=1", f"{VARIABLE}=1 " + " ".join(missing), 1)
+        head = head.replace(f"{VARIABLE}=1", f"{VARIABLE}=1 " + " ".join(missing), 1)
+        text = head + tail
     return text
 
 

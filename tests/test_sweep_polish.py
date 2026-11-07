@@ -8,6 +8,7 @@ import logging
 import pytest
 
 try:  # pragma: no cover - exercised only when PyQt6 is missing
+    from PyQt6.QtTest import QTest
     from PyQt6.QtWidgets import QApplication
 except Exception:  # noqa: BLE001
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
@@ -116,9 +117,9 @@ def test_finish_uses_a_friendly_operation_title(qapp, monkeypatch):
 
     seen: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        game_view_mod.QMessageBox,
-        "warning",
-        lambda _parent, title, message: seen.append((title, message)),
+        game_view_mod.GameView,
+        "_failure_choice",
+        lambda _self, title, message, can_retry: seen.append((title, message)) or "close",
     )
     view = GameView()
     try:
@@ -151,7 +152,7 @@ def test_failure_dialog_for_background_profile_uses_the_friendly_title(
     )
     try:
         window._on_failed("beta", "login", "boom")
-        assert seen == [("Beta: Signing in", "boom")]
+        assert seen == [("Beta: Logging in", "boom")]
     finally:
         window.close()
         window.deleteLater()
@@ -293,3 +294,24 @@ def test_official_hero_provenance_is_persisted(tmp_path, qapp):
     profile = reloaded.profile("sample")
     assert profile["art_source"]["hero"] == "official"
     assert artwork.resolve(profile) == official
+
+
+def test_a_library_refresh_keeps_keyboard_focus_on_the_same_game(qapp):
+    """#942: the grid is rebuilt on every change; the focused card must stay focused."""
+    profiles = {"a": {"title": "A"}, "b": {"title": "B"}, "c": {"title": "C"}}
+    page = LibraryPage()
+    try:
+        page.show()
+        page.activateWindow()
+        QTest.qWaitForWindowActive(page)
+        page.refresh(profiles)
+        page._cards["b"].setFocus()
+        qapp.processEvents()
+        assert QApplication.focusWidget() is page._cards["b"]
+        page.refresh(profiles)
+        qapp.processEvents()
+        assert QApplication.focusWidget() is page._cards["b"]
+        page.refresh({"a": {"title": "A"}, "c": {"title": "C"}})  # the focused game is gone
+        qapp.processEvents()
+    finally:
+        page.deleteLater()

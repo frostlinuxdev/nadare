@@ -43,8 +43,8 @@ def test_running_launch_is_truthful(qapp):
     view.set_status(Status("installed"))
     view.set_busy("launch")
     assert not view.progress.isVisible()
-    assert view.badge.text() == "RUNNING"
-    assert view.primary.text() == "STOP"
+    assert view.badge.text() == "PLAYING"
+    assert view.primary.text() == "PLAYING"
 
 
 def test_cancellable_op_keeps_cancel(qapp):

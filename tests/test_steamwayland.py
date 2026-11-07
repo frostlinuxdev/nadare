@@ -203,3 +203,81 @@ def test_only_name_equals_value_pairs_are_accepted_as_extras():
     for bad in ("UMU_ID", "=1", "A B=1", "A=1;rm", "$(x)=1", "A=`x`", ""):
         with pytest.raises(ValueError):
             steamwayland.with_wayland("", extra=(bad,))
+
+
+# ---- only the environment before %command% counts, game arguments stay as they are (#897) ------
+def test_an_argument_after_the_command_is_not_an_environment_setting():
+    assert steamwayland.has_wayland("%command% --note PROTON_ENABLE_WAYLAND=1") is False
+    assert steamwayland.has_wayland("PROTON_ENABLE_WAYLAND=1 %command% --x") is True
+    assert steamwayland.has_wayland("MANGOHUD=1 PROTON_ENABLE_WAYLAND=1 %command%") is True
+    assert steamwayland.has_wayland("PROTON_ENABLE_WAYLAND=0 %command%") is False
+
+
+def test_a_game_argument_that_looks_like_the_setting_is_kept_and_a_real_one_is_added():
+    out = steamwayland.with_wayland("%command% --note PROTON_ENABLE_WAYLAND=0")
+    assert out == "PROTON_ENABLE_WAYLAND=1 %command% --note PROTON_ENABLE_WAYLAND=0"
+    assert steamwayland.has_wayland(out) is True
+
+
+def test_a_real_setting_before_the_command_is_turned_on_in_place():
+    out = steamwayland.with_wayland("A=1 PROTON_ENABLE_WAYLAND=0 B=2 %command% --keep")
+    assert out == "A=1 PROTON_ENABLE_WAYLAND=1 B=2 %command% --keep"
+
+
+def test_a_duplicate_in_the_arguments_is_left_when_the_real_one_is_set():
+    out = steamwayland.with_wayland("PROTON_ENABLE_WAYLAND=0 %command% PROTON_ENABLE_WAYLAND=0")
+    assert out == "PROTON_ENABLE_WAYLAND=1 %command% PROTON_ENABLE_WAYLAND=0"
+
+
+def test_options_without_a_command_are_arguments_and_get_a_wrapper():
+    assert steamwayland.with_wayland("--windowed") == "PROTON_ENABLE_WAYLAND=1 %command% --windowed"
+    assert steamwayland.with_wayland("PROTON_ENABLE_WAYLAND=0") == (
+        "PROTON_ENABLE_WAYLAND=1 %command% PROTON_ENABLE_WAYLAND=0"
+    )
+    assert steamwayland.with_wayland("") == "PROTON_ENABLE_WAYLAND=1 %command%"
+    assert steamwayland.with_wayland(None) == "PROTON_ENABLE_WAYLAND=1 %command%"
+
+
+def test_extra_variables_only_look_before_the_command():
+    out = steamwayland.with_wayland("%command% UMU_ID=7", extra=("UMU_ID=0",))
+    assert out == "PROTON_ENABLE_WAYLAND=1 UMU_ID=0 %command% UMU_ID=7"
+    keep = steamwayland.with_wayland("UMU_ID=5 %command%", extra=("UMU_ID=0",))
+    assert keep == "PROTON_ENABLE_WAYLAND=1 UMU_ID=5 %command%"
+
+
+# ---- repeated assignments: the shell keeps the last one (#970) --------------------------------
+def test_the_effective_setting_is_the_last_assignment_before_the_command():
+    assert not steamwayland.has_wayland("PROTON_ENABLE_WAYLAND=1 PROTON_ENABLE_WAYLAND=0 %command%")
+    assert steamwayland.has_wayland("PROTON_ENABLE_WAYLAND=0 PROTON_ENABLE_WAYLAND=1 %command%")
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (
+            "PROTON_ENABLE_WAYLAND=0 PROTON_ENABLE_WAYLAND=0 %command%",
+            "PROTON_ENABLE_WAYLAND=1 %command%",
+        ),
+        (
+            "PROTON_ENABLE_WAYLAND=1 PROTON_ENABLE_WAYLAND=0 %command%",
+            "PROTON_ENABLE_WAYLAND=1 %command%",
+        ),
+        (
+            "FOO=1 PROTON_ENABLE_WAYLAND=0 BAR=2 PROTON_ENABLE_WAYLAND=0 %command% -x",
+            "FOO=1 PROTON_ENABLE_WAYLAND=1 BAR=2 %command% -x",
+        ),
+    ],
+)
+def test_turning_wayland_on_leaves_one_assignment_so_the_game_really_gets_one(before, after):
+    result = steamwayland.with_wayland(before)
+    assert result == after
+    assert steamwayland.has_wayland(result)
+
+
+def test_variables_the_game_needs_are_told_from_what_is_set_before_the_command():
+    has = steamwayland.has_variables
+    assert has("UMU_ID=0 PROTON_ENABLE_WAYLAND=1 %command%", ("UMU_ID=0",))
+    assert has("UMU_ID=5 %command%", ("UMU_ID=0",))  # the player's own value counts
+    assert not has("PROTON_ENABLE_WAYLAND=1 %command%", ("UMU_ID=0",))
+    assert not has("%command% UMU_ID=0", ("UMU_ID=0",))  # an argument is not a setting
+    assert has("anything", ())

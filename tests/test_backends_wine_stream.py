@@ -404,3 +404,34 @@ def test_a_kill_that_failed_does_not_start_the_cooldown(tmp_path, monkeypatch):
     wine_mod._stop_wineserver([str(ws), "g.exe"], env)
     wine_mod._stop_wineserver([str(ws), "g.exe"], env)  # the server may still be alive: retry
     assert len(calls) == 2
+
+
+def test_a_failed_reinstall_is_not_a_success_because_the_old_launcher_is_still_there(
+    tmp_path, monkeypatch
+):
+    """#934: a launcher from an earlier install must not hide this attempt's failure."""
+    backend, events = _installer_backend(tmp_path)
+    installer = write_exe(tmp_path / "Arknights-setup.exe", "MZ")
+    _wire_install(monkeypatch, backend, installer, 1)
+    write_exe(backend.install_dir() / "game launcher.exe", "MZ")
+
+    with pytest.raises(BackendError):
+        backend.install()
+
+    assert not any(e.kind == "done" for e in events)
+
+
+def test_a_fresh_install_that_leaves_a_launcher_still_counts_whatever_the_exit_code(
+    tmp_path, monkeypatch
+):
+    backend, events = _installer_backend(tmp_path)
+    installer = write_exe(tmp_path / "Arknights-setup.exe", "MZ")
+    _wire_install(monkeypatch, backend, installer, 0)
+
+    def installer_run(*args, **kwargs):
+        write_exe(backend.install_dir() / "game launcher.exe", "MZ")
+        return 3010  # some installers report "restart needed" while having worked
+
+    monkeypatch.setattr(wg, "stream", installer_run)
+    backend.install()
+    assert any(e.kind == "done" for e in events)

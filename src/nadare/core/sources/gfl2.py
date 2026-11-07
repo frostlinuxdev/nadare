@@ -125,7 +125,9 @@ def resolve(
 
     return directdl.Plan(
         game_tag=game_tag,
-        version=(f"{version}+client-{client_version}" if client_only else version),
+        # The client archive has its own version: a client-only update must change this too, or the
+        # installed version still reads as current (#866).
+        version=f"{version}+client-{client_version}",
         files=tuple(files),
         archives=(archive,),
         exe="GF2_Exilium.exe",

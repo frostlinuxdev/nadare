@@ -174,6 +174,10 @@ def test_an_absolute_symlink_spelling_is_kept_in_the_stored_path(tmp_path, qapp)
 def _readonly(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     path.chmod(0o555)
+    if os.access(path, os.W_OK):
+        # root (as in CI containers) ignores directory permissions: nothing is read-only.
+        path.chmod(0o755)
+        pytest.skip("directory permissions do not apply to this user")
 
 
 def _writable_again(path: Path) -> None:

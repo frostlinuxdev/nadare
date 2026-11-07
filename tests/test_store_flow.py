@@ -249,7 +249,7 @@ def test_accepted_install_creates_the_profile_marks_it_added_and_opens_it(
         (name,) = window.config.profiles
         assert opened == [name] and started == [(name, "install")]
         assert not window.store.grid._cards["direct-pgr"].added_marker.isHidden()
-        assert window.store.detail.install_button.text() == "Add another"
+        assert window.store.detail.install_button.text() == "Add another copy"
         assert not window.store.detail.installed_note.isHidden()
     finally:
         _close(window, qapp)
@@ -420,7 +420,7 @@ def test_unrelated_profile_changes_do_not_reset_the_hero(tmp_path, qapp, monkeyp
         assert _is(_hero_colour(flow), "#ff0000")
         assert flow.detail.install_button.text() == "Install"
         flow.set_installed_kinds(frozenset({"direct-pgr"}))
-        assert flow.detail.install_button.text() == "Add another"
+        assert flow.detail.install_button.text() == "Add another copy"
     finally:
         flow.deleteLater()
         qapp.processEvents()

@@ -104,3 +104,37 @@ def test_stylesheet_styles_radio_buttons_with_the_accent():
 def test_dialog_primary_buttons_do_not_use_page_sized_padding():
     css = theme.STYLESHEET
     assert "QDialog QPushButton#Primary" in css
+
+
+def test_image_loader_falls_back_when_the_first_existing_file_does_not_decode(tmp_path, qapp):
+    """#918: a damaged custom background used to hide every valid cover behind it."""
+    broken, good = tmp_path / "custom.png", tmp_path / "cover.png"
+    broken.write_bytes(b"not an image")
+    good.write_bytes(b"also stand-in bytes")
+
+    def fake_decode(path, w, h, *, crop=True, trim_bottom=0.0, fit=False):
+        if str(path) == str(broken):
+            return None
+        return QImage(w, h, QImage.Format.Format_RGB32)
+
+    loader = images.ImageLoader(decode=fake_decode)
+    got: list = []
+    loader.request([str(broken), str(good)], 20, 20, got.append)
+    deadline = time.monotonic() + 10.0
+    while not got and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert len(got) == 1 and got[0] is not None
+
+
+def test_image_loader_reports_none_once_every_candidate_fails(tmp_path, qapp):
+    only = tmp_path / "custom.png"
+    only.write_bytes(b"x")
+    loader = images.ImageLoader(decode=lambda *a, **k: None)
+    got: list = []
+    loader.request([str(only)], 20, 20, got.append)
+    deadline = time.monotonic() + 10.0
+    while not got and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert got == [None]

@@ -85,15 +85,43 @@ def _decode(action: str, blob: object) -> tuple[bool, object]:
 
 
 def save(
-    app_id: str | int, action: str, payload: object, *, state_dir: Path | None = None
+    app_id: str | int,
+    action: str,
+    payload: object,
+    *,
+    where: str = "",
+    state_dir: Path | None = None,
 ) -> None:
-    """Remember how to undo this game's last change (replacing any earlier one)."""
+    """Remember how to undo this game's last change (replacing any earlier one).
+
+    ``where`` names the file the change was made in (the Steam account's ``localconfig.vdf``
+    for launch options): an undo only fits the account it was made for (#894)."""
     encoded = _encode(action, payload) if action in UNDOABLE else None
     if encoded is None:
         return
     data = _read(state_dir)
-    data[str(app_id)] = {"action": action, "payload": encoded}
+    data[str(app_id)] = {"action": action, "payload": encoded, "where": str(where or "")}
     _write(data, state_dir)
+
+
+def where(app_id: str | int, *, state_dir: Path | None = None) -> str:
+    """The file this game's saved undo was made in (empty for an older undo or none)."""
+    entry = _read(state_dir).get(str(app_id))
+    return str(entry.get("where") or "") if isinstance(entry, dict) else ""
+
+
+def fits(app_id: str | int, current: str, *, state_dir: Path | None = None) -> bool:
+    """Whether the saved undo may be applied to ``current`` (the file in use now).
+
+    A launch-option undo is for one Steam account (its ``localconfig.vdf``), a runner undo for
+    one Steam installation (its ``config.vdf``): native and Flatpak Steam keep their own, and
+    restoring one into the other would overwrite what that install has (#894, #970). An undo
+    saved without the file it was made in is not trusted.
+    """
+    if load(app_id, state_dir=state_dir) is None:
+        return False
+    recorded = where(app_id, state_dir=state_dir)
+    return bool(recorded) and recorded == str(current)
 
 
 def load(app_id: str | int, *, state_dir: Path | None = None) -> tuple[str, object] | None:

@@ -50,7 +50,7 @@ from PyQt6.QtWidgets import (
 
 from .. import __version__
 from ..core import backends as core_backends
-from ..core import diskspace, paths, secrets, selfupdate, shortcuts, steamstore
+from ..core import diskspace, paths, sandbox, secrets, selfupdate, shortcuts, steamstore
 from ..core import runners as core_runners
 from ..core.backends import (
     Status,
@@ -58,16 +58,17 @@ from ..core.backends import (
     supports_media,
     supports_news,
     supports_remember_me,
+    supports_sandbox,
 )
 from ..core.config import Config
 from ..core.directkinds import DIRECT_KINDS
 from ..core.eta import EtaEstimator, format_eta
 from ..core.events import Event
 from ..core.news import NewsResult
-from . import i18n, steam_setup, steam_wiring
+from . import i18n, notify, steam_setup, steam_wiring
 from .add_game import PREFIX_ONLY_KINDS, AddGameDialog
 from .banner import InfoBanner
-from .downloads_page import DownloadRow, DownloadsPage
+from .downloads_page import DownloadRow, DownloadsPage, downloads_label
 from .game_view import OPERATION_TITLES, GameSnapshot, GameView, can_pause_kind
 from .library import LibraryPage, count_text, profile_title
 from .notice import AccountNoticeDialog
@@ -210,6 +211,7 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.config = config
         self._current_profile = ""
+        self._settings_return = ""  # the game page Settings was opened from, if any
         self._busy: dict[str, str] = {}
         #: Profiles whose install/update/repair waits for a free install slot (#770).
         self._waiting: set[str] = set()
@@ -420,17 +422,21 @@ class MainWindow(QMainWindow):
         self.game.queue_next_requested.connect(self._on_queue_next)
         self.game.queue_now_requested.connect(self._on_queue_now)
         self.game.remember_toggled.connect(self._on_remember_toggled)
+        self.game.sandbox_toggled.connect(self._on_sandbox_toggled)
         self.game.settings_requested.connect(self.open_settings)
+        self.game.remove_requested.connect(self._on_remove_requested)
+        self.game.move_requested.connect(self._open_move)
+        self.library.remove_game.connect(self._on_remove_requested)
         self.game.report_requested.connect(self._show_support_report)
         self.game.steam_setup_requested.connect(self._open_steam_setup)
         self.settings.saved.connect(self._on_settings_saved)
-        self.settings.cancelled.connect(self.show_library)
+        self.settings.cancelled.connect(self._leave_settings)
         self.settings.remove_requested.connect(self._on_remove_requested)
         self.settings.remake_prefix_requested.connect(self._on_remake_prefix_requested)
         self.settings.report_requested.connect(self._show_support_report)
         self.settings.logs_requested.connect(self._show_logs)
         self.settings.system_check_requested.connect(self._show_system_check)
-        self.sidebar_games.open_game.connect(self.open_game)
+        self.sidebar_games.open_game.connect(lambda name: self._guarded(self.open_game, name))
 
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
@@ -460,7 +466,10 @@ class MainWindow(QMainWindow):
         self.beta_pill = QLabel("BETA")
         self.beta_pill.setObjectName("Pill")
         self.beta_pill.setProperty("state", "info")
-        self.beta_pill.setToolTip("Beta: expect bugs. Please report what you hit.")
+        self.beta_pill.setToolTip(
+            f"Nadare {__version__}, a beta: expect bugs. "
+            "Use Report a problem on a game's page to tell us what went wrong."
+        )
         self.brand_cjk = QLabel("雪崩")
         self.brand_cjk.setObjectName("BrandCJK")
         brand_col = QVBoxLayout()
@@ -475,6 +484,10 @@ class MainWindow(QMainWindow):
         brand_row.addLayout(brand_col)
         brand_row.addStretch(1)
         side.addLayout(brand_row)
+        self.version_label = QLabel(f"v{__version__}")
+        self.version_label.setObjectName("Hint")
+        self.version_label.setToolTip("The Nadare version you are running.")
+        side.addWidget(self.version_label)
         # Shown only when the startup check finds a newer release.
         self.update_button = QPushButton()
         self.update_button.setObjectName("GhostButton")
@@ -510,25 +523,25 @@ class MainWindow(QMainWindow):
         self.store_button = QPushButton("Store")
         self.store_button.setObjectName("NavItem")
         self.store_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.store_button.clicked.connect(self.show_store)
+        self.store_button.clicked.connect(lambda: self._guarded(self.show_store))
         side.addWidget(self.store_button)
 
         self.library_button = QPushButton("Library")
         self.library_button.setObjectName("NavItem")
         self.library_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.library_button.clicked.connect(self.show_library)
+        self.library_button.clicked.connect(lambda: self._guarded(self.show_library))
         side.addWidget(self.library_button)
 
         self.downloads_button = QPushButton("Downloads")
         self.downloads_button.setObjectName("NavItem")
         self.downloads_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.downloads_button.clicked.connect(self.show_downloads)
+        self.downloads_button.clicked.connect(lambda: self._guarded(self.show_downloads))
         side.addWidget(self.downloads_button)
 
         self.settings_button = QPushButton("Settings")
         self.settings_button.setObjectName("NavItem")
         self.settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.settings_button.clicked.connect(self.open_settings)
+        self.settings_button.clicked.connect(self._open_settings_from_sidebar)
         side.addWidget(self.settings_button)
 
         side.addSpacing(20)
@@ -571,6 +584,8 @@ class MainWindow(QMainWindow):
         self.controller.queue_changed.connect(self._refresh_downloads)
         self.controller.busy.connect(lambda *_args: self._refresh_downloads())
         self.controller.paused.connect(lambda *_args: self._refresh_downloads())
+        # Cancelling a paused download emits only ``cancelled``: without this its row stayed.
+        self.controller.cancelled.connect(lambda *_args: self._refresh_downloads())
         self.downloads.pause_requested.connect(lambda name: self.controller.pause(name))
         self.downloads.resume_requested.connect(lambda name: self.controller.resume(name))
         self.downloads.cancel_requested.connect(lambda name: self.controller.cancel(name))
@@ -703,7 +718,9 @@ class MainWindow(QMainWindow):
             return
         overview = self.controller.install_overview()
         active = len(overview.running) + len(overview.waiting)
-        self.downloads_button.setText(f"Downloads ({active})" if active else "Downloads")
+        text, tip = downloads_label(active, len(overview.paused))
+        self.downloads_button.setText(text)
+        self.downloads_button.setToolTip(tip)
         if force or self.stack.currentIndex() == PAGE_DOWNLOADS:
             self.downloads.set_rows(self._download_rows())
 
@@ -747,6 +764,7 @@ class MainWindow(QMainWindow):
             supports_remember_me(str(self.config.profiles[profile].get("backend") or "")),
             bool(self.config.profiles[profile].get("remember_me", False)),
         )
+        self._sync_sandbox(profile)
         self.stack.setCurrentIndex(PAGE_GAME)
         self._set_active_nav("library")
         self.sidebar_games.set_active(profile)
@@ -772,16 +790,37 @@ class MainWindow(QMainWindow):
             if self.controller.is_paused(profile):
                 self.game.set_paused(self.controller.paused_operation(profile))
 
-    def open_settings(self) -> None:
-        profile = self._current_profile or self.config.active
-        if not profile or profile not in self.config.profiles:
-            QMessageBox.information(self, "Settings", "Add a game first.")
+    def _guarded(self, action: Any, *args: Any) -> None:
+        """Run a sidebar navigation, first asking when Settings holds unsaved edits (#852)."""
+        if self.stack.currentIndex() == PAGE_SETTINGS and not self.settings.confirm_leave():
             return
-        self.settings.load(self.config, profile)
+        action(*args)
+
+    def _open_settings_from_sidebar(self) -> None:
+        """Clicking Settings while on Settings keeps the form as it is."""
+        if self.stack.currentIndex() == PAGE_SETTINGS:
+            return
+        self.open_settings()
+
+    def open_settings(self) -> None:
+        profile = self._current_profile
+        self._settings_return = profile
+        if profile and profile in self.config.profiles:
+            self.settings.load(self.config, profile)
+            status = f"Settings · {self._game_title(profile)}"
+        else:
+            # No game open (Library, Store, Downloads, or no games at all): Nadare's own.
+            self.settings.load_app_only(self.config)
+            status = "Settings · Nadare"
         self.stack.setCurrentIndex(PAGE_SETTINGS)
         self._set_active_nav("settings")
         self.sidebar_games.set_active("")
-        self._set_side_status(f"Settings · {self._game_title(profile)}")
+        self._set_side_status(status)
+
+    def _open_move(self, profile: str) -> None:
+        """Open Settings on the tab where the game can be moved."""
+        self.open_settings()
+        self.settings.show_move_section()
 
     def _show_support_report(self, profile: str) -> None:
         from .support_report import ReportDialog, ReportTask
@@ -1049,7 +1088,15 @@ class MainWindow(QMainWindow):
     def _on_settings_saved(self, profile: str) -> None:
         self._sync_remember(profile)
         self.refresh_library()
-        self.show_library()
+        self._leave_settings()
+
+    def _leave_settings(self) -> None:
+        """Go back to the game page Settings was opened from; the Library otherwise."""
+        origin, self._settings_return = self._settings_return, ""
+        if origin and origin in self.config.profiles:
+            self.open_game(origin)
+        else:
+            self.show_library()
 
     def _on_remember_toggled(self, enabled: bool) -> None:
         """Remember me ticked on the game page or the login QR card."""
@@ -1070,6 +1117,30 @@ class MainWindow(QMainWindow):
             return
         self._sync_remember(profile)
 
+    def _sync_sandbox(self, profile: str) -> None:
+        """Show the Sandbox switch for ``profile`` as saved (greyed out in the Flatpak build)."""
+        data = self.config.profiles.get(profile) or {}
+        supported = supports_sandbox(str(data.get("backend") or ""))
+        blocked = "Not available in the Flatpak version yet." if sandbox.in_flatpak() else ""
+        self.game.set_sandbox(supported, data.get("secure_mode") is True, blocked)
+
+    def _on_sandbox_toggled(self, enabled: bool) -> None:
+        """The Sandbox switch on the game page; the setting is the same one Settings shows."""
+        profile = self._current_profile
+        data = self.config.profiles.get(profile)
+        if not data or not supports_sandbox(str(data.get("backend") or "")):
+            return
+        before = data.get("secure_mode") is True
+        try:
+            with self.config.locked():
+                data["secure_mode"] = bool(enabled)
+                self.config.save()
+        except OSError as exc:
+            with self.config.locked():
+                data["secure_mode"] = before
+            self._sync_sandbox(profile)
+            QMessageBox.critical(self, "Sandbox", f"Could not save config: {exc}")
+
     def _sync_remember(self, profile: str) -> None:
         """Apply the Remember me flag immediately (turning it off forgets the login)."""
         data = self.config.profiles.get(profile)
@@ -1082,7 +1153,9 @@ class MainWindow(QMainWindow):
             # call can block, so it runs off the GUI thread.
             if not enabled and core_backends.supports_remember_me(str(data.get("backend") or "")):
                 self._remember_pending.discard(profile)
-                self._forget_saved_login(profile, str(data.get("backend") or ""))
+                self._forget_saved_login(
+                    profile, str(data.get("backend") or ""), keep_live=True
+                )
             elif enabled:
                 # Queue the enable until the worker frees the profile; dropping
                 # it would leave the config asking for remember-me while no
@@ -1096,11 +1169,19 @@ class MainWindow(QMainWindow):
             # reaches the user after the settings page has been left.
             self._remember_watching.add(profile)
 
-    def _forget_saved_login(self, profile: str, kind: str) -> None:
-        """Wipe the saved login off the GUI thread (keyring/DBus blocks)."""
+    def _forget_saved_login(self, profile: str, kind: str, keep_live: bool = False) -> None:
+        """Wipe the saved login off the GUI thread (keyring/DBus blocks).
+
+        ``keep_live`` leaves a session already signed in this run alone (Remember me turned
+        off), where the default also drops it (the profile is being removed).
+        """
 
         def run() -> None:
-            core_backends.get(kind).forget_saved_login(profile)
+            cls = core_backends.get(kind)
+            forget = cls.forget_saved_login
+            if keep_live:
+                forget = getattr(cls, "forget_persisted_login", forget)
+            forget(profile)
 
         task = CallTask(run)
         task.signals.failed.connect(lambda message: self._on_forget_failed(profile, message))
@@ -1128,8 +1209,8 @@ class MainWindow(QMainWindow):
         box.setWindowTitle("Add from Steam")
         box.setText(
             f"Add {title} to your library?\n\nThe game itself comes from your own Steam. "
-            "Next, Nadare opens a checklist that installs it there and fixes what needs "
-            "fixing, one step at a time."
+            "Next, Nadare opens a checklist: Steam installs the game, and Nadare fixes what "
+            "needs fixing, one step at a time."
         )
         box.setStandardButtons(QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
         return box.exec() == QMessageBox.StandardButton.Ok
@@ -1223,7 +1304,7 @@ class MainWindow(QMainWindow):
                 wants_import = dialog.import_requested
                 dialog.deleteLater()
                 if wants_import:
-                    self._add_game_dialog(kind=kind)  # use files the user already has
+                    self._add_game_dialog(kind=kind, importing=True)  # files they already have
                     return
                 if not accepted:
                     return
@@ -1281,8 +1362,12 @@ class MainWindow(QMainWindow):
             data["accept_account_notice"] = False
             QMessageBox.warning(self, "Account notice", f"Could not save config: {exc}")
 
-    def _add_game_dialog(self, *, kind: str | None = None, advanced: bool = False) -> None:
+    def _add_game_dialog(
+        self, *, kind: str | None = None, advanced: bool = False, importing: bool = False
+    ) -> None:
         dialog = AddGameDialog(self.config, self, kind=kind, advanced=advanced)
+        if importing:
+            dialog.set_mode(True)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
         profile = dialog.created_profile
@@ -1323,7 +1408,9 @@ class MainWindow(QMainWindow):
         if not self.controller.start(profile, operation, payload):
             if not silent:
                 QMessageBox.information(
-                    self, "Busy", f"{profile} is already running an operation."
+                    self,
+                    "Busy",
+                    f"{self._game_title(profile)} is busy. Wait for it to finish, then try again.",
                 )
             return False
         self._worker_generations[profile] = self._profile_generation(profile)
@@ -1472,6 +1559,8 @@ class MainWindow(QMainWindow):
         status = self._snapshot(profile).get("status")
         if status is not None and getattr(status, "state", "") not in ("not_installed", ""):
             return True  # already installed: this is a repair, not a fresh download
+        if status is not None and (getattr(status, "data", None) or {}).get("incomplete"):
+            return True  # RESUME: only what is missing is fetched, nothing to confirm
         data = self.config.profiles.get(profile) or {}
         where = str(data.get("install_dir") or paths.profiles_dir())
         try:
@@ -1483,7 +1572,8 @@ class MainWindow(QMainWindow):
         box.setWindowTitle("Download the game?")
         box.setText(
             f"Installing {self._game_title(profile)} downloads about "
-            f"{diskspace.human_size(size)} and needs about as much free space ({free})."
+            f"{diskspace.human_size(size)} and needs about as much free space ({free}).\n\n"
+            f"It goes to: {where}"
         )
         box.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
         box.button(QMessageBox.StandardButton.Yes).setText("Download")
@@ -1705,7 +1795,9 @@ class MainWindow(QMainWindow):
         elif isinstance(result, dict):
             msg = result.get("message")
             if result.get("verified", True):
-                QMessageBox.information(self, "File check", str(msg or "All checks passed"))
+                QMessageBox.information(
+                    self, "Check game files", str(msg or "All checks passed")
+                )
             else:
                 QMessageBox.warning(self, "File check failed", str(msg or "File check failed"))
 
@@ -1745,7 +1837,10 @@ class MainWindow(QMainWindow):
             return
         if operation not in SILENT_OPERATIONS:
             self._busy.pop(profile, None)
-        if profile == self._current_profile:
+        # A background check that ends late (one detached by a pause, say) must not clear the
+        # page of an operation that is running now (#895).
+        late_check = operation in SILENT_OPERATIONS and profile in self._busy
+        if profile == self._current_profile and not late_check:
             self.game.finish(operation, exit_code)
         if operation == "status":
             self._after_status(profile)
@@ -1757,9 +1852,18 @@ class MainWindow(QMainWindow):
             self._show_remember_notice(profile)
         if operation in ("install", "update", "launch"):
             self._maybe_offer_runner_cleanup()
+        self._notify_finished(profile, operation, True)
         if operation == "launch":
             self.controller.launch_ended(profile)
             self._maybe_finish_background_close()
+
+    def _notify_finished(self, profile: str, operation: str, ok: bool) -> None:
+        """Tell the desktop that a long operation ended, when nobody is looking at the window."""
+        if not self.config.data.get("notify_when_done", True) or self.isActiveWindow():
+            return
+        text = notify.finished_text(operation, self._game_title(profile), ok)
+        if text is not None:
+            notify.send(*text)
 
     # ---- old runners ----------------------------------------------------------
     def _maybe_offer_runner_cleanup(self) -> None:
@@ -1854,7 +1958,7 @@ class MainWindow(QMainWindow):
                 self._undo_remember(profile)
                 notice += (
                     "\n\nRemember me has been turned off; "
-                    "you will need to scan the QR code each time."
+                    "you will need to log in again each time."
                 )
             QMessageBox.information(self, "Remember me", notice)
 
@@ -1947,6 +2051,7 @@ class MainWindow(QMainWindow):
             )
         if profile in self._remember_notice:
             self._show_remember_notice(profile)
+        self._notify_finished(profile, operation, False)
         if operation in REPROBE_OPERATIONS:
             # The failure may mean the files changed underneath us; never leave
             # the last READY state (and an enabled LAUNCH) on the page.
@@ -2100,7 +2205,7 @@ class MainWindow(QMainWindow):
 
     def _start_notices_check(self) -> None:
         """Read the project's notices feed once per start, off the GUI thread."""
-        if not self.config.data.get("check_updates", True):
+        if not self.config.data.get("check_notices", True):
             return
         from ..core import notices
 
@@ -2441,7 +2546,7 @@ class MainWindow(QMainWindow):
                 "from there, but the game files stay incomplete until you do. Close anyway?"
             )
         else:
-            title = "Sign-in in progress"
+            title = "Login in progress"
             text = f"{names} is still signing in or changing its login.\n\nClose anyway?"
         answer = QMessageBox.warning(
             self,

@@ -166,7 +166,7 @@ class GameRow(QFrame):
         self.dot.setProperty("kind", kind)
         repolish(self.dot)
         self.dot.setVisible(bool(kind))
-        label = {"running": "Running", "update": "Update available"}.get(kind, "")
+        label = {"running": "Playing", "update": "Update available"}.get(kind, "")
         self.dot.setAccessibleName(label)
         self.dot.setToolTip(label)
         # Steam dims what is in the library but not on disk. Only a reported "not installed"

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-from . import backends, paths, process, shortcuts
+from . import backends, paths, process, runlog, shortcuts
 
 _TREE_KEYS = ("install_dir", "prefix", "wineprefix")
 _BACKUP_KEY = "prefix_backup"
@@ -36,6 +36,7 @@ class RemovalResult:
     shortcuts_removed: list[Path] = field(default_factory=list)
     login_forgotten: bool = False
     data_dir_removed: Path | None = None
+    logs_removed: Path | None = None
     warnings: list[str] = field(default_factory=list)
     trees_removed: list[Path] = field(default_factory=list)
     #: True when a requested deletion was refused/failed and the profile was kept.
@@ -663,6 +664,8 @@ def _remove_locked(
         if cls is not None and getattr(cls, "supports_remember_me", False):
             try:
                 cls.forget_saved_login(name)
+                # A login held in memory would be adopted by a new profile of the same name.
+                getattr(cls, "drop_live_session", lambda _name: None)(name)
                 result.login_forgotten = True
             except Exception as exc:  # noqa: BLE001 - best effort, never fatal
                 result.warnings.append(f"could not forget saved login: {exc}")
@@ -712,6 +715,25 @@ def _remove_locked(
                             result.data_dir_removed = target
                     except OSError as exc:
                         result.warnings.append(f"could not remove data dir: {exc}")
+
+    # 5b2. The game's own log folder (``logs/<game-id>``) goes with its data; nothing else in
+    # the logs folder does. A kept profile keeps its logs too: they are the evidence of
+    # whatever was left behind (#972). Mounted drives inside are never entered.
+    if delete_data and not keep_profile:
+        log_folder = paths.logs_dir() / runlog.game_id(name)
+        if log_folder.is_symlink():
+            result.warnings.append(f"refusing to delete symlink: {log_folder}")
+        elif log_folder.is_dir():
+            try:
+                outcome = _rmtree_safely(log_folder)
+                for mount in outcome.mounts:
+                    result.warnings.append(f"{mount} is a separate mounted drive, left alone")
+                for path, exc in outcome.leftovers:
+                    result.warnings.append(_leftover_warning(path, exc))
+                if not log_folder.exists():
+                    result.logs_removed = log_folder
+            except OSError as exc:
+                result.warnings.append(f"could not remove the logs: {exc}")
 
     # 5c. The per-game folder Nadare made around them goes too, but only when it is now empty
     # (``rmdir`` never touches contents), so a file the user put there survives. The empty

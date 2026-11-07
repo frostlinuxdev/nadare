@@ -20,3 +20,12 @@ index_push() {
     index_pull "$index" || return 1
     git -C "$index" push --quiet origin HEAD
 }
+
+# Push generated commits an earlier run could not push. A run with nothing new to publish used to
+# report healthy while its last commit was still only local. No upstream or nothing ahead is fine.
+index_push_pending() {
+    local index="$1" ahead
+    ahead="$(git -C "$index" rev-list --count '@{u}..HEAD' 2>/dev/null)" || return 0
+    [[ "${ahead:-0}" -gt 0 ]] || return 0
+    index_push "$index"
+}

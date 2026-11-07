@@ -169,13 +169,22 @@ def build_manifest(
     if not files:
         raise YostarApiError(None, "manifest lists no files (empty or malformed payload)")
     stamp = generated_at or (_dt.datetime.now(_dt.UTC).replace(microsecond=0).isoformat())
-    return {
+    manifest = {
         "game_tag": tag,
         "version": str(version),
         "base_url": base_url,
         "generated_at": stamp,
         "files": files,
     }
+    # Publishing a document Nadare's own client rejects would replace the last good one and
+    # break every install (#923): run it through the client's parser first.
+    try:
+        yostar._parse_manifest(manifest, url)
+    except yostar.ManifestError as exc:
+        raise YostarApiError(
+            None, f"the generated manifest is one Nadare's client would reject: {exc}"
+        ) from exc
+    return manifest
 
 
 def generate_game(

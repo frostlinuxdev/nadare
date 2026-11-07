@@ -36,11 +36,14 @@ _LOCK = threading.Lock()
 _LIVE: dict[str, Session] = {}
 #: Keyring reads, once per process (``status()`` polls; the keyring must not).
 _CACHE: dict[str, Session | None] = {}
+#: Bumped whenever a profile's saved login is wiped, so a save that was already running can tell
+#: its write landed after the wipe and take it back (#956).
+_WIPES: dict[str, int] = {}
 
 
 def _store() -> SecretStore:
     """Token storage that refuses the plaintext fallback."""
-    return SecretStore(allow_fallback=False, kind="netmarble")
+    return SecretStore(allow_fallback=False, kind="netmarble", legacy_fallback=False)
 
 
 def _encode(session: Session) -> str:
@@ -76,6 +79,12 @@ def reset_process_state() -> None:
     with _LOCK:
         _LIVE.clear()
         _CACHE.clear()
+        _WIPES.clear()
+
+
+def _note_wipe(name: str) -> None:
+    with _LOCK:
+        _WIPES[name] = _WIPES.get(name, 0) + 1
 
 
 class NetmarbleLoginMixin:
@@ -90,7 +99,16 @@ class NetmarbleLoginMixin:
     ctx: Any
 
     @staticmethod
+    def forget_persisted_login(profile: str) -> None:
+        """Wipe the saved login but keep a live session, as turning Remember me off does (#917)."""
+        _note_wipe(profile)
+        with _LOCK:
+            _CACHE[profile] = None
+        _store().delete(profile)
+
+    @staticmethod
     def forget_saved_login(profile: str) -> None:
+        _note_wipe(profile)
         with _LOCK:
             _CACHE.pop(profile, None)
             _LIVE.pop(profile, None)
@@ -130,6 +148,7 @@ class NetmarbleLoginMixin:
         name = self.ctx.name
         with _LOCK:
             _LIVE[name] = session
+            wipes = _WIPES.get(name, 0)
         if not self._remember_enabled():
             return
         store = _store()
@@ -142,7 +161,16 @@ class NetmarbleLoginMixin:
             self.ctx.emit(Event("status", KEYRING_NOTICE, data={"remember_unavailable": True}))
             return
         with _LOCK:
-            _CACHE[name] = session
+            wiped = _WIPES.get(name, 0) != wipes
+            if not wiped:
+                _CACHE[name] = session
+        if wiped:
+            # Remember me was turned off (or the login forgotten) while the write ran: the
+            # entry it just made must not outlive that.
+            try:
+                store.delete(name)
+            except SecretStoreError:
+                self.ctx.emit(Event("status", KEYRING_NOTICE, data={"remember_unavailable": True}))
 
     # ---- GameBackend contract ----------------------------------------------
     def status(self):  # type: ignore[no-untyped-def]
@@ -185,6 +213,7 @@ class NetmarbleLoginMixin:
             except netmarble.NetmarbleError as exc:
                 raise BackendError(f"Netmarble sign-in failed: {exc}", 3) from exc
         name = netmarble.fetch_user_name(token)
+        self.ctx.cancel.raise_if_cancelled()  # a Cancel during the lookup must not still sign in
         try:
             session = netmarble.session_from_token(token, device_key, name=name)
         except netmarble.NetmarbleError as exc:
@@ -195,6 +224,7 @@ class NetmarbleLoginMixin:
 
     def logout(self) -> None:
         name = self.ctx.name
+        _note_wipe(name)
         with _LOCK:
             _LIVE.pop(name, None)
             _CACHE[name] = None
@@ -223,6 +253,7 @@ class NetmarbleLoginMixin:
             self.ctx.set("remember_me", enabled)
         name = self.ctx.name
         if not enabled:
+            _note_wipe(name)
             with _LOCK:
                 _CACHE[name] = None
             try:

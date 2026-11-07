@@ -270,3 +270,48 @@ def test_a_validator_that_raises_is_a_failure():
     net = Net({A + "p.json": doc(n=1), B + "p.json": doc(n=1)})
     with pytest.raises(indexfetch.IndexUnavailable):
         indexfetch.fetch_json("p.json", opener=net, validate=boom)
+
+
+# ---- read_cached applies the same expiry and clock rules as fetch_json (#859) ----------------
+def _saved(rel="p.json"):
+    indexfetch.fetch_json(rel, opener=Net({A + rel: doc(n=5)}))
+    return indexfetch.cache_path(A, rel)
+
+
+def test_read_cached_serves_a_fresh_copy():
+    _saved()
+    assert indexfetch.read_cached("p.json")["n"] == 5
+
+
+def test_read_cached_refuses_a_copy_dated_far_in_the_future():
+    path = _saved()
+    future = time.time() + 365 * 24 * 3600
+    os.utime(path, (future, future))
+    assert indexfetch.read_cached("p.json") is None
+
+
+def test_read_cached_tolerates_a_small_clock_step():
+    path = _saved()
+    ahead = time.time() + 300
+    os.utime(path, (ahead, ahead))
+    assert indexfetch.read_cached("p.json")["n"] == 5
+
+
+def test_read_cached_refuses_a_stale_copy():
+    path = _saved()
+    old = time.time() - (indexfetch.MAX_CACHE_AGE_SECONDS + 3600)
+    os.utime(path, (old, old))
+    assert indexfetch.read_cached("p.json") is None
+
+
+def test_both_paths_agree_on_every_age():
+    path = _saved()
+    for offset in (-400 * 86400, -7200, -300, 0, 3600, indexfetch.MAX_CACHE_AGE_SECONDS + 10):
+        stamp = time.time() - offset
+        os.utime(path, (stamp, stamp))
+        down = Net({A + "p.json": OSError("x"), B + "p.json": OSError("y")})
+        try:
+            served = indexfetch.fetch_json("p.json", opener=down).data["n"] == 5
+        except indexfetch.IndexUnavailable:
+            served = False
+        assert (indexfetch.read_cached("p.json") is not None) == served, offset

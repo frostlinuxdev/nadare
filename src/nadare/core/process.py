@@ -94,7 +94,18 @@ _SHIM_MARKERS = (
 )
 _SYSTEM_DIRS = ("/usr/bin", "/bin")
 #: Credential-looking variables (matched case-insensitively) never reach a game.
-_SECRET_SUFFIXES = ("_TOKEN", "_SECRET")
+_SECRET_SUFFIXES = (
+    "_TOKEN",
+    "_SECRET",
+    "_API_KEY",
+    "_APIKEY",
+    "_ACCESS_KEY",
+    "_SECRET_KEY",
+    "_PRIVATE_KEY",
+    "_PASSWORD",
+    "_PASSWD",
+    "_CREDENTIALS",
+)
 _SECRET_PREFIXES = ("AWS_", "SSH_", "GPG_", "CZN_")
 
 
@@ -110,8 +121,9 @@ def _is_secret_name(name: str) -> bool:
 def sanitize_game_env(env: Mapping[str, str]) -> dict[str, str]:
     """A copy of ``env`` that is safe to hand to Proton/Wine/umu.
 
-    Always drops credential-looking variables (``*_TOKEN``, ``*_SECRET``, and
-    ``AWS_``/``SSH_``/``GPG_``/``CZN_`` names) and relative ``PATH`` entries (``.``
+    Always drops credential-looking variables (``*_TOKEN``, ``*_SECRET``, ``*_API_KEY``,
+    ``*_PASSWORD`` and the like, and ``AWS_``/``SSH_``/``GPG_``/``CZN_`` names; a bare ``*KEY``
+    stays, it names harmless graphics and input variables) and relative ``PATH`` entries (``.``
     lets a cwd binary shadow a bare Proton/umu helper). When there is a system
     ``python3`` it also drops the Python launcher variables and takes
     version-manager shims and an active virtualenv's ``bin`` off ``PATH`` (a stale
@@ -260,8 +272,10 @@ class ProcessInfo:
         return " ".join(self.cmdline)
 
 
-def _read_cmdline(pid: int) -> tuple[list[str], str | None, str]:
-    base = Path("/proc") / str(pid)
+def _read_cmdline(
+    pid: int, root: Path = Path("/proc")
+) -> tuple[list[str], str | None, str]:
+    base = root / str(pid)
     try:
         raw = (base / "cmdline").read_bytes()
     except OSError:
@@ -273,7 +287,8 @@ def _read_cmdline(pid: int) -> tuple[list[str], str | None, str]:
     except OSError:
         exe = None
     try:
-        name = (base / "comm").read_text(encoding="utf-8").strip()
+        # The kernel cuts comm at 15 bytes, which can split a multi-byte character (#928).
+        name = (base / "comm").read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
         # Fall back to the first token of the command line.
         name = Path(cmdline[0]).name if cmdline else ""
@@ -440,14 +455,14 @@ def is_running(
     return bool(find_processes(prefix=prefix, name=name, cmdline_contains=cmdline_contains))
 
 
-def _pid_starttime(pid: int) -> str | None:
+def _pid_starttime(pid: int, root: Path = Path("/proc")) -> str | None:
     """Start time (clock ticks since boot) of ``pid``, or ``None`` if unreadable.
 
     Two different processes never share a start time, so a changed value across
     the grace window means the PID was recycled onto an unrelated process.
     """
     try:
-        data = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
+        data = (root / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     try:
@@ -505,6 +520,10 @@ def spawn(
     launcher's own handler and lets us signal the whole process group.
     """
     cmd = [str(a) for a in args]
+    # A child may write bytes that are not valid text (a game's legacy-encoded string): decoding
+    # them strictly kills the reader thread, loses the rest of the output and, once the pipe is
+    # full, blocks the child (#976).
+    popen_kwargs.setdefault("errors", "replace")
     return subprocess.Popen(  # noqa: S603 - args are backend-controlled
         cmd,
         env=dict(env) if env is not None else None,
@@ -673,7 +692,43 @@ def run(
                 # and still holds the profile's files.
                 _signal_group(proc, force=True, pgid=pgid)
                 _wait_reaped()
+        else:
+            # The leader already exited, but its descendants (a game, wineserver) may still be
+            # in its group and would keep running while the caller releases the profile (#896).
+            _stop_orphaned_group(pgid)
         raise
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return False
+    return True
+
+
+def _stop_orphaned_group(pgid: int | None) -> None:
+    """Terminate, then kill, whatever is left in ``pgid`` after its leader exited.
+
+    The group id is the one this call started (its leader's pid); while any member lives the
+    kernel cannot hand that number to another group, so this only ever reaches our own
+    descendants. Nothing is signalled when the group is already empty."""
+    if pgid is None or not _group_alive(pgid):
+        return
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except OSError:
+        return
+    deadline = time.monotonic() + min(GRACE_SECONDS, 2.0)
+    while time.monotonic() < deadline and _group_alive(pgid):
+        time.sleep(0.05)
+    if _group_alive(pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except OSError:
+            pass
 
 
 def _signal_group(

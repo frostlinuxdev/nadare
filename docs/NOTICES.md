@@ -1,7 +1,7 @@
 # The notices feed
 
 Nadare reads `<index base>/notices.json` once per start (cached six hours, silent on any
-failure; turned off by *Check for launcher and game updates*). It exists so a broken game or a
+failure; turned off by *Show safety and service notices*, which is separate from update checks). It exists so a broken game or a
 needed update can be announced without a release, including to builds that cannot be changed.
 
 ```json

@@ -977,6 +977,43 @@ def test_startup_sweep_removes_only_old_inactive_cover_parts(tmp_path, monkeypat
     assert outside.read_bytes() == b"outside"
 
 
+def test_a_download_during_the_cover_migration_is_not_overwritten(fake, tmp_path, monkeypatch):
+    """The migration installs a WebP and its sidecar as one step against a concurrent download."""
+    import threading
+
+    from PyQt6.QtGui import QImage
+
+    monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path)
+    old = tmp_path / "game-cover.png"
+    old.write_bytes(_png_bytes(400, 300))
+    artwork.src_sidecar(old).write_text("https://old.example/small.png")
+    url = "https://cdn.example/new.png"
+    fake.routes[url] = FakeResponse(
+        content=_png_bytes(800, 600), headers={"Content-Type": "image/png"}
+    )
+    real_copy = artwork._copy_sidecar_atomically
+    downloads: list[threading.Thread] = []
+
+    def copy_while_a_download_runs(source, target):
+        download = threading.Thread(
+            target=lambda: artwork._store(url, "game", "cover", official=True)
+        )
+        download.start()
+        downloads.append(download)
+        download.join(0.5)  # unguarded it finishes here; guarded it waits for the install
+        real_copy(source, target)
+
+    monkeypatch.setattr(artwork, "_copy_sidecar_atomically", copy_while_a_download_runs)
+
+    artwork.migrate_cached_covers()
+    for download in downloads:
+        download.join(10)
+
+    webp = tmp_path / "game-cover.webp"
+    assert artwork.src_sidecar(webp).read_text(encoding="utf-8") == url
+    assert QImage.fromData(webp.read_bytes()).width() == 800
+
+
 def test_migrated_cache_paths_keep_resolving_profile_art(tmp_path, monkeypatch):
     monkeypatch.setattr(artwork, "cache_dir", lambda: tmp_path)
     hero = tmp_path / "genshin-official-hero.png"

@@ -354,7 +354,7 @@ class TestScriptBuild:
         script = write_exe(tmp_path / "run.sh", "#!/bin/sh\necho hi\n")
         captured: list[list[str]] = []
 
-        def fake_stream(argv, env, on_line=None, cancel=None, stop_wine=True):
+        def fake_stream(argv, env, on_line=None, cancel=None, stop_wine=True, cwd=None):
             captured.append(list(argv))
             return 0
 
@@ -425,7 +425,7 @@ class TestScriptBuild:
         write_exe(tmp_path / "run.sh", "#!/bin/sh\n")
         captured: dict[str, str] = {}
 
-        def fake_stream(argv, env, on_line=None, cancel=None, stop_wine=True):
+        def fake_stream(argv, env, on_line=None, cancel=None, stop_wine=True, cwd=None):
             captured.update(env)
             return 0
 

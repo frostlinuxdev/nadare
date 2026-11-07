@@ -46,7 +46,7 @@ def test_missing_backends_show_one_banner_with_their_titles(monkeypatch, qapp, c
         banner = page.unavailable_banner
         assert banner.isVisible()
         text = banner.message_label.text()
-        assert "2 games can't load in this build" in text
+        assert "2 games are not available in this version of Nadare" in text
         assert "Arknights" in text
         assert "Stella Sora" in text
         assert banner.action_button.text() == "Open logs"

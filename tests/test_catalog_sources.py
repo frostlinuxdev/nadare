@@ -131,7 +131,7 @@ def _wuwa_fetch(gz_index: bool, gz_list: bool = False):
 @pytest.mark.parametrize("gz", [False, True])
 def test_wuwa_plan(gz):
     f, root, cfg = _wuwa_fetch(gz, gz)
-    plan = wuwa.resolve(f)
+    plan = wuwa.resolve_legacy(f)
     res = json.loads(fx("wuwa_indexFile.json"))["resource"]
     assert plan.game_tag == "wuwa"
     assert plan.version == cfg["version"] == "3.7.1"
@@ -151,7 +151,7 @@ def test_wuwa_rejects_a_traversal_dest():
     bad["resource"][0]["dest"] = "../evil.dll"
     f.routes[root + cfg["indexFile"]] = json.dumps(bad).encode()
     with pytest.raises(dd.DirectError):
-        wuwa.resolve(f)
+        wuwa.resolve_legacy(f)
 
 
 # ------------------------------------------------------------------ GFL2
@@ -162,7 +162,7 @@ def test_gfl2_plan():
     f = FakeFetch({flex: fx("gfl2_flexible_config.json"), ver_url: fx("gfl2_Version.txt")})
     plan = gfl2.resolve(f)
     assert plan.game_tag == "gfl2"
-    assert plan.version == "2.7.4330.14886.28279"
+    assert plan.version == "2.7.4330.14886.28279+client-2.7.4330"
     assert plan.exe == "GF2_Exilium.exe"
     (arc,) = plan.archives
     assert arc.source.url == cdn + "package/PCClient/2.7.4330/GF2_Exilium_Origin.zip"

@@ -374,3 +374,78 @@ def test_folders_the_user_laid_out_themselves_are_not_tidied(env, monkeypatch):
         cfg, "gone", delete_trees=["install_dir", "prefix"], applications_dir=tmp / "apps"
     )
     assert (tmp / "Games" / "Nadare" / "Gone").is_dir()
+
+
+# ---- 6. "delete Nadare's logs" deletes the game's log folder -----------------------
+def test_delete_data_also_deletes_the_games_log_folder_and_only_that(env, monkeypatch):
+    cfg, tmp = env
+    _backend(monkeypatch)
+    mine = _tree(paths.logs_dir(), "gone")
+    other = _tree(paths.logs_dir(), "keep")
+    result = removal.remove_game(cfg, "gone", delete_data=True, applications_dir=tmp / "apps")
+    assert not mine.exists() and other.is_dir()
+    assert result.logs_removed == mine
+
+
+def test_logs_are_kept_when_data_is_kept(env, monkeypatch):
+    cfg, tmp = env
+    _backend(monkeypatch)
+    mine = _tree(paths.logs_dir(), "gone")
+    removal.remove_game(cfg, "gone", applications_dir=tmp / "apps")
+    assert mine.is_dir()
+
+
+def test_logs_are_kept_when_the_profile_is_kept_because_a_tree_was_left(env, monkeypatch):
+    # #972: the logs are the evidence of a failed deletion.
+    cfg, tmp = env
+    _backend(monkeypatch)
+    install = _tree(tmp, "Games", "gone")
+    bind = _tree(install, "savedata")
+    cfg.profiles["gone"].update(install_dir=str(install), owned_trees=["install_dir"])
+    monkeypatch.setattr(removal, "_mountinfo_points", lambda: frozenset({str(bind.resolve())}))
+    mine = _tree(paths.logs_dir(), "gone")
+    result = removal.remove_game(
+        cfg, "gone", delete_trees=["install_dir"], delete_data=True, applications_dir=tmp / "apps"
+    )
+    assert result.profile_kept
+    assert mine.is_dir() and result.logs_removed is None
+
+
+def test_a_mount_inside_the_log_folder_is_not_deleted(env, monkeypatch):
+    cfg, tmp = env
+    _backend(monkeypatch)
+    mine = _tree(paths.logs_dir(), "gone")
+    bind = _tree(mine, "mounted")
+    (bind / "precious.txt").write_text("user data")
+    monkeypatch.setattr(removal, "_mountinfo_points", lambda: frozenset({str(bind.resolve())}))
+    removal.remove_game(cfg, "gone", delete_data=True, applications_dir=tmp / "apps")
+    assert (bind / "precious.txt").read_text() == "user data"
+
+
+def test_a_symlinked_log_folder_is_refused(env, monkeypatch):
+    cfg, tmp = env
+    _backend(monkeypatch)
+    target = _tree(tmp, "precious")
+    paths.logs_dir().mkdir(parents=True)
+    (paths.logs_dir() / "gone").symlink_to(target)
+    result = removal.remove_game(cfg, "gone", delete_data=True, applications_dir=tmp / "apps")
+    assert (target / "file.bin").exists()
+    assert result.logs_removed is None
+    assert any("refusing to delete symlink" in w for w in result.warnings), result.warnings
+
+
+def test_removing_a_czn_profile_also_drops_its_live_login(env, monkeypatch):
+    """#931: a same-name profile added later adopted the old account from process memory."""
+    from nadare.backends.czn import backend as czn
+
+    cfg, _tmp = env
+    cfg.add_profile("czn", backend="stove-czn", title="CZN")
+    czn._reset_process_state()
+    czn._live_set("czn", "refresh-token", "123")
+    monkeypatch.setattr(czn, "forget_saved_credential", lambda profile: None)
+    _backend(monkeypatch)
+    monkeypatch.setattr(removal.backends, "get", lambda kind: czn.CznBackend)
+
+    removal.remove_game(cfg, "czn", delete_data=False, delete_trees=[])
+
+    assert czn._live_get("czn") is None

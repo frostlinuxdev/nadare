@@ -7,6 +7,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from nadare.core import runlog
 from nadare.core.config import Config
 from nadare.core.events import Event
 from nadare.gui import workers
@@ -19,7 +20,7 @@ def _worker(tmp_path, monkeypatch):
     clock = {"now": 1000.0}
     monkeypatch.setattr(workers.time, "monotonic", lambda: clock["now"])
     worker = workers.BackendWorker(Config.load(tmp_path / "config.json"), "G", "install")
-    return worker, logs / "G-install.log", clock
+    return worker, logs / runlog.game_id("G"), clock
 
 
 def _progress(done: int, total: int = 1000) -> Event:
@@ -27,6 +28,8 @@ def _progress(done: int, total: int = 1000) -> Event:
 
 
 def _lines(path) -> list[str]:
+    if path.is_dir():  # the game's folder: one install run
+        (path,) = path.glob("install-*.log")
     return [line for line in path.read_text(encoding="utf-8").splitlines() if "[progress]" in line]
 
 
@@ -62,5 +65,6 @@ def test_other_events_are_never_throttled(tmp_path, monkeypatch):
     for index in range(5):
         worker._on_event(Event("step", f"step {index}"))
     worker._close_log()
-    text = path.read_text(encoding="utf-8")
+    (written,) = path.glob("install-*.log")
+    text = written.read_text(encoding="utf-8")
     assert all(f"[step] step {index}" in text for index in range(5))

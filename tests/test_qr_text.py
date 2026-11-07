@@ -89,8 +89,7 @@ def make_png(
     elif color_type == 2:
         bpp = 3
         raw = [
-            bytearray(b for v in r for b in ((10, 10, 10) if v else (250, 250, 250)))
-            for r in rows
+            bytearray(b for v in r for b in ((10, 10, 10) if v else (250, 250, 250))) for r in rows
         ]
     elif color_type == 3:
         bpp = 1
@@ -247,3 +246,59 @@ def test_cli_printer_survives_unreadable_png(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(sys, "stdout", out)
     app._make_printer()(_event(tmp_path / "missing.png"))
     assert "[step] Scan the QR code" in out.getvalue()
+
+
+# ---- the decompressed size is bounded by what the header declares (#902) -----------------------
+def _bomb(width: int = 21, height: int = 21, extra: int = 2 << 20) -> bytes:
+    """A valid-CRC grayscale PNG whose compressed data expands to far more than its rows."""
+    rows = b"".join(b"\x00" + bytes([255]) * width for _ in range(height))
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0)
+    body = zlib.compress(rows + b"\x00" * extra)
+    return (
+        b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", body) + _chunk(b"IEND", b"")
+    )
+
+
+def test_a_png_that_expands_past_its_rows_is_refused_without_allocating_it(monkeypatch):
+    asked: list[int] = []
+    real = zlib.decompressobj
+
+    class Watch:
+        def __init__(self):
+            self._d = real()
+
+        def decompress(self, data, max_length=0):
+            asked.append(max_length)
+            return self._d.decompress(data, max_length)
+
+        def __getattr__(self, name):
+            return getattr(self._d, name)
+
+    monkeypatch.setattr(qr_text.zlib, "decompressobj", Watch)
+    assert qr_text._decode(_bomb()) is None
+    assert asked and 0 not in asked and max(asked) <= 21 * 22 + 1
+
+
+def test_a_png_with_trailing_data_inside_the_stream_is_refused():
+    assert qr_text._decode(_bomb(extra=10)) is None
+
+
+def test_a_truncated_stream_is_refused():
+    data = bytearray(_bomb(extra=0))
+    cut = data.index(b"IDAT") + 8
+    assert qr_text._decode(bytes(data[: cut + 5])) is None
+
+
+def test_an_empty_stream_is_refused():
+    ihdr = struct.pack(">IIBBBBB", 21, 21, 8, 0, 0, 0, 0)
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + _chunk(b"IHDR", ihdr)
+        + _chunk(b"IDAT", zlib.compress(b""))
+        + _chunk(b"IEND", b"")
+    )
+    assert qr_text._decode(png) is None
+
+
+def test_a_normal_png_still_decodes():
+    assert qr_text._decode(make_png(_matrix(), scale=4)) is not None

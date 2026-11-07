@@ -140,7 +140,17 @@ def entries(
                 variant=variant,
             )
         )
-    result.sort(key=lambda entry: (entry.tier != TIER_VERIFIED, entry.title.casefold()))
+    # Builds of one game stay together, the most supported first; among equals the order they
+    # are declared in ``_VARIANTS`` decides (Darkwinter before Haoplay), not their titles.
+    order = {kind: rank for rank, kind in enumerate(_VARIANTS)}
+    result.sort(
+        key=lambda entry: (
+            entry.tier != TIER_VERIFIED,
+            (entry.group or entry.title).casefold(),
+            order.get(entry.kind, 0),
+            entry.title.casefold(),
+        )
+    )
     return result
 
 

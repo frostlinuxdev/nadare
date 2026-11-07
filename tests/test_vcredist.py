@@ -41,11 +41,18 @@ def _isolated_index(tmp_path, monkeypatch):
     monkeypatch.setenv("NADARE_INDEX_BASE", INDEX_BASE)
 
 
+def x64_dll(extra: bytes = b"") -> bytes:
+    """The smallest file the runtime check accepts as an x64 DLL."""
+    head = bytearray(b"MZ" + b"\0" * 0x3E)
+    head[0x3C:0x40] = (0x40).to_bytes(4, "little")
+    return bytes(head) + b"PE\0\0" + (0x8664).to_bytes(2, "little") + b"\0" * 20 + extra
+
+
 def _write_dlls(prefix: Path, *, native: bool = True) -> None:
     root = prefix / "drive_c/windows/system32"
     root.mkdir(parents=True, exist_ok=True)
     for name in ("vcruntime140.dll", "msvcp140.dll"):
-        (root / name).write_bytes(b"MZ-native" if native else BUILTIN)
+        (root / name).write_bytes(x64_dll(b"native") if native else BUILTIN)
 
 
 class _BytesResp:
@@ -105,7 +112,7 @@ class TestInstalled:
     def test_marker_beyond_the_first_4096_bytes_is_ignored(self, tmp_path):
         root = tmp_path / "drive_c/windows/system32"
         root.mkdir(parents=True, exist_ok=True)
-        late = b"MZ" + b"\x00" * 5000 + b"Wine builtin DLL"
+        late = x64_dll(b"\x00" * 5000 + b"Wine builtin DLL")
         for name in ("vcruntime140.dll", "msvcp140.dll"):
             (root / name).write_bytes(late)
         assert vcredist.installed(tmp_path) is True
@@ -125,9 +132,7 @@ class TestPins:
         assert pin == digest
 
     def test_profile_beats_constant(self):
-        pin = vcredist.resolve_pin(
-            {"vcredist_sha256": "b" * 64}, constant="c" * 64, environ={}
-        )
+        pin = vcredist.resolve_pin({"vcredist_sha256": "b" * 64}, constant="c" * 64, environ={})
         assert pin == "b" * 64
 
     def test_constant_is_the_fallback(self):
@@ -135,9 +140,7 @@ class TestPins:
 
     def test_whitespace_falls_through(self):
         assert (
-            vcredist.resolve_pin(
-                {"vcredist_sha256": "   "}, constant="c" * 64, environ={}
-            )
+            vcredist.resolve_pin({"vcredist_sha256": "   "}, constant="c" * 64, environ={})
             == "c" * 64
         )
 
@@ -284,9 +287,7 @@ class TestEnsure:
         assert not any(e.kind == "status" and "skipped it" in e.message for e in events)
 
     def test_hash_mismatch_warns_and_never_runs(self, tmp_path, monkeypatch):
-        ran, events = self._ensure(
-            tmp_path, monkeypatch, b"MZ-tampered", 0, constant="0" * 64
-        )
+        ran, events = self._ensure(tmp_path, monkeypatch, b"MZ-tampered", 0, constant="0" * 64)
         assert ran == []
         assert not (tmp_path / "cache" / "vc_redist.x64.exe").exists()
         assert any(
@@ -312,9 +313,7 @@ class TestEnsure:
         assert any(e.kind == "status" and "skipped it" in e.message for e in events)
 
     def test_exactly_one_status_event_on_failure(self, tmp_path, monkeypatch):
-        _ran, events = self._ensure(
-            tmp_path, monkeypatch, b"MZ-tampered", 0, constant="0" * 64
-        )
+        _ran, events = self._ensure(tmp_path, monkeypatch, b"MZ-tampered", 0, constant="0" * 64)
         assert sum(1 for e in events if e.kind == "status") == 1
 
     def test_cancellation_propagates(self, tmp_path):
@@ -446,3 +445,50 @@ def test_a_successful_install_clears_the_failure_marker(tmp_path):
 
     _ensure(prefix, good, [])
     assert not marker.exists()
+
+
+class TestInstalledNeedsRealDlls:
+    """A file that cannot load is not a runtime (#903)."""
+
+    def _put(self, prefix, data: bytes) -> None:
+        root = prefix / "drive_c/windows/system32"
+        root.mkdir(parents=True, exist_ok=True)
+        for name in ("vcruntime140.dll", "msvcp140.dll"):
+            (root / name).write_bytes(data)
+
+    def test_an_empty_file_is_not_installed(self, tmp_path):
+        self._put(tmp_path, b"")
+        assert vcredist.installed(tmp_path) is False
+
+    def test_a_truncated_file_is_not_installed(self, tmp_path):
+        self._put(tmp_path, b"MZ")
+        assert vcredist.installed(tmp_path) is False
+
+    def test_not_a_pe_file_is_not_installed(self, tmp_path):
+        self._put(tmp_path, b"hello" * 100)
+        assert vcredist.installed(tmp_path) is False
+
+    def test_a_32_bit_dll_is_not_installed(self, tmp_path):
+        data = bytearray(x64_dll())
+        data[0x44:0x46] = (0x14C).to_bytes(2, "little")
+        self._put(tmp_path, bytes(data))
+        assert vcredist.installed(tmp_path) is False
+
+    def test_a_real_x64_dll_is_installed(self, tmp_path):
+        self._put(tmp_path, x64_dll(b"runtime" * 100))
+        assert vcredist.installed(tmp_path) is True
+
+    def test_ensure_runs_the_install_for_an_empty_runtime(self, tmp_path):
+        prefix = tmp_path / "prefix"
+        self._put(prefix, b"")
+        ran = []
+        vcredist.ensure(
+            prefix,
+            profile={},
+            cache_dir=tmp_path / "cache",
+            run_in_prefix=lambda argv: 0,
+            emit=lambda _e: None,
+            cancel=SimpleNamespace(cancelled=False),
+            install_fn=lambda *a, **k: ran.append(1),
+        )
+        assert ran == [1]

@@ -17,7 +17,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from . import events, paths, process
+from . import events, paths, process, runlog
 
 MAX_REPORT_BYTES = 300_000
 STUB_PREBUILT_SHA256 = "fe4a5bad970750e974cf999e31e3b87132fbb25f9c04c9eea69e3acc2e243185"
@@ -93,12 +93,40 @@ def _command(runner: Callable[..., Any], args: list[str], *, timeout: float = 3)
         return f"unavailable: {exc}"
 
 
+#: Most bytes of a log read for the report: the newest 200 lines fit easily; a log of any size
+#: is never loaded whole (#858).
+_TAIL_BYTES = 256 * 1024
+
+
 def _tail(path: Path, lines: int = 200) -> str:
     try:
-        data = path.read_bytes().decode("utf-8", errors="replace")
-        return events.mask("\n".join(data.splitlines()[-lines:])) or "(empty)"
+        with path.open("rb") as handle:
+            size = handle.seek(0, 2)
+            start = max(0, size - _TAIL_BYTES)
+            handle.seek(start)
+            data = handle.read(_TAIL_BYTES + 1)
+        if start:
+            # Began in the middle of a line: that first piece is not a whole line.
+            cut = data.find(b"\n")
+            data = data[cut + 1 :] if cut >= 0 else b""
+        text = data.decode("utf-8", errors="replace")
+        return events.mask("\n".join(text.splitlines()[-lines:])) or "(empty)"
     except OSError as exc:
         return f"unavailable: {exc}"
+
+
+def _newest_runs(folder: Path, limit: int = 8) -> list[Path]:
+    """The newest run of each operation in a game's log folder (not the background file)."""
+    newest: dict[str, Path] = {}
+    try:
+        files = [p for p in folder.iterdir() if p.is_file()]
+    except OSError:
+        return []
+    for path in sorted(files, key=runlog.run_order):
+        operation = runlog.operation_of(path)
+        if operation is not None and operation != "background":
+            newest[operation] = path  # in time order, so the last one wins
+    return sorted(newest.values(), key=runlog.run_order, reverse=True)[:limit]
 
 
 def build_report(
@@ -183,9 +211,13 @@ def build_report(
             f"Installed version: {profile.get('version') or 'unknown'}",
             f"Runner: {profile.get('runner') or 'unknown'}",
         ]
-        for label, folder in (("game", game_dir), ("prefix", profiles / name), ("logs", logs)):
+        configured = profile.get("prefix") or profile.get("wineprefix")
+        prefix_dir = Path(os.path.expanduser(str(configured))) if configured else profiles / name
+        for label, folder in (("game", game_dir), ("prefix", prefix_dir), ("logs", logs)):
             try:
-                free = shutil.disk_usage(folder if folder.exists() else folder.parent).free
+                while not folder.exists() and folder != folder.parent:
+                    folder = folder.parent  # the nearest folder that exists
+                free = shutil.disk_usage(folder).free
                 lines.append(f"Free disk ({label}): {free} bytes")
             except OSError as exc:
                 lines.append(f"Free disk ({label}): unavailable: {exc}")
@@ -207,19 +239,9 @@ def build_report(
                     lines.append("CZN stub banner: unavailable")
             except OSError as exc:
                 lines.append(f"CZN stub: unavailable: {exc}")
-        if game_dir.is_dir():
-            for candidate in game_dir.rglob("*"):
-                if candidate.is_file() and (
-                    "cheat" in candidate.name.lower() or candidate.name.lower().startswith("ucld")
-                ):
-                    try:
-                        lines.append(f"Game file: {candidate.name} size={candidate.stat().st_size}")
-                    except OSError:
-                        pass
-                elif candidate.is_dir() and (
-                    "crashpad" in candidate.name.lower() or "dump" in candidate.name.lower()
-                ):
-                    lines.append(f"Game dump folder: {candidate.name}")
+        # Only a folder the profile names: an empty install_dir is Path(""), the current folder.
+        if str(profile.get("install_dir") or "").strip():
+            lines += _game_folder_notes(game_dir)
     lines += ["", "## Logs"]
     log_files = (
         sorted(
@@ -242,9 +264,17 @@ def build_report(
             )
         ):
             lines += [f"### {path.name}", _tail(path)]
+    own_folder = runlog.game_id(name) if name else ""
+    for path in _newest_runs(logs / own_folder) if own_folder else []:
+        lines += [f"### {own_folder}/{path.name}", _tail(path)]
     try:
         for path in sorted(logs.iterdir(), key=lambda p: p.name):
-            if path not in log_files:
+            if path.is_dir():
+                if path.name != own_folder:
+                    files = [f for f in path.iterdir() if f.is_file()]
+                    total = sum(f.stat().st_size for f in files)
+                    lines.append(f"Other: {path.name}/ files={len(files)} size={total}")
+            elif path not in log_files:
                 stat = path.stat()
                 lines.append(f"Other: {path.name} size={stat.st_size} mtime={stat.st_mtime}")
     except OSError:
@@ -303,6 +333,31 @@ def _detect_virtualisation(runner: Callable[..., Any], proc: Path, sys_root: Pat
 _DROP = object()
 
 
+def _game_folder_notes(game_dir: Path) -> list[str]:
+    """Anti-cheat files and crash-dump folders inside the game folder, for the report.
+
+    Folders that cannot be read (container storage, permissions) are skipped, never fatal."""
+    notes: list[str] = []
+    try:
+        if not game_dir.is_dir():
+            return notes
+    except OSError:
+        return notes
+    for root, dirs, files in os.walk(game_dir, onerror=lambda _exc: None):
+        for name in files:
+            if "cheat" in name.lower() or name.lower().startswith("ucld"):
+                try:
+                    notes.append(
+                        f"Game file: {name} size={os.stat(os.path.join(root, name)).st_size}"
+                    )
+                except OSError:
+                    pass
+        for name in dirs:
+            if "crashpad" in name.lower() or "dump" in name.lower():
+                notes.append(f"Game dump folder: {name}")
+    return notes
+
+
 def _safe_setting(key: str, value: Any) -> Any:
     if events.is_secret_key(key) or key.lower() in {"extra_env", "cookies", "cookie"}:
         return _DROP
@@ -315,6 +370,8 @@ def _safe_setting(key: str, value: Any) -> Any:
         return result
     if isinstance(value, list):
         return [child for item in value if (child := _safe_setting("", item)) is not _DROP]
+    if isinstance(value, str):
+        value = events.mask_known(value)  # free-form text such as launch_args (#968)
     if isinstance(value, str) and ("/" in value or value.startswith("~")):
         return Path(value).name
     return value

@@ -235,3 +235,25 @@ def test_a_failed_copy_with_a_read_only_folder_leaves_no_partial_behind(
         assert not list(tmp_path.glob("*partial*"))
     finally:
         (src / "ro").chmod(0o755)
+
+
+def test_a_change_hidden_below_the_newest_timestamp_is_caught(tmp_path, cross_disk):
+    """#915: one same-size file rewritten with an mtime below another file's must not pass."""
+    src = _tree(tmp_path / "src")
+    big = src / "drive_c" / "Game" / "a.bin"
+    future = src / "future.bin"
+    future.write_bytes(b"f")
+    os.utime(future, (4_000_000_000, 4_000_000_000))  # the newest mtime in the tree
+    os.utime(big, (1_000_000, 1_000_000))
+    state = {"done": False}
+
+    def meddle(done, total):
+        if not state["done"]:
+            state["done"] = True
+            size = big.stat().st_size
+            big.write_bytes(b"b" * size)  # same size, new content, mtime still below future's
+            os.utime(big, (2_000_000, 2_000_000))
+
+    with pytest.raises(relocate.RelocateError, match="changed"):
+        relocate.move_tree(src, tmp_path / "dst", progress=meddle)
+    assert not (tmp_path / "dst").exists()

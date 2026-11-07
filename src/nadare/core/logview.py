@@ -17,7 +17,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import events, paths, report
+from . import events, paths, report, runlog
 
 #: The app's own rotating log and its numbered backups.
 _APP_LOG = re.compile(r"^nadare\.log(?:\.\d+)?$")
@@ -97,7 +97,39 @@ def list_logs(
                 stat.st_mtime,
             )
         )
+    found.extend(_game_folder_logs(entries, known, profile))
     found.sort(key=lambda item: item.mtime, reverse=True)
+    return found
+
+
+def _game_folder_logs(
+    entries: Iterable[Path], known: list[str], profile: str | None
+) -> list[LogFile]:
+    """The runs in ``<logs>/<game-id>/`` folders, each under the profile its id belongs to."""
+    by_id = {runlog.game_id(name): name for name in known}
+    found: list[LogFile] = []
+    for folder in entries:
+        try:
+            if not folder.is_dir():
+                continue
+            files = list(folder.iterdir())
+        except OSError:
+            continue
+        owner = by_id.get(folder.name, folder.name)  # a removed game keeps its folder id
+        if profile is not None and owner != profile:
+            continue
+        for path in files:
+            operation = runlog.operation_of(path)
+            if operation is None:
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if not path.is_file():
+                continue
+            label = f"{owner} · {operation}"
+            found.append(LogFile(path, label, owner, operation, stat.st_size, stat.st_mtime))
     return found
 
 
@@ -226,10 +258,10 @@ def bundle(
 ) -> int:
     """Write every listed log (see :func:`list_logs`) into one zip at ``dest``.
 
-    Returns how many logs went in. Names are flat (a log's file name), each log is cut to its
-    end and, with ``redact``, has the username, paths and addresses hidden. A ``README.txt``
-    says what the bundle holds. The zip is written beside ``dest`` and moved into place, so a
-    failure leaves no partial file.
+    Returns how many logs went in. Runs keep their game folder in the zip (old flat logs stay
+    flat), each log is cut to its end and, with ``redact``, has the username, paths and
+    addresses hidden. A ``README.txt`` says what the bundle holds. The zip is written beside
+    ``dest`` and moved into place, so a failure leaves no partial file.
     """
     import tempfile
     import zipfile
@@ -238,6 +270,7 @@ def bundle(
     from .. import __version__
 
     target = Path(dest)
+    base = Path(directory) if directory is not None else paths.logs_dir()
     logs = list_logs(profiles, directory, profile=profile)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=target.name + ".", suffix=".tmp", dir=target.parent)
@@ -246,9 +279,25 @@ def bundle(
     try:
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
             count = 0
+            used: set[str] = set()
             for log in logs:
                 text = read_tail(log.path, max_bytes_per_file)
-                zf.writestr(log.path.name, redacted(text) if redact else text)
+                try:  # a run keeps its game folder, so two games' "launch-...log" never collide
+                    arcname = log.path.relative_to(base).as_posix()
+                except ValueError:
+                    arcname = log.path.name
+                if redact:
+                    # A profile name can be an address or a username (#914): hide it in the
+                    # entry name too, and keep two names that hide to the same text apart.
+                    arcname = redacted(arcname)
+                    stem, dot, suffix = arcname.rpartition(".")
+                    unique, number = arcname, 1
+                    while unique in used or unique == "README.txt":
+                        number += 1
+                        unique = f"{stem}-{number}{dot}{suffix}" if dot else f"{arcname}-{number}"
+                    arcname = unique
+                used.add(arcname)
+                zf.writestr(arcname, redacted(text) if redact else text)
                 count += 1
             hidden = (
                 "Your username, home path, host name and public addresses are hidden."
@@ -256,12 +305,13 @@ def bundle(
                 else "Your username and paths are NOT hidden: check before you share it."
             )
             noun = "log file" if count == 1 else "log files"
+            shown = (redacted(profile) if redact else profile) if profile else ""
             readme = (
                 f"Nadare log bundle\n"
                 f"Created: {datetime.now().astimezone().isoformat(timespec='seconds')}\n"
                 f"Nadare version: {__version__}\n"
                 f"{count} {noun}"
-                f"{f' for {profile}' if profile else ''}, each cut to its last "
+                f"{f' for {shown}' if shown else ''}, each cut to its last "
                 f"{max_bytes_per_file // 1024} KiB.\n"
                 f"{hidden}\n"
             )

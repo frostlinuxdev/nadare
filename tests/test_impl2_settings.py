@@ -89,6 +89,7 @@ def test_option_help_is_visible_text_not_only_a_tooltip(tmp_path, qapp):
     page = SettingsPage()
     try:
         page.load(config, "sample")
+        page.show_advanced.setChecked(True)  # Display backend is an advanced option
         display = next(o for o in get("stove-czn").options if o.key == "display")
         labels = [label for label in page.findChildren(QLabel) if label.text() == display.help]
         assert labels, "the NVIDIA/X11 warning must be shown as text"

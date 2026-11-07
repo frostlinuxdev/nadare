@@ -91,7 +91,7 @@ def test_settings_and_removal_name_the_game_not_its_profile_key(tmp_path, qapp, 
     page.load(config, "czn")
     try:
         assert page.heading.text() == "Settings — Chaos Zero Nightmare"
-        assert any(label.text() == "Profile ID" for label in page.findChildren(QLabel))
+        assert any(label.text() == "Game ID" for label in page.findChildren(QLabel))
     finally:
         page.deleteLater()
         qapp.processEvents()
@@ -185,7 +185,7 @@ def test_verify_is_called_check_game_files_and_failures_use_plain_words(
         window._on_result("czn", {"verified": False, "message": "one file is wrong"})
         assert shown[-1] == ("warning", "File check failed")
         window._on_result("czn", {"verified": True, "message": "all good"})
-        assert shown[-1] == ("info", "File check")
+        assert shown[-1] == ("info", "Check game files")
     finally:
         window.close()
         window.deleteLater()

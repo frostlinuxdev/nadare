@@ -280,7 +280,8 @@ def test_install_replaces_the_file_and_keeps_the_old_one(tmp_path):
     assert result.name == NAME and result.parent == tmp_path
     backup = tmp_path / (target.name + ".previous")
     assert backup.read_bytes() == b"old"
-    assert not target.exists()  # the old name is gone: the new file carries its own version
+    # the old name now leads to the new file, so a shortcut made with it keeps working (#869)
+    assert target.is_symlink() and target.read_bytes() == b"new-bytes"
     assert not new.exists()
 
 

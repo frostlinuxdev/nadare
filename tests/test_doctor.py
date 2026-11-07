@@ -277,3 +277,34 @@ def test_doctor_does_not_wait_for_a_dead_keyring(monkeypatch, capsys) -> None:
     release.set()
     assert time.monotonic() - started < 20
     assert "keyring: unavailable" in capsys.readouterr().out
+
+
+def test_doctor_says_whether_secure_mode_can_run(monkeypatch, capsys) -> None:
+    from nadare.core import gamesandbox
+
+    monkeypatch.setattr(graphics, "vulkan_info", lambda **k: graphics.VulkanInfo(False))
+    monkeypatch.setattr(runners, "all_runners", list)
+    monkeypatch.setattr(
+        gamesandbox, "locate", lambda: gamesandbox.Located("bwrap", "system", True)
+    )
+    run_cli(["doctor"])
+    assert "Sandbox: bubblewrap found (the system's copy: bwrap)" in capsys.readouterr().out
+
+    srt = "/home/u/.local/share/umu/steamrt4/pressure-vessel/libexec/x/srt-bwrap"
+    monkeypatch.setattr(
+        gamesandbox, "locate", lambda: gamesandbox.Located(srt, "runtime", True)
+    )
+    run_cli(["doctor"])
+    assert f"the game runtime's copy: {srt}" in capsys.readouterr().out
+
+    monkeypatch.setattr(
+        gamesandbox,
+        "locate",
+        lambda: gamesandbox.Located(None, "", True, "setting up uid map: Permission denied"),
+    )
+    run_cli(["doctor"])
+    assert "cannot start here (setting up uid map" in capsys.readouterr().out
+
+    monkeypatch.setattr(gamesandbox, "locate", lambda: gamesandbox.Located(None))
+    run_cli(["doctor"])
+    assert "bubblewrap is not installed and no game runtime yet" in capsys.readouterr().out

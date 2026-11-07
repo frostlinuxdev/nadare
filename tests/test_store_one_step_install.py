@@ -205,7 +205,7 @@ def test_I_already_have_it_opens_the_full_dialog_and_creates_nothing(
     monkeypatch.setattr(QuickInstallDialog, "exec", press_import)
     try:
         window._store_install(KIND)
-        assert opened == [{"kind": KIND}]
+        assert opened == [{"kind": KIND, "importing": True}]
         assert cfg.profiles == {} and started == []
     finally:
         window.close()
@@ -243,5 +243,30 @@ def test_the_store_install_button_goes_to_the_one_step_path(tmp_path, qapp, monk
     try:
         window.store.install_requested.emit(KIND)
         assert seen == [KIND]
+    finally:
+        window.close()
+
+
+def test_i_already_have_it_opens_the_full_dialog_in_import_mode(tmp_path, qapp, monkeypatch):
+    from nadare.gui.add_game import AddGameDialog
+
+    window, cfg, started, shown, _ = _window(tmp_path, monkeypatch, acked=[KIND])
+
+    def ask_to_import(self):
+        self.import_requested = True
+        return QDialog.DialogCode.Rejected
+
+    modes = []
+
+    def fake_full_dialog(self):
+        modes.append((self.selected_kind(), self.import_existing.isChecked()))
+        return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(QuickInstallDialog, "exec", ask_to_import)
+    monkeypatch.setattr(AddGameDialog, "exec", fake_full_dialog)
+    try:
+        window._store_install(KIND)
+        assert modes == [(KIND, True)]  # the user already said "import": do not ask again
+        assert not cfg.profiles
     finally:
         window.close()

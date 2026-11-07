@@ -57,6 +57,11 @@ SYSTEM_WINE = "System Wine"
 #: ``(min, max)`` for ``int`` options that need a tighter bound than the default.
 INT_RANGES: dict[str, tuple[int, int]] = {"download_workers": (1, 16)}
 DEFAULT_INT_RANGE = (0, 999999)
+#: Options every game page lists but only people who know what they do should touch:
+#: shown under "Show advanced options", whatever the backend says.
+GAME_SUBTITLE = "How this game is installed, launched and displayed."
+APP_SUBTITLE = "Settings that belong to Nadare itself and apply to every game."
+PLAYER_ADVANCED = frozenset({"renderer", "display", "launch_args"})
 
 #: Old beta keys mapped to the canonical field that now owns their value.
 LEGACY_PROFILE_KEYS = {"runner": "proton_runner", "prefix": "wineprefix"}
@@ -250,6 +255,7 @@ class SettingsPage(QWidget):
         self._fetch_button: QPushButton | None = None
         self._pending_art: dict[str, str] = {}
         self._loaded_state: dict[str, Any] | None = None
+        self._app_only = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(32, 24, 32, 28)
@@ -271,9 +277,9 @@ class SettingsPage(QWidget):
         self.heading = QLabel("Settings")
         self.heading.setObjectName("Title")
         intro.addWidget(self.heading)
-        subtitle = QLabel("How this profile is installed, launched and displayed.")
-        subtitle.setObjectName("Subtitle")
-        intro.addWidget(subtitle)
+        self.subtitle = QLabel(GAME_SUBTITLE)
+        self.subtitle.setObjectName("Subtitle")
+        intro.addWidget(self.subtitle)
         root.addLayout(intro)
 
         # One tab per area. Each tab scrolls on its own so the cards never clip on short displays.
@@ -283,10 +289,11 @@ class SettingsPage(QWidget):
         general_layout = self._tab_page("General")
         game_layout = self._tab_page("Game")
         launcher_tab_layout = self._tab_page("Nadare (all games)")
+        self._app_tab = self.tabs.count() - 1
 
         # ---- profile --------------------------------------------------------
         profile_card, profile_form = self._section(
-            "Profile", "Basic identity. The backend is fixed when the game is added."
+            "Game", "Basic identity. The game type is fixed when the game is added."
         )
         self.profile_name = QLineEdit()
         self.profile_name.setReadOnly(True)
@@ -295,8 +302,8 @@ class SettingsPage(QWidget):
         # The backend is chosen once, in Add game. Switching it afterwards would
         # point the game's existing prefix and files at the wrong driver.
         self._backend_kind = ""
-        profile_form.addRow("Profile ID", self.profile_name)
-        profile_form.addRow("Title", self.title)
+        profile_form.addRow("Game ID", self.profile_name)
+        profile_form.addRow("Game name", self.title)
         general_layout.addWidget(profile_card)
 
         # ---- account --------------------------------------------------------
@@ -418,9 +425,22 @@ class SettingsPage(QWidget):
             self.language.addItem(LANGUAGE_NAMES.get(code, code), code)
         self.language_label = QLabel("Language")
         self.check_updates = QCheckBox("Check for launcher and game updates")
+        self.check_notices = QCheckBox("Show safety and service notices")
+        self.check_notices.setToolTip(
+            "Nadare reads a small public notices file at start-up, for example a safety "
+            "warning about a game launcher. It sends nothing about you. Leave this on "
+            "unless you are offline on purpose."
+        )
+        self.notify_when_done = QCheckBox("Tell me when an install or update finishes")
+        self.notify_when_done.setToolTip(
+            "Shows a desktop notification when an install, update or repair ends while Nadare "
+            "is in the background. It needs a desktop that shows notifications."
+        )
         self.hide_uninstalled = QCheckBox("Hide games that are not installed in the sidebar")
         launcher_form.addRow(self.language_label, self.language)
         launcher_form.addRow("", self.check_updates)
+        launcher_form.addRow("", self.check_notices)
+        launcher_form.addRow("", self.notify_when_done)
         launcher_form.addRow("", self.hide_uninstalled)
         self.default_monitor = QComboBox()
         self.default_monitor.setToolTip(
@@ -479,7 +499,7 @@ class SettingsPage(QWidget):
         self.report_button.setObjectName("GhostButton")
         self.report_button.clicked.connect(lambda: self.report_requested.emit(self._profile))
         footer.addWidget(self.report_button)
-        self.logs_button = QPushButton("View logs")
+        self.logs_button = QPushButton("Open logs")
         self.logs_button.setObjectName("GhostButton")
         self.logs_button.clicked.connect(lambda: self.logs_requested.emit(self._profile))
         footer.addWidget(self.logs_button)
@@ -546,19 +566,26 @@ class SettingsPage(QWidget):
             return
         self._open_path(str(self._config.path), "config file")
 
+    def confirm_leave(self) -> bool:
+        """True when it is fine to leave: nothing unsaved, or the user agreed to discard it."""
+        if not self._has_unsaved_changes():
+            return True
+        answer = QMessageBox.question(
+            self,
+            "Discard changes",
+            "Discard your changes?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        self._loaded_state = self._form_state()  # discarded: the form no longer counts as edited
+        return True
+
     def _request_back(self) -> None:
         """Leave Settings, asking first when the form has unsaved edits."""
-        if self._has_unsaved_changes():
-            answer = QMessageBox.question(
-                self,
-                "Discard changes",
-                "Discard your changes?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-        self.cancelled.emit()
+        if self.confirm_leave():
+            self.cancelled.emit()
 
     def _form_state(self) -> dict[str, Any]:
         """The form's current values, for comparing against the loaded ones."""
@@ -568,6 +595,8 @@ class SettingsPage(QWidget):
             "remember": self.remember.isChecked(),
             "language": self.language.currentData(),
             "check_updates": self.check_updates.isChecked(),
+            "check_notices": self.check_notices.isChecked(),
+            "notify_when_done": self.notify_when_done.isChecked(),
             "hide_uninstalled": self.hide_uninstalled.isChecked(),
             "default_monitor": self.default_monitor.currentData(),
         }
@@ -831,7 +860,9 @@ class SettingsPage(QWidget):
             if option.help and not option.advanced:
                 row_widget = self._with_help(option, row_widget)
             form.addRow(label, row_widget)
-            self._option_rows.append((option.advanced, form.rowCount() - 1))
+            self._option_rows.append(
+                (option.advanced or option.key in PLAYER_ADVANCED, form.rowCount() - 1)
+            )
         self.open_game_button.setVisible(has_install_dir)
         self.open_prefix_button.setVisible(any(option.key == "prefix" for option in options))
         self._apply_advanced(self.show_advanced.isChecked())
@@ -844,6 +875,8 @@ class SettingsPage(QWidget):
             editor = self._option_widgets.get(option.key)
             if editor is None:
                 continue
+            if option.key == "prefix" and getattr(editor, "isReadOnly", lambda: False)():
+                continue  # locked for an installed game: clearing it would repoint the game
             kind = option.kind
             if kind == "choice":
                 index = editor.findData(option.default)
@@ -956,8 +989,8 @@ class SettingsPage(QWidget):
     #: Shown under the locked prefix field (the note is reworded while a check is pending/failed).
     _LOCKED_NOTE = (
         "The game is installed, so this location is locked. Editing it here would make "
-        "the game unfindable. Use 'Move to another folder' to relocate it, or 'I moved it "
-        "myself' if you already did."
+        "Nadare would no longer find the game. Use the Move button to relocate it, or "
+        "'I moved it myself' if you already did."
     )
 
     def _refresh_prefix_lock(self, has_wine_prefix: bool) -> None:
@@ -1206,6 +1239,13 @@ class SettingsPage(QWidget):
             self.saved.emit(name)
         return True
 
+    def show_move_section(self) -> None:
+        """Switch to the tab that holds the Move button."""
+        for index in range(self.tabs.count()):
+            if self.tabs.widget(index).isAncestorOf(self.move_button):
+                self.tabs.setCurrentIndex(index)
+                return
+
     def _make_move_button(self) -> QPushButton:
         button = QPushButton("Move to another folder…")
         button.setAutoDefault(False)
@@ -1272,7 +1312,7 @@ class SettingsPage(QWidget):
             )
             return False
         try:
-            relink_core.check_movable(data)
+            relink_core.check_movable(data, name=name, profiles=config.profiles)
         except relink_core.RelinkError as exc:
             QMessageBox.warning(self, "Wine prefix", str(exc))
             return False
@@ -1638,6 +1678,7 @@ class SettingsPage(QWidget):
         """Populate the form from ``config`` for ``profile``."""
         self._config = config
         self._profile = profile
+        self._set_app_only(False)
         self._pending_art = {}
         self.tabs.setCurrentIndex(0)
         data = config.profile(profile)
@@ -1670,17 +1711,79 @@ class SettingsPage(QWidget):
         self.account_card.setVisible(supported)
         self.remember.setChecked(bool(data.get("remember_me", False)))
 
+        self._load_app_values(config)
+        self.note.setText(f"Saved in {config.path}")
+        self._loaded_state = self._form_state()
+
+    def _load_app_values(self, config: Config) -> None:
+        """Fill the controls that belong to Nadare itself, not to one game."""
         language = str(config.data.get("language") or i18n.DEFAULT_LANGUAGE)
         lang_index = self.language.findData(language)
         self.language.setCurrentIndex(lang_index if lang_index >= 0 else 0)
         self.check_updates.setChecked(bool(config.data.get("check_updates", True)))
+        self.check_notices.setChecked(bool(config.data.get("check_notices", True)))
+        self.notify_when_done.setChecked(bool(config.data.get("notify_when_done", True)))
         self.hide_uninstalled.setChecked(bool(config.data.get("sidebar_hide_uninstalled", False)))
         saved_monitor = config.data.get("default_monitor")
         _fill_monitor_combo(self.default_monitor, saved_monitor)
         monitor_index = self.default_monitor.findData(str(saved_monitor or ""))
         self.default_monitor.setCurrentIndex(monitor_index if monitor_index >= 0 else 0)
+
+    def _set_app_only(self, app_only: bool) -> None:
+        self._app_only = app_only
+        self.subtitle.setText(APP_SUBTITLE if app_only else GAME_SUBTITLE)
+        for index in range(self.tabs.count()):
+            self.tabs.setTabVisible(index, not app_only or index == self._app_tab)
+        for button in (self.remove_button, self.report_button, self.logs_button):
+            button.setVisible(not app_only)
+
+    def load_app_only(self, config: Config) -> None:
+        """Show only Nadare's own settings, for when no game is open."""
+        self._config = config
+        self._profile = ""
+        self._set_app_only(True)
+        self._pending_art = {}
+        self.tabs.setCurrentIndex(self._app_tab)
+        self.heading.setText("Nadare settings")
+        self._load_app_values(config)
         self.note.setText(f"Saved in {config.path}")
         self._loaded_state = self._form_state()
+
+    def _save_app_only(self) -> None:
+        config = self._config
+        keys = (
+            "language",
+            "check_updates",
+            "check_notices",
+            "notify_when_done",
+            "sidebar_hide_uninstalled",
+            "default_monitor",
+        )
+        try:
+            with config.locked():
+                backup = {key: config.data.get(key) for key in keys}
+                config.data["language"] = self.language.currentData() or i18n.DEFAULT_LANGUAGE
+                config.data["check_updates"] = bool(self.check_updates.isChecked())
+                config.data["check_notices"] = bool(self.check_notices.isChecked())
+                config.data["notify_when_done"] = bool(self.notify_when_done.isChecked())
+                config.data["sidebar_hide_uninstalled"] = bool(self.hide_uninstalled.isChecked())
+                if self.default_monitor.currentData():
+                    config.data["default_monitor"] = self.default_monitor.currentData()
+                else:
+                    config.data.pop("default_monitor", None)
+                config.save()
+        except OSError as exc:
+            with config.locked():
+                for key, old in backup.items():
+                    if old is None:
+                        config.data.pop(key, None)
+                    else:
+                        config.data[key] = old
+            QMessageBox.critical(self, "Settings", f"Could not save config: {exc}")
+            return
+        i18n.set_language(config.data["language"])
+        self._loaded_state = self._form_state()
+        self.saved.emit("")
 
     def _confirm_environment(self, data: dict[str, Any]) -> bool:
         """Ask before saving a changed, non-empty Environment; True means go ahead.
@@ -1705,7 +1808,34 @@ class SettingsPage(QWidget):
         )
         return answer == QMessageBox.StandardButton.Yes
 
+    def _unsafe_folder_message(self, data: dict[str, Any]) -> str:
+        """Why a changed Wine prefix or game folder cannot be saved, or ``""`` (#851).
+
+        Only a value the user just changed is judged, so a folder saved earlier does not block
+        saving other settings.
+        """
+        from ..core import prefixguard
+
+        for key in ("prefix", "wineprefix", "install_dir"):
+            editor = self._option_widgets.get(key)
+            if editor is None or not hasattr(editor, "text"):
+                continue
+            value = editor.text().strip()
+            if not value or value == str(data.get(key) or "").strip():
+                continue
+            reason = prefixguard.unsafe_reason(
+                value,
+                profiles=self._config.profiles if self._config is not None else None,
+                own=self._profile,
+            )
+            if reason:
+                return prefixguard.explain(value, reason)
+        return ""
+
     def save(self) -> None:
+        if self._config is not None and self._app_only:
+            self._save_app_only()
+            return
         if self._config is None or not self._profile:
             self.cancelled.emit()
             return
@@ -1724,6 +1854,11 @@ class SettingsPage(QWidget):
                 f"{backend!r} is not a backend this build knows, so this game's "
                 "settings cannot be saved.",
             )
+            return
+
+        refusal = self._unsafe_folder_message(data)
+        if refusal:
+            QMessageBox.critical(self, "Settings", refusal)
             return
 
         runner_text = self.runner.currentText().strip()
@@ -1747,7 +1882,10 @@ class SettingsPage(QWidget):
                 _copy.deepcopy(data),
                 config.data.get("language"),
                 config.data.get("check_updates"),
+                config.data.get("check_notices"),
+                config.data.get("notify_when_done"),
                 config.data.get("sidebar_hide_uninstalled"),
+                config.data.get("default_monitor"),
             )
         warnings: list[str] = []
         custom_runner = not (
@@ -1803,6 +1941,8 @@ class SettingsPage(QWidget):
                     self.language.currentData() or i18n.DEFAULT_LANGUAGE
                 )
                 config.data["check_updates"] = bool(self.check_updates.isChecked())
+                config.data["check_notices"] = bool(self.check_notices.isChecked())
+                config.data["notify_when_done"] = bool(self.notify_when_done.isChecked())
                 config.data["sidebar_hide_uninstalled"] = bool(self.hide_uninstalled.isChecked())
                 if self.default_monitor.currentData():
                     config.data["default_monitor"] = self.default_monitor.currentData()
@@ -1816,7 +1956,14 @@ class SettingsPage(QWidget):
                 data.clear()
                 data.update(backup[0])
                 for key, old in zip(
-                    ("language", "check_updates", "sidebar_hide_uninstalled"),
+                    (
+                        "language",
+                        "check_updates",
+                        "check_notices",
+                        "notify_when_done",
+                        "sidebar_hide_uninstalled",
+                        "default_monitor",
+                    ),
                     backup[1:],
                     strict=True,
                 ):

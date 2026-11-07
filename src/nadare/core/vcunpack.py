@@ -141,7 +141,7 @@ def _collect(
     return found
 
 
-def _is_x64_pe(path: Path) -> bool:
+def is_x64_pe(path: Path) -> bool:
     try:
         if path.stat().st_size > _MAX_DLL_BYTES:
             return False
@@ -203,15 +203,15 @@ def unpack(
             if name not in found:
                 raise UnpackError(f"{name} was not found inside {installer.name}")
         for name, path in found.items():
-            if not _is_x64_pe(path):
+            if not is_x64_pe(path):
                 raise UnpackError(f"{name} in {installer.name} is not an x64 Windows DLL")
         copied: list[str] = []
         for name in RUNTIME_DLLS:
             if name not in found:
                 continue
             dest = system32 / name
-            if dest.exists() and not _is_placeholder(dest):
-                continue
+            if dest.exists() and not _is_placeholder(dest) and is_x64_pe(dest):
+                continue  # a real runtime DLL; an empty or damaged one is replaced (#903)
             try:
                 _place(found[name], dest)
             except OSError as exc:

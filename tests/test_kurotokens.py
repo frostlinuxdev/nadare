@@ -171,7 +171,7 @@ def test_published_token_is_tried_before_the_builtin(monkeypatch):
         return routes[url]
 
     monkeypatch.setattr(kurosrc, "default_fetch", fake_fetch)
-    plan = wuwa.resolve()
+    plan = wuwa.resolve_legacy()
     assert calls[:2] == [new_url, wuwa.INDEX_URL]
     assert plan.version == cfg["version"]
 
@@ -185,7 +185,7 @@ def test_an_explicit_token_is_the_only_candidate():
         raise dd.DirectError("HTTP 403 for " + url)
 
     with pytest.raises(dd.DirectError):
-        wuwa.resolve(fake_fetch, token=token)
+        wuwa.resolve_legacy(fake_fetch, token=token)
     assert calls == [
         "https://prod-alicdn-gamestarter.kurogame.com/launcher/game/G153/"
         f"50004_{token}/index.json"
@@ -198,7 +198,7 @@ def test_an_injected_fetch_never_reads_the_published_tokens(monkeypatch):
 
     monkeypatch.setattr(kurotokens, "published", published)
     routes, _root, _cfg = _wuwa_routes(wuwa.INDEX_URL)
-    assert wuwa.resolve(FakeFetch(routes)).game_tag == "wuwa"
+    assert wuwa.resolve_legacy(FakeFetch(routes)).game_tag == "wuwa"
 
 
 def test_a_rotation_inside_the_cache_lifetime_is_picked_up_by_one_forced_refresh(monkeypatch):
@@ -225,7 +225,7 @@ def test_a_rotation_inside_the_cache_lifetime_is_picked_up_by_one_forced_refresh
         raise dd.DirectError("HTTP 403 for " + u)
 
     monkeypatch.setattr(kurosrc, "default_fetch", fake_fetch)
-    plan = wuwa.resolve()
+    plan = wuwa.resolve_legacy()
     assert plan.version == cfg["version"]
     assert seen == [False, True]
     assert calls[:3] == [url(old), wuwa.INDEX_URL, url(new)]
@@ -241,4 +241,4 @@ def test_no_refresh_is_attempted_for_an_explicit_token(monkeypatch):
         raise dd.DirectError("HTTP 403 for " + u)
 
     with pytest.raises(dd.DirectError):
-        wuwa.resolve(fake_fetch, token="EXPLICITTOKEN123456")
+        wuwa.resolve_legacy(fake_fetch, token="EXPLICITTOKEN123456")

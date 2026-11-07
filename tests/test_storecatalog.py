@@ -34,8 +34,9 @@ def test_entries_cover_catalog_once_and_sort_verified_first() -> None:
         [entry.tier == TIER_VERIFIED for entry in result], reverse=True
     )
     for tier in (TIER_VERIFIED, TIER_EXPERIMENTAL):
-        titles = [entry.title for entry in result if entry.tier == tier]
-        assert titles == sorted(titles, key=str.casefold)
+        # Builds of one game sit together under the game's name; their order is declared.
+        names = [(entry.group or entry.title) for entry in result if entry.tier == tier]
+        assert names == sorted(names, key=str.casefold)
 
 
 def test_entries_hide_hoyo_when_configured(monkeypatch) -> None:

@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QMouseEvent
+from PyQt6.QtGui import QKeyEvent, QMouseEvent
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -27,6 +27,19 @@ from PyQt6.QtWidgets import (
 _KIND_LABELS = {"install": "Installing", "update": "Updating", "repair": "Repairing"}
 
 
+def downloads_label(active: int, paused: int) -> tuple[str, str]:
+    """``(text, tooltip)`` for the Downloads entry: running and waiting, and paused apart (#941)."""
+    if active and paused:
+        return f"Downloads ({active} · {paused} paused)", (
+            f"{active} downloading or waiting, {paused} paused"
+        )
+    if active:
+        return f"Downloads ({active})", f"{active} downloading or waiting"
+    if paused:
+        return f"Downloads ({paused} paused)", f"{paused} paused"
+    return "Downloads", ""
+
+
 @dataclass
 class DownloadRow:
     profile: str
@@ -39,6 +52,14 @@ class DownloadRow:
     ahead: int = 0  # waiting: how many waiting installs come first
     can_pause: bool = False  # running or waiting: the download resumes from what is on disk
     can_now: bool = False  # waiting: the running install can be paused to start this one
+
+
+_CANCEL_TIP = "Stop this download and take it off this list."
+#: A download that resumes from disk keeps its files when it is cancelled (#991).
+_CANCEL_KEEPS_TIP = (
+    "Stop this download and take it off this list. What is already downloaded stays on disk, "
+    "and the game page offers Resume."
+)
 
 
 def _button(text: str, tip: str) -> QPushButton:
@@ -58,6 +79,7 @@ class DownloadRowWidget(QFrame):
         super().__init__(parent)
         self.profile = profile
         self.setObjectName("Card")
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # Enter or Space opens the game page
         outer = QHBoxLayout(self)
         outer.setContentsMargins(16, 12, 16, 12)
         outer.setSpacing(12)
@@ -69,7 +91,10 @@ class DownloadRowWidget(QFrame):
         self.title_label = QLabel()
         self.title_label.setTextFormat(Qt.TextFormat.PlainText)
         self.title_label.setStyleSheet("font-weight: 700; font-size: 14px;")
-        head.addWidget(self.title_label)
+        # A long custom title is clipped (the full text is the tooltip), never the reason the
+        # row grows past the window and pushes its buttons out of sight (#855).
+        self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        head.addWidget(self.title_label, 1)
         self.kind_label = QLabel()
         self.kind_label.setObjectName("Muted")
         head.addWidget(self.kind_label)
@@ -106,7 +131,7 @@ class DownloadRowWidget(QFrame):
             "Pause the download that is running, start this one, and carry on with the other "
             "afterwards. Nothing already downloaded is lost.",
         )
-        self.cancel_btn = _button("Cancel", "Stop and forget this operation.")
+        self.cancel_btn = _button("Cancel", _CANCEL_TIP)
         for button in (
             self.pause_btn,
             self.resume_btn,
@@ -119,6 +144,8 @@ class DownloadRowWidget(QFrame):
 
     def apply(self, row: DownloadRow) -> None:
         self.title_label.setText(row.title)
+        self.title_label.setToolTip(row.title)
+        self.setAccessibleName(f"{row.title}: open the game page")
         self.kind_label.setText(_KIND_LABELS.get(row.operation, row.operation.capitalize()))
         running = row.state == "running"
         waiting = row.state == "waiting"
@@ -132,7 +159,7 @@ class DownloadRowWidget(QFrame):
                 noun = "install" if row.ahead == 1 else "installs"
                 self._set_status(f"Waiting · {row.ahead} {noun} ahead of this one")
         else:
-            self._set_status("Paused. What is already downloaded is kept.")
+            self._set_status("Paused. Everything downloaded so far is kept.")
         self.bar.setVisible(running)
         self.eta_label.setVisible(running)
         if running:
@@ -142,6 +169,7 @@ class DownloadRowWidget(QFrame):
         self.next_btn.setVisible(waiting and row.ahead > 0)
         self.now_btn.setVisible(waiting and row.can_now)
         self.cancel_btn.setVisible(True)
+        self.cancel_btn.setToolTip(_CANCEL_KEEPS_TIP if (row.can_pause or paused) else _CANCEL_TIP)
 
     def _set_status(self, text: str) -> None:
         self.status_label.setText(text)
@@ -161,6 +189,16 @@ class DownloadRowWidget(QFrame):
         if event is not None and event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
         super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent | None) -> None:  # noqa: N802 - Qt naming
+        if event is not None and event.key() in (
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Enter,
+            Qt.Key.Key_Space,
+        ):
+            self.clicked.emit()
+            return
+        super().keyPressEvent(event)
 
 
 class DownloadsPage(QWidget):

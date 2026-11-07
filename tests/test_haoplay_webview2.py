@@ -62,6 +62,7 @@ def test_webview2_installer_uses_haoplay_prefix_runner_and_xwayland(tmp_path, mo
     backend.ctx.profile["wineprefix"] = str(tmp_path / "legacy-prefix")
     installed = iter([False, True])  # before the installer, then after it ran
     monkeypatch.setattr(webview2, "installed", lambda prefix: next(installed))
+    monkeypatch.setattr(webview2, "registered", lambda prefix: True)
     monkeypatch.setattr(webview2, "resolve_pin", lambda profile, constant: "a" * 64)
     monkeypatch.setattr(czn_backend.graphics, "has_display", lambda: True)
     cache = tmp_path / "czn"

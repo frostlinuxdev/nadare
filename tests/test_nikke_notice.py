@@ -39,4 +39,4 @@ def test_the_notice_says_the_install_needs_no_window_and_that_play_opens_the_lau
 
 def test_the_notice_says_closing_the_window_only_hides_the_launcher():
     text = _notice()
-    assert "tray" in text and "press STOP" in text
+    assert "tray" in text and "x next to PLAYING" in text

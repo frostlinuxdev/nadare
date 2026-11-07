@@ -10,7 +10,9 @@ credential/session writers are covered without a network or a real STOVE login.
 from __future__ import annotations
 
 import json
+import os
 import stat
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1083,3 +1085,27 @@ def test_login_qr_without_image_but_with_url_emits_the_fallback(
     qr = next(fields for name, fields in events if name == "qr")
     assert qr["png"] is None
     assert qr["url"] == "https://stove.example/qr"
+
+
+def test_a_fresh_sign_in_replaces_the_previous_account_identity(authmod, monkeypatch):
+    """#913: a new STOVE account must not be saved under the old account's member number."""
+    data = {"code": 0, "value": {"access_token": "AT", "refresh_token": "RT", "member_no": 222}}
+    stove, _ = _stove(
+        authmod,
+        monkeypatch,
+        [FakeResponse(data)],
+        state={"member_no": "111", "guid": "G1"},
+    )
+    stove.signin_qr("sess")
+    stove._persist_launcher()
+    assert stove.member_no == "222"
+    assert stove.guid is None  # the old account's guid is not carried over
+    assert json.loads((authmod.STATE_FILE).read_text()).get("guid") in (None, "")
+    handoff = json.loads(Path(os.environ["CZN_CREDENTIAL_OUT"]).read_text())
+    assert handoff["member_no"] == "222"
+
+
+def test_a_refresh_keeps_the_known_identity(authmod, monkeypatch):
+    stove, _ = _stove(authmod, monkeypatch, state={"member_no": "111", "guid": "G1"})
+    stove._apply_signin({"code": 0, "value": {"access_token": "AT", "refresh_token": "RT"}})
+    assert stove.member_no == "111" and stove.guid == "G1"

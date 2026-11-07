@@ -265,8 +265,9 @@ def test_operation_logs_are_private(tmp_path, monkeypatch):
         handle.close()
     finally:
         os.umask(old)
-    mode = (tmp_path / "logs" / "p-install.log").stat().st_mode & 0o777
-    assert mode == 0o600
+    (written,) = (tmp_path / "logs" / "p").glob("install-*.log")
+    assert written.stat().st_mode & 0o777 == 0o600
+    assert (tmp_path / "logs" / "p").stat().st_mode & 0o777 == 0o700
 
 
 def test_the_gui_exits_cleanly_without_a_display(monkeypatch):
@@ -295,6 +296,7 @@ def test_operation_log_lines_are_masked(tmp_path, monkeypatch):
     workers.BackendWorker._note(holder, "[info] token=abcdef0123456789abcdef0123456789 ok")  # type: ignore[attr-defined]
     workers.BackendWorker._note(holder, "Authorization: Bearer abcdef0123456789abcdef01234567")  # type: ignore[attr-defined]
     holder._log.close()
-    text = (tmp_path / "logs" / "p-login.log").read_text(encoding="utf-8")
+    (written,) = (tmp_path / "logs" / "p").glob("login-*.log")
+    text = written.read_text(encoding="utf-8")
     assert "abcdef0123456789" not in text
     assert "ok" in text

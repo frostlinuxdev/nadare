@@ -16,6 +16,7 @@ def qapp():
     app = QApplication.instance() or QApplication([])
     yield app
 
+
 H = "===== 2026-10-26T10:00:0{n} launch (G) | nadare 0.1.0b12 =====\n"
 
 
@@ -115,3 +116,49 @@ def test_zip_button_saves_every_log_of_the_profile(qapp, logs, tmp_path, monkeyp
 def test_zip_button_is_disabled_when_there_are_no_logs(qapp, tmp_path):
     dlg = make(tmp_path / "none")
     assert not dlg.zip_btn.isEnabled()
+
+
+def test_saving_a_log_to_an_unwritable_place_shows_an_error_and_survives(
+    qapp, logs, tmp_path, monkeypatch
+):
+    """A full disk or a vanished drive must not take the whole launcher down (#892)."""
+    from PyQt6.QtWidgets import QFileDialog, QMessageBox
+
+    dlg = make(logs)
+    shown = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        staticmethod(lambda parent, title, text, *a, **k: shown.append(text)),
+    )
+    target = tmp_path / "no-such-folder" / "out.log"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
+    dlg._save_as()
+    assert shown and "Could not save the log" in shown[0]
+    assert not target.exists()
+
+
+def test_saving_a_log_writes_what_is_shown(qapp, logs, tmp_path, monkeypatch):
+    from PyQt6.QtWidgets import QFileDialog
+
+    dlg = make(logs)
+    target = tmp_path / "out.log"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
+    dlg._save_as()
+    assert target.read_text(encoding="utf-8") == dlg.current_text()
+
+
+def test_the_suggested_name_is_a_copy_not_the_source_log(qapp, logs, monkeypatch):
+    from PyQt6.QtWidgets import QFileDialog
+
+    dlg = make(logs)
+    asked = []
+
+    def chooser(parent, title, suggested, *a, **k):
+        asked.append(suggested)
+        return "", ""
+
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", chooser)
+    dlg._save_as()
+    assert asked and asked[0] != str(logs / "G-launch.log")
+    assert os.path.basename(asked[0]).endswith("-saved.log")

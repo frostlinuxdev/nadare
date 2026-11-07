@@ -13,6 +13,8 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+from . import prefixguard
+
 
 class PrefixMoveError(RuntimeError):
     """The prefix could not be moved or restored safely."""
@@ -81,6 +83,13 @@ def move_aside(prefix: Path) -> Path:
     reason = _refusal_reason(prefix)
     if reason is not None:
         raise PrefixMoveError(f"refusing to move {prefix}: it is {reason}")
+    if not prefixguard.is_wine_prefix(prefix) and any(prefix.iterdir()):
+        # A folder wrongly set as the prefix (Documents, a drive) holds the user's own files:
+        # renaming it would make them look gone (#850).
+        raise PrefixMoveError(
+            f"refusing to move {prefix}: it does not look like a Wine prefix (no drive_c) and "
+            "holds other files. Point the profile at the real prefix folder first."
+        )
     backup = backup_path(prefix)
     try:
         os.rename(prefix, backup)
@@ -161,9 +170,18 @@ def delete_backup(config, name: str, path) -> Path:
     if not tree.safe:
         raise PrefixMoveError(f"refusing to delete {target}: it {tree.reason}")
     try:
-        shutil.rmtree(tree.path)
+        # The same mount-aware deletion game removal uses: a personal folder or drive mounted
+        # inside an old prefix must keep its contents (#946).
+        outcome = removal._rmtree_safely(tree.path)
     except OSError as exc:
         raise PrefixMoveError(f"could not delete {target}: {exc}") from exc
+    if outcome.mounts or outcome.leftovers:
+        left = [f"{m} is a separate mounted drive, left alone" for m in outcome.mounts]
+        left += [removal._leftover_warning(p, e) for p, e in outcome.leftovers]
+        raise PrefixMoveError(
+            f"{target} was only partly deleted ({'; '.join(left)}). "
+            "The backup stays recorded; remove what is left by hand."
+        )
     profile = config.profiles.get(name)
     if isinstance(profile, dict):
         values = profile.get("prefix_backups")

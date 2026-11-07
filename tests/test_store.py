@@ -73,7 +73,8 @@ def test_tier_filter_updates_cards(qapp):
     try:
         page.tier_filter.setCurrentText("Verified")
         qapp.processEvents()
-        assert page.visible_kinds() == [entry.kind for entry in entries(tier="Verified")]
+        # One card per game, showing its lead build: GFL2 has two Verified builds, one card.
+        assert page.visible_kinds() == [g.primary.kind for g in store_games(tier="Verified")]
     finally:
         page.close()
 

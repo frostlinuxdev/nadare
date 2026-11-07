@@ -76,6 +76,23 @@ def _summary(root: Path) -> tuple[int, int, int, int, int]:
     return files, dirs, links, size, newest
 
 
+def _inventory(root: Path) -> dict[str, tuple[int, int]]:
+    """``{relative path: (bytes, mtime_ns)}`` for every regular file below ``root``.
+
+    The summary's single newest mtime cannot see a same-size file rewritten with a timestamp
+    below the newest one in the tree (#915), so the move compares each file.
+    """
+    found: dict[str, tuple[int, int]] = {}
+    for current, names, filenames in os.walk(root, followlinks=False, onerror=_walk_error):
+        names[:] = [n for n in names if not Path(current, n).is_symlink()]
+        for name in filenames:
+            path = Path(current, name)
+            info = os.lstat(path)
+            if stat.S_ISREG(info.st_mode):
+                found[path.relative_to(root).as_posix()] = (info.st_size, info.st_mtime_ns)
+    return found
+
+
 def _check(src: Path, dst: Path) -> None:
     for label, path in (("move", src), ("destination", dst)):
         if path == Path("/"):
@@ -175,6 +192,7 @@ def move_tree(
 
     try:
         before = _summary(src)
+        files_before = _inventory(src)
     except OSError as exc:
         raise RelocateError(f"Could not read {src}: {exc}") from exc
     size = before[3]
@@ -200,11 +218,14 @@ def move_tree(
         created = True
         _copy(src, partial, size, cancel, progress)
         after = _summary(src)
-        if after != before:
+        if after != before or _inventory(src) != files_before:
             raise RelocateError(
                 "Files changed while they were being copied. Close the game and try again."
             )
-        if _summary(partial)[:4] != before[:4]:
+        copied = _inventory(partial)
+        if _summary(partial)[:4] != before[:4] or {
+            name: info[0] for name, info in copied.items()
+        } != {name: info[0] for name, info in files_before.items()}:
             raise RelocateError("The copy could not be verified against the original.")
         if os.path.lexists(dst):
             raise RelocateError(f"{dst} appeared while copying; nothing was replaced.")

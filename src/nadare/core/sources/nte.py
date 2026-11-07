@@ -64,6 +64,9 @@ def decode_container(data: bytes, app_id: str) -> str:
     (stored,) = struct.unpack("<I", data[12:16])
     if stored > _MAX_XML:
         raise directdl.DirectError("PatcherXML0 manifests XML is too large")
+    if stored <= 0:
+        # zlib reads max_length=0 as "no limit", so an empty declared size must not get that far
+        raise directdl.DirectError("PatcherXML0 declares no XML")
     body = data[16:]
     if not body or len(body) % 16:
         raise directdl.DirectError("PatcherXML0 ciphertext has an invalid length")

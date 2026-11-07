@@ -423,3 +423,65 @@ def test_settings_offers_the_first_backup_that_can_really_be_deleted(env, qapp, 
     finally:
         page.deleteLater()
         qapp.processEvents()
+
+
+# ---------------------------------------------------------------------------
+# 5. a personal folder mounted inside an old prefix is never emptied (#946)
+# ---------------------------------------------------------------------------
+
+
+def _backup_with_mounted_documents(tmp):
+    prefix = tmp / "Games" / "Nadare" / "Gone" / "prefix"
+    prefix.mkdir(parents=True)
+    backup = _backup(tmp / "Games" / "Nadare" / "Gone", prefix)
+    docs = backup / "drive_c" / "users" / "me" / "Documents"
+    docs.mkdir(parents=True)
+    (docs / "thesis.txt").write_text("PERSONAL")
+    return prefix, backup, docs
+
+
+def _pretend_mounted(monkeypatch, docs, *, via_mountinfo):
+    from nadare.core import removal
+
+    if via_mountinfo:  # a same-device bind mount that ismount() and st_dev cannot see
+        monkeypatch.setattr(
+            removal, "_mountinfo_points", lambda: frozenset({str(docs.resolve())})
+        )
+    else:
+        real = removal.os.path.ismount
+        monkeypatch.setattr(
+            removal.os.path, "ismount", lambda p: str(p) == str(docs.resolve()) or real(p)
+        )
+
+
+@pytest.mark.parametrize("via_mountinfo", [False, True])
+def test_delete_backup_leaves_a_mounted_folder_alone_and_keeps_the_record(
+    env, monkeypatch, via_mountinfo
+):
+    cfg, tmp = env
+    prefix, backup, docs = _backup_with_mounted_documents(tmp)
+    _profile_with_backup(cfg, prefix, backup)
+    _pretend_mounted(monkeypatch, docs, via_mountinfo=via_mountinfo)
+
+    with pytest.raises(prefixmove.PrefixMoveError, match="mounted"):
+        prefixmove.delete_backup(cfg, "gone", backup)
+
+    assert (docs / "thesis.txt").read_text() == "PERSONAL"
+    assert not (backup / "drive_c" / "stale.dll").exists()  # the rest of the backup went
+    assert cfg.profiles["gone"]["prefix_backups"] == [str(backup)]  # still recorded
+
+
+def test_removing_a_game_with_delete_backups_keeps_a_mounted_folder(env, monkeypatch):
+    from nadare.core import removal
+
+    cfg, tmp = env
+    prefix, backup, docs = _backup_with_mounted_documents(tmp)
+    _profile_with_backup(cfg, prefix, backup)
+    _pretend_mounted(monkeypatch, docs, via_mountinfo=False)
+
+    result = removal.remove_game(
+        cfg, "gone", delete_data=False, delete_trees=[], delete_backups=True
+    )
+
+    assert (docs / "thesis.txt").read_text() == "PERSONAL"
+    assert any("mounted" in w for w in result.warnings), result.warnings

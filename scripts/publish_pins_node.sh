@@ -120,6 +120,10 @@ if ! git -C "$index" diff --cached --quiet -- catalog/archive-pins; then
         index_push "$index" || fail "git push failed"
         result=published
     fi
+elif [[ "$push" != 0 ]]; then
+    # Nothing new, but an earlier run's commit may still be local (its push failed): publish it
+    # before calling this run healthy.
+    index_push_pending "$index" || fail "git push failed"
 fi
 
 if [[ $rc -ne 0 && $rc -ne 3 ]]; then

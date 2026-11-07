@@ -116,7 +116,7 @@ class ManageRunnersDialog(QDialog):
         layout.addWidget(self.total_label)
 
         footer = QHBoxLayout()
-        self.cleanup_button = QPushButton("Delete unused old runners")
+        self.cleanup_button = QPushButton("Delete unused runners")
         self.cleanup_button.setObjectName("GhostButton")
         self.cleanup_button.setToolTip(
             "Removes every runner no game uses, except the recommended build."
@@ -215,9 +215,9 @@ class ManageRunnersDialog(QDialog):
             button.setToolTip("In use by: " + ", ".join(users) if users else "")
         self.cleanup_button.setEnabled(bool(self._unused))
         self.cleanup_button.setText(
-            f"Delete unused old runners ({len(self._unused)})"
+            f"Delete unused runners ({len(self._unused)})"
             if self._unused
-            else "Delete unused old runners"
+            else "Delete unused runners"
         )
 
     def _ensure_usage(self) -> None:

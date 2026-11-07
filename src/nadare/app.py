@@ -589,6 +589,16 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
             print("  fix: run these two commands (this also avoids the 32-bit libraries)")
             for line in userns.install_command().splitlines():
                 print(f"    {line}")
+    from .core import gamesandbox
+
+    located = gamesandbox.locate()
+    if located.binary is not None:
+        kind = "the game runtime's copy" if located.source == "runtime" else "the system's copy"
+        print(f"Sandbox: bubblewrap found ({kind}: {located.binary})")
+    elif located.found:
+        print(f"Sandbox: unavailable, bubblewrap cannot start here ({located.why})")
+    else:
+        print("Sandbox: unavailable, bubblewrap is not installed and no game runtime yet")
     from .core import secrets as _secrets
 
     ok, why = _secrets.keyring_diagnosis()
@@ -876,7 +886,9 @@ def _run_shortcut(args: argparse.Namespace, config: Config) -> int:
         result = shortcuts.refresh_desktop_entries(
             config.profiles, desktop_dir=_desktop_dir()
         )
-        steam = shortcuts.refresh_steam_shortcuts(config.profiles)
+        steam = shortcuts.refresh_steam_shortcuts(
+            config.profiles, argv=shortcuts.launcher_argv()
+        )
         for path in result["updated"]:
             print(f"updated {path}")
         for path in result["removed"]:

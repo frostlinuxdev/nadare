@@ -360,11 +360,28 @@ def plan_setup(
         if not installed:
             items.append(blocked("wayland", wayland_label))
         elif steamwayland.has_wayland(launch_options):
-            items.append(
-                SetupItem(
-                    "wayland", wayland_label, STATE_DONE, "On in this game's launch options."
+            if steamwayland.has_variables(launch_options, game.launch_env):
+                items.append(
+                    SetupItem(
+                        "wayland", wayland_label, STATE_DONE, "On in this game's launch options."
+                    )
                 )
-            )
+            else:
+                # On, but the game's own variable is missing: not done (#970).
+                items.append(
+                    SetupItem(
+                        "wayland",
+                        wayland_label,
+                        STATE_OPTIONAL,
+                        "On, but this game also needs "
+                        + ", ".join(game.launch_env)
+                        + " in its launch options.",
+                        "set_wayland",
+                        needs_steam_closed=True,
+                        warning=_wayland_warning(game.launch_env),
+                        action_label="Add the missing variable",
+                    )
+                )
         elif not runner_has_wayland:
             items.append(
                 SetupItem(

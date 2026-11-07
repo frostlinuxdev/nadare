@@ -394,7 +394,10 @@ def test_a_steam_shortcut_profile_with_quotes_and_backslashes_round_trips():
     from nadare.core import shortcuts
 
     for profile in ('a"b', "plain", "back\\slash", 'both\\"mixed"'):
-        entry = {"LaunchOptions": f"launch -p {shortcuts._steam_quote(profile)}"}
+        entry = {
+            "tags": {"0": shortcuts.STEAM_TAG},
+            "LaunchOptions": f"launch -p {shortcuts._steam_quote(profile)}",
+        }
         assert shortcuts._steam_shortcut_profile(entry) == profile
     assert shortcuts._steam_shortcut_profile({"LaunchOptions": "something else"}) is None
 

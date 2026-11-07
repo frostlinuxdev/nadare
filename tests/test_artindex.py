@@ -313,3 +313,37 @@ def test_an_unreadable_schema_never_overwrites_the_saved_copy(monkeypatch):
     )
     assert fallback.data == good and fallback.from_cache is True
     assert indexfetch.read_cached("catalog/art.json", validate=validate) == good
+
+
+def test_a_load_left_over_from_before_a_reset_does_not_store_its_answer(monkeypatch):
+    """A background load that waits for the load lock across a reset belongs to the old state."""
+    import threading
+
+    arrived = threading.Event()
+    real = artindex._load_lock
+
+    class Lock:
+        def __enter__(self):
+            arrived.set()  # the load is at the lock, and waits there
+            return real.__enter__()
+
+        def __exit__(self, *exc):
+            return real.__exit__(*exc)
+
+    monkeypatch.setattr(artindex, "wait_for_load", lambda timeout=5.0: None)
+    artindex.set_loader(lambda: _doc())
+    real.acquire()  # the old load is started, but cannot begin yet
+    monkeypatch.setattr(artindex, "_load_lock", Lock())
+    try:
+        artindex._start_background()
+        assert arrived.wait(5)
+        artindex.reset()  # the state it was started for is gone
+        artindex.set_loader(lambda: (_ for _ in ()).throw(OSError("offline")))
+    finally:
+        real.release()
+    stale = artindex._thread
+    assert isinstance(stale, threading.Thread)
+    stale.join(5)  # it runs now, against the state that was reset, and must not keep its answer
+
+    artindex.set_loader(lambda: _doc(**{"direct-genshin": {"cover": [_entry()]}}))
+    assert [url for url, _ in artindex.lookup("direct-genshin", wait=True)] == [GOOD_URL]

@@ -199,6 +199,20 @@ def test_cancel_removes_the_row(tmp_path, qapp, monkeypatch):
         _close(window, qapp)
 
 
+def test_cancelling_a_paused_row_removes_it(tmp_path, qapp, monkeypatch):
+    window = _window(tmp_path, monkeypatch)
+    try:
+        _start(window, "a", "b")
+        window.show_downloads()
+        window.downloads.row("b").pause_btn.click()
+        assert window.controller.is_paused("b")
+        window.downloads.row("b").cancel_btn.click()
+        assert not window.controller.is_paused("b")
+        assert window.downloads.row_profiles() == ["a"]  # the paused row must not linger
+    finally:
+        _close(window, qapp)
+
+
 def test_clicking_a_row_opens_that_game(tmp_path, qapp, monkeypatch):
     window = _window(tmp_path, monkeypatch)
     try:
@@ -257,5 +271,32 @@ def test_a_game_removed_from_the_library_has_no_row(tmp_path, qapp, monkeypatch)
         del window.config.data["profiles"]["b"]
         window.show_downloads()
         assert window.downloads.row_profiles() == ["a"]
+    finally:
+        _close(window, qapp)
+
+
+@pytest.mark.parametrize(
+    ("active", "paused", "text", "tip"),
+    [
+        (0, 0, "Downloads", ""),
+        (3, 0, "Downloads (3)", "3 downloading or waiting"),
+        (2, 1, "Downloads (2 · 1 paused)", "2 downloading or waiting, 1 paused"),
+        (0, 2, "Downloads (2 paused)", "2 paused"),
+    ],
+)
+def test_the_downloads_label_says_what_it_counts(active, paused, text, tip):
+    """#941: the entry counted running and waiting only while the page also lists paused ones."""
+    from nadare.gui.downloads_page import downloads_label
+
+    assert downloads_label(active, paused) == (text, tip)
+
+
+def test_the_entry_mentions_a_paused_download(tmp_path, qapp, monkeypatch):
+    window = _window(tmp_path, monkeypatch)
+    try:
+        _start(window, "a", "b")
+        window.controller.pause("b")
+        assert window.downloads_button.text() == "Downloads (1 · 1 paused)"
+        assert "paused" in window.downloads_button.toolTip()
     finally:
         _close(window, qapp)

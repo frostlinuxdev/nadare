@@ -67,3 +67,40 @@ def test_the_file_is_plain_json_written_whole(tmp_path):
     data = json.loads((tmp_path / steamundo.FILE).read_text())
     assert data["3224770"]["action"] == "set_runner"
     assert not list(tmp_path.glob("*.tmp*")) and not list(tmp_path.glob(".*"))
+
+
+# ---- an undo belongs to the Steam account it was made for (#894) -------------------------------
+def test_the_account_file_is_remembered_with_the_undo(tmp_path):
+    undo = steamwayland.LaunchUndo("--previous-A")
+    where = "/steam/userdata/1/config/localconfig.vdf"
+    steamundo.save("5019180", "set_wayland", undo, where=where, state_dir=tmp_path)
+    assert steamundo.where("5019180", state_dir=tmp_path) == where
+    assert steamundo.load("5019180", state_dir=tmp_path) == ("set_wayland", undo)
+
+
+def test_an_undo_fits_the_account_it_was_saved_for(tmp_path):
+    undo = steamwayland.LaunchUndo("x")
+    steamundo.save("1", "set_wayland", undo, where="/a/localconfig.vdf", state_dir=tmp_path)
+    assert steamundo.fits("1", "/a/localconfig.vdf", state_dir=tmp_path)
+    assert not steamundo.fits("1", "/b/localconfig.vdf", state_dir=tmp_path)
+
+
+def test_an_older_launch_option_undo_without_an_account_is_not_trusted(tmp_path):
+    steamundo.save("1", "set_wayland", steamwayland.LaunchUndo("x"), state_dir=tmp_path)
+    assert not steamundo.fits("1", "/a/localconfig.vdf", state_dir=tmp_path)
+
+
+def test_a_runner_undo_fits_only_the_steam_install_it_was_saved_for(tmp_path):
+    # #970: native Steam and Flatpak Steam each have their own config.vdf.
+    steamundo.save("1", "set_runner", ENTRY, where="/native/config.vdf", state_dir=tmp_path)
+    assert steamundo.fits("1", "/native/config.vdf", state_dir=tmp_path)
+    assert not steamundo.fits("1", "/flatpak/config.vdf", state_dir=tmp_path)
+
+
+def test_an_older_runner_undo_without_an_install_is_not_trusted(tmp_path):
+    steamundo.save("1", "set_runner", ENTRY, state_dir=tmp_path)
+    assert not steamundo.fits("1", "/anything", state_dir=tmp_path)
+
+
+def test_no_undo_fits_nothing(tmp_path):
+    assert not steamundo.fits("1", "/a/localconfig.vdf", state_dir=tmp_path)

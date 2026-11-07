@@ -236,6 +236,9 @@ CREDENTIAL_INPUT = "credential-in.json"
 #: outlive the object that performed it; a separate process cannot share this
 #: and must rely on ``remember_me`` + the keyring.
 _LIVE_LOCK = threading.Lock()
+#: Bumped whenever a profile's saved login is wiped, so a keyring write that was already running
+#: can tell it landed after the wipe and take it back (#956).
+_WIPES: dict[str, int] = {}
 _LIVE_SESSIONS: dict[str, dict[str, str]] = {}
 #: Keyring reads are cached once per process so ``status()`` does not unlock the
 #: user's keyring on every poll.
@@ -428,6 +431,12 @@ class CznBackend(GameBackend):
     def forget_saved_login(profile: str) -> None:
         forget_saved_credential(profile)
 
+    @staticmethod
+    def drop_live_session(profile: str) -> None:
+        """Forget the login held in memory, so a profile added later under this name cannot
+        adopt the old account (#931). Removal calls it; turning Remember me off does not."""
+        _live_clear(profile)
+
     options = (
         Option("prefix", "Wine prefix", "path_dir", "WINEPREFIX used for this game."),
         Option(
@@ -610,6 +619,7 @@ class CznBackend(GameBackend):
             self._notify_remember_unavailable()
             return
         cred = {"refresh_token": refresh_token, "member_no": member}
+        wipes = _WIPES.get(self.ctx.name, 0)
         try:
             store.set(self.ctx.name, json.dumps(cred))
         except SecretStoreError:
@@ -618,6 +628,10 @@ class CznBackend(GameBackend):
             # 44010. Drop it rather than leave a dead credential behind.
             self._delete_credential()
             self._notify_remember_unavailable()
+            return
+        if _WIPES.get(self.ctx.name, 0) != wipes:
+            # Remember me was turned off (or the account forgotten) while the write ran.
+            self._delete_credential()
             return
         _cache_keyring(self.ctx.name, cred)
 
@@ -630,6 +644,7 @@ class CznBackend(GameBackend):
         silently reported as a successful removal.
         """
         deleted = True
+        _WIPES[self.ctx.name] = _WIPES.get(self.ctx.name, 0) + 1
         # No default collection means nothing was ever stored; deleting would
         # create the collection and pop the "Choose password for new keyring"
         # dialog. Only False proves that, so None/True keep deleting as before.
@@ -642,13 +657,18 @@ class CznBackend(GameBackend):
         return deleted
 
     def logout(self) -> None:
-        """Forget the account everywhere: keyring, cache and process memory."""
-        deleted = self._delete_credential()
-        _live_clear(self.ctx.name)
-        self._refresh_token = None
-        self._member_no = None
-        self._restore_attempted = True
-        self._restored = False
+        """Forget the account everywhere: keyring, cache and process memory.
+
+        Runs under the rotation lock, so a renewal in progress (here or in another Nadare
+        command) cannot save the login again after it (#957).
+        """
+        with self._rotation_lock(wait=30):
+            deleted = self._delete_credential()
+            _live_clear(self.ctx.name)
+            self._refresh_token = None
+            self._member_no = None
+            self._restore_attempted = True
+            self._restored = False
         if not deleted:
             self.ctx.emit(Event("status", LOGOUT_KEYRING_NOTICE))
             self.info(LOGOUT_KEYRING_NOTICE)
@@ -1311,15 +1331,25 @@ class CznBackend(GameBackend):
         prefix = self.prefix()
         if (prefix / "drive_c").is_dir():
             return
+        # Only a tree this call creates is cleaned up on failure: an existing prefix (even a
+        # half-built one the user pointed us at) is never deleted.
+        created = not prefix.exists()
         prefix.mkdir(parents=True, exist_ok=True)
         self.ctx.emit(Event("step", f"Creating the Wine prefix at {prefix}…"))
-        with self._activity_label("Creating the Wine prefix"):
-            code = self._run_in_prefix(["wineboot", "-u"])
-        if code != 0 or not (prefix / "drive_c").is_dir():
-            raise BackendError(
-                self._explain(f"prefix creation failed (exit {code})"),
-                1,
-            )
+        try:
+            with self._activity_label("Creating the Wine prefix"):
+                code = self._run_in_prefix(["wineboot", "-u"])
+            if code != 0 or not (prefix / "drive_c").is_dir():
+                raise BackendError(
+                    self._explain(f"prefix creation failed (exit {code})"),
+                    1,
+                )
+        except BaseException:
+            # A failed or cancelled wineboot can leave drive_c behind, which the next run
+            # would take for a finished prefix.
+            if created:
+                shutil.rmtree(prefix, ignore_errors=True)
+            raise
         try:
             (prefix / PREFIX_MARKER).write_text("created by Nadare\n")
             (prefix / "czn-runner").write_text(self.runner_name() + "\n")
@@ -1336,8 +1366,8 @@ class CznBackend(GameBackend):
         return "game connected" in text or "heartbeats started" in text
 
     def _webview2_installed(self) -> bool:
-        """Whether the WebView2 runtime executable is already in the prefix."""
-        return webview2.installed(self.prefix())
+        """Whether the WebView2 runtime is in the prefix and registered, not just on disk."""
+        return webview2.installed(self.prefix()) and webview2.registered(self.prefix())
 
     def _webview2_pin(self) -> str:
         """Resolve the expected installer SHA-256 from a trusted source."""
@@ -1622,6 +1652,15 @@ class CznBackend(GameBackend):
         """Move the corrupted prefix aside and rebuild it, keeping the game files."""
         if self._game_running():
             self._fail("remake_prefix", 8)
+        # Only this game's folder is restored, so another profile's game in the same prefix
+        # would be left in the backup (#919).
+        from ...core.removal import _shared_with
+
+        other = _shared_with(self.ctx.config.profiles, self.ctx.name, self.prefix().resolve())
+        if other:
+            raise BackendError(
+                f"refusing to rebuild {self.prefix()}: it is shared with profile {other!r}"
+            )
         self.ctx.emit(Event("step", "Moving the old Wine prefix aside"))
         backup = prefixmove.move_aside(self.prefix())
         moved: list[Path] = []
@@ -1698,7 +1737,7 @@ class CznBackend(GameBackend):
             raise BackendError(
                 "The STOVE account changed since you logged in. Log in again.", 3
             )
-        self._save_credential(handoff["refresh_token"], member)
+        self._save_credential(handoff["refresh_token"], member or self._member_no)
 
     def terms(self) -> dict[str, Any]:
         """The terms this account still has to agree to.
@@ -1836,7 +1875,13 @@ class CznBackend(GameBackend):
         """One refresh + game-token exchange; writes the ephemeral session."""
         with self._rotation_lock(wait=60):
             self._adopt_newer_credential()
-            return self._mint_session_unlocked()
+            code = self._mint_session_unlocked()
+        if code != 0:
+            # The worker may have written session.json before a later step failed; nothing
+            # downstream registers it for cleanup yet, so a failed mint must not leave a live
+            # game token behind (#916).
+            _unlink_quietly(self._session())
+        return code
 
     def _mint_session_unlocked(self) -> int:
         code, handoff = self._run_auth(["token", "--out", str(self._session())])
@@ -1850,19 +1895,19 @@ class CznBackend(GameBackend):
             return code
         # M2: a rotation handed off before a later network step failed must
         # still be kept, or STOVE has already invalidated the previous token.
-        if code != 0:
-            self._save_credential(handoff["refresh_token"], handoff.get("member_no"))
-            return code
         member = handoff.get("member_no") or ""
         if self._member_no and member and member != self._member_no:
+            # Checked before anything is adopted, also when the worker failed: a rotation that
+            # names another account is never kept as this one (#959).
             self._forget_credential()
             # The worker wrote session.json before the mismatch was detected;
             # remove the game token so launch() cannot start with it.
             _unlink_quietly(self._session())
             self._notify_mismatch()
             return 3
-        self._save_credential(handoff["refresh_token"], member)
-        return 0
+        # A handoff without a member number keeps the one already known.
+        self._save_credential(handoff["refresh_token"], member or self._member_no)
+        return code
 
     def restore(self) -> bool:
         """Restore a remembered session, at most once per process start.

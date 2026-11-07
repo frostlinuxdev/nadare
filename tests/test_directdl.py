@@ -362,9 +362,9 @@ def test_split_archive_is_never_joined_on_disk(server, tmp_path, monkeypatch):
     seen: list[bool] = []
     real = dd._extract_zip_to
 
-    def spy(source, target):
+    def spy(source, target, cancel=None):
         seen.append((tmp_path / dd.DL_DIR / "g.zip").exists())
-        return real(source, target)
+        return real(source, target, cancel)
 
     monkeypatch.setattr(dd, "_extract_zip_to", spy)
     dd.sync(dd.Plan("T", "1", archives=(arc,)), tmp_path)

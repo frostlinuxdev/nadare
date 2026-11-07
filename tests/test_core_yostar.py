@@ -384,6 +384,21 @@ class TestSync:
         yostar.sync(man, tmp_path)
         assert calls == [(tmp_path, len(payload) - 4)]
 
+    def test_disk_check_does_not_credit_a_part_the_download_will_drop(self, tmp_path, monkeypatch):
+        payload = b"0123456789"
+        (tmp_path / "big.bin.part").write_bytes(b"x" * 25)  # larger than the file: restarted
+        man = self._man([yostar.ManifestFile("big.bin", len(payload), yostar.crc64(payload))])
+        fake = _FakeDownload({"https://cdn.yo-star.com/assets/big.bin": payload})
+        monkeypatch.setattr(yostar.download, "stream_download", fake)
+        calls: list[tuple[Path, int]] = []
+        monkeypatch.setattr(
+            yostar.diskspace,
+            "check_space",
+            lambda path, needed, margin=0.05: calls.append((Path(path), needed)),
+        )
+        yostar.sync(man, tmp_path)
+        assert calls == [(tmp_path, len(payload))]
+
     def test_resumes_part_file(self, tmp_path, monkeypatch):
         payload = b"0123456789"
         dest = tmp_path / "resume.bin"

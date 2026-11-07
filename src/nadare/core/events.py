@@ -26,7 +26,8 @@ _TOKEN_VALUE_RE = re.compile(
     _TOKEN_KEYS.pattern
     # A quoted value runs to its closing quote (escapes allowed) plus anything glued to it,
     # so a secret that itself contains a quote does not leak its tail.
-    + r"""\s*[:=]\s*((?:(?:Bearer|Basic|Token|Digest)\s+)?"""
+    # A JSON or repr key is quoted, so one closing quote may sit before the separator (#924).
+    + r"""["']?\s*[:=]\s*((?:(?:Bearer|Basic|Token|Digest)\s+)?"""
     + r"""(?:"(?:[^"\\]|\\.)*"\S*|'(?:[^'\\]|\\.)*'\S*|\S+))"""
 )
 
@@ -144,8 +145,13 @@ def mask_traceback(text: str) -> str:
     """
     out: list[str] = []
     for line in text.split("\n"):
-        if not line or line[0] in " \t" or line.startswith(_TRACEBACK_STRUCTURE):
+        if not line or line.startswith(_TRACEBACK_STRUCTURE):
             out.append(line)
+            continue
+        if line[0] in " \t":
+            # Frames and source lines, but also the continuation of a multi-line exception
+            # message: mask what is known to be secret and keep the rest readable (#968).
+            out.append(mask_known(line))
             continue
         match = _EXCEPTION_LINE.match(line)
         if match is None:

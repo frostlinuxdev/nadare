@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from nadare.core.eta import EtaEstimator, format_eta
 
 
@@ -88,3 +90,61 @@ def test_a_transfer_that_slows_down_is_followed_within_the_window():
     eta = feed(est, [(31 + i, 0.30 + (i + 1) / 1000) for i in range(0, 40)])  # now 0.1 % per second
     remaining = 1 - 0.30 - 40 / 1000
     assert eta is not None and 0.6 * (remaining / 0.001) < eta < 1.4 * (remaining / 0.001)
+
+
+# ---- download speed ----------------------------------------------------------------
+from nadare.core.eta import SpeedMeter, format_speed  # noqa: E402
+
+MIB = 1024**2
+
+
+def test_speed_is_silent_until_it_has_two_samples():
+    meter = SpeedMeter()
+    assert meter.update(0, 0.0) is None
+
+
+def test_speed_is_bytes_over_the_recent_window():
+    meter = SpeedMeter()
+    meter.update(0, 0.0)
+    assert meter.update(100 * MIB, 1.0) == pytest.approx(100 * MIB)
+    meter.update(200 * MIB, 2.0)
+    assert meter.update(300 * MIB, 3.0) == pytest.approx(100 * MIB)
+
+
+def test_an_old_burst_leaves_the_window():
+    meter = SpeedMeter()
+    meter.update(0, 0.0)
+    meter.update(1000 * MIB, 1.0)  # a resume skipping files: a jump, then quiet
+    for second in range(2, 30):
+        meter.update(1000 * MIB + (second - 1) * 10 * MIB, float(second))
+    assert meter.update(1000 * MIB + 29 * 10 * MIB, 30.0) == pytest.approx(10 * MIB, rel=0.05)
+
+
+def test_speed_starts_over_when_the_counter_drops():
+    meter = SpeedMeter()
+    meter.update(0, 0.0)
+    meter.update(500 * MIB, 5.0)
+    assert meter.update(10 * MIB, 6.0) is None  # a new phase began at a lower count
+
+
+def test_speed_goes_quiet_after_a_long_gap():
+    meter = SpeedMeter()
+    meter.update(0, 0.0)
+    meter.update(50 * MIB, 1.0)
+    assert meter.update(60 * MIB, 200.0) is None
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        (None, ""),
+        (0, ""),
+        (-5, ""),
+        (512, "512 B/s"),
+        (3 * 1024, "3.0 KiB/s"),
+        (85 * MIB, "85.0 MiB/s"),
+        (1.5 * 1024**3, "1.50 GiB/s"),
+    ],
+)
+def test_format_speed(value, text):
+    assert format_speed(value) == text

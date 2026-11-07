@@ -1002,3 +1002,27 @@ def test_a_cancelled_step_does_not_say_too_late(qapp):
     finally:
         release.set()
         _close(dialog, qapp)
+
+
+def test_refresh_during_the_first_check_does_not_plan_on_the_gui_thread(qapp):
+    """#925: reopening Set up while "Checking Steam…" ran the planner on the GUI thread."""
+    main = threading.get_ident()
+    seen: list[int] = []
+    gate = threading.Event()
+    plan = _runner_plan()
+
+    def plan_fn():
+        seen.append(threading.get_ident())
+        gate.wait(5.0)
+        return plan
+
+    dialog = _dialog(plan_fn, async_plan=True)
+    try:
+        dialog.refresh()  # the main window does this when the same game's window is reopened
+        assert main not in seen
+        gate.set()
+        assert _wait(qapp, lambda: set(dialog.rows) == {"runner", "h264"})
+        assert main not in seen
+    finally:
+        gate.set()
+        _close(dialog, qapp)

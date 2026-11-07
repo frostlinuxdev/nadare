@@ -19,7 +19,9 @@ APP = "nadare"
 
 
 def _xdg(env: str, default: str) -> Path:
-    base = os.environ.get(env) or os.path.expanduser(default)
+    base = os.environ.get(env, "")
+    if not os.path.isabs(base):  # the XDG spec: a relative value is invalid and must be ignored
+        base = os.path.expanduser(default)
     return Path(base) / APP
 
 

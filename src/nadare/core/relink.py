@@ -81,8 +81,16 @@ def _same(a: Path, b: Path) -> bool:
         return a.absolute() == b.absolute()
 
 
-def check_movable(profile: dict[str, Any]) -> None:
+def check_movable(
+    profile: dict[str, Any],
+    *,
+    name: str | None = None,
+    profiles: Mapping[str, Any] | None = None,
+) -> None:
     """Raise :class:`RelinkError` unless the profile's prefix can be moved and relinked afterwards.
+
+    With ``name`` and ``profiles`` a prefix another profile also uses is refused: only the
+    selected profile is relinked afterwards, so the other would be left pointing nowhere (#971).
 
     Called before anything is moved, so a move never ends in a profile Nadare cannot update.
     """
@@ -100,6 +108,13 @@ def check_movable(profile: dict[str, Any]) -> None:
             f"{old} does not look like a Wine prefix (no drive_c folder), so Nadare will not "
             "move it."
         )
+    if profiles and managed_home(profile) is None:
+        who = _other_inside(profiles, name, old)
+        if who:
+            raise RelinkError(
+                f"{who} also uses this prefix, and only one game can be relinked after a move. "
+                f"Move or remove {who} first."
+            )
     install = str(profile.get("install_dir") or "")
     if install:
         inside = _under(Path(install).expanduser(), old)

@@ -39,6 +39,8 @@ LAUNCHER_NAMES = ("StellaSora.exe",)
 
 class StellaSoraBackend(ArknightsBackend):
     install_size_hint = 21 * 1024**3
+    #: Direct download, no launcher: Play goes through ``_launch_direct``, which wraps it.
+    supports_secure_mode = True
 
     kind = KIND
     game_tag = "StellaSora_EN"
@@ -101,6 +103,14 @@ class StellaSoraBackend(ArknightsBackend):
             advanced=True,
         ),
         Option("launch_args", "Launch arguments", "args"),
+        Option(
+            "secure_mode",
+            "Sandbox",
+            "bool",
+            "Hides your home folder from the game (needs bubblewrap). The game can still use "
+            "the network. Experimental: see docs/SECURE-MODE.md.",
+            default=False,
+        ),
         Option("wine_binary", "Wine binary", "path_file", advanced=True),
         Option("umu_binary", "umu-run binary", "path_file", advanced=True),
         Option("extra_env", "Environment", "env", "One KEY=VALUE per line.", advanced=True),

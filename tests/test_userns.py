@@ -215,6 +215,7 @@ def _fake_runtime(tmp_path: Path, monkeypatch) -> Path:
     )
     bwrap.parent.mkdir(parents=True)
     bwrap.write_text("x")
+    bwrap.chmod(0o755)
     return bwrap
 
 
@@ -222,20 +223,79 @@ def test_probe_is_unknown_without_a_downloaded_runtime() -> None:
     assert userns.probe(lambda *a, **k: _Done(0)) is None
 
 
+def _pin(*copies: Path) -> None:
+    """Record ``copies`` the way the first Sandbox start does (see ``gamesandbox``)."""
+    from nadare.core import gamesandbox
+
+    gamesandbox._record_runtime_copies()
+    assert all(str(c) in (gamesandbox._read_pins() or {}) for c in copies)
+
+
 def test_probe_reports_working_blocked_and_unclear(tmp_path: Path, monkeypatch) -> None:
-    _fake_runtime(tmp_path, monkeypatch)
+    _pin(_fake_runtime(tmp_path, monkeypatch))
     assert userns.probe(lambda *a, **k: _Done(0)) is True
     assert userns.probe(lambda *a, **k: _Done(1, BWRAP_FAILURE)) is False
     assert userns.probe(lambda *a, **k: _Done(1, "something else")) is None
 
 
 def test_probe_never_raises(tmp_path: Path, monkeypatch) -> None:
-    _fake_runtime(tmp_path, monkeypatch)
+    _pin(_fake_runtime(tmp_path, monkeypatch))
 
     def boom(*a, **k):
         raise OSError("no")
 
     assert userns.probe(boom) is None
+
+
+def test_probe_does_not_run_a_copy_nothing_recorded(tmp_path: Path, monkeypatch) -> None:
+    """Doctor must not be the first to trust a runtime copy a game could have planted (#965)."""
+    _fake_runtime(tmp_path, monkeypatch)
+    ran: list[str] = []
+
+    def spy(argv, **k):
+        ran.append(argv[0])
+        return _Done(0)
+
+    assert userns.probe(spy) is None
+    assert ran == []
+
+
+def test_probe_runs_only_the_recorded_copy_not_a_newer_planted_one(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import os
+
+    original = _fake_runtime(tmp_path, monkeypatch)
+    _pin(original)
+    planted = original.parents[4] / "newer/pressure-vessel/libexec/steam-runtime-tools-0/srt-bwrap"
+    planted.parent.mkdir(parents=True)
+    planted.write_text("x")
+    planted.chmod(0o755)
+    os.utime(planted, (original.stat().st_mtime + 100,) * 2)
+    ran: list[str] = []
+
+    def spy(argv, **k):
+        ran.append(argv[0])
+        return _Done(0)
+
+    assert userns.probe(spy) is True
+    assert ran == [str(original)]
+
+
+def test_probe_does_not_run_a_recorded_copy_whose_content_changed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runtime = _fake_runtime(tmp_path, monkeypatch)
+    _pin(runtime)
+    runtime.write_text("replaced by a game")
+    ran: list[str] = []
+
+    def spy(argv, **k):
+        ran.append(argv[0])
+        return _Done(0)
+
+    assert userns.probe(spy) is None
+    assert ran == []
 
 
 def _doctor(monkeypatch, capsys, probe_result):

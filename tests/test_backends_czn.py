@@ -23,7 +23,7 @@ import urllib.parse
 from pathlib import Path
 
 import pytest
-from _backend_helpers import make_context
+from _backend_helpers import make_context, x64_dll
 
 from nadare.backends.czn import backend as czn_backend
 from nadare.backends.czn import update as czn_update
@@ -34,6 +34,7 @@ from nadare.backends.czn.backend import (
 )
 from nadare.core import indexfetch, paths
 from nadare.core import secrets as core_secrets
+from nadare.core import webview2 as webview2_core
 from nadare.core.backends import BackendError
 from nadare.core.events import Cancelled, contains_value
 
@@ -152,6 +153,17 @@ class TestStatus:
 # ---------------------------------------------------------------------------
 # CznBackend.verify
 # ---------------------------------------------------------------------------
+def _register_webview2(prefix) -> None:
+    """The registry entry a finished WebView2 install leaves in system.reg (#912)."""
+    key = (
+        r"[Software\\Wow6432Node\\Microsoft\\EdgeUpdate\\Clients\\"
+        r"{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}]"
+    )
+    (prefix / "system.reg").write_text(
+        f'WINE REGISTRY Version 2\n\n{key} 1\n"pv"="1.0.0"\n'
+    )
+
+
 class TestVerify:
     def _full_install(self, backend: CznBackend) -> None:
         prefix = backend.prefix()
@@ -163,10 +175,11 @@ class TestVerify:
         webview = prefix / "drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application/1.0.0"
         webview.mkdir(parents=True, exist_ok=True)
         (webview / "msedgewebview2.exe").write_bytes(b"MZ")
+        _register_webview2(prefix)
         system32 = prefix / "drive_c/windows/system32"
         system32.mkdir(parents=True, exist_ok=True)
         for dll in ("vcruntime140.dll", "msvcp140.dll"):
-            (system32 / dll).write_bytes(b"MZ-native")
+            (system32 / dll).write_bytes(x64_dll(b"native"))
         _write_session(backend._session().parent, valid=True)
 
     def test_all_present(self, make_backend_context, tmp_path):
@@ -1642,6 +1655,91 @@ class TestProcessWideSession:
         assert czn_backend._keyring_credential("test") is None
         assert any(e.kind == "status" and "keyring" in e.message.lower() for e in events), events
         assert events[-1].message == "Logged out of STOVE"
+
+    def test_remember_off_wins_over_a_keyring_write_already_running(
+        self, make_backend_context, tmp_path, fake_keyring, monkeypatch
+    ):
+        """Audit #956: a save in flight when Remember me is turned off must not leave an entry."""
+        import threading
+
+        backend = _cred_backend(make_backend_context, tmp_path, remember=True)
+        started, release = threading.Event(), threading.Event()
+        real_set = fake_keyring.set_password
+
+        def slow_set(service, account, value):
+            started.set()
+            release.wait(5)
+            real_set(service, account, value)
+
+        monkeypatch.setattr(fake_keyring, "set_password", slow_set)
+        worker = threading.Thread(target=backend._save_credential, args=(SENTINEL, "42"))
+        worker.start()
+        assert started.wait(5)
+        backend.set_remember(False)
+        release.set()
+        worker.join(5)
+
+        assert fake_keyring.store == {}
+        assert czn_backend._keyring_credential("test") is None
+
+    def test_logout_waits_for_a_renewal_that_holds_the_rotation_lock(
+        self, make_backend_context, tmp_path, fake_keyring, monkeypatch
+    ):
+        """Audit #957: logout must not run beside a renewal that would save the login again."""
+        backend = _cred_backend(make_backend_context, tmp_path, remember=True)
+        backend._save_credential(SENTINEL, "42")
+        order: list[str] = []
+
+        class Lock:
+            def __init__(self, profile, *, wait=0.0, poll=0.2):
+                order.append(f"lock wait={wait:g}")
+
+            def acquire(self):
+                return self
+
+            def release(self):
+                order.append("unlock")
+
+        monkeypatch.setattr(czn_backend.process, "ProfileLock", Lock)
+        real_delete = backend._delete_credential
+
+        def delete():
+            order.append("delete")
+            return real_delete()
+
+        monkeypatch.setattr(backend, "_delete_credential", delete)
+        backend.logout()
+
+        assert order[0].startswith("lock") and order[-1] == "unlock" and "delete" in order
+
+    def test_a_failed_renewal_naming_another_account_is_not_adopted(
+        self, make_backend_context, tmp_path, fake_keyring, monkeypatch
+    ):
+        """Audit #959: identity is checked before a rotation is kept, even after a failure."""
+        backend = _cred_backend(make_backend_context, tmp_path, remember=True)
+        backend._save_credential(SENTINEL, "42")
+        TestEphemeralSession()._launchable(backend, tmp_path, monkeypatch)
+        credential = {"refresh_token": "other-token", "member_no": "99"}
+        monkeypatch.setattr(backend, "_run_module", _auth_runner([], credential, code=1))
+
+        assert backend._mint_session_unlocked() == 3
+
+        assert czn_backend._live_get("test") is None
+        assert "other-token" not in "".join(fake_keyring.store.values())
+
+    def test_a_renewal_without_a_member_number_keeps_the_known_one(
+        self, make_backend_context, tmp_path, fake_keyring, monkeypatch
+    ):
+        backend = _cred_backend(make_backend_context, tmp_path, remember=True)
+        backend._save_credential(SENTINEL, "42")
+        TestEphemeralSession()._launchable(backend, tmp_path, monkeypatch)
+        credential = {"refresh_token": "next-token", "member_no": ""}
+        monkeypatch.setattr(backend, "_run_module", _auth_runner([], credential))
+
+        assert backend._mint_session_unlocked() == 0
+
+        assert backend._member_no == "42"
+        assert czn_backend._live_get("test")["member_no"] == "42"
 
 
 class TestStatusKeyringCache:
@@ -3145,7 +3243,7 @@ class TestVcredist:
         root = backend.prefix() / "drive_c/windows/system32"
         root.mkdir(parents=True, exist_ok=True)
         for name in ("vcruntime140.dll", "msvcp140.dll"):
-            (root / name).write_bytes(b"MZ-native" if native else self.BUILTIN)
+            (root / name).write_bytes(x64_dll(b"native") if native else self.BUILTIN)
 
     @staticmethod
     def _serve(monkeypatch, payload: bytes) -> list[str]:
@@ -3199,7 +3297,7 @@ class TestVcredist:
         self, make_backend_context, tmp_path
     ):
         backend = self._backend(make_backend_context, tmp_path)
-        late = b"MZ" + b"\x00" * 5000 + b"Wine builtin DLL"
+        late = x64_dll(b"\x00" * 5000 + b"Wine builtin DLL")
         root = backend.prefix() / "drive_c/windows/system32"
         root.mkdir(parents=True, exist_ok=True)
         for name in ("vcruntime140.dll", "msvcp140.dll"):
@@ -3989,6 +4087,7 @@ class TestImpl2CznFixes:
         webview = prefix / "drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application/1.0.0"
         webview.mkdir(parents=True, exist_ok=True)
         (webview / "msedgewebview2.exe").write_bytes(b"MZ")
+        _register_webview2(prefix)
         backend._refresh_token = "saved-token"
 
         report = backend.verify()
@@ -4136,3 +4235,100 @@ def test_upf_version_marker_is_written_atomically(monkeypatch, tmp_path, capsys)
     monkeypatch.setattr(czn_update, "UPF", upf)
     czn_update._write_local_version({"version_no": 56}, 56)
     assert json.loads(upf.read_text())["local_version"] == 56
+
+
+class TestPrefixAndWebView2Readiness:
+    """#911 / #912: a half-made prefix or half-installed runtime is not 'done'."""
+
+    def test_a_failed_wineboot_leaves_no_prefix_to_be_trusted_next_time(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        prefix = backend.prefix()
+        calls: list[list[str]] = []
+
+        def failing_boot(args):
+            calls.append(args)
+            (prefix / "drive_c").mkdir(parents=True)
+            return 1
+
+        monkeypatch.setattr(backend, "_run_in_prefix", failing_boot)
+        with pytest.raises(BackendError):
+            backend._ensure_prefix()
+        assert not prefix.exists()
+        with pytest.raises(BackendError):
+            backend._ensure_prefix()
+        assert len(calls) == 2  # the retry ran wineboot again
+
+    def test_a_prefix_that_already_existed_is_not_deleted_on_failure(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        prefix = backend.prefix()
+        prefix.mkdir(parents=True, exist_ok=True)
+        (prefix / "keep.txt").write_text("mine")
+        monkeypatch.setattr(backend, "_run_in_prefix", lambda args: 1)
+        with pytest.raises(BackendError):
+            backend._ensure_prefix()
+        assert (prefix / "keep.txt").read_text() == "mine"
+
+    def test_runtime_files_without_registration_are_not_installed(
+        self, make_backend_context, tmp_path
+    ):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        app = backend.prefix() / "drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application/1.0"
+        app.mkdir(parents=True)
+        (app / "msedgewebview2.exe").write_bytes(b"MZ")
+        assert webview2_core.installed(backend.prefix())
+        assert backend._webview2_installed() is False
+
+    def test_ensure_does_not_stop_at_runtime_files_that_are_not_registered(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        app = backend.prefix() / "drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application/1.0"
+        app.mkdir(parents=True)
+        (app / "msedgewebview2.exe").write_bytes(b"MZ")
+        monkeypatch.delenv("NADARE_WEBVIEW2_SHA256", raising=False)
+        monkeypatch.setattr(czn_backend, "WEBVIEW2_SHA256", None)
+        with pytest.raises(BackendError):  # it went on to the repair, which has no pin here
+            backend._ensure_webview2()
+
+
+class TestFailedMintLeavesNoSession:
+    """#916: a token mint that fails after writing session.json must not leave it behind."""
+
+    @pytest.mark.parametrize("handoff", [None, {"refresh_token": "r", "member_no": "1"}])
+    def test_a_failed_mint_removes_the_session_file(
+        self, make_backend_context, tmp_path, monkeypatch, handoff
+    ):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        session = backend._session()
+        session.parent.mkdir(parents=True, exist_ok=True)
+
+        def fake_auth(args):
+            session.write_text('{"access_token": "live"}')
+            return 2, handoff
+
+        monkeypatch.setattr(backend, "_run_auth", fake_auth)
+        monkeypatch.setattr(backend, "_save_credential", lambda *a, **k: None)
+        monkeypatch.setattr(backend, "_adopt_newer_credential", lambda: None)
+        assert backend._mint_session() == 2
+        assert not session.exists()
+
+    def test_a_good_mint_keeps_the_session_file(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = _make_backend(make_backend_context, tmp_path / "prefix")
+        session = backend._session()
+        session.parent.mkdir(parents=True, exist_ok=True)
+
+        def fake_auth(args):
+            session.write_text('{"access_token": "live"}')
+            return 0, {"refresh_token": "r", "member_no": "1"}
+
+        monkeypatch.setattr(backend, "_run_auth", fake_auth)
+        monkeypatch.setattr(backend, "_save_credential", lambda *a, **k: None)
+        monkeypatch.setattr(backend, "_adopt_newer_credential", lambda: None)
+        assert backend._mint_session() == 0
+        assert session.exists()

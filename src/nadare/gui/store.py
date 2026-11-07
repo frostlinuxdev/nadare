@@ -5,10 +5,11 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import replace
 from typing import Any
 
-from PyQt6.QtCore import QObject, QRunnable, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QRunnable, Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -35,8 +36,25 @@ from .theme import ACCENT, cover_pixmap
 
 #: Store tiles are landscape: most covers are wide key art, which then fills the tile whole.
 CARD_WIDTH = 330
+#: Cards share the row between them within these widths, so no wide empty gutter is left (#857).
+CARD_MIN_WIDTH = 300
+CARD_MAX_WIDTH = 420
+CARD_GAP = 18
 CARD_ART_H = 186
 CARD_HEIGHT = CARD_ART_H + 148
+
+def card_width_for(available: int) -> int:
+    """The card width that makes whole cards fill ``available`` pixels of one row.
+
+    As many cards as fit at the minimum width, grown evenly up to the maximum; a window too
+    narrow for one card keeps the minimum and scrolls.
+    """
+    per_row = max(1, (available + CARD_GAP) // (CARD_MIN_WIDTH + CARD_GAP))
+    width = (available - (per_row - 1) * CARD_GAP) // per_row
+    return max(CARD_MIN_WIDTH, min(CARD_MAX_WIDTH, width))
+
+#: How long a cover that failed to download waits before it is asked for again (#900).
+COVER_RETRY_SECONDS = 60.0
 
 _FOCUS_RING = f"QFrame#StoreCard:focus {{ border: 2px solid {ACCENT}; }}"
 
@@ -102,6 +120,8 @@ class StoreCard(QFrame):
         self.setAccessibleName(entry.title)
         self.setToolTip(entry.title)
         self.setStyleSheet(_FOCUS_RING)
+        self._card_width = CARD_WIDTH
+        self._art_source: Any = None
         self.setFixedSize(CARD_WIDTH, CARD_HEIGHT)
         self._shadow = _drop_shadow(self, 18, 70)
 
@@ -175,9 +195,24 @@ class StoreCard(QFrame):
         self._describe()
 
     def set_art(self, pixmap: Any) -> None:
+        self._art_source = pixmap
+        self._draw_art()
+
+    def _draw_art(self) -> None:
         self.art.setPixmap(
-            cover_pixmap(pixmap, CARD_WIDTH - 2, CARD_ART_H, self.entry.title, radius=13)
+            cover_pixmap(
+                self._art_source, self._card_width - 2, CARD_ART_H, self.entry.title, radius=13
+            )
         )
+
+    def set_card_width(self, width: int) -> None:
+        """Resize the card (height stays) and redraw its cover for the new width."""
+        if width == self._card_width:
+            return
+        self._card_width = width
+        self.setFixedSize(width, CARD_HEIGHT)
+        self.art.setFixedSize(width - 2, CARD_ART_H)
+        self._draw_art()
 
     def enterEvent(self, event) -> None:  # noqa: N802 - Qt naming
         self._shadow.setBlurRadius(34)
@@ -220,6 +255,8 @@ class StorePage(QWidget):
         self._art_started = False
         self._built = False
         self._art_requested: set[str] = set()
+        #: When each cover that failed last failed, so it is retried later, not all session.
+        self._art_failed_at: dict[str, float] = {}
         #: Fetched cover files by kind, so cards rebuilt by a search keep their art.
         self._art_paths: dict[str, str] = {}
         self._images = ImageLoader(parent=self)
@@ -263,6 +300,7 @@ class StorePage(QWidget):
         self._flow = FlowLayout(self._container, margin=2, spacing=18)
         self._container.setLayout(self._flow)
         self.scroll.setWidget(self._container)
+        self.scroll.viewport().installEventFilter(self)
 
         self.empty_label = QLabel("No games match your search.")
         self.empty_label.setObjectName("Muted")
@@ -272,7 +310,7 @@ class StorePage(QWidget):
         self.results.addWidget(self.empty_label)
         root.addWidget(self.results, 1)
 
-        self.own_game_button = QPushButton("Add your own game...")
+        self.own_game_button = QPushButton("Add your own game…")
         self.own_game_button.setObjectName("Link")
         self.own_game_button.setAccessibleName("Add your own game")
         self.own_game_button.clicked.connect(self.own_game_requested.emit)
@@ -304,10 +342,21 @@ class StorePage(QWidget):
         noun = "game" if count == 1 else "games"
         titles = ", ".join(title for _kind, title in missing)
         self.unavailable_banner.show_message(
-            f"{count} {noun} can't load in this build: {titles}.",
+            f"{count} {noun} are not available in this version of Nadare: {titles}.",
             "Open logs",
             dismissible=False,
         )
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt naming
+        if watched is self.scroll.viewport() and event.type() == QEvent.Type.Resize:
+            self._fit_cards()
+        return super().eventFilter(watched, event)
+
+    def _fit_cards(self) -> None:
+        """Give every card the width that fills its row, between the minimum and maximum."""
+        width = card_width_for(self.scroll.viewport().width() - 4)  # the layout's own margins
+        for card in self._cards.values():
+            card.set_card_width(width)
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().showEvent(event)
@@ -360,6 +409,7 @@ class StorePage(QWidget):
                 kinds=kinds,
             )
             card.activated.connect(self.entry_activated.emit)
+            card.set_card_width(card_width_for(self.scroll.viewport().width() - 4))
             self._flow.addWidget(card)
             self._cards[primary.kind] = card
             for kind in kinds:
@@ -404,12 +454,20 @@ class StorePage(QWidget):
         for card in tuple(self._cards.values()):
             if not card.has_art or card.art_kind in self._art_requested:
                 continue
+            failed = self._art_failed_at.get(card.art_kind)
+            if failed is not None and time.monotonic() - failed < COVER_RETRY_SECONDS:
+                continue
             self._art_requested.add(card.art_kind)
             pool.start(_FetchArt(card.art_kind, card.art_title, self._art_signals))
 
     def _on_art_fetched(self, kind: str, path: object) -> None:
         if not path:
+            # Offline or a bad answer: forget the request, so a later refresh or visit asks again
+            # once the backoff has passed.
+            self._art_requested.discard(kind)
+            self._art_failed_at[kind] = time.monotonic()
             return
+        self._art_failed_at.pop(kind, None)
         self._art_paths[kind] = str(path)
         for card in tuple(self._cards.values()):
             if card.art_kind == kind:

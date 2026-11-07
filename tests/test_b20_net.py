@@ -385,10 +385,17 @@ def _one_file_manifest(chunk: bytes, file_size: int) -> bytes:
 
 
 def test_sophon_chunk_must_lie_inside_its_file() -> None:
-    inside = _one_file_manifest(_chunk_message(0, 512), 1024)
+    # The chunks of a file must also tile it (#865), so the in-bounds cases cover it fully.
+    inside = _one_file_manifest(_chunk_message(0, 1024), 1024)
     assert sophon.parse_manifest(inside)[0].size == 1024
-    exact = _one_file_manifest(_chunk_message(512, 512), 1024)
-    assert sophon.parse_manifest(exact)[0].chunks[0].offset == 512
+    exact = _field_bytes(
+        1,
+        _field_bytes(1, "x.bin")
+        + _field_bytes(2, _chunk_message(0, 512))
+        + _field_bytes(2, _chunk_message(512, 512))
+        + _field_varint(4, 1024),
+    )
+    assert sophon.parse_manifest(exact)[0].chunks[1].offset == 512
     far = _one_file_manifest(_chunk_message(60 << 30, 1 << 20), 1024)
     with pytest.raises(sophon.SophonError, match="outside"):
         sophon.parse_manifest(far)
@@ -408,6 +415,37 @@ def test_a_pool_hop_that_needs_an_unsupported_proxy_is_refused_when_strict(monke
             pool.open("https://cdn.example/file.bin", strict_proxy=True)
     finally:
         pool.close()
+
+
+@pytest.mark.parametrize("call", ["default", "streaming", "range"])
+def test_every_pool_caller_refuses_an_unsupported_proxy_instead_of_going_direct(
+    monkeypatch, tmp_path, call
+) -> None:
+    # #967: streaming and range downloads called pool.open without strict_proxy, so an
+    # https:// proxy silently became a direct connection.
+    monkeypatch.setenv("https_proxy", "https://proxy.example:8443")
+    monkeypatch.setenv("HTTPS_PROXY", "https://proxy.example:8443")
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    pool = dl.HttpClientPool()
+    connected: list[str] = []
+    monkeypatch.setattr(pool, "_connection", lambda *a, **k: connected.append(a[1]) or 1 / 0)
+    url = "https://origin.example/file.bin"
+    try:
+        with pytest.raises(dl.ProxyNotSupported):
+            if call == "default":
+                pool.open(url)
+            elif call == "streaming":
+                dl.stream_download(url, tmp_path / "f.bin", pool=pool)
+            else:
+                from nadare.core import rangefile
+
+                reader = rangefile.RangeReader([(url, 10)])
+                monkeypatch.setattr(reader._pool, "_connection", pool._connection)
+                reader._fetch_block(0, 0, 3)
+    finally:
+        pool.close()
+    assert connected == []
 
 
 def test_a_redirect_into_a_proxied_scheme_falls_back_to_urllib(

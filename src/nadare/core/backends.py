@@ -454,6 +454,14 @@ def supports_update(kind: str) -> bool:
         return False
 
 
+def supports_sandbox(kind: str) -> bool:
+    """Whether ``kind`` can run its game in the Sandbox (safe for unknown kinds)."""
+    try:
+        return bool(getattr(get(kind), "supports_secure_mode", False))
+    except BackendError:
+        return False
+
+
 def supports_news(kind: str) -> bool:
     """Whether ``kind`` has an official news source (safe for unknown kinds)."""
     try:

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Starting an operation trims old runs so its log cannot grow without bound."""
+"""Old flat logs are left alone; a new run goes to its game's folder (issue #838)."""
 
 from __future__ import annotations
 
@@ -10,19 +10,13 @@ pytest.importorskip("PyQt6.QtWidgets")
 from nadare.core.config import Config
 from nadare.gui import workers
 
-HEADER = "===== 2026-10-26T10:00:{second:02d} install (G) | nadare test =====\n"
 
-
-def test_open_log_drops_oldest_runs_before_appending(tmp_path, monkeypatch):
+def test_a_legacy_flat_log_is_not_touched_by_a_new_run(tmp_path, monkeypatch):
     logs = tmp_path / "logs"
     logs.mkdir()
-    path = logs / "G-install.log"
-    blocks = [
-        HEADER.format(second=index) + f"old-run-{index}\n" + "x" * 300_000 + "\n"
-        for index in range(5)
-    ]
-    path.write_text("".join(blocks), encoding="utf-8")
-    assert path.stat().st_size > 1_048_576
+    legacy = logs / "G-install.log"
+    legacy.write_text("===== old run =====\n" + "x" * 2_000_000, encoding="utf-8")
+    before = legacy.read_bytes()
 
     monkeypatch.setattr(workers.paths, "logs_dir", lambda: logs)
     worker = workers.BackendWorker(Config.load(tmp_path / "config.json"), "G", "install")
@@ -31,8 +25,5 @@ def test_open_log_drops_oldest_runs_before_appending(tmp_path, monkeypatch):
     handle.close()
     worker._log = None
 
-    text = path.read_text(encoding="utf-8")
-    assert "old-run-0" not in text
-    assert "old-run-4" in text
-    assert text.count("install (G)") == 4
-    assert path.stat().st_size <= 1_048_576 + len(HEADER) + 64
+    assert legacy.read_bytes() == before
+    assert len(list(logs.glob("*/install-*.log"))) == 1

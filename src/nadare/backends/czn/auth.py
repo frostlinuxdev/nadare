@@ -47,6 +47,7 @@ import os
 import re
 import secrets
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -124,23 +125,31 @@ def _check_http(r, what: str) -> None:
 def _write_private(path: Path, text: str) -> None:
     """Atomically write a file that is 0600 from creation (no world-readable window)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(text)
-    os.chmod(tmp, 0o600)  # in case tmp pre-existed with wider permissions
-    tmp.replace(path)
+    # mkstemp: 0600 from creation, and a unique name
+    fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _write_private_bytes(path: Path, data: bytes) -> None:
     """Atomically write binary data that is 0600 from creation (e.g. the QR png)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
-    os.chmod(tmp, 0o600)
-    tmp.replace(path)
+    # mkstemp: 0600 from creation, and a unique name
+    fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 # ---- client constants (from Lite; override via env) --------------------------
@@ -435,6 +444,12 @@ class StoveAuth:
         )
         data = self._parse(r, "signin")
         _check_code(data, "signin")
+        # A fresh sign-in may be a different STOVE account: the identity from the previous one
+        # must not be saved beside the new credential (#913). A refresh keeps what it knows.
+        self.member_no = None
+        self.guid = None
+        self.state.pop("member_no", None)
+        self.state.pop("guid", None)
         self._apply_signin(data)
         return data
 

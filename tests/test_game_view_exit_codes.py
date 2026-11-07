@@ -39,9 +39,9 @@ def view(qapp):
 def warnings(monkeypatch):
     seen: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        game_view_mod.QMessageBox,
-        "warning",
-        lambda _parent, title, message: seen.append((title, message)),
+        GameView,
+        "_failure_choice",
+        lambda _self, title, message, can_retry: seen.append((title, message)) or "close",
     )
     return seen
 

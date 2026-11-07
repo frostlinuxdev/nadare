@@ -486,3 +486,31 @@ def test_the_wayland_warning_names_the_extra_variable_of_that_game_only(tmp_path
     _library(tmp_path, UMA)
     uma = _item(_plan(UMA, tmp_path, localconfig_texts=[LOCALCONFIG_ON], **kwargs), "wayland")
     assert "UMU_ID" not in uma.warning
+
+
+# ---- done means the game's own variables too (#970) ------------------------------------------
+def test_native_wayland_is_not_done_while_the_games_own_variable_is_missing(tmp_path):
+    _library(tmp_path, "3308670")
+    kwargs = dict(wayland_session=True, runner_has_wayland=True)
+    missing = _wayland_item(
+        _plan("3308670", tmp_path, launch_options="PROTON_ENABLE_WAYLAND=1 %command%", **kwargs)
+    )
+    assert missing.state != steamsetup.STATE_DONE and missing.action == "set_wayland"
+    assert "UMU_ID=0" in missing.detail
+    for options in (
+        "UMU_ID=0 PROTON_ENABLE_WAYLAND=1 %command%",
+        "UMU_ID=7 PROTON_ENABLE_WAYLAND=1 %command%",  # the player's own value stays
+    ):
+        done = _wayland_item(_plan("3308670", tmp_path, launch_options=options, **kwargs))
+        assert done.state == steamsetup.STATE_DONE and done.action == ""
+
+
+def test_a_game_with_no_extra_variables_is_done_as_before(tmp_path):
+    _library(tmp_path, UMA)
+    done = _wayland_item(
+        _plan(
+            UMA, tmp_path, localconfig_texts=[LOCALCONFIG_ON], wayland_session=True,
+            runner_has_wayland=True, launch_options="PROTON_ENABLE_WAYLAND=1 %command%",
+        )
+    )
+    assert done.state == steamsetup.STATE_DONE

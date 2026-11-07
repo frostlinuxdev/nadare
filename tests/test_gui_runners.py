@@ -437,11 +437,19 @@ def test_the_cleanup_worker_survives_failures_and_counts_only_real_deletions(
         return real_remove(path)
 
     monkeypatch.setattr(runners, "remove", flaky)
+    results: list = []
+    window.runner_cleanup_done.connect(lambda *args: results.append(args))
     try:
         window._delete_stale([good, bad])
-        assert _wait(qapp, lambda: "Deleted 1 unused runner" in window.side_status.text())
-        assert "1 could not be deleted" in window.side_status.text()
+        # The signal carries the result; the sidebar label is shared with background
+        # updates, so it is checked on its own below.
+        assert _wait(qapp, lambda: bool(results))
+        deleted, _freed, failed = results[0]
+        assert (deleted, failed) == (1, 1)
         assert not good.exists() and bad.exists()
+        window._runner_cleanup_finished(deleted, 0, failed)
+        assert "Deleted 1 unused runner" in window.side_status.text()
+        assert "1 could not be deleted" in window.side_status.text()
     finally:
         window.close()
 

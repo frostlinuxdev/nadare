@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from _backend_helpers import x64_dll
 
 from nadare.core import steamfix
 from nadare.core.backends import BackendError
@@ -149,8 +150,8 @@ def test_check_prerequisites_webview2_and_vcredist(tmp_path):
     _register_webview2(prefix, "1.0")
     system32 = prefix / "drive_c/windows/system32"
     system32.mkdir(parents=True)
-    (system32 / "vcruntime140.dll").write_bytes(b"MZ real")
-    (system32 / "msvcp140.dll").write_bytes(b"MZ real")
+    (system32 / "vcruntime140.dll").write_bytes(x64_dll(b"real"))
+    (system32 / "msvcp140.dll").write_bytes(x64_dll(b"real"))
     found = {p.key: p.present for p in steamfix.check_prerequisites(prefix)}
     assert found == {steamfix.KEY_WEBVIEW2: True, steamfix.KEY_VCREDIST: True}
 

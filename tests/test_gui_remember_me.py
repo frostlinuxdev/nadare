@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -185,3 +186,47 @@ def test_a_remember_notice_from_login_is_shown_and_undoes_the_box(
     assert not window.game.remember.isChecked()
     assert not _remembers(tmp_path / "config.json")
     window.close()
+
+
+def test_turning_remember_me_off_while_busy_keeps_the_live_netmarble_login(
+    tmp_path, qapp, monkeypatch
+):
+    """#917: the busy path wipes the saved login only, like the idle path does."""
+    from nadare.backends import nmlogin
+    from nadare.gui import main_window
+
+    class Store:
+        def __init__(self):
+            self.deleted = []
+
+        def delete(self, profile):
+            self.deleted.append(profile)
+
+    store = Store()
+    monkeypatch.setattr(nmlogin, "_store", lambda: store)
+    live = SimpleNamespace(
+        token="t", expires_at=2**40, player_id="p", device_key="d", name="n"
+    )
+    monkeypatch.setitem(nmlogin._LIVE, "mongil", live)
+
+    class Inline:
+        @staticmethod
+        def start(task):
+            task.run()
+
+    monkeypatch.setattr(main_window.QThreadPool, "globalInstance", staticmethod(lambda: Inline))
+    # No status probe may start: it would fetch the game's manifest over the network (a leaked
+    # worker thread outlives the test and aborts the process later).
+    from nadare.gui.workers import BackendController
+
+    monkeypatch.setattr(BackendController, "start", lambda self, *a, **k: True)
+    config = Config.load(tmp_path / "config.json")
+    config.add_profile("mongil", backend="direct-mongil", title="Mongil")
+    config.profiles["mongil"]["remember_me"] = False
+    window = MainWindow(config)
+    window._busy["mongil"] = "Updating"
+
+    window._sync_remember("mongil")
+
+    assert store.deleted == ["mongil"]
+    assert nmlogin._LIVE.get("mongil") is live

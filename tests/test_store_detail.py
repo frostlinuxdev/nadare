@@ -69,7 +69,7 @@ def test_notice_is_shown_and_cleared(qapp):
 
 def test_installed_button_note_and_signal(qapp):
     widget = StoreDetail(_entry("direct-pgr", installed=True))
-    assert widget.install_button.text() == "Add another"
+    assert widget.install_button.text() == "Add another copy"
     assert widget.installed_note.text() == "Already in your library."
     received = []
     widget.install_requested.connect(received.append)

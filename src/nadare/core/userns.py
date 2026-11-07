@@ -86,10 +86,13 @@ def probe(run=subprocess.run) -> bool | None:  # noqa: ANN001
 
     The sysctl alone can give a false alarm (a profile or a distro tweak may
     already allow the binary), so ``nadare doctor`` asks the sandbox itself.
-    ``None`` means the runtime is not downloaded yet or the result is unclear.
-    Never raises.
+    ``None`` means the runtime is not downloaded yet or the result is unclear. Only a copy the
+    Sandbox recorded and that still matches is run: the folder is writable by a game, and this
+    runs on the host (#965). Never raises.
     """
-    for path in _srt_bwrap_paths()[:1]:
+    from . import gamesandbox  # late: gamesandbox imports this module
+
+    for path in gamesandbox.recorded_runtime_copies()[:1]:
         try:
             result = run(
                 [path, "--unshare-user", "--ro-bind", "/", "/", "/bin/true"],

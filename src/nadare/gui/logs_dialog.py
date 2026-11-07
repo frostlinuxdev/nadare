@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import diskspace, logview, paths
+from ..core import diskspace, logview, paths, runlog
 
 
 def _human_size(size: int) -> str:
@@ -255,13 +255,20 @@ class LogsDialog(QDialog):
 
     def _save_as(self) -> None:
         path = self._selected_path()
-        suggested = str(path) if path is not None else str(self._directory / "nadare.log")
+        # A copy's name, in the home folder: what is saved is the filtered, redacted view, and
+        # suggesting the source log's own path would invite overwriting the real log (#892).
+        stem, suffix = (path.stem, path.suffix) if path is not None else ("nadare", ".log")
+        suggested = str(Path.home() / f"{stem}-saved{suffix or '.log'}")
         name, _filter = QFileDialog.getSaveFileName(
             self, "Save log", suggested, "Log files (*.log *.txt);;All files (*)"
         )
         if not name:
             return
-        Path(name).write_text(self.current_text(), encoding="utf-8")
+        try:
+            Path(name).write_text(self.current_text(), encoding="utf-8")
+        except OSError as exc:
+            # A full disk or a vanished drive must not escape the slot and abort the launcher.
+            QMessageBox.warning(self, "Save log", f"Could not save the log: {exc}")
 
     def _save_zip(self) -> None:
         suggested = str(Path.home() / f"nadare-logs-{datetime.now():%Y%m%d-%H%M}.zip")
@@ -284,6 +291,30 @@ class LogsDialog(QDialog):
     def _open_folder(self) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._directory)))
 
+    def _newer_run(self, path: Path) -> Path | None:
+        """A later run of the same operation in the same game folder, if one has started."""
+        operation = runlog.operation_of(path)
+        if operation is None or operation == "background":
+            return None
+        mine = runlog.run_order(path)
+        try:
+            siblings = list(path.parent.iterdir())
+        except OSError:
+            return None
+        later = [
+            p
+            for p in siblings
+            if runlog.operation_of(p) == operation and runlog.run_order(p) > mine
+        ]
+        return max(later, key=runlog.run_order) if later else None
+
+    def _select_path(self, path: Path) -> None:
+        for row in range(self.files.count()):
+            item = self.files.item(row)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == str(path):
+                self.files.setCurrentRow(row)
+                return
+
     # ---- follow mode ---------------------------------------------------------
     def _tick(self) -> None:
         path = self._selected_path()
@@ -294,6 +325,11 @@ class LogsDialog(QDialog):
             stat = path.stat()
         except OSError:
             self.refresh()
+            return
+        newer = self._newer_run(path)
+        if newer is not None:  # the next run of this operation has started: follow it
+            self._reload_files()
+            self._select_path(newer)
             return
         if self._stat == (stat.st_size, stat.st_mtime_ns):
             return

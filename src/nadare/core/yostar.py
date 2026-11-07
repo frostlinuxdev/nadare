@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import re
+import stat
 import threading
 import time
 import urllib.parse
@@ -1161,9 +1162,12 @@ def _sync(
             part = root / entry.path
             part = part.with_name(part.name + ".part")
             try:
-                pending_bytes -= part.stat().st_size
+                info = part.lstat()
             except OSError:
-                pass
+                continue
+            # Only a regular part no larger than the file is resumed; download drops the rest.
+            if stat.S_ISREG(info.st_mode) and info.st_size <= entry.size:
+                pending_bytes -= info.st_size
         diskspace.check_space(root, max(0, pending_bytes))
     if not todo:
         say(

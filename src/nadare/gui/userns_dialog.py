@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
 
 from ..core import userns
 
-_COPIED = "Copied. Paste it into a terminal, then press Install again."
+_COPIED = "Copied. Paste it into a terminal, then try again."
 _WAITING = "Waiting for your password…"
 
 

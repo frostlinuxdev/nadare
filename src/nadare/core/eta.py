@@ -81,4 +81,50 @@ def format_eta(seconds: float | None) -> str | None:
     return f"about {hours} h {minutes} min left"
 
 
-__all__ = ["EtaEstimator", "format_eta"]
+#: Seconds of recent bytes the speed is measured over.
+SPEED_WINDOW = 5.0
+
+
+class SpeedMeter:
+    """Bytes per second over the last :data:`SPEED_WINDOW` seconds of a growing byte counter.
+
+    Starts over when the counter drops (a new phase) or goes quiet for :data:`GAP_RESET`, and
+    says nothing until two samples exist.
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self._points: list[tuple[float, float]] = []
+
+    def update(self, done: float, now: float) -> float | None:
+        if self._points:
+            last_time, last_done = self._points[-1]
+            if done < last_done or now - last_time > GAP_RESET:
+                self.reset()
+        self._points.append((now, done))
+        while len(self._points) > 2 and now - self._points[0][0] > SPEED_WINDOW:
+            self._points.pop(0)
+        first_time, first_done = self._points[0]
+        span = now - first_time
+        if len(self._points) < 2 or span <= 0:
+            return None
+        return (done - first_done) / span
+
+
+def format_speed(bytes_per_second: float | None) -> str:
+    """``85.0 MiB/s``; empty when there is no speed to show."""
+    if not bytes_per_second or bytes_per_second <= 0:
+        return ""
+    value = float(bytes_per_second)
+    if value < 1024:
+        return f"{value:.0f} B/s"
+    if value < 1024**2:
+        return f"{value / 1024:.1f} KiB/s"
+    if value < 1024**3:
+        return f"{value / 1024**2:.1f} MiB/s"
+    return f"{value / 1024**3:.2f} GiB/s"
+
+
+__all__ = ["EtaEstimator", "SpeedMeter", "format_eta", "format_speed"]

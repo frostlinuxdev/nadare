@@ -124,3 +124,27 @@ def test_roll_back_moves_restored_paths_back_into_the_old_prefix(tmp_path):
     assert (prefix / "drive_c" / "stale.dll").read_text() == "old"
     parked = list(tmp_path.glob("prefix.failed-*"))
     assert not parked, "an emptied parked prefix is tidied up, not left behind"
+
+
+def test_a_folder_that_is_not_a_wine_prefix_is_never_moved(tmp_path):
+    """A folder wrongly set as the prefix (Documents, a drive) must not be renamed away (#850)."""
+    folder = tmp_path / "Documents"
+    folder.mkdir()
+    (folder / "thesis.odt").write_text("precious")
+    with pytest.raises(prefixmove.PrefixMoveError, match="Wine prefix"):
+        prefixmove.move_aside(folder)
+    assert (folder / "thesis.odt").read_text() == "precious"
+    assert not list(tmp_path.glob("Documents.broken-*"))
+
+
+@pytest.mark.parametrize("marker", ["drive_c", "pfx"])
+def test_wine_and_proton_prefixes_are_still_moved(tmp_path, marker):
+    prefix = tmp_path / "prefix"
+    (prefix / marker).mkdir(parents=True)
+    assert prefixmove.move_aside(prefix).is_dir()
+
+
+def test_an_empty_folder_is_still_moved(tmp_path):
+    prefix = tmp_path / "prefix"
+    prefix.mkdir()
+    assert prefixmove.move_aside(prefix).is_dir()

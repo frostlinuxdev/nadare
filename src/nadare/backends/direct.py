@@ -16,6 +16,7 @@ installer keys.
 from __future__ import annotations
 
 import contextlib
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +48,7 @@ class DirectBackend(WineGameBackend):
     """Base for the per-game classes below; never registered on its own."""
 
     kind = "direct"
+    supports_secure_mode = True
     install_size_hint = 20 * 1024**3
     #: The community publishes these without the vendor's blessing.
     unofficial_notice = True
@@ -91,6 +93,14 @@ class DirectBackend(WineGameBackend):
             advanced=True,
         ),
         Option("launch_args", "Launch arguments", "args"),
+        Option(
+            "secure_mode",
+            "Sandbox",
+            "bool",
+            "Hides your home folder from the game (needs bubblewrap). The game can still use "
+            "the network. Experimental: see docs/SECURE-MODE.md.",
+            default=False,
+        ),
         Option("wine_binary", "Wine binary", "path_file", advanced=True),
         Option("umu_binary", "umu-run binary", "path_file", advanced=True),
         Option("extra_env", "Environment", "env", "One KEY=VALUE per line.", advanced=True),
@@ -149,17 +159,21 @@ class DirectBackend(WineGameBackend):
         ]
 
     def _sync_direct(self) -> dict[str, Any]:
+        self._refuse_if_running("installing, updating or repairing it")
         plan = self._load_manifest()
         workers = int(
             self.ctx.profile.get("download_workers") or directdl.plan_workers(plan)
         )
         marker = self._install_marker_path()
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        # An install that finished before (a version is recorded, no marker) stays usable if
-        # this update fails or is cancelled: its files are only replaced one by one, verified.
+        # An install that finished before (a version is recorded, no marker) stays usable if an
+        # update fails before it replaced anything. Once a file was replaced, files may already have
+        # been replaced one by one (there is no rollback), so the marker stays and the page says
+        # RESUME instead of promising the old version still works (#856).
         was_complete = not marker.exists() and self._read_version_file() is not None
-        marker.write_text("sync in progress\n", encoding="utf-8")
+        self._write_install_marker()
         from ..core.events import Event
+
+        changed = threading.Event()
 
         self.ctx.emit(Event("step", f"{self.display_name}: syncing {plan.version} directly"))
         try:
@@ -169,15 +183,20 @@ class DirectBackend(WineGameBackend):
                 emit=self.ctx.emit,
                 cancel=self.ctx.cancel,
                 workers=workers,
+                changed=changed,
             )
         except directdl.DirectError as exc:
-            if was_complete:
+            if was_complete and not changed.is_set():
                 marker.unlink(missing_ok=True)
+                raise BackendError(
+                    f"{self.display_name}: {exc}. Nothing was left half-installed; try again."
+                ) from exc
             raise BackendError(
-                f"{self.display_name}: {exc}. Nothing was left half-installed; try again."
+                f"{self.display_name}: {exc}. The update stopped part-way, so some files may be "
+                "new and some old. Press RESUME (or Repair files) to finish it."
             ) from exc
         except BaseException:
-            if was_complete:
+            if was_complete and not changed.is_set():
                 marker.unlink(missing_ok=True)
             raise
         marker.unlink(missing_ok=True)
@@ -272,6 +291,16 @@ class WutheringWavesBackend(DirectBackend):
     plan_factory = staticmethod(wuwa.resolve)
     options = DirectBackend.options + (
         Option(
+            "wuwa_quality",
+            "Resource quality",
+            "choice",
+            "The size of the game's textures, as in Kuro's launcher: SD about 58 GiB, HD about "
+            "80 GiB, UHD about 99 GiB. Changing it downloads the missing files on the next "
+            "Update; the folder of the old quality stays until you delete it.",
+            default="hd",
+            choices=(("SD", "sd"), ("HD", "hd"), ("UHD", "uhd")),
+        ),
+        Option(
             "kuro_token",
             "Kuro download token",
             "text",
@@ -281,9 +310,21 @@ class WutheringWavesBackend(DirectBackend):
         ),
     )
 
+    def _latest_variant(self) -> str:
+        # Each quality (and a custom download token) has its own published version (#975); the
+        # default HD with the shipped token keeps the plain cache name.
+        quality = wuwa.quality_of(self.ctx.profile.get("wuwa_quality"))
+        parts = [] if quality == wuwa.DEFAULT_QUALITY else [quality]
+        if str(self.ctx.profile.get("kuro_token") or "").strip():
+            parts.append("token")  # never the token itself
+        return "-".join(parts)
+
     def plan_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {"quality": wuwa.quality_of(self.ctx.profile.get("wuwa_quality"))}
         token = str(self.ctx.profile.get("kuro_token") or "").strip()
-        return {"token": token} if token else {}
+        if token:
+            kwargs["token"] = token
+        return kwargs
 
     #: The game binary. ``Wuthering Waves.exe`` (``direct_exe``) is Kuro's launcher stub: it
     #: runs ``ACE-Setup64.exe``, which installs the ACE kernel driver into the prefix, and Wine
@@ -302,7 +343,7 @@ class WutheringWavesBackend(DirectBackend):
         # The launcher stub passes these; a profile that sets its own launch_args keeps control.
         if self._extra_args("launch_args"):
             return []
-        return ["-dx12", "-krqlv=hd"]
+        return ["-dx12", f"-krqlv={wuwa.quality_of(self.ctx.profile.get('wuwa_quality'))}"]
 
 
 class Gfl2Backend(DirectBackend):
@@ -376,7 +417,7 @@ class Gfl2HaoplayBackend(Gfl2Backend):
             cancel=self.ctx.cancel,
             constant=constant,
             url=czn_backend.WEBVIEW2_URL,
-            installed_fn=lambda: webview2.installed(prefix),
+            installed_fn=lambda: webview2.installed(prefix) and webview2.registered(prefix),
             pin_fn=lambda: webview2.resolve_pin(profile, constant),
             index_pins_fn=webview2.index_pins,
             index_source_fn=webview2.index_source,

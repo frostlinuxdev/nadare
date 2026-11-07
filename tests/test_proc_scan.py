@@ -180,3 +180,20 @@ def test_the_renderer_probe_sees_the_wine_game_of_a_proton_launch(tmp_path: Path
     pids = _prefix_scan(root, "/games/pfx")
 
     assert graphics.detect_renderer(pids, proc_root=root) == "DXVK on Vulkan"
+
+
+def test_a_process_name_that_is_not_utf8_does_not_break_the_scan(tmp_path):
+    """#928: the kernel cuts comm at 15 bytes, which can split a multi-byte character."""
+    from nadare.core import process
+
+    proc = tmp_path / "proc" / "4242"
+    proc.mkdir(parents=True)
+    broken = "ゲーム".encode()[:-1]  # a truncated character
+    (proc / "comm").write_bytes(broken + b"\n")
+    fields = " ".join(["S"] + ["0"] * 18 + ["777"] + ["0"] * 5)
+    (proc / "stat").write_bytes(b"4242 (" + broken + b") " + fields.encode() + b"\n")
+    (proc / "cmdline").write_bytes(b"game\x00")
+
+    assert process._pid_starttime(4242, root=tmp_path / "proc") == "777"
+    _cmdline, _exe, name = process._read_cmdline(4242, root=tmp_path / "proc")
+    assert name.startswith("ゲー")

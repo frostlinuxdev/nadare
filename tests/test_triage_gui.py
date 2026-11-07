@@ -90,10 +90,15 @@ def test_externally_sourced_labels_are_plain_text(qapp):
 
 
 # ---- #22 ------------------------------------------------------------------
-def test_stop_button_requests_the_stop_operation(qapp):
-    """While a launch is busy the primary button reads STOP and asks for stop."""
+def test_stop_button_requests_the_stop_operation(qapp, monkeypatch):
+    """While a launch is busy the x next to PLAYING asks for the stop operation."""
+    from PyQt6.QtWidgets import QMessageBox
+
     from nadare.gui.game_view import GameView
 
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
     view = GameView()
     view.set_profile("p", {})
     view.set_busy("launch")
@@ -102,9 +107,9 @@ def test_stop_button_requests_the_stop_operation(qapp):
     view.action_requested.connect(actions.append)
     view.cancel_requested.connect(lambda: cancels.append(True))
     try:
-        assert view.primary.text() == "STOP"
+        assert view.primary.text() == "PLAYING"
         view._primary_grace_until = 0.0  # past the double-click guard (#617)
-        view.primary.click()
+        view.stop_button.click()
         assert actions == ["stop"]
         assert cancels == [], "STOP must not take the generic cancel path"
     finally:

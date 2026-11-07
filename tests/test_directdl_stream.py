@@ -520,3 +520,42 @@ def test_a_symlinked_state_dir_is_refused_and_no_record_lands_outside(server, tm
     with pytest.raises(dd.DirectError, match="symlink"):
         dd.sync(_zip_plan(s.url + "/g.zip", blob, True), dest)
     assert list(outside.iterdir()) == []
+
+
+class _CancelAfter(Cancel):
+    """Cancelled once ``raise_if_cancelled`` has been asked ``calls`` times."""
+
+    def __init__(self, calls: int) -> None:
+        super().__init__()
+        self._left = calls
+
+    def raise_if_cancelled(self) -> None:
+        self._left -= 1
+        if self._left < 0:
+            self.cancel()
+        super().raise_if_cancelled()
+
+
+@pytest.mark.parametrize("calls", [0, 1, 2, 3])
+def test_a_cancel_during_zip_extraction_installs_nothing_and_raises(tmp_path, calls):
+    """#929: the ZIP path used to finish extracting and merge after a cancel."""
+    blob = make_zip({"a.bin": b"a" * 10, "b.bin": b"b" * 10, "c.bin": b"c" * 10})
+    zip_path = tmp_path / "g.zip"
+    zip_path.write_bytes(blob)
+    dest, work = tmp_path / "dest", tmp_path / "work"
+    work.mkdir()
+    with pytest.raises(Cancelled):
+        dd._extract_zip_into_dest(zip_path, dest, work, _CancelAfter(calls))
+    assert not dest.exists() or not any(dest.rglob("*"))
+
+
+def test_a_cancel_during_slice_extraction_installs_nothing_and_raises(tmp_path):
+    data = b"x" * 30
+    pack = tmp_path / "pack.bin"
+    pack.write_bytes(data)
+    members = (dd.Member("a.bin", 0, 10), dd.Member("b.bin", 10, 10), dd.Member("c.bin", 20, 10))
+    dest, work = tmp_path / "dest", tmp_path / "work"
+    work.mkdir()
+    with pytest.raises(Cancelled):
+        dd._extract_slices_into_dest(pack, members, dest, work, _CancelAfter(2))
+    assert not dest.exists() or not any(dest.rglob("*"))

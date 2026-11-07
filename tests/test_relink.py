@@ -153,6 +153,16 @@ def test_check_movable_accepts_a_normal_profile(tmp_path):
     relink.check_movable({"prefix": str(pfx), "install_dir": str(pfx / "drive_c" / "Game")})
 
 
+def test_check_movable_refuses_a_prefix_another_profile_also_uses(tmp_path):
+    # #971: moving it would leave the other profile pointing at a vanished folder.
+    pfx = _prefix(tmp_path / "p")
+    mine = {"prefix": str(pfx)}
+    profiles = {"a": mine, "b": {"title": "Other Game", "prefix": str(pfx)}}
+    with pytest.raises(relink.RelinkError, match="Other Game"):
+        relink.check_movable(mine, name="a", profiles=profiles)
+    relink.check_movable(mine, name="a", profiles={"a": mine})  # alone: fine
+
+
 def test_a_hand_relink_of_the_whole_game_home_takes_the_rebuild_backup_along(tmp_path):
     old_home, new_home = tmp_path / "lib" / "Nadare" / "Game", tmp_path / "lib2" / "Nadare" / "Game"
     _prefix(new_home / "prefix")

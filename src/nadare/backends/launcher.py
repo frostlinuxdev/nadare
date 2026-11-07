@@ -123,6 +123,7 @@ class LauncherBackend(WineGameBackend):
     """Base for the per-game classes below; never registered on its own."""
 
     kind = "launcher"
+    supports_secure_mode = True
     #: Each game below sets its own; this is only a fallback for a new launcher kind.
     install_size_hint = 100 * 1024**3
     unofficial_notice = True
@@ -174,6 +175,15 @@ class LauncherBackend(WineGameBackend):
         ),
         Option("installer_args", "Installer arguments", "args", advanced=True),
         Option("launch_args", "Launch arguments", "args"),
+        Option(
+            "secure_mode",
+            "Sandbox",
+            "bool",
+            "Hides your home folder from the launcher and the game (needs bubblewrap). They can "
+            "still use the network. Experimental: the launcher may fail to update itself. See "
+            "docs/SECURE-MODE.md.",
+            default=False,
+        ),
         Option("wine_binary", "Wine binary", "path_file", advanced=True),
         Option("umu_binary", "umu-run binary", "path_file", advanced=True),
         Option("extra_env", "Environment", "env", "One KEY=VALUE per line.", advanced=True),
@@ -218,7 +228,8 @@ class NikkeBackend(LauncherBackend):
         "Nadare installs the NIKKE launcher for you, without opening any window (about 700 MB). "
         "Press Play to open the launcher, sign in there and it downloads the game; the launcher "
         "asks for about 23 GB of free space. Closing the launcher window only hides it in the "
-        "tray: Nadare still sees it running, so press STOP in Nadare to close it completely. "
+        "tray: Nadare still sees it running, so press the x next to PLAYING in Nadare to close "
+        "it completely. "
         "If the silent install does not work here, Nadare opens the NIKKE miniloader instead: "
         "click INSTALL, wait for the download, then click LAUNCH (if another installer window "
         "opens first, click INSTALL there too). Tencent's kernel anti-cheat (ACE) may prevent "

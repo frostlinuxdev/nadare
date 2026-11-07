@@ -490,9 +490,24 @@ def test_tiers_mark_only_the_launched_games_as_verified():
     assert dk.tier_of("direct-nte") == "Verified"
     assert dk.tier_of("direct-mongil") == "Verified"  # b13 end to end, 2026-10-27
     assert dk.tier_of("launcher-nte") == "Experimental"
-    assert dk.tier_of("direct-genshin") == "Experimental"
-    assert dk.tier_of("direct-wuwa") == "Experimental"
+    assert dk.tier_of("launcher-gfl2-haoplay") == "Experimental"
     assert dk.tier_of("not-a-kind") == "Experimental"
+
+
+def test_hoyo_wuwa_haoplay_direct_and_nikke_are_verified():
+    """Marked Verified on the maintainer's word, 2026-11-05."""
+    from nadare.core import directkinds as dk
+
+    for kind in (
+        "direct-genshin",
+        "direct-hsr",
+        "direct-zzz",
+        "direct-wuwa",
+        "direct-gfl2-haoplay",
+        "launcher-nikke",
+    ):
+        assert dk.tier_of(kind) == "Verified", kind
+        assert kind in dk.CATALOG_KINDS, kind
 
 
 # ------------------------------------------------------------ Wuthering Waves launch
@@ -542,7 +557,7 @@ def test_hoyo_kinds_still_load_for_existing_profiles():
     assert dk.HOYO_KINDS <= dk.DIRECT_KINDS
     assert dk.HOYO_KINDS <= set(dk.CATALOG_BACKENDS)
     assert dk.tier_of("direct-hi3") == "Verified"
-    assert dk.tier_of("direct-zzz") == "Experimental"
+    assert dk.tier_of("direct-zzz") == "Verified"
 
 
 def test_gfl2_haoplay_is_a_launcher_kind_with_a_trusted_installer():
@@ -557,12 +572,12 @@ def test_gfl2_haoplay_is_a_launcher_kind_with_a_trusted_installer():
     assert any(cls.default_installer_url.split("/")[2].endswith(h) for h in cls.trusted_hosts)
 
 
-def test_gfl2_haoplay_direct_kind_is_registered_and_experimental():
+def test_gfl2_haoplay_direct_kind_is_registered_and_verified():
     from nadare.backends import direct
     from nadare.core import directkinds as dk
 
     assert "direct-gfl2-haoplay" in dk.CATALOG_KINDS
-    assert dk.tier_of("direct-gfl2-haoplay") == "Experimental"
+    assert dk.tier_of("direct-gfl2-haoplay") == "Verified"
     cls = direct.Gfl2HaoplayBackend
     assert cls.kind == "direct-gfl2-haoplay" and cls.direct_exe == "GF2_Exilium.exe"
     assert cls.plan_factory is not direct.Gfl2Backend.plan_factory
@@ -643,3 +658,30 @@ def test_a_direct_error_while_comparing_files_is_not_rewritten_by_repair(game, m
     monkeypatch.setattr(game, "_missing_entries", _comparison_fails)
     with pytest.raises(dd.DirectError, match="could not compare"):
         game.repair()
+
+
+# ------------------------------------------------------------ Wuthering Waves quality
+@pytest.mark.parametrize("quality", ["sd", "hd", "uhd"])
+def test_wuwa_launches_with_the_chosen_quality(tmp_path, quality):
+    backend, _root, game = _wuwa(tmp_path, {"wuwa_quality": quality})
+    assert backend._direct_argv(game) == [str(game), "-dx12", f"-krqlv={quality}"]
+
+
+def test_wuwa_quality_defaults_to_hd_and_ignores_nonsense(tmp_path):
+    backend, _root, game = _wuwa(tmp_path)
+    assert backend.plan_kwargs() == {"quality": "hd"}
+    backend, _root, game = _wuwa(tmp_path / "b", {"wuwa_quality": "ultra"})
+    assert backend.plan_kwargs() == {"quality": "hd"}
+    assert backend._direct_argv(game)[-1] == "-krqlv=hd"
+
+
+def test_wuwa_plan_gets_the_quality_and_the_token(tmp_path):
+    backend, _root, _game = _wuwa(tmp_path, {"wuwa_quality": "UHD", "kuro_token": "ABCDEFGH12"})
+    assert backend.plan_kwargs() == {"quality": "uhd", "token": "ABCDEFGH12"}
+
+
+def test_wuwa_offers_quality_as_a_visible_choice():
+    option = next(o for o in direct.WutheringWavesBackend.options if o.key == "wuwa_quality")
+    assert option.kind == "choice" and not option.advanced
+    assert [v for _label, v in option.choices] == ["sd", "hd", "uhd"]
+    assert option.default == "hd"

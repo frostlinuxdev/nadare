@@ -236,7 +236,13 @@ class SteamSetupDialog(QDialog):
         return self._busy
 
     def refresh(self) -> None:
-        """Ask the planner again and redraw the checklist (the result line stays)."""
+        """Ask the planner again and redraw the checklist (the result line stays).
+
+        While the first check or a step is running on the pool, that work redraws the list when
+        it ends, and planning here would run Vulkan and Steam probes on the GUI thread (#925).
+        """
+        if self._busy:
+            return
         self._plan = self._plan_fn()
         self._render()
 

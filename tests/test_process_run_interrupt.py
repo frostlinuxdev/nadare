@@ -7,6 +7,7 @@ import os
 import signal
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -20,7 +21,13 @@ def _alive(pid: int) -> bool:
         return False
     except PermissionError:  # pragma: no cover - same-user children only
         return True
-    return True
+    # A killed orphan stays a zombie until its parent reaps it, and a container without an init
+    # process (the CI runner) never does: a zombie is gone as far as the test is concerned.
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return True
+    return state != "Z"
 
 
 def _wait_dead(pid: int, timeout: float) -> bool:
@@ -121,3 +128,30 @@ def test_a_further_interrupt_during_cleanup_still_kills_the_child(
         assert _wait_dead(marks["pid"], 5), "a second interrupt left the child alive"
     finally:
         _kill_quietly(marks.get("pid"))
+
+
+def test_a_raising_emitter_after_the_leader_exited_still_stops_its_descendants(tmp_path) -> None:
+    """The leader is gone but a grandchild is not: the group is cleaned up anyway (#896)."""
+    pidfile = tmp_path / "grandchild.pid"
+    script = f"sleep 60 & echo $! > {pidfile}; echo hello; exit 0"
+    seen: list[str] = []
+
+    def emit(event) -> None:
+        if event.kind == "log" and event.message == "hello":
+            time.sleep(0.6)  # let the leader exit while its output is still being forwarded
+            seen.append("raising")
+            raise RuntimeError("the log sink is broken")
+
+    grandchild = 0
+    try:
+        with pytest.raises(RuntimeError, match="log sink"):
+            process.run(["sh", "-c", script], env=dict(os.environ), emit=emit)
+        assert seen == ["raising"]
+        grandchild = int(pidfile.read_text())
+        assert _wait_dead(grandchild, 8.0), "the grandchild was left running"
+    finally:
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except (ProcessLookupError, ValueError, PermissionError):
+                pass

@@ -10,6 +10,7 @@ the caller decides what to do next (open the game page, offer a verify run).
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import backends, paths
+from ..core import backends, paths, prefixguard
 from ..core.backends import BackendError
 from ..core.config import MAX_PROFILE_NAME, Config, valid_profile_name
 from ..core.directkinds import (
@@ -256,6 +257,25 @@ def _absolute(path: str | Path) -> str:
     if ".." in Path(text).parts:
         return os.path.realpath(text)
     return os.path.normpath(text)
+
+
+def unique_context(profiles: Mapping[str, Mapping[str, Any]]) -> str | None:
+    """A lepton context no other FGO profile uses, or ``None`` when the default is free.
+
+    Profiles with no ``context`` all mean the one called ``fgo``, so a second copy would
+    control the same Android context as the first (#921).
+    """
+    used = {
+        str(p.get("context") or "fgo")
+        for p in profiles.values()
+        if str(p.get("backend") or "") in LEPTON_KINDS
+    }
+    if "fgo" not in used:
+        return None
+    number = 2
+    while f"fgo-{number}" in used:
+        number += 1
+    return f"fgo-{number}"
 
 
 def _cannot_create(path: str | Path) -> bool:
@@ -507,7 +527,7 @@ class AddGameDialog(QDialog):
         root.setContentsMargins(26, 22, 26, 8)
         root.setSpacing(14)
 
-        heading = QLabel("Add a game")
+        heading = QLabel("Add game")
         heading.setObjectName("Title")
         root.addWidget(heading)
         subtitle = QLabel(
@@ -615,9 +635,9 @@ class AddGameDialog(QDialog):
         form.addRow("", self.location_toggle)
 
         self.name = QLineEdit()
-        self.name.setPlaceholderText("profile name")
+        self.name.setPlaceholderText("name for this game")
         self.name.textEdited.connect(lambda _t: setattr(self, "_name_touched", True))
-        form.addRow("Profile name", self.name)
+        form.addRow("Game name", self.name)
         root.addLayout(form)
 
         self.detect_label = QLabel("")
@@ -1122,6 +1142,23 @@ class AddGameDialog(QDialog):
                 )
                 owned_dirs.append(str(game_dir))
                 prefix_value = str(game_dir / "prefix")
+        if (
+            not importing
+            and prefix_value
+            and kind in PREFIX_KINDS
+            and kind not in PREFIX_ONLY_KINDS
+            and self._prefix_touched
+        ):
+            # A Wine prefix picked on its own is not a library, but a drive root, the home
+            # folder or a personal folder picked as one would get drive_c and friends dropped in
+            # it: give such a place Nadare's own sub-tree, as a picked game folder gets (#851).
+            reason = prefixguard.unsafe_reason(prefix_value, as_prefix=True)
+            if reason:
+                game_dir = _free_folder(
+                    Path(prefix_value) / "Nadare", _folder_name(game.title), self.config.profiles
+                )
+                owned_dirs.append(str(game_dir))
+                prefix_value = str(game_dir / "prefix")
         if not importing and prefix_value and kind in PREFIX_KINDS:
             if _new_or_empty(Path(prefix_value)):
                 owned.append("prefix")
@@ -1191,6 +1228,11 @@ class AddGameDialog(QDialog):
         install_dir, prefix_value, owned, owned_dirs = self._plan_paths(
             game, install_dir, prefix_value, importing
         )
+        for label, value in (("game folder", install_dir), ("Wine prefix", prefix_value)):
+            reason = prefixguard.unsafe_reason(value, profiles=self.config.profiles)
+            if reason:
+                self.error_label.setText(f"That {label}: {prefixguard.explain(value, reason)}")
+                return None
 
         if not importing and kind in PREFIX_ONLY_KINDS and prefix_value:
             chosen = Path(prefix_value)
@@ -1220,6 +1262,8 @@ class AddGameDialog(QDialog):
             values["install_dir"] = install_dir
         if prefix_value and (kind in PREFIX_KINDS or kind in LEPTON_KINDS):
             values["prefix"] = prefix_value
+        if kind in LEPTON_KINDS and (context := unique_context(self.config.profiles)):
+            values["context"] = context
         if owned:
             values["owned_trees"] = owned
         if owned_dirs:

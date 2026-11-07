@@ -901,6 +901,11 @@ def remove(runner_id_or_path: str | os.PathLike[str]) -> bool:
     """Remove an Nadare-installed runner by id or path. Returns True if removed."""
     root = paths.runners_dir().resolve()
     candidate = Path(runner_id_or_path).expanduser()
+    # A dot or dot-dot component names somewhere else (``..`` is the folder that holds the
+    # runners, profiles and saves): never a runner. ``Path`` drops a lone ``.``, so an empty
+    # name is refused with the rest.
+    if not candidate.name or ".." in candidate.parts or "." in str(runner_id_or_path).split("/"):
+        return False
     if not candidate.is_absolute():
         candidate = root / str(runner_id_or_path)
     # Judge the entry by where it lives, not by where it points: resolve only its

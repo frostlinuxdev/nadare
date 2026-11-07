@@ -150,3 +150,22 @@ def test_mask_redacts_bearer_scheme():
 
     assert "password123" not in mask("Authorization: Bearer password123")
     assert "secret99" not in mask("authorization=Basic secret99")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '{"password": "hunter2"}',
+        '{"access_token":"abc"}',
+        "{'api_key': 'k'}",
+        '{"client_secret" : "s"}',
+    ],
+)
+def test_a_quoted_json_key_still_masks_its_value(line):
+    """#924: a quoted key (JSON) must not slip past the key-based pass."""
+    from nadare.core.events import mask
+
+    masked = mask(line)
+    for secret in ("hunter2", "abc", "'k'", "'s'", '"s"'):
+        assert secret not in masked
+    assert "redacted" in masked

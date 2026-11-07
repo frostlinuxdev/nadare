@@ -236,7 +236,13 @@ def test_main_window_checks_runner_usage_off_the_gui_thread(tmp_path, qapp, monk
         return real_usage(profiles)
 
     monkeypatch.setattr(runners, "runner_usage", slow_usage)
-    monkeypatch.setattr("nadare.gui.main_window.QMessageBox.question", lambda *a, **k: None)
+    # The check ends by asking "Delete unused runners?" from the GUI thread. Wait for that
+    # while the question is still patched: a late signal would otherwise reach the next test's
+    # event loop with the real, modal box and abort the whole run.
+    asked: list[bool] = []
+    monkeypatch.setattr(
+        "nadare.gui.main_window.QMessageBox.question", lambda *a, **k: asked.append(True)
+    )
     try:
         window._runners_before = set()
         before = time.monotonic()
@@ -244,6 +250,7 @@ def test_main_window_checks_runner_usage_off_the_gui_thread(tmp_path, qapp, monk
         assert time.monotonic() - before < 0.15, "runner cleanup check blocked the GUI"
         assert _wait(qapp, lambda: bool(threads))
         assert all(is_gui is False for is_gui in threads), threads
+        assert _wait(qapp, lambda: bool(asked)), "the background check never finished"
     finally:
         window.close()
         window.deleteLater()

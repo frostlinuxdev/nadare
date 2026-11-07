@@ -128,10 +128,16 @@ class TestStatusNotInstalled:
 
         assert status.state == "not_installed"
         assert status.running is False
-        assert status.message == "installation incomplete — click INSTALL to finish"
+        assert status.message == (
+            "installation incomplete — click RESUME to finish; what is already downloaded is kept"
+        )
         assert status.data["exe"] == str(exe)
         assert status.data["can_repair"] is True
-        assert status.data == _expected_data(backend, direct=True, exe=str(exe))
+        assert status.data["incomplete"] is True
+        assert status.data == {
+            **_expected_data(backend, direct=True, exe=str(exe)),
+            "incomplete": True,
+        }
 
 
 class TestStatusInstalled:

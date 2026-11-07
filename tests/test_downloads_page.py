@@ -230,3 +230,13 @@ def test_a_long_step_text_does_not_make_the_row_taller(page, qapp):
     qapp.processEvents()
     assert page.row("a").height() == short
     assert page.row("a").status_label.toolTip() == long_name  # the full text stays reachable
+
+
+def test_cancel_says_what_is_downloaded_stays_on_disk_where_that_is_true(page):
+    # A download that can resume keeps its files when cancelled; the tooltip must say so, and a
+    # row that cannot resume keeps the plain wording.
+    page.set_rows([running("a"), waiting("b", can_now=False, can_pause=False), paused("c")])
+    tips = {name: page.row(name).cancel_btn.toolTip() for name in ("a", "b", "c")}
+    assert "stays on disk" in tips["a"] and "Resume" in tips["a"]
+    assert "stays on disk" in tips["c"]
+    assert "stays on disk" not in tips["b"]

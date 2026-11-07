@@ -82,7 +82,8 @@ def test_update_apply_reports_a_directory_conflict(monkeypatch, tmp_path, capsys
     monkeypatch.setattr(czn_update, "diskspace", None)
     monkeypatch.setattr(czn_update, "local_version", lambda: 1)
     monkeypatch.setattr(czn_update, "resolve_latest", lambda installed: (2, "test"))
-    monkeypatch.setattr(czn_update, "fetch_manifest", lambda version: {"version_no": 2})
+    manifest = {"version_no": 2, "files": ["f"]}
+    monkeypatch.setattr(czn_update, "fetch_manifest", lambda version: manifest)
     monkeypatch.setattr(czn_update, "game_running", lambda: False)
     monkeypatch.setattr(
         czn_update,

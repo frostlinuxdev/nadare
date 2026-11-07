@@ -242,11 +242,11 @@ class ArknightsBackend(WineGameBackend):
         return list(yostar.plan(self._load_manifest(), self.install_dir(), verify=verify))
 
     def _sync_direct(self) -> dict[str, Any]:
+        self._refuse_if_running("installing, updating or repairing it")
         manifest = self._load_manifest()
         workers = profile_setting(self.ctx.profile, "download_workers", 6)
         marker = self._install_marker_path()
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text("sync in progress\n", encoding="utf-8")
+        self._write_install_marker()
         self.ctx.emit(Event("step", f"{self.display_name}: syncing {manifest.version} directly"))
         try:
             summary = yostar.sync(

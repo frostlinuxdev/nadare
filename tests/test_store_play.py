@@ -59,7 +59,7 @@ def test_an_installed_game_shows_play_as_the_main_button(qapp):
     assert widget.play_button.text() == "Play"
     assert widget.play_button.objectName() == "Primary"
     # Installing another copy is still possible, but it is no longer the main action.
-    assert widget.install_button.text() == "Add another"
+    assert widget.install_button.text() == "Add another copy"
     assert widget.install_button.objectName() != "Primary"
 
 

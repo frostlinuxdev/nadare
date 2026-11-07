@@ -688,7 +688,11 @@ def _size_from(opener, request, method: str, timeout: int) -> int | None:
     request.method = method
     try:
         with opener.open(request, timeout=timeout) as response:
-            total = response.headers.get("Content-Range", "").rpartition("/")[2]
+            ranged = response.headers.get("Content-Range", "")
+            total = ranged.rpartition("/")[2]
+            if ranged and not total.isdigit():
+                # "bytes 0-0/*": the length of the slice is not the size of the object (#930).
+                return None
             length = total if total.isdigit() else response.headers.get("Content-Length")
     except Exception:  # noqa: BLE001 - an unknown size is not an error
         return None
@@ -878,7 +882,7 @@ class HttpClientPool:
         timeout: int | None = None,
         redirects: int = 5,
         redirect_allowed: Callable[[str], bool] | None = None,
-        strict_proxy: bool = False,
+        strict_proxy: bool = True,
     ) -> HttpResponse:
         """Issue a GET, following redirects, and return a streaming response.
 

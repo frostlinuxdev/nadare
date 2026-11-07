@@ -51,6 +51,8 @@ class Entry:
 _MAGIC = b"7z\xbc\xaf\x27\x1c"
 _MAX_HEADER = 64 * 1024 * 1024
 _MAX_FILES = 10_000_000
+#: The LZMA decoder allocates the dictionary up front; 7-Zip's own presets stay well below this.
+_MAX_DICT = 1 << 30
 _CHUNK = 1 << 20
 
 
@@ -159,6 +161,11 @@ def _read_digests(r: _Reader, count: int) -> list[int | None]:
     return [r.u32() if bit else None for bit in bits]
 
 
+def _check_dict(dict_size: int) -> None:
+    if dict_size > _MAX_DICT:
+        raise SevenZipError(f"LZMA dictionary too large ({dict_size} bytes)")
+
+
 def _coder_filter(coder: _Coder) -> dict[str, int] | None:
     cid = coder.id
     if cid == b"\x00":
@@ -170,6 +177,7 @@ def _coder_filter(coder: _Coder) -> dict[str, int] | None:
         if prop > 40:
             raise SevenZipError("bad LZMA2 properties")
         dict_size = 0xFFFFFFFF if prop == 40 else (2 | (prop & 1)) << (prop // 2 + 11)
+        _check_dict(dict_size)
         return {"id": lzma.FILTER_LZMA2, "dict_size": dict_size}
     if cid == b"\x03\x01\x01":
         if len(coder.props) != 5:
@@ -180,6 +188,7 @@ def _coder_filter(coder: _Coder) -> dict[str, int] | None:
         lp = first % 5
         pb = first // 5
         dict_size = int.from_bytes(coder.props[1:5], "little")
+        _check_dict(dict_size)
         return {
             "id": lzma.FILTER_LZMA1,
             "dict_size": dict_size,

@@ -156,6 +156,11 @@ def check_endfield_games_exe(
         if status == "ok" and age < DEEP_INTERVAL:
             return []
         if status == "unreachable" and age < RETRY_INTERVAL:
+            # Not looking again yet, but the check is still blind: say so, or the quiet hour
+            # reads as a healthy one (#922).
+            stored = state.get("problems")
+            for note in stored if isinstance(stored, list) else []:
+                BLIND.append(str(note))
             return []
         if status == "problem" and age < RETRY_INTERVAL:
             stored = state.get("problems")
@@ -180,8 +185,9 @@ def check_endfield_games_exe(
         try:
             download(url, installer)
         except Exception as exc:  # noqa: BLE001 - a flaky CDN must not raise a false alarm
-            _blind(f"could not download the Endfield installer to look for Games.exe: {exc}")
-            _write_state(state_path, "unreachable", [], now)
+            note = f"could not download the Endfield installer to look for Games.exe: {exc}"
+            _blind(note)
+            _write_state(state_path, "unreachable", [note], now)
             return []
         try:
             extract(installer, Path(tmp) / "Games.exe")

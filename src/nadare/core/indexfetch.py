@@ -139,9 +139,7 @@ def fetch_json(
         cached = cache_path(base, rel)
         try:
             mtime = cached.stat().st_mtime
-            age = time.time() - mtime
-            # A copy dated well ahead of the clock would never expire; allow a small clock step.
-            if age > max_cache_age or age < -_CLOCK_SKEW_SECONDS:
+            if not _usable_age(time.time() - mtime, max_cache_age):
                 continue
             payload = cached.read_bytes()
         except OSError:
@@ -159,6 +157,15 @@ def fetch_json(
     raise IndexUnavailable(f"no mirror answered and no usable cached {rel}")
 
 
+def _usable_age(age: float, limit: float) -> bool:
+    """Whether a saved copy ``age`` seconds old may still be served.
+
+    Too old is refused; so is one dated well ahead of the clock, which would never expire (a
+    wrong clock); a small step back is tolerated. Both read paths use this one rule (#859).
+    """
+    return -_CLOCK_SKEW_SECONDS <= age <= limit
+
+
 def read_cached(rel: str, *, validate: Callable[[Any], Any] | None = None) -> Any | None:
     """The last good copy of ``rel`` from disk (no network at all), or ``None``.
 
@@ -171,7 +178,7 @@ def read_cached(rel: str, *, validate: Callable[[Any], Any] | None = None) -> An
             continue
         cached = cache_path(base, rel)
         try:
-            if time.time() - cached.stat().st_mtime > MAX_CACHE_AGE_SECONDS:
+            if not _usable_age(time.time() - cached.stat().st_mtime, MAX_CACHE_AGE_SECONDS):
                 continue
             payload = cached.read_bytes()
         except OSError:

@@ -340,3 +340,16 @@ def test_main_runs_the_deep_check_and_reports_its_problem(tmp_path, monkeypatch,
     monkeypatch.setattr(canary, "check_endfield_games_exe", lambda *a, **k: ["Games.exe is gone"])
     assert canary.main(["--state", str(tmp_path / "s.json")]) == canary.PROBLEM
     assert "CANARY: Games.exe is gone" in capsys.readouterr().out
+
+
+def test_an_unreachable_download_stays_blind_while_the_hour_is_waited_out(tmp_path):
+    """#922: the quiet retry window used to look like a healthy check."""
+    canary = _canary()
+    deep = _Deep(tmp_path, download_error=OSError("connection reset"))
+    canary.BLIND.clear()
+    deep.run(canary, 1000.0)
+    assert canary.BLIND and "connection reset" in canary.BLIND[0]
+    canary.BLIND.clear()  # the next run starts empty, as main() does
+    assert deep.run(canary, 1000.0 + 600) == []  # no new download in the window...
+    assert len(deep.downloads) == 1
+    assert canary.BLIND and "connection reset" in canary.BLIND[0]  # ...but still blind

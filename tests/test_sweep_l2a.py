@@ -97,8 +97,8 @@ def test_sidebar_status_dots_are_labelled(qapp, tmp_path):
     window = _window(tmp_path)
     try:
         running.set_state(Status("running"))
-        assert running.dot.accessibleName() == "Running"
-        assert running.dot.toolTip() == "Running"
+        assert running.dot.accessibleName() == "Playing"
+        assert running.dot.toolTip() == "Playing"
         update.set_state(Status("installed", data={"update_available": True}))
         assert update.dot.accessibleName() == "Update available"
         assert update.dot.toolTip() == "Update available"

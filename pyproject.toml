@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nadare-launcher"
-version = "0.1.0b20"
+version = "0.1.0b21"
 description = "An open-source Linux launcher for anime gacha games (Fate/Grand Order, Chaos Zero Nightmare, and more)"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -27,7 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 build = ["pyinstaller>=6.6"]
-dev = ["pytest>=8", "pytest-qt>=4.4", "ruff>=0.6"]
+dev = ["pytest>=8", "pytest-qt>=4.4", "pytest-xdist>=3.5", "ruff>=0.6"]
 # Enables "Remember me": stores CZN logins in the OS keyring (never plaintext).
 secure = ["keyring>=24"]
 

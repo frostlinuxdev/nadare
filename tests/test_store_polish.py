@@ -200,3 +200,32 @@ def test_launcher_games_do_not_show_the_old_100_gib_placeholder(qapp):
     # GFL2: a tiny launcher, then the game downloads about 88 GB inside itself (measured: 87.7 GB
     # of game files for one voice language, plus the ~3 GB prefix).
     assert 88 * 10**9 <= sizes["launcher-gfl2-haoplay"] <= 100 * 10**9
+
+
+def test_a_background_installed_change_does_not_move_keyboard_focus(qapp):
+    """#942: the page already shown must keep focus where the user put it."""
+    import dataclasses
+
+    entry = _entry("fgo-lepton")
+    widget = StoreDetail(dataclasses.replace(entry, installed=False))
+    widget.show()
+    widget.back_button.setFocus() if hasattr(widget, "back_button") else None
+    elsewhere = widget.install_button
+    elsewhere.setFocus()
+    qapp.processEvents()
+    widget.set_entry(dataclasses.replace(entry, installed=True))
+    # Install had focus, so the user's place moves to Play (their next step)...
+    assert widget.focusWidget() is widget.play_button
+    # ...but a later background refresh must not steal focus from wherever it now is.
+    widget.install_button.setFocus()
+    widget.set_entry(dataclasses.replace(entry, installed=True))
+    assert widget.focusWidget() is widget.install_button
+
+
+def test_opening_the_page_for_another_game_focuses_play(qapp):
+    import dataclasses
+
+    first = dataclasses.replace(_entry("fgo-lepton"), installed=True)
+    widget = StoreDetail(first)
+    widget.show()
+    assert widget.focusWidget() is widget.play_button

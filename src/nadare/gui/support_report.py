@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
 from datetime import date
 from pathlib import Path
 
@@ -18,6 +20,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+log = logging.getLogger(__name__)
+
 
 class _Signals(QObject):
     finished = pyqtSignal(str)
@@ -30,17 +34,27 @@ class ReportTask(QRunnable):
         self.profile = profile
         self.signals = _Signals()
 
-    def run(self) -> None:
-        from ..app import _doctor_text
-        from ..core.config import Config
-        from ..core.report import build_report
+    def run(self) -> None:  # noqa: D102 - QRunnable entry point
+        # An exception escaping a pool thread aborts the whole app (PyQt6): answer in the dialog.
+        try:
+            from ..app import _doctor_text
+            from ..core.config import Config
+            from ..core.report import build_report
 
-        text = build_report(
-            self.config,
-            profile_name=self.profile,
-            doctor_text=_doctor_text(Config(data=self.config)),
-        )
-        self.signals.finished.emit(text)
+            text = build_report(
+                self.config,
+                profile_name=self.profile,
+                doctor_text=_doctor_text(Config(data=self.config)),
+            )
+        except Exception as exc:  # noqa: BLE001 - a message beats a crash
+            log.debug("support report failed", exc_info=True)
+            text = (
+                f"The report could not be built: {exc}\n\n"
+                "Nothing was lost. Please tell us this message, and what you pressed, "
+                "where you are getting help."
+            )
+        with contextlib.suppress(RuntimeError):  # the window may be gone by now
+            self.signals.finished.emit(text)
 
 
 class ReportDialog(QDialog):

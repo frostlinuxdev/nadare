@@ -121,7 +121,9 @@ class TermsDialog(QDialog):
         data = result if isinstance(result, dict) else {}
         documents = data.get("documents") if isinstance(data.get("documents"), list) else []
         if not data.get("pending") or not documents:
-            self.status.setText("This account has already agreed to the terms. Try again now.")
+            self.status.setText(
+                "This account has already agreed to the terms. Close this window and try again."
+            )
             return
         missing = data.get("missing")
         if isinstance(missing, list) and missing:

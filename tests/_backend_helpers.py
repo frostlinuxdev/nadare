@@ -49,3 +49,10 @@ def make_jwt(sub: str = "P12345", exp: int | None = None) -> str:
     header = b64(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
     payload = b64(json.dumps({"sub": sub, "exp": exp}).encode())
     return f"{header}.{payload}.{b64(b'signature-bytes')}"
+
+
+def x64_dll(extra: bytes = b"") -> bytes:
+    """The smallest file the VC++ runtime check accepts as an x64 DLL."""
+    head = bytearray(b"MZ" + b"\0" * 0x3E)
+    head[0x3C:0x40] = (0x40).to_bytes(4, "little")
+    return bytes(head) + b"PE\0\0" + (0x8664).to_bytes(2, "little") + b"\0" * 20 + extra

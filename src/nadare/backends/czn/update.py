@@ -284,6 +284,25 @@ def fetch_manifest(version: int) -> dict:
     return json.loads(_get(f"{BASE}/{SERVICE}_{version}.json").decode("utf-8"))
 
 
+def check_manifest(manifest: object) -> None:
+    """Refuse anything that is not a manifest: an error page, a maintenance notice, junk.
+
+    Such a document used to plan as "nothing differs", so the updater called it up to date,
+    advanced the installed version and cached it as the inventory to verify against (#904).
+    """
+    if not isinstance(manifest, dict):
+        raise ManifestError("the server answered with something that is not a manifest")
+    files = manifest.get("files")
+    if not isinstance(files, list) or not files or not all(isinstance(r, str) for r in files):
+        raise ManifestError("the manifest has no file list (the server may be in maintenance)")
+    version = manifest.get("version_no")
+    if version is not None:
+        try:
+            int(version)
+        except (TypeError, ValueError):
+            raise ManifestError(f"the manifest's version is not a number: {version!r}") from None
+
+
 def parse_files(manifest: dict):
     """Yield (kind, path, ver_folder, chunk, md5_unpacked, md5_packed, usize)."""
     for row in manifest.get("files", []):
@@ -638,6 +657,7 @@ def _verify_cached() -> int:
     """Hash the install against the cached manifest; print one JSON event line."""
     try:
         manifest = json.loads(MANIFEST_CACHE.read_text())
+        check_manifest(manifest)
         differ, _dirs = plan(manifest, trust_stat_cache=False)
     except (OSError, ValueError, ManifestError):
         print(json.dumps({"event": "verify", "checked": False}))
@@ -750,6 +770,7 @@ def main(argv=None) -> int:
     )
 
     try:
+        check_manifest(manifest)
         to_dl, dirs = plan(manifest, trust_stat_cache=not args.full)
     except ManifestError as e:
         print(f"[!] manifest rejected: {e}")

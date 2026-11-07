@@ -98,9 +98,16 @@ def _decode(data: bytes) -> list[list[bool]] | None:
     bits = channels * depth
     stride = (width * bits + 7) // 8
     bpp = max(1, bits // 8)
+    # The scanlines are exactly height * (1 filter byte + stride): decompress no further than one
+    # byte past that, and take anything but exactly that many as a bad image. The third argument
+    # of zlib.decompress is only an initial buffer size, so it bounded nothing (#902).
+    expected = height * (stride + 1)
     try:
-        raw = zlib.decompress(bytes(idat), 15, stride * height + height + 1024)
+        inflater = zlib.decompressobj()
+        raw = inflater.decompress(bytes(idat), expected + 1)
     except (zlib.error, ValueError):
+        return None
+    if len(raw) != expected or inflater.unconsumed_tail:
         return None
     rows = _unfilter(raw, height, stride, bpp)
     if rows is None:

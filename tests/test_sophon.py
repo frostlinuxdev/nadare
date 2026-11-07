@@ -145,6 +145,13 @@ def test_parse_manifest_rejects_unsafe_paths_and_garbage():
         sophon.parse_manifest(b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff")
 
 
+def test_parse_manifest_rejects_a_path_listed_twice():
+    one = Build({"same.bin": b"A" * 10}).manifest_raw
+    two = Build({"same.bin": b"B" * 10}).manifest_raw
+    with pytest.raises(sophon.SophonError, match="twice"):
+        sophon.parse_manifest(one + two)
+
+
 # --------------------------------------------------------------- sync through directdl
 def test_fresh_install_writes_every_file_and_is_idempotent(servers, tmp_path):
     files = {"a.bin": bytes(range(256)) * 3, "sub/b.bin": b"bravo" * 70, "empty.bin": b""}
@@ -425,6 +432,27 @@ def test_cancel_stops_without_marking_done(servers, tmp_path):
     cancel.cancel()
     with pytest.raises(Cancelled):
         dd.sync(plan_for(build), tmp_path, cancel=cancel)
+    assert not (tmp_path / ".nadare" / "sophon-game.done").exists()
+
+
+def test_cancel_with_queued_files_says_cancelled_not_an_error(servers, tmp_path, monkeypatch):
+    """Cancelling a big install cancels the queued file tasks; that is a cancel, not a failure.
+
+    Genshin's Cancel button ended in ``error: CancelledError`` because the cancelled futures
+    raise ``concurrent.futures.CancelledError``, which is not ``Cancelled``.
+    """
+    build = Build({f"f{i}.bin": bytes([i % 250]) * 300 for i in range(400)}, chunk_size=100)
+    servers(build)
+    cancel = Cancel()
+    real = sophon._fetch_chunk
+
+    def fetch(*args, **kwargs):
+        cancel.cancel()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(sophon, "_fetch_chunk", fetch)
+    with pytest.raises(Cancelled):
+        dd.sync(plan_for(build), tmp_path, cancel=cancel, workers=1)
     assert not (tmp_path / ".nadare" / "sophon-game.done").exists()
 
 

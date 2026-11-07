@@ -382,3 +382,93 @@ def test_keyring_diagnosis_does_not_create_or_unlock_secret_service(monkeypatch)
     ok, why = sec.keyring_diagnosis()
     assert ok is True and "locked" not in why
     assert "unlock" not in calls and "create" not in calls
+
+
+# ---- audit #958 / #962 ----------------------------------------------------------------------
+
+
+def _fake_keyring_package(monkeypatch: pytest.MonkeyPatch, get_keyring) -> None:
+    import keyring
+
+    monkeypatch.delenv("NADARE_NO_KEYRING", raising=False)
+    monkeypatch.setattr(keyring, "get_keyring", get_keyring)
+
+
+def test_delete_says_so_when_the_keyring_cannot_be_reached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A discovery crash is not proof that nothing is saved (#958); logout must not succeed."""
+
+    def boom():
+        raise RuntimeError("dbus went away")
+
+    _fake_keyring_package(monkeypatch, boom)
+    store = SecretStore(tmp_path / "secrets.json", allow_fallback=False, kind="netmarble")
+    assert not store.secure
+    with pytest.raises(SecretStoreError):
+        store.delete("p")
+
+
+def test_delete_stays_quiet_when_there_is_no_keyring_by_design(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("NADARE_NO_KEYRING", "1")
+    store = SecretStore(tmp_path / "secrets.json", allow_fallback=False)
+    store.delete("p")  # nothing was ever saved: no error
+
+
+def test_delete_stays_quiet_with_the_fail_backend(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from keyring.backends.fail import Keyring as FailKeyring
+
+    _fake_keyring_package(monkeypatch, FailKeyring)
+    SecretStore(tmp_path / "secrets.json", allow_fallback=False).delete("p")
+
+
+def _backend_named(module: str, name: str):
+    cls = type(name, (), {"get_password": lambda *a: None})
+    cls.__module__ = module
+    return cls()
+
+
+@pytest.mark.parametrize(
+    "module,name",
+    [
+        ("keyrings.alt.file", "PlaintextKeyring"),
+        ("keyring.backends.null", "Keyring"),
+    ],
+)
+def test_a_plaintext_or_null_backend_is_not_secure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, module: str, name: str
+) -> None:
+    backend = _backend_named(module, name)
+    _fake_keyring_package(monkeypatch, lambda: backend)
+    assert not SecretStore(tmp_path / "s.json", allow_fallback=False).secure
+
+
+def test_a_chain_with_a_plaintext_member_is_not_secure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    chain = type("Chainer", (), {})()
+    chain.backends = [_backend_named("keyrings.alt.file", "PlaintextKeyring")]
+    _fake_keyring_package(monkeypatch, lambda: chain)
+    assert not SecretStore(tmp_path / "s.json", allow_fallback=False).secure
+
+
+def test_an_ordinary_backend_is_still_secure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    backend = _backend_named("keyring.backends.SecretService", "Keyring")
+    _fake_keyring_package(monkeypatch, lambda: backend)
+    assert SecretStore(tmp_path / "s.json", allow_fallback=False).secure
+
+
+def test_a_scoped_store_that_never_used_the_legacy_id_leaves_it_alone(fake_keyring) -> None:
+    """Netmarble must not read or delete the CZN login's ``token:`` entry (#960)."""
+    czn = SecretStore(allow_fallback=False)
+    czn.set("K", "czn-refresh")
+    netmarble = SecretStore(allow_fallback=False, kind="netmarble", legacy_fallback=False)
+    assert netmarble.get("K") is None
+    netmarble.delete("K")
+    assert czn.get("K") == "czn-refresh"

@@ -480,3 +480,54 @@ def test_czn_remake_failure_after_the_game_files_moved_puts_everything_back(
     assert (prefix / "drive_c" / "stale.dll").read_text() == "broken"
     parked = list(prefix.parent.glob(f"{prefix.name}.failed-*"))
     assert not parked, "an emptied parked prefix is tidied up, not left behind"
+
+
+def test_a_direct_sync_refuses_while_the_game_is_running(tmp_path, monkeypatch):
+    """#933: update and repair replace files one by one; a running game must be stopped first."""
+    from _backend_helpers import make_context
+
+    from nadare.backends import direct
+
+    monkeypatch.setattr(wg, "scan_pids", lambda patterns: [1234])
+    for backend in (
+        _arknights(tmp_path),
+        direct.MongilBackend(
+            make_context(tmp_path, "direct-mongil", {"prefix": str(tmp_path / "pfx")}, "mongil")
+        ),
+    ):
+        monkeypatch.setattr(
+            backend, "_load_manifest", lambda: pytest.fail("the sync must not start")
+        )
+        with pytest.raises(BackendError) as exc:
+            backend._sync_direct()
+        assert exc.value.code == 8
+
+
+def _share_the_prefix(backend, tmp_path) -> None:
+    """A second profile that uses the same Wine prefix (the Relink screen allows that)."""
+    backend.ctx.config.profiles["other"] = {
+        "backend": "wine",
+        "prefix": str(backend.prefix()),
+        "install_dir": str(backend.prefix() / "drive_c" / "OtherGame"),
+    }
+
+
+@pytest.mark.parametrize("kind", ["czn", "arknights"])
+def test_remake_refuses_a_prefix_another_profile_also_uses(tmp_path, monkeypatch, kind):
+    """#919: only this game was restored; the other profile's game was left in the backup."""
+    backend = _czn(tmp_path) if kind == "czn" else _arknights(tmp_path, prefix=str(tmp_path / "p"))
+    backend.prefix().mkdir(parents=True, exist_ok=True)
+    (backend.prefix() / "drive_c" / "OtherGame").mkdir(parents=True)
+    (backend.prefix() / "drive_c" / "OtherGame" / "other.exe").write_text("theirs")
+    _share_the_prefix(backend, tmp_path)
+    monkeypatch.setattr(wg, "scan_pids", lambda patterns: [])
+    if kind == "czn":
+        monkeypatch.setattr(backend, "_game_running", lambda: False)
+    moved: list[str] = []
+    monkeypatch.setattr(prefixmove, "move_aside", lambda p: moved.append("move"))
+
+    with pytest.raises(BackendError, match="other"):
+        backend.remake_prefix()
+
+    assert moved == []
+    assert (backend.prefix() / "drive_c" / "OtherGame" / "other.exe").read_text() == "theirs"

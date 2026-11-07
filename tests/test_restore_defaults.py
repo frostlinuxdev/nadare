@@ -188,3 +188,20 @@ def test_back_after_restore_asks_to_discard_when_it_differs(tmp_path, qapp, monk
         assert asked, "Back must ask to discard the restored defaults"
     finally:
         _dispose(page, qapp)
+
+
+def test_restore_keeps_a_locked_prefix(tmp_path, qapp):
+    # #971: the prefix field is read-only for an installed game; reset must not clear it.
+    prefix = tmp_path / "pfx"
+    prefix.mkdir()
+    config = _config(tmp_path, "wine", prefix=str(prefix))
+    page = SettingsPage()
+    try:
+        page.load(config, "sample")
+        page._set_prefix_locked(True)
+        editor = page.option_widget("prefix")
+        assert editor.text() == str(prefix)
+        page._restore_option_defaults()
+        assert editor.text() == str(prefix)
+    finally:
+        _dispose(page, qapp)

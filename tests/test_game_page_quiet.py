@@ -107,3 +107,51 @@ def test_self_evident_backend_labels_are_hidden(qapp, kind, hidden):
 
 def test_a_fresh_page_shows_no_kicker_before_any_status_is_known(view):
     assert view.kicker.isHidden()
+
+
+@pytest.mark.parametrize("operation", ["install", "update", "repair"])
+def test_a_download_starts_with_the_output_folded_away(view, operation):
+    """Thousands of per-file lines scroll past in a big install: hide them until asked."""
+    view.set_busy(operation)
+    view.append_event(Event("log", "verified 6ca5.uab (7767 bytes)"))
+    assert view.console.isHidden()
+    assert not view.output_head.isHidden()
+    assert view.console_toggle.text() == "Show output"
+    assert not view.progress_frame.isHidden()
+
+
+def test_the_output_can_still_be_opened_during_a_download(view):
+    view.set_busy("update")
+    view.append_event(Event("log", "verified 6ca5.uab (7767 bytes)"))
+    view.console_toggle.click()
+    assert not view.console.isHidden()
+    assert view.console_toggle.text() == "Hide output"
+
+
+def test_an_error_during_a_download_opens_the_output(view):
+    view.set_busy("install")
+    view.append_event(Event("log", "verified 6ca5.uab (7767 bytes)"))
+    view.append_event(Event("error", "sha256 mismatch"))
+    assert not view.console.isHidden()
+
+
+def test_a_launch_still_shows_its_output(view):
+    view.set_busy("launch")
+    assert not view.console.isHidden()
+
+
+def test_resuming_a_paused_download_says_so(view):
+    """The pane showed only "paused" after RESUME, while the run was already going."""
+    view.set_busy("install")
+    view.set_paused("install")
+    assert "paused" in view.console.toPlainText()
+    view.set_busy("install")
+    text = view.console.toPlainText()
+    assert text.rstrip().endswith("resumed")
+    assert "Resuming" in view.step_label.text()
+
+
+def test_a_plain_start_does_not_say_resumed(view):
+    view.set_busy("install")
+    assert "resumed" not in view.console.toPlainText()
+    assert "Resuming" not in view.step_label.text()

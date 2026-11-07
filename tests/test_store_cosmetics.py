@@ -123,6 +123,8 @@ def test_the_version_count_ignores_the_tier_filter(qapp, dispose):
     qapp.processEvents()
     everything = _gfl2_card(page).delivery_label.text()
     assert "3 versions" in everything
-    page.tier_filter.setCurrentText("Experimental")
+    # Verified keeps two of the three GFL2 builds (Darkwinter and Haoplay direct): still one
+    # card for the game, and it still counts the launcher build the filter hides.
+    page.tier_filter.setCurrentText("Verified")
     qapp.processEvents()
     assert "3 versions" in _gfl2_card(page).delivery_label.text()

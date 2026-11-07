@@ -1165,3 +1165,39 @@ def test_only_a_416_throws_away_a_resumable_part_when_pooled(tmp_path: Path) -> 
             pool=pool,
         )
     assert part.read_bytes() == b"half"
+
+
+class _FakeResponse:
+    def __init__(self, headers):
+        self.headers = headers
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeOpener:
+    def __init__(self, headers):
+        self._headers = headers
+
+    def open(self, request, timeout=0):
+        return _FakeResponse(self._headers)
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"Content-Range": "bytes 0-0/1234", "Content-Length": "1"}, 1234),
+        ({"Content-Range": "bytes 0-0/*", "Content-Length": "1"}, None),  # #930
+        ({"Content-Range": "bytes */*"}, None),
+        ({"Content-Length": "77"}, 77),
+        ({}, None),
+    ],
+)
+def test_size_from_never_mistakes_a_ranged_reply_for_the_object_size(headers, expected):
+    from nadare.core import download
+
+    request = download._request("https://example.invalid/x", None)
+    assert download._size_from(_FakeOpener(headers), request, "GET", 5) == expected

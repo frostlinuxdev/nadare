@@ -171,23 +171,28 @@ def test_switching_away_and_back_replays_a_running_install(tmp_path, qapp, monke
         qapp.processEvents()
 
 
-def test_stop_ignores_the_second_click_of_a_launch_double_click(qapp):
-    """#617: LAUNCH turns into STOP under the finger; a double-click must not
+def test_stop_ignores_the_second_click_of_a_launch_double_click(qapp, monkeypatch):
+    """#617: LAUNCH turns into PLAYING under the finger; a double-click must not
     start the game and then stop it again."""
     import time
 
+    from PyQt6.QtWidgets import QMessageBox
+
     from nadare.gui.game_view import GameView
 
+    monkeypatch.setattr(
+        QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes)
+    )
     view = GameView()
     view.set_profile("sample", {})
     actions: list[str] = []
     view.action_requested.connect(actions.append)
     try:
         view.set_busy("launch")
-        view.primary.click()
+        view.stop_button.click()
         assert actions == []
         view._primary_grace_until = time.monotonic() - 1
-        view.primary.click()
+        view.stop_button.click()
         assert actions == ["stop"]
     finally:
         view.deleteLater()

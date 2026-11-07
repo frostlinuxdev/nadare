@@ -168,6 +168,8 @@ def installed(prefix: Path) -> bool:
             return False
         if b"Wine builtin DLL" in head:
             return False
+        if not vcunpack.is_x64_pe(root / name):
+            return False  # empty, truncated or not an x64 DLL: it cannot load (#903)
     return True
 
 

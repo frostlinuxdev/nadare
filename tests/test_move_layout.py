@@ -224,6 +224,8 @@ def test_a_move_to_another_disk_copies_keeps_the_old_one_and_re_roots(tmp_path):
     shm = Path("/dev/shm")
     if not shm.is_dir() or not os.access(shm, os.W_OK):
         pytest.skip("no writable tmpfs for a cross-device move")
+    if shutil.disk_usage(shm).free < 2 * relocate.SPACE_MARGIN:
+        pytest.skip("the tmpfs is too small for the move's free-space margin (CI containers)")
     profile = _make(tmp_path / "lib")
     other = Path(tempfile.mkdtemp(prefix="nadare-move-test-", dir=shm))
     try:

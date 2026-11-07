@@ -136,6 +136,16 @@ def _no_live_hoyo_art_feed(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _failure_dialog_never_blocks(monkeypatch):
+    """The Retry / Open logs / Close box is modal: tests must never wait on it."""
+    try:
+        from nadare.gui.game_view import GameView
+    except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
+        return
+    monkeypatch.setattr(GameView, "_failure_choice", lambda self, *a, **k: "close")
+
+
+@pytest.fixture(autouse=True)
 def _restore_backend_registry():
     """Tests that ``register()`` a fake backend must not leak it to other tests."""
     from nadare.core import backends

@@ -191,6 +191,12 @@ VERIFIED_KINDS = frozenset(
         "direct-endfield",
         "direct-nte",
         "direct-mongil",
+        "direct-genshin",
+        "direct-hsr",
+        "direct-zzz",
+        "direct-wuwa",
+        "direct-gfl2-haoplay",
+        "launcher-nikke",
     }
 )
 

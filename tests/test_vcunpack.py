@@ -98,7 +98,9 @@ def test_optional_dlls_may_be_missing(tmp_path):
 
 def test_a_real_dll_already_there_is_kept_and_a_placeholder_or_gap_is_filled(tmp_path):
     prefix, system32 = _prefix(tmp_path)
-    (system32 / "msvcp140.dll").write_bytes(b"MZ" + b"newer real runtime" * 400)
+    from test_vcredist import x64_dll
+
+    (system32 / "msvcp140.dll").write_bytes(x64_dll(b"newer real runtime" * 400))
     kept = (system32 / "msvcp140.dll").read_bytes()
     vcunpack.unpack(_bundle(tmp_path), prefix)
     assert (system32 / "msvcp140.dll").read_bytes() == kept
@@ -156,3 +158,14 @@ def test_the_scratch_folder_is_removed(tmp_path, monkeypatch):
     import os
 
     assert not any(os.path.exists(d) for d in made)
+
+
+def test_an_empty_or_damaged_dll_is_replaced_not_kept(tmp_path):
+    """A zero-byte or non-PE file cannot load: unpacking fills it in (#903)."""
+    prefix, system32 = _prefix(tmp_path)
+    (system32 / "msvcp140.dll").write_bytes(b"")
+    (system32 / "vcruntime140.dll").write_bytes(b"not a dll at all")
+    copied = vcunpack.unpack(_bundle(tmp_path), prefix)
+    assert "msvcp140.dll" in copied and "vcruntime140.dll" in copied
+    assert vcunpack.is_x64_pe(system32 / "msvcp140.dll")
+    assert vcunpack.is_x64_pe(system32 / "vcruntime140.dll")

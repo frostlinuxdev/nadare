@@ -919,3 +919,18 @@ def test_corrupt_vcredist_history_is_refused_not_reset(tmp_path):
     with pytest.raises(RuntimeError, match="latest.json"):
         module.publish_vcredist(out, {}, _webview2_opener(module, b"A" * 50_000_000))
     assert (out / "latest.json").read_text() == "not json"
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [{"path": "a.bin", "size": -1, "hash": 1}],  # negative size
+        [{"path": "../escape.bin", "size": 1, "hash": 1}],  # leaves the game folder
+        [{"path": "a.bin", "size": 1, "hash": 1}, {"path": "A.BIN", "size": 1, "hash": 2}],
+    ],
+)
+def test_build_manifest_refuses_what_the_clients_own_parser_refuses(gen, entries):
+    """#923: publishing it would overwrite a good manifest with one every client rejects."""
+    url = "https://cdn.yo-star.com/pc/manifest.json"
+    with pytest.raises(gen.YostarApiError, match="client"):
+        gen.build_manifest("GameA_EN", "1", {"source": "s", "file": entries}, url)

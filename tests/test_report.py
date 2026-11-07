@@ -356,3 +356,78 @@ def test_game_page_and_settings_page_offer_the_button(qapp) -> None:
     page.report_requested.connect(seen.append)
     page.report_button.click()
     assert seen == ["demo", "demo2"]
+
+
+def test_the_prefix_free_space_is_measured_where_the_prefix_is(tmp_path: Path, monkeypatch) -> None:
+    """#926: the line named 'prefix' used to describe the state folder, not the Wine prefix."""
+    from nadare.core import report as report_module
+
+    probed: list[Path] = []
+    real = report_module.shutil.disk_usage
+
+    def spy(path):
+        probed.append(Path(path))
+        return real(path)
+
+    monkeypatch.setattr(report_module.shutil, "disk_usage", spy)
+    elsewhere = tmp_path / "games" / "wine"  # not created yet: its nearest existing parent counts
+    (tmp_path / "games").mkdir()
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    build_report(
+        {"active_profile": "g", "profiles": {"g": {"backend": "wine", "prefix": str(elsewhere)}}},
+        logs_path=logs,
+        profiles_path=tmp_path / "profiles",
+        username="u",
+        home=tmp_path / "home",
+        hostname="h",
+        run_command=lambda *a, **k: "unavailable",
+        proc_root=tmp_path / "proc",
+    )
+    assert tmp_path / "games" in probed
+    assert tmp_path / "profiles" / "g" not in probed
+
+
+def _report_for(tmp_path: Path, profile: dict) -> str:
+    return build_report(
+        {"active_profile": "g", "profiles": {"g": {"backend": "direct-bd2", **profile}}},
+        logs_path=tmp_path / "logs",
+        profiles_path=tmp_path / "profiles",
+        run_command=lambda *a, **k: "unavailable",
+        proc_root=tmp_path / "proc",
+    )
+
+
+def test_a_profile_with_no_install_folder_does_not_scan_the_current_folder(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # An empty install_dir became Path("") == ".", so the report walked whatever folder Nadare
+    # was started from (a home with unreadable container storage aborted the app).
+    here = tmp_path / "cwd"
+    (here / "sub").mkdir(parents=True)
+    (here / "sub" / "cheat-notes.txt").write_text("x")
+    (here / "crashpad").mkdir()
+    monkeypatch.chdir(here)
+    text = _report_for(tmp_path, {"title": "BD2"})
+    assert "cheat-notes" not in text and "Game dump folder" not in text
+
+
+def test_an_unreadable_folder_inside_the_game_folder_does_not_break_the_report(
+    tmp_path: Path,
+) -> None:
+    if os.geteuid() == 0:
+        return  # root reads everything: nothing to test
+    game = tmp_path / "game"
+    locked = game / "locked"
+    (game / "data").mkdir(parents=True)
+    locked.mkdir()
+    (locked / "inner").write_text("x")
+    (game / "data" / "cheat_engine.dll").write_text("xx")
+    (game / "crashpad").mkdir()
+    locked.chmod(0o444)  # names can be listed, but each entry cannot be examined: EACCES
+    try:
+        text = _report_for(tmp_path, {"title": "BD2", "install_dir": str(game)})
+    finally:
+        locked.chmod(0o755)
+    assert "Game file: cheat_engine.dll size=2" in text
+    assert "Game dump folder: crashpad" in text

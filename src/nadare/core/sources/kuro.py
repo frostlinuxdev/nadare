@@ -177,3 +177,87 @@ def resolve_game(
         files=tuple(files),
         exe=exe,
     )
+
+
+def resolve_bundle(
+    index_url: str,
+    *,
+    game_tag: str,
+    exe: str,
+    tier: str,
+    fetch: Fetch | None = None,
+    refused_hint: str = "",
+) -> directdl.Plan:
+    """Plan for one resource tier of a game on Kuro's bundle index (launcher 3.0 and newer).
+
+    The index lists ``resourcePacks`` (each with its own ``indexFile`` and ``baseUrl``) and
+    ``bundles`` (a tier such as SD, HD or UHD is a list of pack names, always the shared
+    ``common`` pack plus one tier pack). The plan is every pack of the chosen bundle together.
+    """
+    fetch = fetch or default_fetch
+    try:
+        raw = fetch(index_url, None)
+    except directdl.DirectError as exc:
+        raise directdl.DirectError(f"{exc}. {refused_hint}".strip()) from exc
+    index = _json(raw, "index")
+    try:
+        cdns = index["cdnList"]
+        root = _https(str(max(cdns, key=lambda cdn: int(cdn["P"]))["url"]))
+        packs = index["resourcePacks"]
+        bundles = index["bundles"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise directdl.DirectError("index is missing the CDN list, packs or bundles") from exc
+    if not isinstance(packs, dict) or not isinstance(bundles, dict) or not bundles:
+        raise directdl.DirectError("index packs or bundles are not objects")
+
+    wanted = str(tier or "").strip().lower()
+    bundle = next((b for name, b in bundles.items() if name.lower() == wanted), None)
+    if not isinstance(bundle, dict):
+        raise directdl.DirectError(
+            f"no {tier!r} resource quality in the index (it offers: {', '.join(bundles)})"
+        )
+    names = bundle.get("resourcePacks")
+    if not isinstance(names, list) or not names:
+        raise directdl.DirectError("the bundle names no packs")
+
+    files: list[directdl.RemoteFile] = []
+    seen: set[str] = set()
+    pack_versions: list[tuple[str, str]] = []
+    for name in names:
+        pack = packs.get(name)
+        if not isinstance(pack, dict):
+            raise directdl.DirectError(f"the bundle needs pack {name!r}, which the index lacks")
+        try:
+            base_url = str(pack["baseUrl"])
+            index_file = str(pack["indexFile"])
+        except KeyError as exc:
+            raise directdl.DirectError(f"pack {name!r} is missing {exc.args[0]!r}") from exc
+        pack_versions.append((str(name), str(pack.get("version") or "")))
+        manifest = _json(fetch(_https(root + quote(index_file, safe="/")), None), "indexFile")
+        resources = manifest.get("resource")
+        if not isinstance(resources, list):
+            raise directdl.DirectError(f"pack {name!r} is missing its resource list")
+        for item in resources:
+            if not isinstance(item, dict):
+                raise directdl.DirectError("indexFile resource entry is not an object")
+            try:
+                path = directdl.safe_relative_path(item["dest"])
+                md5 = str(item["md5"])
+                size = int(item["size"])
+            except KeyError as exc:
+                raise directdl.DirectError(f"resource is missing {exc.args[0]!r}") from exc
+            except (TypeError, ValueError) as exc:
+                raise directdl.DirectError("resource has an invalid size") from exc
+            if path in seen:
+                raise directdl.DirectError(f"{path} is listed in more than one pack")
+            seen.add(path)
+            url = _https(root + quote(base_url + path, safe="/"))
+            files.append(directdl.RemoteFile(path=path, url=url, size=size, md5=md5))
+
+    # The first pack's version is the plan's; a pack that moved on its own is added, so a
+    # tier pack updated alone is seen as an update too (#905). Equal versions stay plain.
+    version = pack_versions[0][1] if pack_versions else ""
+    moved = [f"{n}-{v}" for n, v in pack_versions[1:] if v != version]
+    if moved:
+        version += "+" + "+".join(moved)
+    return directdl.Plan(game_tag=game_tag, version=version, files=tuple(files), exe=exe)

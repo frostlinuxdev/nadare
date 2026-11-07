@@ -622,7 +622,9 @@ class TestVerifyAndLogin:
                 return
             raise OSError("device busy")
 
-        monkeypatch.setattr(wg, "shutil", types.SimpleNamespace(rmtree=boom))
+        from nadare.core import removal
+
+        monkeypatch.setattr(removal, "shutil", types.SimpleNamespace(rmtree=boom))
         # No prefix/drive_c exists, so the only rmtree is the purge of the
         # profile tree; its OSError must surface instead of being ignored.
         assert not (backend.prefix() / "drive_c").is_dir()
@@ -777,3 +779,56 @@ class TestStellaSoraVcredist:
             backend._run_vcredist(created=True)
             backend._run_vcredist(created=False)
             assert calls == []
+
+
+class TestUninstallSafety:
+    """#947: the backend's own uninstall follows the same mount and running-game rules."""
+
+    def test_uninstall_leaves_a_mounted_personal_folder_alone(self, tmp_path, monkeypatch):
+        from nadare.core import removal
+
+        backend = _backend(tmp_path)
+        prefix = backend.prefix()
+        _install_launcher(prefix)
+        docs = prefix / "drive_c" / "users" / "me" / "Documents"
+        docs.mkdir(parents=True)
+        (docs / "thesis.txt").write_text("PERSONAL")
+        real = removal.os.path.ismount
+        monkeypatch.setattr(
+            removal.os.path, "ismount", lambda p: str(p) == str(docs.resolve()) or real(p)
+        )
+
+        with pytest.raises(BackendError, match="mounted"):
+            backend.uninstall()
+
+        assert (docs / "thesis.txt").read_text() == "PERSONAL"
+
+    def test_purge_leaves_a_mounted_folder_in_the_data_dir_alone(self, tmp_path, monkeypatch):
+        from nadare.core import removal
+
+        backend = _backend(tmp_path)
+        _install_launcher(backend.prefix())
+        data_dir = backend._data_dir()
+        docs = data_dir / "elsewhere" / "Documents"
+        docs.mkdir(parents=True)
+        (docs / "thesis.txt").write_text("PERSONAL")
+        real = removal.os.path.ismount
+        monkeypatch.setattr(
+            removal.os.path, "ismount", lambda p: str(p) == str(docs.resolve()) or real(p)
+        )
+
+        with pytest.raises(BackendError, match="mounted"):
+            backend.uninstall(purge=True)
+
+        assert (docs / "thesis.txt").read_text() == "PERSONAL"
+
+    def test_uninstall_refuses_while_the_game_is_running(self, tmp_path, monkeypatch):
+        backend = _backend(tmp_path)
+        _install_launcher(backend.prefix())
+        monkeypatch.setattr(wg, "scan_pids", lambda patterns: [1234])
+
+        with pytest.raises(BackendError) as exc:
+            backend.uninstall()
+
+        assert exc.value.code == 8
+        assert backend.prefix().exists()

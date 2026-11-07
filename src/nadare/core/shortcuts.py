@@ -394,7 +394,7 @@ def _read_cstr(data: bytes, pos: int) -> tuple[str, int]:
     return data[pos:end].decode("utf-8", errors="replace"), end + 1
 
 
-def _read_map(data: bytes, pos: int) -> tuple[dict[str, Any], int]:
+def _read_map(data: bytes, pos: int, strict: bool = False) -> tuple[dict[str, Any], int]:
     result: dict[str, Any] = {}
     while pos < len(data):
         kind = data[pos]
@@ -408,10 +408,14 @@ def _read_map(data: bytes, pos: int) -> tuple[dict[str, Any], int]:
             value = struct.unpack_from("<i", data, pos)[0]
             pos += 4
         elif kind == 0x00:
-            value, pos = _read_map(data, pos)
-        else:  # pragma: no cover - malformed input
+            value, pos = _read_map(data, pos, strict)
+        else:
+            if strict:
+                raise ValueError(f"unsupported shortcuts.vdf value type {kind:#x}")
             break
         result[key] = value
+    if strict:
+        raise ValueError("shortcuts.vdf ends inside a map")
     return result, pos
 
 
@@ -425,20 +429,28 @@ def vdf_loads(data: bytes, *, strict: bool = False) -> list[dict[str, Any]]:
         return []
     raw = bytes(data)
     if not raw.startswith(_SHORTCUTS_HEADER):
+        if strict:
+            raise ValueError("not a shortcuts.vdf (wrong header)")
         return []
     try:
         pos = len(_SHORTCUTS_HEADER)
         shortcuts: list[dict[str, Any]] = []
+        closed = False
         while pos < len(raw):
             kind = raw[pos]
             pos += 1
             if kind == 0x08:
+                closed = True
                 break
-            if kind != 0x00:  # pragma: no cover - malformed input
+            if kind != 0x00:
+                if strict:
+                    raise ValueError("unexpected entry in shortcuts.vdf")
                 break
             _key, pos = _read_cstr(raw, pos)
-            entry, pos = _read_map(raw, pos)
+            entry, pos = _read_map(raw, pos, strict)
             shortcuts.append(entry)
+        if strict and not closed:
+            raise ValueError("shortcuts.vdf ends before the shortcuts map is closed")
         return shortcuts
     except (ValueError, struct.error, IndexError, RecursionError):
         # A truncated/corrupt file (including absurdly deep nesting) is
@@ -467,6 +479,29 @@ def steam_running() -> bool:
         if comm == "steam":
             return True
     return False
+
+
+#: Steam keeps an entry's tags, so this one marks the shortcuts Nadare made (#893).
+STEAM_TAG = "Nadare"
+
+
+def _is_ours(entry: Mapping[str, Any]) -> bool:
+    """Whether ``entry`` is a shortcut Nadare made, not just one that ends like one.
+
+    A launch line ending in ``launch -p "<name>"`` is not proof (another launcher can use that
+    shape). Entries made since the tag was added carry it; older ones are recognised by what
+    they start: Nadare's AppImage, command, Flatpak id or ``-m nadare``.
+    """
+    tags = entry.get("tags")
+    if isinstance(tags, Mapping) and STEAM_TAG in {str(v) for v in tags.values()}:
+        return True
+    exe = str(entry.get("Exe") or "").strip('"').lower()
+    options = str(entry.get("LaunchOptions") or "").lower()
+    return (
+        "nadare" in os.path.basename(exe)
+        or FLATPAK_ID.lower() in options
+        or re.search(r"(^|\s)-m\s+nadare(\s|$)", options) is not None
+    )
 
 
 def _steam_quote(value: str) -> str:
@@ -503,13 +538,28 @@ def add_steam_shortcut(
                 f"{path} is unreadable or corrupt ({exc}); leaving it untouched"
             ) from exc
     launch_options = _steam_launch_options(profile, argv)
+    exe = _steam_quote(str(argv[0]))
+    start_dir = os.path.dirname(str(argv[0])) or "."
     for entry in existing:
-        if entry.get("AppName") == title and entry.get("LaunchOptions") == launch_options:
-            return False
+        if (
+            entry.get("AppName") == title
+            and entry.get("LaunchOptions") == launch_options
+            and _is_ours(entry)
+        ):
+            if entry.get("Exe") == exe and entry.get("StartDir") == start_dir:
+                return False
+            # Nadare moved (or came from another install method): point its own entry at the
+            # launcher that is running now (#899).
+            entry["Exe"], entry["StartDir"] = exe, start_dir
+            backup = path.with_name(path.name + ".nadare-bak")
+            if not backup.exists():
+                backup.write_bytes(path.read_bytes())
+            _atomic_write_bytes(path, vdf_dumps(existing), 0o644)
+            return True
     record: dict[str, Any] = {
         "AppName": title,
-        "Exe": _steam_quote(str(argv[0])),
-        "StartDir": os.path.dirname(str(argv[0])) or ".",
+        "Exe": exe,
+        "StartDir": start_dir,
         "icon": icon,
         "ShortcutPath": "",
         "LaunchOptions": launch_options,
@@ -520,7 +570,7 @@ def add_steam_shortcut(
         "Devkit": 0,
         "DevkitOverrideAppID": 0,
         "LastPlayTime": 0,
-        "tags": {},
+        "tags": {"0": STEAM_TAG},
     }
     existing.append(record)
     backup = path.with_name(path.name + ".nadare-bak")
@@ -545,7 +595,11 @@ def remove_steam_shortcut(shortcuts_vdf: str | os.PathLike[str], profile: str) -
             f"{path} is unreadable or corrupt ({exc}); leaving it untouched"
         ) from exc
     suffix = f'launch -p {_steam_quote(profile)}'
-    kept = [e for e in existing if not str(e.get("LaunchOptions", "")).endswith(suffix)]
+    kept = [
+        e
+        for e in existing
+        if not (str(e.get("LaunchOptions", "")).endswith(suffix) and _is_ours(e))
+    ]
     if len(kept) == len(existing):
         return False
     if steam_running():
@@ -584,7 +638,7 @@ def _steam_unquote(value: str) -> str:
 def _steam_shortcut_profile(entry: Mapping[str, Any]) -> str | None:
     """The profile a Nadare Steam shortcut launches, or ``None`` for another entry."""
     match = _LAUNCH_PROFILE.search(str(entry.get("LaunchOptions") or ""))
-    if not match:
+    if not match or not _is_ours(entry):
         return None
     return _steam_unquote(match.group(1)) if match.group(1) is not None else match.group(2)
 
@@ -607,8 +661,12 @@ def installed_steam_shortcuts() -> list[tuple[Path, str, str]]:
 
 def refresh_steam_shortcuts(
     profiles: Mapping[str, Mapping[str, Any]],
+    argv: list[str] | None = None,
 ) -> dict[str, list[str] | list[Path]]:
     """Update Nadare Steam shortcut titles and drop deleted profiles.
+
+    With ``argv`` (how Nadare starts now), a shortcut of Nadare's that still points at an older
+    path is repaired too.
 
     Files that cannot be read or written are reported in ``warnings`` and left
     untouched, as is every file while Steam is running.
@@ -638,6 +696,11 @@ def refresh_steam_shortcuts(
             if entry.get("AppName") != title:
                 entry["AppName"] = title
                 changed = True
+            if argv:
+                exe, start_dir = _steam_quote(str(argv[0])), os.path.dirname(str(argv[0])) or "."
+                if entry.get("Exe") != exe or entry.get("StartDir") != start_dir:
+                    entry["Exe"], entry["StartDir"] = exe, start_dir
+                    changed = True
             kept.append(entry)
         if not changed:
             continue

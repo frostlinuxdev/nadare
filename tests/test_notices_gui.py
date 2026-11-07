@@ -126,22 +126,44 @@ def test_a_notice_targeting_an_installed_game_is_shown(tmp_path, qapp, monkeypat
         _close(window, qapp)
 
 
-def test_the_setting_that_turns_off_update_checks_also_turns_off_notices(
-    tmp_path, qapp, monkeypatch
-):
+def test_turning_off_update_checks_does_not_turn_off_notices(tmp_path, qapp, monkeypatch):
+    """A safety notice must still reach someone who disabled update checks."""
+
+    def boom(*a, **k):
+        raise AssertionError("must not check for updates")
+
+    monkeypatch.setattr(updatecheck, "check_latest", boom)
+    monkeypatch.setattr(notices, "load", lambda *a, **k: [_n()])
+    config = Config.load(tmp_path / "config.json")
+    config.data["check_updates"] = False
+    window = MainWindow(config)
+    try:
+        assert _wait(qapp, lambda: not window.notice_banner.isHidden())
+        assert window.update_banner.isHidden()
+    finally:
+        _close(window, qapp)
+
+
+def test_the_notices_setting_turns_off_the_notices_feed(tmp_path, qapp, monkeypatch):
     def boom(*a, **k):
         raise AssertionError("must not fetch")
 
     monkeypatch.setattr(notices, "load", boom)
-    monkeypatch.setattr(updatecheck, "check_latest", boom)
+    monkeypatch.setattr(updatecheck, "check_latest", lambda: None)
     config = Config.load(tmp_path / "config.json")
-    config.data["check_updates"] = False
+    config.data["check_notices"] = False
     window = MainWindow(config)
     try:
         qapp.processEvents()
         assert window.notice_banner.isHidden()
     finally:
         _close(window, qapp)
+
+
+def test_notices_are_on_by_default():
+    from nadare.core.config import TOP_DEFAULTS
+
+    assert TOP_DEFAULTS["check_notices"] is True
 
 
 def test_the_update_banner_and_the_notice_banner_are_independent(tmp_path, qapp, monkeypatch):

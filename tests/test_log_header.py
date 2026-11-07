@@ -20,7 +20,8 @@ def _header(tmp_path, monkeypatch, operation: str) -> str:
     assert handle is not None
     handle.close()
     worker._log = None
-    text = (tmp_path / "logs" / f"czn-{operation}.log").read_text(encoding="utf-8")
+    (written,) = (tmp_path / "logs" / "czn").glob(f"{operation}-*.log")
+    text = written.read_text(encoding="utf-8")
     return text.strip().splitlines()[0]
 
 
@@ -36,11 +37,14 @@ def test_log_header_keeps_its_existing_shape(tmp_path, monkeypatch):
     ), header
 
 
-def test_each_new_run_appends_its_own_header(tmp_path, monkeypatch):
+def test_each_new_run_gets_its_own_file_and_header(tmp_path, monkeypatch):
     monkeypatch.setattr(workers.paths, "logs_dir", lambda: tmp_path / "logs")
     for _ in range(2):
         worker = workers.BackendWorker(Config.load(tmp_path / "config.json"), "czn", "launch")
         worker._open_log().close()
-    text = (tmp_path / "logs" / "czn-launch.log").read_text(encoding="utf-8")
-    assert text.count("===== ") == 2
-    assert text.count(f"nadare {nadare.__version__}") == 2
+    files = sorted((tmp_path / "logs" / "czn").glob("launch-*.log"))
+    assert len(files) == 2
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        assert text.count("===== ") == 1
+        assert text.count(f"nadare {nadare.__version__}") == 1

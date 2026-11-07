@@ -13,12 +13,14 @@ from typing import Any
 from PyQt6.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFontMetrics
 from PyQt6.QtWidgets import (
+    QApplication,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QLayout,
     QLayoutItem,
+    QMenu,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -360,6 +362,7 @@ class LibraryPage(QWidget):
 
     open_game = pyqtSignal(str)
     add_game = pyqtSignal()
+    remove_game = pyqtSignal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -405,9 +408,24 @@ class LibraryPage(QWidget):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         root.addWidget(scroll, 1)
 
+    def card_menu(self, profile: str) -> QMenu:
+        """The right-click menu of a game card."""
+        menu = QMenu(self)
+        menu.addAction("Open").triggered.connect(lambda: self.open_game.emit(profile))
+        menu.addAction("Remove from library…").triggered.connect(
+            lambda: self.remove_game.emit(profile)
+        )
+        return menu
+
     # ---- population --------------------------------------------------------
     def refresh(self, profiles: dict[str, dict[str, Any]]) -> None:
-        """Rebuild the grid from the config's profiles."""
+        """Rebuild the grid from the config's profiles.
+
+        A keyboard user's place survives the rebuild: the card that had focus gets it back (#942).
+        """
+        focused = QApplication.focusWidget()
+        focused_name = next((n for n, c in self._cards.items() if c is focused), None)
+        add_focused = isinstance(focused, AddGameCard)
         self._clear()
         for name, profile in profiles.items():
             title = display_title(name, profiles)
@@ -420,6 +438,10 @@ class LibraryPage(QWidget):
                 parent=self._container,
             )
             card.clicked.connect(self.open_game.emit)
+            card.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            card.customContextMenuRequested.connect(
+                lambda pos, n=name, c=card: self.card_menu(n).exec(c.mapToGlobal(pos))
+            )
             self._flow.addWidget(card)
             self._cards[name] = card
             self._request_art(name, card, title, profile_art_candidates(profile))
@@ -438,6 +460,10 @@ class LibraryPage(QWidget):
         # Not adjustSize(): while the page is hidden (a removal runs from the game
         # page) that shrinks the container to one card wide, and nothing re-flows it.
         self._flow.invalidate()
+        if focused_name in self._cards:
+            self._cards[focused_name].setFocus()
+        elif add_focused:
+            add.setFocus()
 
     def _request_art(self, name: str, card: GameCard, title: str, candidates: list[str]) -> None:
         """Decode one cover in the background, then update its card if still shown."""

@@ -363,6 +363,29 @@ QPushButton#Danger {{
     font-weight: 800;
     letter-spacing: 1px;
 }}
+/* A running game: a state, not an action. Not greyed out when disabled. */
+QPushButton#Playing, QPushButton#Playing:disabled {{
+    background: rgba(61, 139, 253, 0.14);
+    border: 1px solid rgba(61, 139, 253, 0.38);
+    color: {ACCENT};
+    border-radius: 10px;
+    padding: 15px;
+    font-size: 15px;
+    font-weight: 800;
+    letter-spacing: 1px;
+}}
+QPushButton::menu-indicator {{ image: none; width: 0; }}
+QMenu {{
+    background: {PANEL_2};
+    border: 1px solid {LINE};
+    border-radius: 8px;
+    padding: 4px;
+    color: {TEXT};
+}}
+QMenu::item {{ padding: 7px 18px; border-radius: 6px; }}
+QMenu::item:selected {{ background: rgba(61, 139, 253, 0.14); color: {ACCENT}; }}
+QMenu::item:disabled {{ color: {DISABLED_TEXT}; }}
+QMenu::separator {{ height: 1px; background: {LINE}; margin: 4px 8px; }}
 QPushButton#Danger:hover {{ background: rgba(255, 138, 138, 0.22); }}
 QPushButton#Danger:pressed {{ background: rgba(255, 138, 138, 0.30); }}
 
@@ -872,13 +895,13 @@ def app_icon() -> QIcon:
 
 #: ``state`` variants understood by the ``QLabel#Pill`` selectors.
 BADGE_STATES = {
-    "running": ("good", "RUNNING"),
+    "running": ("good", "PLAYING"),
     "installed": ("good", "READY"),
     "installing": ("info", "INSTALLING"),
     "updating": ("info", "UPDATING"),
     "launching": ("info", "LAUNCHING"),
     "login": ("info", "LOGIN"),
-    "verifying": ("info", "VERIFY"),
+    "verifying": ("info", "CHECKING"),
     "not_installed": ("muted", "NOT INSTALLED"),
     "checking": ("muted", "CHECKING…"),
     "error": ("bad", "ERROR"),

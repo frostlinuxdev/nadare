@@ -121,6 +121,8 @@ TOP_DEFAULTS: dict[str, Any] = {
     "active_profile": "",
     "lock_to_single_instance": True,
     "check_updates": True,
+    "check_notices": True,  # safety notices; independent of check_updates
+    "notify_when_done": True,  # a desktop notice when an install, update or repair ends
     "dismissed_update": "",  # release version whose banner the user closed
     "dismissed_notices": [],  # ids of notices the user closed
     "sidebar_hide_uninstalled": False,  # hide games known not to be installed in the sidebar
@@ -130,7 +132,7 @@ TOP_DEFAULTS: dict[str, Any] = {
 
 
 #: Profile keys that must be real booleans, even when hand-edited as strings.
-_PROFILE_BOOLS = ("remember_me", "accept_account_notice")
+_PROFILE_BOOLS = ("remember_me", "accept_account_notice", "secure_mode")
 
 
 def _coerce_bool(value: Any, default: bool) -> bool:
@@ -239,6 +241,11 @@ class Config:
         renames: dict[str, str] = {}
         cfg = cls(path=p, data=cls._normalise(raw, renames), notice=notice)
         cfg._renames = dict(renames)
+        # What the file held, per (new) name, before this load changed anything: a migration's
+        # own edits must count as local edits against it, or the first save would take the old
+        # on-disk paths and selection back as someone else's newer change (#868).
+        on_disk = copy.deepcopy(cfg.data["profiles"])
+        raw_active = raw.get("active_profile") if isinstance(raw, dict) else None
         if renames:
             moved = cfg._migrate_profile_dirs(renames)
             if moved:
@@ -248,8 +255,10 @@ class Config:
                     "so your game and settings are still there."
                 )
                 cfg.notice = f"{notice}\n\n{message}" if notice else message
-        cfg._snapshot = copy.deepcopy(cfg.data["profiles"])
+        cfg._snapshot = on_disk if renames else copy.deepcopy(cfg.data["profiles"])
         cfg._top_snapshot = cfg._top_level()
+        if renames and isinstance(raw_active, str) and raw_active in renames:
+            cfg._top_snapshot["active_profile"] = raw_active
         return cfg
 
     def _migrate_profile_dirs(self, renames: dict[str, str]) -> list[tuple[str, str]]:
@@ -589,7 +598,11 @@ class Config:
                 continue
             final = self._renames.get(str(name), str(name))
             if valid_profile_name(final):
-                disk_profiles[final] = prof
+                # Read as load does: a hand-edited "false" must not come back truthy (#927).
+                disk_profiles[final] = {
+                    key: _coerce_bool(value, False) if key in _PROFILE_BOOLS else value
+                    for key, value in prof.items()
+                }
         disk = disk_profiles
         for name in list(self.profiles):
             untouched = name in self._snapshot and self._snapshot[name] == self.profiles[name]
@@ -616,6 +629,8 @@ class Config:
         for key, value in raw.items():
             if key == "profiles":
                 continue
+            if isinstance(TOP_DEFAULTS.get(key), bool):
+                value = _coerce_bool(value, TOP_DEFAULTS[key])
             if key not in self._top_snapshot:
                 # A key this process had not seen when it loaded: another
                 # process added it. Keep it unless we set our own value.

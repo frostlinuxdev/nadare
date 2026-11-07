@@ -52,6 +52,28 @@ def _log() -> object:
         return logging.getLogger("nadare.secrets")
 
 
+#: Backends that keep account credentials unencrypted (or nowhere). A login must never go there
+#: (#962); ``module.ClassName`` of the backend or of any member of a chain.
+_UNSAFE_BACKENDS = frozenset(
+    {
+        "keyrings.alt.file.PlaintextKeyring",
+        "keyrings.alt.pyfs.PlaintextKeyring",
+        "keyring.backends.null.Keyring",
+    }
+)
+
+
+def _backend_name(backend: object) -> str:
+    return f"{type(backend).__module__}.{type(backend).__name__}"
+
+
+def _unsafe_backend(backend: object) -> bool:
+    members = getattr(backend, "backends", None)
+    if members is not None:
+        return any(_unsafe_backend(member) for member in members)
+    return _backend_name(backend) in _UNSAFE_BACKENDS
+
+
 def _keyring_module() -> object | None:
     """Return the ``keyring`` module if usable, else None."""
     if os.environ.get("NADARE_NO_KEYRING"):
@@ -65,9 +87,30 @@ def _keyring_module() -> object | None:
             return None
         if hasattr(backend, "backends") and not backend.backends:
             return None
+        if _unsafe_backend(backend):
+            return None
         return keyring
     except Exception:
         return None
+
+
+def _keyring_unreachable() -> bool:
+    """True when a keyring is installed and wanted but looking it up crashed.
+
+    That is different from "no keyring on this machine": a login saved earlier may still be
+    there, so a delete that cannot reach it must not look like it worked (#958).
+    """
+    if os.environ.get("NADARE_NO_KEYRING"):
+        return False
+    try:
+        import keyring  # type: ignore
+    except Exception:  # noqa: BLE001 - not installed: nothing could have been saved
+        return False
+    try:
+        keyring.get_keyring()
+    except Exception:  # noqa: BLE001
+        return True
+    return False
 
 
 def _is_missing_secret(exc: BaseException) -> bool:
@@ -100,6 +143,7 @@ class SecretStore:
         *,
         allow_fallback: bool = True,
         kind: str = LEGACY_KIND,
+        legacy_fallback: bool = True,
     ) -> None:
         self._keyring = _keyring_module()
         self._path = path or (paths.config_dir() / FALLBACK_NAME)
@@ -107,6 +151,9 @@ class SecretStore:
         #: Scopes the account id per consumer/backend so two stores sharing a
         #: profile name (and the one plaintext file) cannot collide.
         self._kind = str(kind) or LEGACY_KIND
+        #: Also read and delete the unscoped ``token:`` id. Off for a consumer that never wrote
+        #: it: that id is the CZN login's current one, and must not be touched from outside (#960).
+        self._legacy_fallback = legacy_fallback
         self._lock = threading.Lock()
         self._warned = False
 
@@ -140,7 +187,9 @@ class SecretStore:
         """The scoped account id, plus the legacy one when it differs."""
         account = self._account(profile)
         legacy = self._legacy_account(profile)
-        return [account] if account == legacy else [account, legacy]
+        if account == legacy or not self._legacy_fallback:
+            return [account]
+        return [account, legacy]
 
     # ---- keyring path ------------------------------------------------------
     def _kget(self, account: str) -> str | None:
@@ -262,6 +311,8 @@ class SecretStore:
                 self._kdel(account)
             return
         if not self._allow_fallback:
+            if _keyring_unreachable():
+                raise SecretStoreError("the keyring cannot be reached; a saved login stays")
             return
         with self._lock:
             data = self._load_file()

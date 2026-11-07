@@ -91,3 +91,35 @@ def test_push_retries_once_after_rebasing_when_origin_moved(tmp_path):
         "one.txt",
         "other.txt",
     ]
+
+
+def test_a_commit_left_unpushed_by_an_earlier_failure_is_pushed_on_a_later_quiet_run(tmp_path):
+    """#920: an unchanged run used to report healthy with the generated commit still local."""
+    origin, a, b = _setup(tmp_path)
+    (b / "gen.json").write_text("{}\n")
+    _git(b, "add", ".")
+    _git(b, "commit", "-qm", "generated")  # its push failed earlier
+    assert _git(origin, "rev-parse", "main") != _git(b, "rev-parse", "HEAD")
+
+    result = _sh("index_push_pending", b)
+
+    assert result.returncode == 0, result.stderr
+    assert _git(origin, "rev-parse", "main") == _git(b, "rev-parse", "HEAD")
+
+
+def test_nothing_pending_is_not_an_error_and_pushes_nothing(tmp_path):
+    origin, a, b = _setup(tmp_path)
+    before = _git(origin, "rev-parse", "main")
+    assert _sh("index_push_pending", b).returncode == 0
+    assert _git(origin, "rev-parse", "main") == before
+
+
+def test_a_pending_commit_that_still_cannot_be_pushed_fails_the_run(tmp_path):
+    origin, a, b = _setup(tmp_path)
+    (b / "gen.json").write_text("{}\n")
+    _git(b, "add", ".")
+    _git(b, "commit", "-qm", "generated")
+    hook = origin / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    assert _sh("index_push_pending", b).returncode != 0

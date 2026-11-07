@@ -121,3 +121,20 @@ def test_a_long_member_name_still_fits_the_staging_name(tmp_path):
         handle.write(b"ok")
     os.replace(active, final)
     assert final.read_bytes() == b"ok"
+
+
+@pytest.mark.parametrize(
+    "coder",
+    [
+        sevenz._Coder(b"\x21", b"\x28", 1, 1),  # LZMA2 property 40 = 4 GiB dictionary
+        sevenz._Coder(b"\x03\x01\x01", b"\x5d" + (0xFFFFFFFF).to_bytes(4, "little"), 1, 1),
+    ],
+)
+def test_a_huge_lzma_dictionary_is_refused_before_any_decoder(coder):
+    with pytest.raises(sevenz.SevenZipError, match="dictionary"):
+        sevenz._coder_filter(coder)
+
+
+def test_a_normal_lzma_dictionary_is_accepted():
+    flt = sevenz._coder_filter(sevenz._Coder(b"\x21", b"\x18", 1, 1))
+    assert flt is not None and flt["dict_size"] <= 1 << 30

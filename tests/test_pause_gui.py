@@ -208,3 +208,32 @@ def test_removing_a_game_forgets_its_paused_operation(window):
     assert window.controller.is_paused("other")
     window._on_game_removed("other", SimpleNamespace(profile_kept=False, warnings=[]))
     assert not window.controller.is_paused("other")
+
+
+def test_a_paused_download_can_be_cancelled_from_its_page(view):
+    seen = []
+    view.cancel_requested.connect(lambda: seen.append("cancel"))
+    view.resume_requested.connect(lambda: seen.append("resume"))
+    view.set_busy("install")
+    view.set_paused("install")
+    assert not view.cancel_paused_button.isHidden()
+    view.cancel_paused_button.click()
+    assert seen == ["cancel"]
+
+
+@pytest.mark.parametrize("operation", ["install", "update"])
+def test_cancel_paused_is_only_offered_while_paused(view, operation):
+    assert view.cancel_paused_button.isHidden()
+    view.set_busy(operation)
+    assert view.cancel_paused_button.isHidden()  # running: the primary already reads CANCEL
+    view.set_paused(operation)
+    assert not view.cancel_paused_button.isHidden()
+    view.cancelled()
+    assert view.cancel_paused_button.isHidden()
+
+
+def test_the_button_that_ends_a_paused_download_says_the_files_stay(view):
+    view.set_busy("install")
+    view.set_paused("install")
+    assert view.cancel_paused_button.text() == "Stop download"
+    assert "stays on disk" in view.cancel_paused_button.toolTip()

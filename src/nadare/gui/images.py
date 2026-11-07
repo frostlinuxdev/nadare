@@ -260,10 +260,24 @@ class ImageLoader(QObject):
         calls back later on the GUI thread. Returns the cache key (or ``None``
         when no candidate exists).
         """
-        path = self.resolve(paths)
+        if isinstance(paths, (str, Path)):
+            paths = [str(paths)]
+        existing = [str(p) for p in paths or () if p and Path(str(p)).is_file()]
+        path = existing[0] if existing else None
         if path is None:
             callback(None)
             return None
+        if len(existing) > 1:
+            rest = existing[1:]
+            final = callback
+
+            def callback(pixmap: QPixmap | None) -> None:
+                # A file that exists may still be damaged: try the next candidate (#918).
+                if pixmap is None:
+                    self.request(rest, width, height, final, crop=crop, cover=cover, fit=fit)
+                else:
+                    final(pixmap)
+
         trim = banner_trim_for(path) if cover else 0.0
         key = (path, int(width), int(height), bool(crop), _mtime_ns(path), trim, bool(fit))
         cached = self._cache.get(key)

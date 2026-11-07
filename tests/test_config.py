@@ -491,3 +491,26 @@ def test_save_takes_disk_edit_of_untouched_profile(tmp_path: Path) -> None:
     final = Config.load(path)
     assert final.profiles["one"]["title"] == "new"
     assert final.profiles["two"]["title"] == "mine"
+
+
+def test_a_save_does_not_bring_back_a_string_false_as_a_truthy_setting(tmp_path: Path) -> None:
+    """#927: the merge on save took the raw disk text, so "false" came back as a string."""
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "check_updates": "false",
+                "profiles": {"g": {"backend": "wine", "remember_me": "false", "title": "G"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = Config.load(path)
+    assert config.profiles["g"]["remember_me"] is False
+    config.profiles["g"]["title"] = "Renamed"
+    config.save()
+    assert config.profiles["g"]["remember_me"] is False
+    assert config.data["check_updates"] is False
+    again = json.loads(path.read_text(encoding="utf-8"))
+    assert again["profiles"]["g"]["remember_me"] is False
+    assert again["check_updates"] is False

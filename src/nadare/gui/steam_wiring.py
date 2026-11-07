@@ -38,6 +38,19 @@ class SteamUnavailable(Exception):
     """Steam is not installed here; the message is meant for the user."""
 
 
+def _undo_for_this_account(app_id: str | int, steam_root: Path):
+    """The saved undo, unless it was made for another Steam account or Steam installation."""
+    saved = steamundo.load(app_id)
+    if saved is None:
+        return None
+    if saved[0] == "set_runner":
+        current = str(steamglue.config_vdf(steam_root))
+    else:
+        local = steamglue.active_localconfig_path(steam_root)
+        current = str(local) if local is not None else ""
+    return saved if steamundo.fits(app_id, current) else None
+
+
 def steam_app_id(profile: Mapping[str, Any]) -> str:
     """The numeric Steam app id of a ``steam`` profile, or ``""``."""
     if str(profile.get("backend") or "") != "steam":
@@ -98,6 +111,13 @@ def install_webview2(
     base_env = process.child_environ(run_env)
 
     def run_in_prefix(args: list[str]) -> int:
+        # The download before this took minutes: the game may have been started in the meantime,
+        # and the installer must not write into a prefix a running game is using (#898).
+        if steamfix.running_blockers(app_id, prefix):
+            raise BackendError(
+                "The game started while the installer was downloading, so the installer was "
+                "not started. Close it and try again"
+            )
         argv, env = steamrun.proton_run_command(
             proton=proton,
             compat_data=prefix.parent,
@@ -210,6 +230,8 @@ def build_dialog(
 
     #: The token of the step that is running now (each step gets a fresh one).
     current_cancel: list[Cancel] = [Cancel()]
+    #: The Steam account file the last launch-option change in this window was made in.
+    acted_on: list[str] = []
 
     def act_fn(item) -> steamrun.ActionResult:
         token = Cancel()
@@ -234,8 +256,14 @@ def build_dialog(
         )
         result = do_action(item)
         if item.action in steamundo.UNDOABLE and result.ok and result.changed:
+            if item.action == "set_runner":
+                made_in = str(steamglue.config_vdf(steam_root))  # this Steam installation
+            else:
+                account = steamglue.active_localconfig_path(steam_root)
+                made_in = str(account) if account is not None else ""
+            acted_on[:] = [made_in]
             with contextlib.suppress(OSError):  # the change is done; a lost undo is not an error
-                steamundo.save(app_id, item.action, result.previous)
+                steamundo.save(app_id, item.action, result.previous, where=made_in)
         return result
 
     def cancel_fn() -> None:
@@ -246,6 +274,13 @@ def build_dialog(
             local = steamglue.active_localconfig_path(steam_root)
             if local is None:
                 return steamrun.ActionResult(False, "Nadare could not find the Steam account file.")
+            made_for = (acted_on[0] if acted_on else "") or steamundo.where(app_id)
+            if made_for and made_for != str(local):
+                return steamrun.ActionResult(
+                    False,
+                    "This undo was saved for another Steam account, so it was not applied. "
+                    "Sign in to that account in Steam to undo it, or change the option by hand.",
+                )
             result = steamrun.restore_wayland(
                 app_id,
                 previous,
@@ -256,10 +291,18 @@ def build_dialog(
                 binary=steam_command,
             )
         else:
+            config = steamglue.config_vdf(steam_root)
+            made_in = (acted_on[0] if acted_on else "") or steamundo.where(app_id)
+            if made_in and made_in != str(config):
+                return steamrun.ActionResult(
+                    False,
+                    "This undo was saved for another Steam installation, so it was not applied. "
+                    "Open Set up from that Steam to undo it, or change the runner by hand.",
+                )
             result = restore_fn(
                 app_id,
                 previous,
-                config_path=steamglue.config_vdf(steam_root),
+                config_path=config,
                 run=run,
                 steam_running=steam_running,
                 wait_gone=wait_gone,
@@ -278,6 +321,6 @@ def build_dialog(
         undo_fn=undo_fn,
         async_plan=async_plan,
         app_id=str(app_id),
-        initial_undo=steamundo.load(app_id),
+        initial_undo=_undo_for_this_account(app_id, steam_root),
         cancel_fn=cancel_fn,
     )

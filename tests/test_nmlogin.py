@@ -446,3 +446,47 @@ def test_status_asks_for_a_login_only_once_the_game_is_installed(tmp_path, store
         make_backend(tmp_path / "other", installed=False, name="m2").status().data["login_required"]
         is False
     )
+
+
+# ------------------------------------------------------------------ audit #956 / #961
+def test_a_keyring_write_still_running_when_remember_is_turned_off_is_undone(
+    tmp_path, store, sign_in
+):
+    """Remember me OFF must win over a save that was already in flight (#956)."""
+    sign_in(make_jwt())
+    b = make_backend(tmp_path, {"remember_me": True})
+    started, release = threading.Event(), threading.Event()
+    real_set = store.set
+
+    def slow_set(profile, token):
+        started.set()
+        release.wait(5)
+        real_set(profile, token)
+
+    store.set = slow_set
+    worker = threading.Thread(target=b.login)
+    worker.start()
+    assert started.wait(5)
+    b.set_remember(False)  # deletes while the write has not landed yet
+    release.set()
+    worker.join(5)
+    assert store.data == {}
+    nmlogin.reset_process_state()
+    assert make_backend(tmp_path).status().data["logged_in"] is False
+
+
+def test_cancel_during_the_nickname_lookup_stops_the_login(tmp_path, store, monkeypatch):
+    b = make_backend(tmp_path, {"remember_me": True})
+    cancel = Cancel()
+    b.ctx.cancel = cancel
+    monkeypatch.setattr(direct.MongilBackend, "_open_browser", browser_that_signs_in(make_jwt()))
+
+    def lookup(token, fetch=None):
+        cancel.cancel()
+        return "Cat"
+
+    monkeypatch.setattr(nm, "fetch_user_name", lookup)
+    with pytest.raises(Cancelled):
+        b.login()
+    assert store.data == {}
+    assert b.status().data["logged_in"] is False

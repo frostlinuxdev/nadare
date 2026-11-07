@@ -178,6 +178,7 @@ if [[ -n "$catalog_down" ]]; then
 fi
 if [[ $rc -eq 3 ]]; then
     echo "refresh_index: nothing to publish"
+    index_push_pending "$index" || { echo "refresh_index: git push failed" >&2; exit 1; }
     heartbeat
     exit 0
 fi
@@ -192,6 +193,7 @@ else
         exit "$stage_rc"
     fi
     echo "refresh_index: nothing to publish"
+    index_push_pending "$index" || { echo "refresh_index: git push failed" >&2; exit 1; }
     heartbeat
     exit 0
 fi

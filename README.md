@@ -55,7 +55,7 @@ New here? Read the [tester guide](docs/TESTERS.md). Something wrong?
 Run `./Nadare-*.AppImage doctor` and see [Troubleshooting](docs/TROUBLESHOOTING.md).
 
 Tested on NVIDIA + CachyOS and on AMD (RX 7900 XTX, Mesa, Debian 13), and the AppImage
-starts on Ubuntu 22.04, Debian 12, Fedora 43, Arch and Mint 22.1. Real game runs on Intel
+starts on Ubuntu 22.04 and 24.04, Debian 12, Fedora 44, Arch and Mint 22.1. Real game runs on Intel
 GPUs are not verified yet.
 
 ---
@@ -71,11 +71,11 @@ is covered by tests but has not been played end to end, or needs a workaround.
 | Chaos Zero Nightmare | Verified (install, update, QR login including two-step (OTP) accounts, agreeing to the game's terms, launch) |
 | Arknights, Stella Sora | Verified |
 | Brown Dust 2, Aether Gazer, Punishing: Gray Raven | Verified |
-| Girls' Frontline 2 (Darkwinter build), Honkai Impact 3rd | Verified |
+| Girls' Frontline 2 (Darkwinter build and Haoplay global build), Honkai Impact 3rd | Verified |
+| Genshin Impact, Honkai: Star Rail, Zenless Zone Zero | Verified |
+| Wuthering Waves, NIKKE | Verified |
 | Arknights: Endfield, Neverness to Everness (direct install), Mongil: Star Dive | Verified |
-| Genshin Impact, Honkai: Star Rail, Zenless Zone Zero | Experimental (checked as far as the login screen) |
-| Wuthering Waves, NIKKE | Experimental |
-| Girls' Frontline 2 (Haoplay global build), Neverness to Everness (publisher's launcher) | Experimental |
+| Girls' Frontline 2 (Haoplay launcher), Neverness to Everness (publisher's launcher) | Experimental |
 | Fate/Grand Order (NA) | Experimental, source checkouts only, needs podman and an NVIDIA GPU |
 
 How the catalog works, and how to add a game, is in [docs/CATALOG.md](docs/CATALOG.md).
@@ -125,8 +125,11 @@ and Fate/Grand Order.
 
 ## Updating and uninstalling
 
-Nadare tells you when a new release is out; download the new AppImage and replace the old one (it does not replace itself). To
-remove Nadare and its data, see [Uninstall](docs/TROUBLESHOOTING.md#uninstall).
+Nadare tells you when a new release is out. When it runs from an AppImage in a folder you can
+write to, the banner says **Update**: Nadare downloads the new AppImage, checks it against a
+checksum from the Nadare index, keeps your old copy as `*.previous`, and asks before
+restarting. Otherwise, download the new AppImage and replace the old one. To remove Nadare and
+its data, see [Uninstall](docs/TROUBLESHOOTING.md#uninstall).
 
 ## Report a bug
 

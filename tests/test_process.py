@@ -152,6 +152,34 @@ def test_run_without_capture_does_not_retain_output() -> None:
     assert peak < 8 * 2**20, f"run() retained output with capture=False: {peak / 2**20:.1f} MiB"
 
 
+def _is_running(pid: int) -> bool:
+    """False once the process is gone or only a zombie (no init in a container reaps it)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return True
+    return state != "Z"
+
+
+def test_a_zombie_does_not_count_as_running() -> None:
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)
+    try:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and _is_running(pid):
+            time.sleep(0.01)  # the child exited but is not reaped yet: a zombie
+        assert not _is_running(pid)
+        assert Path(f"/proc/{pid}/stat").exists(), "the child must still be a zombie here"
+    finally:
+        os.waitpid(pid, 0)
+    assert not _is_running(pid)
+
+
 def test_run_cancel_kills_group_after_leader_exits() -> None:
     """A grandchild that ignores SIGTERM must not survive the cancelled leader,
     and the stdout reader must end with the operation."""
@@ -186,9 +214,7 @@ def test_run_cancel_kills_group_after_leader_exits() -> None:
         pid = int(marks["pid"])
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
+            if not _is_running(pid):
                 break
             time.sleep(0.01)
         else:
@@ -391,3 +417,30 @@ class TestGameChildEnv:
         env = {"PYTHONPATH": "/src", "PATH": "/usr/bin"}
         process.sanitize_game_env(env)
         assert env == {"PYTHONPATH": "/src", "PATH": "/usr/bin"}
+
+
+# ---- output that is not valid UTF-8 (#976) -------------------------------------
+def test_output_that_is_not_utf8_is_kept_not_dropped():
+    """A byte like 0xff used to kill the reader thread and lose all output after it."""
+    code = "import os; os.write(1, b'first\\n\\xffsecond\\nthird\\n')"
+    result = process.run([sys.executable, "-c", code], capture=True)
+    assert result.returncode == 0
+    assert "first" in result.stdout
+    assert "second" in result.stdout
+    assert "third" in result.stdout
+
+
+def test_a_large_non_utf8_output_does_not_block_the_child():
+    """With the reader dead the pipe filled and the child hung until it was cancelled."""
+    code = "import os; os.write(1, b'\\xff' + b'x' * 1048576 + b'\\ndone\\n')"
+    cancel = Cancel()
+    timer = threading.Timer(20.0, cancel.cancel)  # a hang fails the test instead of the run
+    timer.start()
+    try:
+        result = process.run([sys.executable, "-c", code], capture=True, cancel=cancel)
+    except Cancelled:
+        pytest.fail("the child blocked on a full pipe because nothing read its output")
+    finally:
+        timer.cancel()
+    assert result.returncode == 0
+    assert result.stdout.rstrip().endswith("done")
