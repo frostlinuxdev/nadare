@@ -66,6 +66,8 @@ is covered by tests but has not been played end to end, or needs a workaround.
 
 ![A game's Store page: its tier, how it installs and its install size](docs/screenshots/store-detail.webp)
 
+![Chaos Zero Nightmare's Store page](docs/screenshots/store-detail-czn.webp)
+
 | Game | Tier |
 |---|---|
 | Chaos Zero Nightmare | Verified (install, update, QR login including two-step (OTP) accounts, agreeing to the game's terms, launch) |
