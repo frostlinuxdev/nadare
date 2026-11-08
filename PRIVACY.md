@@ -3,8 +3,8 @@
 Nadare is a local launcher. It has **no telemetry, no analytics, no crash
 reporting and sends nothing about you to anyone**. The one automatic request it
 makes to the project's own servers is an optional update check against the
-release page (on by default; turn it off with *Settings → Launcher → Check for
-launcher and game updates*). The same setting also controls a small request for
+release page (on by default; turn it off with *Settings → Nadare (all games) → Check
+for launcher and game updates*). The same setting also controls a small request for
 the published game file list of direct-mode games when you open their page (to
 tell you when an update is available). The config even carries `"telemetry":
 false` as an explicit, permanent record.
@@ -20,7 +20,7 @@ network is only used to do the job you asked for.
 | STOVE auth / CDN (CZN) | install, login, update, launch | Your STOVE login (QR approval, then rotating tokens) and the game download requests. Nadare's `auth.py`/`update.py` stand in for the official launcher. |
 | GitHub Releases | CZN runner download | A normal HTTPS request for a pinned Proton build; nothing about you. |
 | Microsoft | CZN install | A download of the WebView2 Runtime bootstrapper (`go.microsoft.com`), installed into the game prefix. |
-| Microsoft | CZN, Arknights and Stella Sora install and launch | A download of the Visual C++ 2015-2022 x64 redistributable (`aka.ms`), installed into the game prefix. |
+| Microsoft | CZN and Mongil install and launch (and any game where you turn it on) | A download of the Visual C++ 2015-2022 x64 redistributable (`aka.ms`), installed into the game prefix. |
 | `lepton-fgo`'s stack | FGO install/update/launch | Whatever `install.sh` and the lepton CLIs contact (upstream sources, FGO manifest/APKs, the NVIDIA/Venus stack). Nadare does not add any. |
 | Nadare release page and index (project host) | every start, unless disabled; game install/update; opening a direct-mode game page | A normal HTTPS request for the latest-release metadata (`hosting.releases_api()`) and the project's Yostar manifest index (the published game file list, used to show an update badge) and pinned-installer hashes (`hosting.index_base()`); nothing about you and no identifier. Update checks are turned off with *Check for launcher and game updates* (or `NADARE_RELEASES_API=""`); the notices file (`notices.json`, same index) is read at start-up too and has its own setting, *Show safety and service notices*. |
 | Official game news and artwork (publisher feeds) | when a game page or the library is shown | A request to the publisher's public news API and image CDN for that game's announcements and artwork (e.g. STOVE for CZN). Cached on disk for 15 minutes. |

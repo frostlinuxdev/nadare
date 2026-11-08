@@ -34,6 +34,13 @@ even though the certificate looks valid. Run `nadare doctor --tls` to check the
 two known forged-chain test hosts; it is opt-in and never runs as part of a
 normal `doctor`.
 
+## Move a game to another drive
+
+Open the game's page and choose **⋯ → Move game…**, or open **Settings → Game** and use
+**Move game and prefix…** (or **Move prefix only…** for a game whose files you manage
+yourself). Nadare moves the files and updates the game's settings. It refuses a folder
+that belongs to another game or is not safe to use, and says why.
+
 ## Uninstall
 
 **From source:** delete the checkout and its venv. Then remove Nadare's data
@@ -48,10 +55,10 @@ rm -rf ~/.local/share/nadare \
 
 **Downloaded package:** remove the AppImage, then run the data removal above.
 
-**Shortcuts:** shortcuts you asked Nadare to create live outside XDG data:
-`~/Desktop/*.desktop` and, for Steam, entries in
-`~/.steam/steam/userdata/*/config/shortcuts.vdf`. Remove them with
-`nadare shortcut remove`, or delete them by hand.
+**Shortcuts:** shortcuts you asked Nadare to create live outside XDG data: the menu entry
+`~/.local/share/applications/nadare-*.desktop`, optionally a copy on your Desktop, and,
+for Steam, entries in each Steam account's `userdata/*/config/shortcuts.vdf` (native and
+Flatpak Steam). Remove them with `nadare shortcut remove`, or delete them by hand.
 
 **Stored tokens:** account (CZN) logins live only in the keyring. Remove the
 `nadare-launcher` service entries:

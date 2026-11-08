@@ -137,9 +137,11 @@ its data, see [Uninstall](docs/TROUBLESHOOTING.md#uninstall).
 
 Open an issue at
 [github.com/frostlinuxdev/nadare/issues](https://github.com/frostlinuxdev/nadare/issues)
-(one problem per issue). Include the Nadare version, how you installed it, your distro,
-kernel, GPU and driver, desktop (KDE/GNOME, Wayland/X11), and the **redacted** log from
-*Open logs*, plus the output of `doctor`. Never attach tokens, QR codes or full auth traffic.
+(one problem per issue) and attach a report: on the game's page press **Report a problem**.
+Nadare collects the version, your system, GPU and driver, `doctor` and the game's recent
+logs, with tokens masked and your home folder shown as `~`. Read it, then use **Copy to clipboard** or
+**Save as file…**. From a terminal: `./Nadare-*.AppImage report > report.txt`. Say what you
+pressed and what you expected. Never attach tokens, QR codes or full auth traffic.
 
 ---
 
