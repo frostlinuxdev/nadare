@@ -66,7 +66,7 @@ is covered by tests but has not been played end to end, or needs a workaround.
 
 ![A game's Store page: its tier, how it installs and its install size](docs/screenshots/store-detail.webp)
 
-![Chaos Zero Nightmare's Store page](docs/screenshots/store-detail-czn.webp)
+![Chaos Zero Nightmare's game page: Launch, login, and the game's news](docs/screenshots/czn-game-page.webp)
 
 | Game | Tier |
 |---|---|
