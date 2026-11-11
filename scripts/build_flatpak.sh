@@ -16,7 +16,13 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 app_id="io.github.frostlinuxdev.Nadare"
 manifest_dir="packaging/flatpak"
-bundle_src="${BUNDLE_DIR:-dist/nadare}"
+# The trimmed AppImage payload (#1064) when there is one: 85 -> 67 MB worth of
+# libraries the raw PyInstaller output still carries.
+if [[ -z "${BUNDLE_DIR:-}" && -x AppDir/usr/bin/nadare ]]; then
+    bundle_src="AppDir/usr/bin"
+else
+    bundle_src="${BUNDLE_DIR:-dist/nadare}"
+fi
 version="$(grep -m1 '^__version__' src/nadare/__init__.py | cut -d'"' -f2)"
 [[ -n "$version" ]] || { echo "[!] cannot read __version__ from src/nadare/__init__.py" >&2; exit 1; }
 work="${WORK_DIR:-build/flatpak}"

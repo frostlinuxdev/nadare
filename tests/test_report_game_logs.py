@@ -70,10 +70,9 @@ def test_other_games_folders_are_summarised_not_dumped(tmp_path):
     _run(logs / "genshin-impact", "launch", "20261105-120000", "x" * 50, 300)
     _run(logs / "genshin-impact", "install", "20261105-120000", "y" * 50, 300)
     report = _report(tmp_path)
-    assert "Other: genshin-impact/ files=2 size=100" in report
-    assert "mtime=" not in "".join(
-        line for line in report.splitlines() if line.startswith("Other: genshin-impact")
-    )
+    # Counted, not named (maintainer, 2026-11-11: which games someone plays is theirs).
+    assert "genshin" not in report
+    assert "Logs for 1 other game (not included)." in report
 
 
 def test_a_missing_game_folder_is_not_an_error(tmp_path):

@@ -5,8 +5,12 @@ from __future__ import annotations
 import time
 
 import _httpserver
+import pytest
 
 from nadare.gui import theme, workers
+
+# This file restyles the whole app: end earlier tests' windows first (#1024).
+pytestmark = pytest.mark.usefixtures("restyle_safe")
 
 
 def test_the_test_http_server_stops_quickly():

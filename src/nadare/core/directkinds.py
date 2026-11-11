@@ -118,20 +118,13 @@ _LAUNCHER: dict[str, tuple[str, str, str, str, str]] = {
         "NIKKE",
         "nikke_launcher.exe",
     ),
-    "launcher-nte": (
-        "NteBackend",
-        "Neverness to Everness (publisher's launcher)",
-        "drive_c/Program Files",
-        "Neverness To Everness",
-        "NTEGlobalLauncher.exe",
-    ),
-    "launcher-gfl2-haoplay": (
-        "Gfl2HaoplayBackend",
-        "Girls' Frontline 2 (Haoplay global build, publisher's launcher)",
-        "drive_c/Program Files",
-        "GF2",
-        "PCLauncher.exe",
-    ),
+}
+
+#: Kinds Nadare no longer offers -> (game, the direct kind to install instead). The catalog is
+#: direct-only; NIKKE keeps its launcher because its sign-in needs it (user, 2026-11-10).
+RETIRED_KINDS: dict[str, tuple[str, str]] = {
+    "launcher-nte": ("Neverness to Everness", "direct-nte"),
+    "launcher-gfl2-haoplay": ("Girls' Frontline 2", "direct-gfl2-haoplay"),
 }
 
 #: Steam app id (or ``None``) whose store art a catalog game uses; the publisher's own page
@@ -152,8 +145,6 @@ ART: dict[str, int | None] = {
     "direct-hi3": None,
     "direct-zzz": 4162040,
     "launcher-nikke": None,
-    "launcher-nte": 4508340,
-    "launcher-gfl2-haoplay": 3308670,
 }
 
 DIRECT_KINDS = frozenset(_DIRECT)

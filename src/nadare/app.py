@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .core import i18n, paths, process, tls
+from .core import i18n, paths, process, tls, vkprobe
 from .core import logging as nadare_logging
 from .core.backends import BackendError, BackendUnsupported
 from .core.backends import create as create_backend
@@ -316,6 +316,37 @@ def build_parser() -> argparse.ArgumentParser:
     remove_cmd.add_argument(
         "-v", "--verbose", action="store_true", default=argparse.SUPPRESS, help="debug logging"
     )
+
+    uninstall_cmd = sub.add_parser(
+        "uninstall-all",
+        help="uninstall every game and remove Nadare's own folders (show the plan first)",
+    )
+    uninstall_cmd.add_argument(
+        "--with-games",
+        action="store_true",
+        help="also delete game folders and prefixes Nadare made",
+    )
+    uninstall_cmd.add_argument(
+        "--with-backups",
+        action="store_true",
+        help="also delete old prefix backups recorded after rebuilding the prefix",
+    )
+    uninstall_cmd.add_argument(
+        "--keep-runtimes",
+        action="store_true",
+        help="keep downloaded Proton/Wine runners and the managed umu folder",
+    )
+    uninstall_cmd.add_argument("--yes", action="store_true", help="confirm the uninstall")
+    uninstall_cmd.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="only show progress, done and errors",
+    )
+    uninstall_cmd.add_argument(
+        "-v", "--verbose", action="store_true", default=argparse.SUPPRESS, help="debug logging"
+    )
     return parser
 
 
@@ -451,13 +482,73 @@ def _print_optional_tools(which) -> None:
         )
 
 
+def _print_sandbox_status() -> None:
+    """Say whether the Sandbox can run here: bubblewrap, or Flatpak's own sandbox."""
+    from .core import gamesandbox, sandbox
+
+    if sandbox.in_flatpak():
+        if gamesandbox._flatpak_spawn() is None:
+            print("Sandbox: unavailable, flatpak-spawn is missing")
+        else:
+            print("Sandbox: available (Flatpak sandbox, flatpak-spawn --sandbox)")
+        return
+    located = gamesandbox.locate()
+    if located.binary is not None:
+        kind = "the game runtime's copy" if located.source == "runtime" else "the system's copy"
+        print(f"Sandbox: bubblewrap found ({kind}: {located.binary})")
+    elif located.found:
+        print(f"Sandbox: unavailable, bubblewrap cannot start here ({located.why})")
+    else:
+        print("Sandbox: unavailable, bubblewrap is not installed and no game runtime yet")
+
+
 def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
-    """Print GPU/Vulkan capability, DXVK readiness and runner freshness."""
-    from .core import backends, graphics, hostlibs, process, runners, sandbox, umu, userns
+    """Print a one-line verdict, then GPU/Vulkan capability, DXVK readiness and the rest.
+
+    The verdict comes first so a newcomer reads the answer before twenty lines of detail
+    (#1002); it names only what stops games from running. ``--strict`` is unchanged.
+    """
+    blockers: list[str] = []
+    body = io.StringIO()
+    completed = False
+    try:
+        with contextlib.redirect_stdout(body):
+            code = _doctor_report(config, args, blockers)
+        completed = True
+    finally:
+        if not completed:
+            # A later probe failed: the diagnostics already collected are still useful.
+            print(body.getvalue(), end="")
+    if blockers:
+        print(f"verdict: not ready: {'; '.join(blockers)} (the fix is under that line below)")
+    else:
+        print("verdict: ready to install and play (the lines below are details)")
+    print(body.getvalue(), end="")
+    return code
+
+
+def _doctor_report(
+    config: Config, args: argparse.Namespace | None, blockers: list[str]
+) -> int:
+    from .core import (
+        backends,
+        flatpakgl,
+        graphics,
+        hostlibs,
+        process,
+        runners,
+        sandbox,
+        umu,
+        userns,
+    )
 
     reasons: list[str] = []
 
     def finish() -> int:
+        blockers.extend(reasons)
+        if not dxvk_ready and info.available:
+            # Not a --strict reason (never was), but games cannot start without it.
+            blockers.append("the 32-bit Vulkan driver is missing or older than Vulkan 1.3")
         if bool(getattr(args, "strict", False)) and reasons:
             print(f"doctor: not ready ({'; '.join(reasons)})")
             return 1
@@ -490,24 +581,45 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
         ready = "DXVK needs Vulkan >= 1.3"
     print(f"GPU/Vulkan: {detail} [{ready}]")
     if not dxvk_ready:
-        family = hostlibs.distro_family()
-        fix = {
-            "debian": (
-                "sudo dpkg --add-architecture i386 && sudo apt update && "
-                "sudo apt install mesa-vulkan-drivers:i386"
-            ),
-            "fedora": "sudo dnf install mesa-vulkan-drivers.i686",
-            "arch": "sudo pacman -S --needed lib32-vulkan-icd-loader lib32-vulkan-radeon",
-        }.get(family or "")
-        if fix:
-            print(f"  fix: {fix}")
-        else:
+        if sandbox.in_flatpak():
             print(
-                "  fix: install your GPU driver's 32-bit Vulkan support "
-                "(see docs/TESTERS.md), then run nadare doctor again"
+                "  fix: run flatpak update to update its runtimes and graphics extensions; "
+                "also check that the host GPU driver works"
             )
+        else:
+            family = hostlibs.distro_family()
+            fix = {
+                "debian": (
+                    "sudo dpkg --add-architecture i386 && sudo apt update && "
+                    "sudo apt install mesa-vulkan-drivers:i386"
+                ),
+                "fedora": "sudo dnf install mesa-vulkan-drivers.i686",
+                "arch": "sudo pacman -S --needed lib32-vulkan-icd-loader lib32-vulkan-radeon",
+            }.get(family or "")
+            if fix:
+                print(f"  fix: {fix}")
+            else:
+                print(
+                    "  fix: install your GPU driver's 32-bit Vulkan support "
+                    "(see docs/TESTERS.md), then run nadare doctor again"
+                )
     if sandbox.in_flatpak():
-        print("umu-run: not needed (Flatpak runs Proton directly)")
+        graphics_problem = flatpakgl.problem()
+        if graphics_problem is None:
+            summary = flatpakgl.check(flatpakgl.ROOT).summary
+            print(f"Flatpak graphics: OK ({summary})")
+        else:
+            print(f"Flatpak graphics: {graphics_problem.summary}")
+            print(f"  fix: {graphics_problem.fix}")
+            reasons.append(
+                "games will not start until the graphics package is installed"
+            )
+        managed = umu.managed()
+        if managed is not None:
+            print(f"umu-run: managed copy {managed} (games run in the Steam Runtime)")
+        else:
+            print("umu-run: set up at the first launch (games run in the Steam Runtime)")
+        print("  Sandboxed games run Proton directly, without the Steam Runtime")
     else:
         found = umu.system("umu-run", which=process.which)
         old_system = None if found else process.which("umu-run")
@@ -589,16 +701,7 @@ def _run_doctor(config: Config, args: argparse.Namespace | None = None) -> int:
             print("  fix: run these two commands (this also avoids the 32-bit libraries)")
             for line in userns.install_command().splitlines():
                 print(f"    {line}")
-    from .core import gamesandbox
-
-    located = gamesandbox.locate()
-    if located.binary is not None:
-        kind = "the game runtime's copy" if located.source == "runtime" else "the system's copy"
-        print(f"Sandbox: bubblewrap found ({kind}: {located.binary})")
-    elif located.found:
-        print(f"Sandbox: unavailable, bubblewrap cannot start here ({located.why})")
-    else:
-        print("Sandbox: unavailable, bubblewrap is not installed and no game runtime yet")
+    _print_sandbox_status()
     from .core import secrets as _secrets
 
     ok, why = _secrets.keyring_diagnosis()
@@ -680,7 +783,9 @@ def _doctor_text(config: Config) -> str:
         with _DOCTOR_CAPTURE_LOCK, contextlib.redirect_stdout(capture):
             _run_doctor(config)
     except Exception as exc:  # noqa: BLE001 - a partial report is still useful
-        return f"unavailable: {exc}"
+        partial = capture.getvalue().strip()
+        error = f"unavailable: {exc}"
+        return f"{partial}\n{error}" if partial else error
     return capture.getvalue().strip()
 
 
@@ -766,6 +871,7 @@ def _run_backend_command(
         )
         return 1 if status.state == "error" else 0
     if command == "install":
+        _check_install_space(backend)
         backend.install()
         return 0
     if command == "update":
@@ -864,6 +970,36 @@ def _desktop_dir() -> Path:
     return shortcuts.desktop_dir()
 
 
+def _shortcut_refresh(config: Config) -> int:
+    from .core import shortcuts
+
+    # A recovered or empty config has no trustworthy profile list: every shortcut would
+    # look orphaned, so refuse (same rule as the GUI) instead of deleting them.
+    if config.notice or not config.profiles:
+        print(
+            "cannot refresh shortcuts: the config could not be read or has no profiles",
+            file=sys.stderr,
+        )
+        return 1
+    result = shortcuts.refresh_desktop_entries(
+        config.profiles, desktop_dir=_desktop_dir()
+    )
+    steam = shortcuts.refresh_steam_shortcuts(
+        config.profiles, argv=shortcuts.launcher_argv()
+    )
+    for path in result["updated"]:
+        print(f"updated {path}")
+    for path in result["removed"]:
+        print(f"removed {path}")
+    for path in steam["updated"]:
+        print(f"updated {path}")
+    for item in steam["removed"]:
+        print(f"removed {item}")
+    for warning in steam["warnings"]:
+        print(f"[warn] {warning}", file=sys.stderr)
+    return 0
+
+
 def _run_shortcut(args: argparse.Namespace, config: Config) -> int:
     from .core import shortcuts
 
@@ -883,23 +1019,7 @@ def _run_shortcut(args: argparse.Namespace, config: Config) -> int:
             print(f"{owner}\t{path}\tSteam: {title}")
         return 0
     if action == "refresh":
-        result = shortcuts.refresh_desktop_entries(
-            config.profiles, desktop_dir=_desktop_dir()
-        )
-        steam = shortcuts.refresh_steam_shortcuts(
-            config.profiles, argv=shortcuts.launcher_argv()
-        )
-        for path in result["updated"]:
-            print(f"updated {path}")
-        for path in result["removed"]:
-            print(f"removed {path}")
-        for path in steam["updated"]:
-            print(f"updated {path}")
-        for item in steam["removed"]:
-            print(f"removed {item}")
-        for warning in steam["warnings"]:
-            print(f"[warn] {warning}", file=sys.stderr)
-        return 0
+        return _shortcut_refresh(config)
 
     name = args.profile or config.active
     if not name:
@@ -948,6 +1068,37 @@ def _run_shortcut(args: argparse.Namespace, config: Config) -> int:
             else:
                 print(f"already present {path}")
     return 0
+
+
+def _check_install_space(backend: Any) -> None:
+    """Refuse a fresh install the disk cannot hold, as the GUI does (#339 F-10).
+
+    What is already in the folder (a resumed install) counts as written. A backend without a
+    size or a folder installs as before.
+    """
+    from .core import backends as core_backends
+    from .core import diskspace
+
+    size = getattr(backend, "install_size_hint", None)
+    kind = str(getattr(backend, "kind", "") or "")
+    asked = core_backends.install_choice(kind) if kind else None
+    if asked is not None:
+        option, sizes = asked
+        profile = getattr(getattr(backend, "ctx", None), "profile", None)
+        if isinstance(profile, dict):
+            from .backends.wine import profile_setting
+
+            chosen = profile_setting(profile, option.key)
+            if chosen in (None, ""):
+                chosen = option.default
+            choice_size = sizes.get(str(chosen))
+            if choice_size:
+                size = choice_size
+    folder = getattr(backend, "install_dir", None)
+    if not size or not callable(folder):
+        return
+    path = Path(folder())
+    diskspace.check_space(path, max(0, int(size) - diskspace.tree_bytes(path)))
 
 
 def _run_remove(args: argparse.Namespace, config: Config) -> int:
@@ -999,8 +1150,52 @@ def _run_remove(args: argparse.Namespace, config: Config) -> int:
     return 1 if result.profile_kept else 0
 
 
+def _run_uninstall_all(args: argparse.Namespace, config: Config) -> int:
+    from .core import uninstall_all
+
+    groups = uninstall_all.plan(config)
+    if not getattr(args, "yes", False):
+        states = {
+            "nadare": True,
+            "runtimes": not getattr(args, "keep_runtimes", False),
+            "games": getattr(args, "with_games", False),
+            "backups": getattr(args, "with_backups", False),
+        }
+        for group in groups:
+            state = "on" if states.get(group.key, group.default) else "off"
+            print(f"{state} {group.label}")
+            if group.note:
+                print(f"  ({group.note})")
+            for path in group.paths:
+                print(f"  {path}")
+        print("nothing was deleted; add --yes to do it")
+        return 0
+
+    before = set(config.profiles)
+    report = uninstall_all.run(
+        config,
+        games=getattr(args, "with_games", False),
+        backups=getattr(args, "with_backups", False),
+        runtimes=not getattr(args, "keep_runtimes", False),
+        applications_dir=uninstall_all._applications_dir(),
+        desktop_dir=uninstall_all._desktop_dir(),
+    )
+    for name in report.profiles_removed:
+        print(i18n.translate("removed {name}", name=name))
+    for path in report.removed:
+        print(f"  removed: {path}")
+    for warning in report.warnings:
+        print(f"  warning: {warning}")
+    kept = any(name not in report.profiles_removed for name in before)
+    return 1 if report.refused or kept else 0
+
+
 def run_cli(argv: Sequence[str] | None = None) -> int:
     """Parse ``argv`` and run one command. Returns a process exit code."""
+    items = list(argv) if argv is not None else sys.argv[1:]
+    if items[:1] == [vkprobe.SUBCOMMAND]:
+        # The GPU probe's helper process (core/vkprobe.py): no config, logs or parser.
+        return vkprobe.main()
     _make_output_encoding_safe()
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -1128,6 +1323,19 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
             return 1
         except Exception as exc:  # noqa: BLE001
             log.error("remove failed: %s", exc, exc_info=True)
+            print(
+                i18n.translate("operation failed: {message}", message=exc), file=sys.stderr
+            )
+            return 1
+
+    if args.command == "uninstall-all":
+        try:
+            return _run_uninstall_all(args, config)
+        except BackendError as exc:
+            print(f"[error] {exc.message}", file=sys.stderr)
+            return 1
+        except Exception as exc:  # noqa: BLE001
+            log.error("uninstall-all failed: %s", exc, exc_info=True)
             print(
                 i18n.translate("operation failed: {message}", message=exc), file=sys.stderr
             )

@@ -20,7 +20,7 @@ Flow:
                launch; no STOVE, no interaction, until the refresh_token is
                invalidated (code 44010 -> run `login` again).
 
-STOVE's CDN filters by TLS/JA3, so curl_cffi's Chrome impersonation is required
+STOVE's CDN expects a browser-shaped TLS handshake, so the client uses curl_cffi
 (plain requests gets reset). Credentials live only in the 0600 credential sink and
 session.json; neither is printed.
 
@@ -92,8 +92,8 @@ TERMS_NOT_ACCEPTED_CODE = "406401"
 TERMS_AGREE_VIEWAREA = "SVC_AG"
 
 #: STOVE refuses the ``provider_cd=RT`` sign-in for some accounts (reported as an "OTP user",
-#: right after a good QR login). ``/sign/v2.0/pc/refresh`` still renews them; the official
-#: launcher never calls it, so it is only used after this refusal.
+#: right after a good QR login). Those accounts use the alternate refresh path instead, which
+#: is only tried after this refusal.
 RT_SIGNIN_DENIED_CODE = "44006"
 
 
@@ -443,6 +443,8 @@ class StoveAuth:
             API_BASE + "/sign/v2.1/pc/signin", json=body, headers=self._headers(), timeout=15
         )
         data = self._parse(r, "signin")
+        if "code" not in data:
+            _check_http(r, "signin")  # an error page without STOVE's envelope is no sign-in
         _check_code(data, "signin")
         # A fresh sign-in may be a different STOVE account: the identity from the previous one
         # must not be saved beside the new credential (#913). A refresh keeps what it knows.
@@ -525,6 +527,8 @@ class StoveAuth:
             API_BASE + "/sign/v2.1/pc/signin", json=body, headers=self._headers(), timeout=15
         )
         data = self._parse(r, "signin_RT")
+        if "code" not in data:
+            _check_http(r, "signin_RT")  # an error page without STOVE's envelope is no renewal
         code = str(data.get("code", "0"))
         if code == RT_SIGNIN_DENIED_CODE:
             data = self._renew_with_pc_refresh()
@@ -792,7 +796,8 @@ class StoveAuth:
             self.launcher_refresh = flat["refresh_token"]
         if not self.member_no and (flat.get("member_no")):
             self.member_no = str(flat["member_no"])
-        v = data.get("value") or {}
+        v = data.get("value")
+        v = v if isinstance(v, dict) else {}  # a non-object "value" must not abort (#1207 b003)
         m = v.get("member") if isinstance(v.get("member"), dict) else {}
         if m:
             self.member = m

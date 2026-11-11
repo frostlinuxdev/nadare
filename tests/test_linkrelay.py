@@ -206,7 +206,7 @@ def test_the_default_opener_uses_xdg_open_with_a_clean_environment(monkeypatch):
         calls["args"], calls["kwargs"] = args, kwargs
         return Done()
 
-    monkeypatch.setattr(linkrelay.shutil, "which", lambda name: "/usr/bin/xdg-open")
+    monkeypatch.setattr(linkrelay.shutil, "which", lambda name, *_a, **_k: "/usr/bin/xdg-open")
     monkeypatch.setattr(linkrelay.subprocess, "Popen", fake_popen)
     monkeypatch.setenv("GITHUB_TOKEN", "secret")
     linkrelay.open_in_browser("https://a.example/x")
@@ -215,7 +215,7 @@ def test_the_default_opener_uses_xdg_open_with_a_clean_environment(monkeypatch):
 
 
 def test_without_xdg_open_nothing_is_started(monkeypatch):
-    monkeypatch.setattr(linkrelay.shutil, "which", lambda name: None)
+    monkeypatch.setattr(linkrelay.shutil, "which", lambda name, *_a, **_k: None)
     monkeypatch.setattr(
         linkrelay.subprocess, "Popen", lambda *a, **k: pytest.fail("must not start anything")
     )

@@ -18,11 +18,13 @@ import http.client
 import io
 import logging
 import os
+import re
 import shutil
 import stat
 import tempfile
 import threading
 import time
+from collections.abc import Iterable
 from concurrent.futures import CancelledError as FutureCancelled
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -84,6 +86,10 @@ class SophonPackage:
     chunk_url: str
     manifest_id: str
     size: int
+    #: A pattern (``re.fullmatch``) for the names of earlier versions of this package. HoYo names
+    #: packages after the version, so an update's ledger never met the old one: nothing was pruned
+    #: and the old ledger kept its files forever (ZZZ 3.2.0 -> 3.3.0: 3.57 GiB).
+    supersedes: str = ""
 
 
 class _CombinedCancel:
@@ -185,6 +191,9 @@ def _target_path(root: Path, relative: str) -> Path:
     The root itself may be a symlink; only components beneath it are forbidden.
     """
     relative = _safe_relative_path(relative)
+    if relative.split("/", 1)[0] == STATE_DIR:
+        # Nadare's own ledger lives there; a manifest may not plant or replace it (final round).
+        raise SophonError(f"unsafe path component in {relative!r}")
     root_real = Path(os.path.realpath(root))
     target = root / relative
     current = root
@@ -411,8 +420,30 @@ def _atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
-def _other_package_paths(root: Path, current_ledger: Path) -> set[str] | None:
-    """Read sibling package ledgers; return None when ownership is uncertain."""
+def _superseded_ledgers(pkg: SophonPackage, root: Path) -> list[Path]:
+    """Ledgers of earlier versions of ``pkg`` (other names matching ``pkg.supersedes``)."""
+    if not pkg.supersedes:
+        return []
+    state = root / STATE_DIR
+    try:
+        candidates = sorted(state.glob("sophon-*.files"))
+    except OSError:
+        return []
+    found: list[Path] = []
+    for ledger in candidates:
+        name = ledger.name[len("sophon-") : -len(".files")]
+        if name != pkg.name and re.fullmatch(pkg.supersedes, name):
+            found.append(ledger)
+    return found
+
+
+def _other_package_paths(
+    root: Path, current_ledger: Path, ignore: frozenset[Path] = frozenset()
+) -> set[str] | None:
+    """Read sibling package ledgers; return None when ownership is uncertain.
+
+    ``ignore`` holds the ledgers of earlier versions of the package being synced: they own
+    nothing once it is installed."""
     state = root / STATE_DIR
     try:
         mode = state.lstat().st_mode
@@ -427,7 +458,7 @@ def _other_package_paths(root: Path, current_ledger: Path) -> set[str] | None:
     try:
         ledgers = state.glob("sophon-*.files")
         for ledger in ledgers:
-            if ledger == current_ledger:
+            if ledger == current_ledger or ledger in ignore:
                 continue
             _check_state_storage(root, ledger)
             raw = ledger.read_text(encoding="utf-8")
@@ -440,8 +471,27 @@ def _other_package_paths(root: Path, current_ledger: Path) -> set[str] | None:
     return protected
 
 
+def _latest_mtime(ledgers: Iterable[Path]) -> float | None:
+    """The newest modification time among existing ledgers, or None when there is none."""
+    latest: float | None = None
+    for ledger in ledgers:
+        try:
+            stamp = ledger.stat().st_mtime
+        except OSError:
+            continue
+        if latest is None or stamp > latest:
+            latest = stamp
+    return latest
+
+
 def _cleanup_stale_files(
-    root: Path, previous: list[str], current: list[str], current_ledger: Path
+    root: Path,
+    previous: list[str],
+    current: list[str],
+    current_ledger: Path,
+    superseded: frozenset[Path] = frozenset(),
+    *,
+    changed_after: float | None = None,
 ) -> bool:
     """Remove unowned stale ledger paths, then prune empty directories.
 
@@ -449,7 +499,7 @@ def _cleanup_stale_files(
     uncertain (a sibling ledger could not be read) or a stale file could not be
     removed. Callers must keep the union ledger when this returns ``False``.
     """
-    protected = _other_package_paths(root, current_ledger)
+    protected = _other_package_paths(root, current_ledger, superseded)
     if protected is None:
         return False
     keep = set(current) | protected
@@ -462,9 +512,34 @@ def _cleanup_stale_files(
             # Re-check at deletion time: a parent may have become a symlink meanwhile.
             _ensure_safe_parents(root, relative)
         except SophonError:
+            # The path is still owned by nobody until it can be checked again: keep the
+            # union ledger so a later sync retries this stale file.
+            complete = False
             continue
+        target = root / relative
         try:
-            (root / relative).unlink()
+            info = target.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            complete = False
+            continue
+        else:
+            if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+                # A directory or device is not a file this ledger installed: keep it and
+                # retry from the union ledger rather than delete something unknown.
+                complete = False
+                continue
+            if (
+                stat.S_ISREG(info.st_mode)
+                and changed_after is not None
+                and info.st_mtime > changed_after + 1
+            ):
+                # Someone changed the dropped file after the install: keep it, and let it
+                # fall out of the ledger so no later sync looks at it again.
+                continue
+        try:
+            target.unlink()
         except FileNotFoundError:
             pass
         except OSError:
@@ -555,7 +630,13 @@ def _load_manifest(
         raw = _unzstd(body, _MAX_MANIFEST_UNPACKED, f"manifest for {pkg.name}")
     except _zstd().ZstdError as exc:
         raise SophonError(f"manifest for {pkg.name} is not a zstd frame: {exc}") from exc
-    return parse_manifest(raw)
+    files = parse_manifest(raw)
+    if not files and pkg.size > 0:
+        # The build says it has data, the manifest lists nothing: applied as the new build,
+        # the empty list would prune every file of the install. A package declared empty
+        # (size 0) may really be empty.
+        raise SophonError(f"the manifest for {pkg.name} lists no files; nothing was changed")
+    return files
 
 
 def _chunk_matches(fh: Any, chunk: ChunkEntry) -> bool:
@@ -610,6 +691,17 @@ def sync_package(
     try:
         files = _load_manifest(pool, pkg, cancel)
         previous, previous_text = _read_ledger(pkg, root)
+        superseded = _superseded_ledgers(pkg, root)
+        try:
+            for old_ledger in superseded:
+                raw_old = old_ledger.read_text(encoding="utf-8")
+                lines = [line for line in raw_old.splitlines() if line]
+                previous.extend(_validate_ledger_entry(line, old_ledger) for line in lines)
+        except (OSError, UnicodeError, SophonError):
+            # An unreadable earlier ledger: keep everything it owns, as before.
+            superseded = []
+        changed_after = _latest_mtime([_ledger_path(pkg, root), *superseded])
+        previous = list(dict.fromkeys(previous))
         root.mkdir(parents=True, exist_ok=True)
         total = sum(entry.size for entry in files)
         done = 0
@@ -827,11 +919,26 @@ def sync_package(
         except OSError:
             pass
         raise
-    if _cleanup_stale_files(root, previous, current, ledger):
+    if _cleanup_stale_files(
+        root,
+        previous,
+        current,
+        ledger,
+        frozenset(superseded),
+        changed_after=changed_after,
+    ):
         try:
             _atomic_write_text(ledger, "".join(f"{path}\n" for path in current))
         except OSError:
             # The union ledger is safe: the next sync retries the prune.
             log.warning("could not shrink %s after cleanup", ledger, exc_info=True)
     # Otherwise keep the union ledger so the next sync retries the prune.
+    # The union ledger now holds every path an earlier version owned, so its own ledger and
+    # marker can go either way: a prune that was cut short is retried from the union ledger.
+    for old_ledger in superseded:
+        for stale in (old_ledger, old_ledger.with_suffix(".done")):
+            try:
+                stale.unlink(missing_ok=True)
+            except OSError:
+                log.warning("could not remove %s", stale, exc_info=True)
     say(Event("log", f"installed {pkg.name}", data={"sophon": pkg.name}))

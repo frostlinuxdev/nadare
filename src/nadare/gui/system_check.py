@@ -95,6 +95,25 @@ def _note_html(text: str) -> str:
 def report_html(text: str) -> str:
     """The report as a small table: marker, label and body, with a one-line summary on top."""
     lines = parse_report(text)
+    verdict = next((line for line in lines if line.label == "verdict"), None)
+    if verdict is not None:
+        # doctor's own answer (#1002): a ▲ below is a detail unless the verdict names it.
+        lines = [line for line in lines if line is not verdict]
+        ready = verdict.body.startswith("ready")
+        colour = TEXT if ready else WARN
+        words = verdict.body.split(" (", 1)[0]
+        words = words[:1].upper() + words[1:]
+        hint = (
+            "A ▲ below is a detail, not a problem."
+            if ready
+            else "The fix is under the flagged line below."
+        )
+        summary = (
+            f"<p style='margin:0 0 10px 0'><b style='color:{colour}'>"
+            f"{'✓' if ready else '▲'} {_escaped(words)}.</b>"
+            f" <span style='color:{MUTED}'>{hint}</span></p>"
+        )
+        return summary + _report_table(lines)
     flagged = sum(1 for line in lines if line.warn)
     if flagged:
         noun = "item" if flagged == 1 else "items"
@@ -107,6 +126,10 @@ def report_html(text: str) -> str:
         summary = (
             f"<p style='margin:0 0 10px 0'><b style='color:{TEXT}'>Nothing flagged.</b></p>"
         )
+    return summary + _report_table(lines)
+
+
+def _report_table(lines: list[ReportLine]) -> str:
     rows: list[str] = []
     for line in lines:
         marker = f"<span style='color:{WARN}'>▲</span>" if line.warn else (
@@ -134,7 +157,7 @@ def report_html(text: str) -> str:
                 f"<tr><td width='18'>{marker}</td><td colspan='2' style='color:{TEXT_SOFT}'>"
                 f"{_escaped(line.body)}</td></tr>"
             )
-    return f"{summary}<table cellspacing='0' cellpadding='4'>{''.join(rows)}</table>"
+    return f"<table cellspacing='0' cellpadding='4'>{''.join(rows)}</table>"
 
 
 class _Signals(QObject):

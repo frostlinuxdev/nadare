@@ -12,12 +12,15 @@ Nothing here talks to the GUI. The user is always asked first; this module only 
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import platform
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +57,11 @@ class AssetUrls:
     appimage: str
     sums: str
     filename: str
+
+    @property
+    def signature(self) -> str:
+        """The detached release signature published next to the AppImage (``release/sign.sh``)."""
+        return self.appimage + ".asc"
 
 
 @dataclass(frozen=True)
@@ -103,7 +111,30 @@ def appimage_target(env: Mapping[str, str] | None = None) -> Path | None:
         return None
     if not os.access(path.parent, os.W_OK | os.X_OK):
         return None
+    if not _only_this_user_controls(path):
+        return None
     return path
+
+
+def _only_this_user_controls(path: Path) -> bool:
+    """The AppImage is ours, and no other user can swap files in its folder (#811).
+
+    A world-writable folder needs the sticky bit; a group-writable one is fine only for the
+    user's own group (umask 002 makes 775 folders common on per-user-group systems).
+    """
+    try:
+        info = path.stat()
+        folder = path.parent.stat()
+    except OSError:
+        return False
+    if info.st_uid != os.getuid():
+        return False
+    mode = folder.st_mode
+    if mode & stat.S_IWOTH and not mode & stat.S_ISVTX:
+        return False
+    if mode & stat.S_IWGRP and folder.st_gid != os.getgid():
+        return False
+    return True
 
 
 def _index_document() -> Any:
@@ -214,7 +245,32 @@ def download_verified(
     return dest
 
 
-def install_update(new: Path, target: Path, filename: str) -> Path:
+def verify_signature(urls: AssetUrls, path: Path) -> None:
+    """Refuse ``path`` unless the release's ``.asc`` is the release key's signature over it.
+
+    The hash came from the index, which is not signed: only this check ties the file to the key
+    that signs Nadare's releases (#1209 P0-1). A release without a signature is not installed
+    in place; the user is sent to the release page instead.
+    """
+    from . import releasesig
+
+    try:
+        text = _fetch_sums(urls.signature)
+    except (SelfUpdateError, download.DownloadError, OSError) as exc:
+        raise SelfUpdateError(
+            "this release has no signature Nadare can check, so it was not installed. "
+            "Download it from the release page instead."
+        ) from exc
+    try:
+        releasesig.verify_detached(path, text)
+    except (releasesig.SignatureError, OSError) as exc:
+        raise SelfUpdateError(
+            f"the download is not signed with Nadare's release key ({exc}), so it was not "
+            "installed. It may have been changed on the way."
+        ) from exc
+
+
+def install_update(new: Path, target: Path, filename: str, *, sha256: str | None = None) -> Path:
     """Put ``new`` next to ``target`` under ``filename``; keep the old file as ``*.previous``.
 
     The running AppImage stays valid after being renamed (Linux keeps the open file), so
@@ -226,6 +282,10 @@ def install_update(new: Path, target: Path, filename: str) -> Path:
     """
     dest = target.with_name(filename)
     backup = target.with_name(target.name + BACKUP_SUFFIX)
+    if sha256 is not None and _sha256_file(new) != sha256.lower():
+        # Checked again just before the swap: the file may have changed since the download
+        # was verified (#811).
+        raise SelfUpdateError("the downloaded file changed after it was checked; not installed")
     os.chmod(new, 0o755)
     try:
         os.replace(target, backup)
@@ -244,6 +304,17 @@ def install_update(new: Path, target: Path, filename: str) -> Path:
     return dest
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for block in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(block)
+    except OSError as exc:
+        raise SelfUpdateError(f"could not read the download: {exc}") from exc
+    return digest.hexdigest()
+
+
 def _leave_links(old: Path, dest: Path) -> None:
     """Make ``old``, and every link in its folder that led to it, point at ``dest``."""
     stale = [old]
@@ -255,17 +326,15 @@ def _leave_links(old: Path, dest: Path) -> None:
     except OSError:
         pass
     for path in stale:
-        temp = path.with_name(path.name + ".link")
         try:
-            temp.unlink(missing_ok=True)
-            os.symlink(dest.name, temp)
-            os.replace(temp, path)
+            # A fixed <AppImage>.link name could belong to the user. Stage in a
+            # private directory on the same filesystem so replacement stays atomic.
+            with tempfile.TemporaryDirectory(prefix=".nadare-link-", dir=path.parent) as work:
+                temp = Path(work) / "launcher"
+                os.symlink(dest.name, temp)
+                os.replace(temp, path)
         except OSError:
             log.debug("self-update: could not leave a link at %s", path, exc_info=True)
-            try:
-                temp.unlink(missing_ok=True)
-            except OSError:
-                pass
 
 
 def cleanup_previous(running: Path) -> None:
@@ -328,6 +397,7 @@ __all__ = [
     "download_host_allowed",
     "download_verified",
     "expected_sha256",
+    "verify_signature",
     "install_update",
     "restart",
     "restart_command",

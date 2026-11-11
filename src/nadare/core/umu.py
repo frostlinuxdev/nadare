@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 from . import download, hosting, paths, process
@@ -120,8 +121,14 @@ def managed() -> Path | None:
     return path
 
 
-def _extract_member(archive: Path, destination: Path) -> None:
-    """Copy only the regular ``umu/umu-run`` member to ``destination``."""
+def _extract_member(
+    archive: Path, destination: Path, check: Callable[[Path], None] | None = None
+) -> None:
+    """Copy only the regular ``umu/umu-run`` member to ``destination``.
+
+    ``check`` runs on the private candidate before it is published: ``managed()`` trusts any
+    executable file at ``destination``, so nothing unchecked may ever appear there (#974).
+    """
     tmp: Path | None = None
     try:
         with tarfile.open(archive, "r:*") as tar:
@@ -146,6 +153,8 @@ def _extract_member(archive: Path, destination: Path) -> None:
             with os.fdopen(fd, "wb") as out, source:
                 shutil.copyfileobj(source, out)
         tmp.chmod(0o755)
+        if check is not None:
+            check(tmp)
         os.replace(tmp, destination)
         tmp = None
     except UmuError:
@@ -223,12 +232,9 @@ def ensure_managed(
         raise UmuError(f"could not download umu: {exc}") from exc
 
     try:
-        _extract_member(result.path, destination)
-        try:
-            _smoke_test(python, destination)
-        except UmuError:
-            destination.unlink(missing_ok=True)
-            raise
+        _extract_member(
+            result.path, destination, check=lambda candidate: _smoke_test(python, candidate)
+        )
     finally:
         try:
             result.path.unlink(missing_ok=True)

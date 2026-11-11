@@ -67,14 +67,11 @@ def test_notice_is_shown_and_cleared(qapp):
     assert widget.notice_link.isHidden()
 
 
-def test_installed_button_note_and_signal(qapp):
+def test_installed_game_hides_the_install_button_and_shows_the_note(qapp):
     widget = StoreDetail(_entry("direct-pgr", installed=True))
-    assert widget.install_button.text() == "Add another copy"
+    assert widget.install_button.isHidden()
+    assert widget.install_button.text() == "Install"
     assert widget.installed_note.text() == "Already in your library."
-    received = []
-    widget.install_requested.connect(received.append)
-    widget.install_button.click()
-    assert received == ["direct-pgr"]
 
 
 def test_back_button_and_escape_emit(qapp):

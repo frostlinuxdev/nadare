@@ -61,7 +61,7 @@ def test_czn_picked_library_gets_nadare_game_prefix(tmp_path, qapp):
         close(d, qapp)
 
 
-def test_czn_library_rule_uses_the_same_free_folder_naming(tmp_path, qapp):
+def test_czn_library_rule_refuses_a_second_copy(tmp_path, qapp):
     library = tmp_path / "Games"
     first = dialog(tmp_path, qapp, kind="stove-czn")
     try:
@@ -75,11 +75,9 @@ def test_czn_library_rule_uses_the_same_free_folder_naming(tmp_path, qapp):
         second.set_profile_name("another")
         second.location_toggle.click()
         second.set_prefix(str(library))
-        name = second.create_profile()
-        assert name
-        assert second.config.profile(name)["prefix"] == str(
-            library / "Nadare" / "Chaos Zero Nightmare 2" / "prefix"
-        )
+        assert second.create_profile() is None
+        assert "already in your library" in second.error_label.text()
+        assert set(second.config.profiles) == {"czn"}
     finally:
         close(second, qapp)
 
@@ -105,9 +103,9 @@ def test_czn_untouched_default_is_unchanged(tmp_path, qapp):
     d = dialog(tmp_path, qapp, kind="stove-czn")
     try:
         name = d.create_profile()
-        assert name
+        assert name == "czn"
         profile = d.config.profile(name)
-        assert profile["prefix"] == str(tmp_path / "data" / "chaos-zero-nightmare" / "prefix")
+        assert profile["prefix"] == str(tmp_path / "data" / name / "prefix")
         assert "owned_dirs" not in profile
     finally:
         close(d, qapp)

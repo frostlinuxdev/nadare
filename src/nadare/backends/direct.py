@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -25,16 +25,27 @@ from typing import Any
 from ..core import (
     archivepins,
     directdl,
+    diskspace,
     endfield_shim,
     graphics,
     monitors,
     nte_launcher,
     paths,
+    removal,
     webview2,
 )
-from ..core.backends import BackendError, Option
+from ..core.backends import PREFIX_HELP, BackendError, Option
 from ..core.sources import Fetch, aethergazer, bd2, endfield, gfl2, hoyo, mongil, nte, pgr, wuwa
-from . import bd2_news, endfield_news, hoyo_art, hoyo_news, kuro_news, nte_news
+from . import (
+    bd2_news,
+    endfield_news,
+    gfl2_news,
+    hoyo_art,
+    hoyo_news,
+    kuro_news,
+    mongil_news,
+    nte_news,
+)
 from .arknights import INSTALLED_PREFIX_KEY
 from .nmlogin import NetmarbleLoginMixin
 from .wine import profile_setting, stream
@@ -55,7 +66,7 @@ class DirectBackend(WineGameBackend):
     news_source = None
     official_media = False
     options = (
-        Option("prefix", "Wine prefix", "path_dir", "WINEPREFIX used for this game."),
+        Option("prefix", "Wine prefix", "path_dir", PREFIX_HELP),
         Option("install_dir", "Game folder", "path_dir", "Where the game lives."),
         Option("exe_name", "Game executable", "text", advanced=True),
         Option(
@@ -98,8 +109,8 @@ class DirectBackend(WineGameBackend):
             "Sandbox",
             "bool",
             "Hides your home folder from the game (needs bubblewrap). The game can still use "
-            "the network. Experimental: see docs/SECURE-MODE.md.",
-            default=False,
+            "the network. See docs/SECURE-MODE.md.",
+            default=True,
         ),
         Option("wine_binary", "Wine binary", "path_file", advanced=True),
         Option("umu_binary", "umu-run binary", "path_file", advanced=True),
@@ -123,11 +134,21 @@ class DirectBackend(WineGameBackend):
                 f"{self.display_name}: could not read the publisher's download "
                 f"information ({exc}). Check your connection or try again later."
             ) from exc
-        if any(archive.stream for archive in plan.archives):
-            try:
-                plan = archivepins.attach(plan, archivepins.load(self.game_tag))
-            except Exception:  # noqa: BLE001 - published pins are optional
-                pass
+        try:
+            loaded = archivepins.load_state(self.game_tag)
+        except Exception:  # noqa: BLE001 - published pins are optional
+            return plan
+        try:
+            plan, notes = archivepins.check(plan, loaded)
+        except archivepins.PinMismatch as exc:
+            # #1158: the file at a pinned address changed. Refuse before anything is written.
+            self.info(str(exc))
+            raise BackendError(f"{self.display_name}: {exc}") from exc
+        # Logged on every read; shown on the page only by an install/update (_sync_direct), so a
+        # background update check does not repeat it every few hours.
+        self._pin_notes = notes
+        for note in notes:
+            self.info(note)
         return plan
 
     # ---- hooks the Arknights machinery calls ------------------------------
@@ -160,7 +181,12 @@ class DirectBackend(WineGameBackend):
 
     def _sync_direct(self) -> dict[str, Any]:
         self._refuse_if_running("installing, updating or repairing it")
+        self._pin_notes: list[str] = []
         plan = self._load_manifest()
+        from ..core.events import Event  # local: threading.Event is used below too
+
+        for note in self._pin_notes:
+            self.ctx.emit(Event("step", f"{self.display_name}: {note}"))
         workers = int(
             self.ctx.profile.get("download_workers") or directdl.plan_workers(plan)
         )
@@ -169,8 +195,17 @@ class DirectBackend(WineGameBackend):
         # update fails before it replaced anything. Once a file was replaced, files may already have
         # been replaced one by one (there is no rollback), so the marker stays and the page says
         # RESUME instead of promising the old version still works (#856).
-        was_complete = not marker.exists() and self._read_version_file() is not None
-        self._write_install_marker()
+        record = self._read_version_file()
+        was_complete = not marker.exists() and record is not None
+        # Say what this sync is, so a restart after it stops can too (#831); resuming an
+        # interrupted update keeps its old version and aims at the current one.
+        earlier = None if was_complete else self._interrupted_update()
+        update = None
+        if was_complete:
+            update = (str(record["version"]), str(plan.version))
+        elif earlier is not None:
+            update = (earlier[0], str(plan.version))
+        self._write_install_marker(update)
         from ..core.events import Event
 
         changed = threading.Event()
@@ -261,6 +296,8 @@ class AetherGazerBackend(DirectBackend):
 
 class MongilBackend(NetmarbleLoginMixin, DirectBackend):
     kind = "direct-mongil"
+    news_source = staticmethod(mongil_news.fetch_mongil_news)
+    official_image_hosts = mongil_news.IMAGE_HOSTS
     vcredist_default = True
     game_tag = "mongil"
     display_name = "Mongil: Star Dive"
@@ -269,6 +306,10 @@ class MongilBackend(NetmarbleLoginMixin, DirectBackend):
     launcher_names = (direct_exe,)
     install_size_hint = int(1.6 * GB)
     plan_factory = staticmethod(mongil.resolve)
+    page_summary = (
+        "Log in opens Netmarble's sign-in page in your browser (no password goes through "
+        "Nadare); Play then hands the game its token."
+    )
     page_notice = (
         "Mongil: Star Dive takes its login from Netmarble's launcher. Nadare does that step "
         "itself: Log in opens Netmarble's own sign-in page in your browser (no password "
@@ -289,6 +330,9 @@ class WutheringWavesBackend(DirectBackend):
     launcher_names = (direct_exe,)
     install_size_hint = int(85.9 * GB)
     plan_factory = staticmethod(wuwa.resolve)
+    # Asked in the install confirm (#990), with the sizes from the option's help.
+    install_choice = "wuwa_quality"
+    install_choice_sizes = {"sd": 58 * 2**30, "hd": 80 * 2**30, "uhd": 99 * 2**30}
     options = DirectBackend.options + (
         Option(
             "wuwa_quality",
@@ -313,18 +357,89 @@ class WutheringWavesBackend(DirectBackend):
     def _latest_variant(self) -> str:
         # Each quality (and a custom download token) has its own published version (#975); the
         # default HD with the shipped token keeps the plain cache name.
-        quality = wuwa.quality_of(self.ctx.profile.get("wuwa_quality"))
+        quality = wuwa.quality_of(profile_setting(self.ctx.profile, "wuwa_quality"))
         parts = [] if quality == wuwa.DEFAULT_QUALITY else [quality]
         if str(self.ctx.profile.get("kuro_token") or "").strip():
             parts.append("token")  # never the token itself
         return "-".join(parts)
 
     def plan_kwargs(self) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"quality": wuwa.quality_of(self.ctx.profile.get("wuwa_quality"))}
+        quality = wuwa.quality_of(profile_setting(self.ctx.profile, "wuwa_quality"))
+        kwargs: dict[str, Any] = {"quality": quality}
         token = str(self.ctx.profile.get("kuro_token") or "").strip()
         if token:
             kwargs["token"] = token
         return kwargs
+
+    def _quality_folder(self, quality: str) -> Path:
+        return self.install_dir() / "Client" / "Content" / quality.upper()
+
+    def other_quality_folders(self) -> list[tuple[str, Path, int]]:
+        """The resource tiers this profile no longer uses, with their sizes (#990).
+
+        Each tier is its own folder under ``Client/Content``. Nothing is offered until the
+        chosen tier has files: before its update downloads them, the old tier is still the
+        one the game plays. Symlinked folders are never followed.
+        """
+        chosen = wuwa.quality_of(profile_setting(self.ctx.profile, "wuwa_quality"))
+        chosen_folder = self._quality_folder(chosen)
+
+        root = self.install_dir()
+
+        def safe(folder: Path) -> bool:
+            """A real folder inside the install dir with no symlink below the install dir.
+
+            Links above it are fine (``/home`` is a link to ``/var/home`` on Silverblue/Bazzite).
+            """
+            try:
+                inside = folder.relative_to(root)
+                return folder.resolve() == root.resolve() / inside
+            except (OSError, ValueError):
+                return False
+
+        if not safe(chosen_folder) or not chosen_folder.is_dir():
+            return []
+        if diskspace.tree_bytes(chosen_folder) <= 0:
+            return []
+        found: list[tuple[str, Path, int]] = []
+        for quality in wuwa.QUALITIES:
+            if quality == chosen:
+                continue
+            folder = self._quality_folder(quality)
+            if not safe(folder) or not folder.is_dir():
+                continue
+            found.append((quality, folder, diskspace.tree_bytes(folder)))
+        return found
+
+    def remove_other_qualities(
+        self, only: Iterable[str] | None = None
+    ) -> tuple[int, list[str]]:
+        """Delete the unused resource tiers, never while the game runs (#990).
+
+        ``only`` restricts the deletion to the tiers the user confirmed; each is still
+        re-checked through :meth:`other_quality_folders` (symlinks and the chosen tier).
+        """
+        self._refuse_if_running("removing files")
+        wanted = None if only is None else {str(name).lower() for name in only}
+        freed = 0
+        warnings: list[str] = []
+        for quality, folder, size in self.other_quality_folders():
+            if wanted is not None and quality not in wanted:
+                continue
+            try:
+                outcome = removal._rmtree_safely(folder)
+            except OSError as exc:
+                warnings.append(removal._leftover_warning(folder, exc))
+                continue
+            for mount in outcome.mounts:
+                warnings.append(
+                    f"{mount} is a separate mounted drive and was left alone"
+                )
+            for path, exc in outcome.leftovers:
+                warnings.append(removal._leftover_warning(path, exc))
+            if not folder.exists():
+                freed += size
+        return freed, warnings
 
     #: The game binary. ``Wuthering Waves.exe`` (``direct_exe``) is Kuro's launcher stub: it
     #: runs ``ACE-Setup64.exe``, which installs the ACE kernel driver into the prefix, and Wine
@@ -343,11 +458,14 @@ class WutheringWavesBackend(DirectBackend):
         # The launcher stub passes these; a profile that sets its own launch_args keeps control.
         if self._extra_args("launch_args"):
             return []
-        return ["-dx12", f"-krqlv={wuwa.quality_of(self.ctx.profile.get('wuwa_quality'))}"]
+        quality = wuwa.quality_of(profile_setting(self.ctx.profile, "wuwa_quality"))
+        return ["-dx12", f"-krqlv={quality}"]
 
 
 class Gfl2Backend(DirectBackend):
     kind = "direct-gfl2"
+    news_source = staticmethod(gfl2_news.fetch_gfl2_news)
+    official_image_hosts = gfl2_news.IMAGE_HOSTS
     game_tag = "gfl2"
     display_name = "Girls' Frontline 2: Exilium (Darkwinter build)"
     install_subdir = _subdir("GF2Exilium")
@@ -368,6 +486,10 @@ class Gfl2HaoplayBackend(Gfl2Backend):
     """The Haoplay global build: same client layout, downloaded from Haoplay's CDN."""
 
     kind = "direct-gfl2-haoplay"
+    # Sunborn's feed is the Darkwinter servers' (its maintenance times may not match);
+    # Haoplay's site has only fixed banner images, no feed (#535, checked 2026-11-08).
+    news_source = None
+    official_image_hosts = DirectBackend.official_image_hosts
     game_tag = "gfl2-haoplay"
     display_name = "Girls' Frontline 2 (Haoplay global build)"
     install_subdir = _subdir("GF2Haoplay")
@@ -456,15 +578,23 @@ class Gfl2HaoplayBackend(Gfl2Backend):
         return {"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS": str(browser_args or "--no-sandbox")}
 
     def _prefix_command(
-        self, args: list[str], extra_env: dict[str, str] | None = None
+        self,
+        args: list[str],
+        extra_env: dict[str, str] | None = None,
+        *,
+        sandboxed: bool = False,
     ) -> tuple[list[str], dict[str, str]]:
-        argv, env = super()._prefix_command(args, extra_env)
+        argv, env = super()._prefix_command(args, extra_env, sandboxed=sandboxed)
         profile_env = profile_setting(self.ctx.profile, "extra_env")
         explicit = {**(profile_env if isinstance(profile_env, dict) else {}), **(extra_env or {})}
         env["GAMEID"] = str(explicit.get("GAMEID") or self.umu_id)
         env["UMU_ID"] = str(explicit.get("UMU_ID") or env["GAMEID"])
         return argv, env
 
+    page_summary = (
+        "The game downloads and updates itself on first start (about 90 GB). If the sign-in "
+        "page misbehaves, try the other Display backend in Settings."
+    )
     page_notice = (
         "This is the Haoplay global build; the Darkwinter build is a separate listing. Nadare "
         "installs only the small Haoplay client straight from Haoplay's servers "
@@ -531,6 +661,10 @@ class NteDirectBackend(DirectBackend):
     #: The launcher's embedded Chromium (login, news) and the game's login window draw blank
     #: under native Wayland on KDE; XWayland renders them. ``display: wayland`` still wins.
     default_display = "x11"
+    page_summary = (
+        "Perfect World's launcher starts with the game as a small bar and starts it by "
+        "itself; that is expected."
+    )
     page_notice = (
         "Installs straight from Perfect World's servers (about 98 GB). The game's Start and "
         "login only work when Perfect World's launcher is running, so Nadare also fetches the "

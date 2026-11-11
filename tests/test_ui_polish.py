@@ -18,6 +18,9 @@ except Exception:  # noqa: BLE001
 
 from nadare.gui import images, theme
 
+# This file restyles the whole app: end earlier tests' windows first (#1024).
+pytestmark = pytest.mark.usefixtures("restyle_safe")
+
 
 @pytest.fixture(scope="module")
 def qapp():

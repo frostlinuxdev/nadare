@@ -49,6 +49,30 @@ else
     PY="python3"
 fi
 
+# --- update information (AppImageUpdate, Gearlever) ------------------------
+# NADARE_UPDATE_INFO goes into the runtime's .upd_info section with `appimagetool -u`,
+# which then also writes <image>.zsync next to the image. Release builds set it
+# (release/container-build.sh); unset means no update information, as before.
+# The release key never enters this build: the image is signed afterwards with
+# scripts/sign_appimage.py, and the .zsync is made again for the signed file.
+update_args=()
+if [[ -n "${NADARE_UPDATE_INFO:-}" ]]; then
+    IFS='|' read -r -a update_fields <<< "$NADARE_UPDATE_INFO"
+    case "${update_fields[0]}" in
+        gh-releases-zsync) update_ok=$(( ${#update_fields[@]} == 5 )) ;;
+        zsync) update_ok=$(( ${#update_fields[@]} == 2 )) ;;
+        *) update_ok=0 ;;
+    esac
+    if (( ! update_ok || ${#NADARE_UPDATE_INFO} > 1000 )); then
+        echo "[!] NADARE_UPDATE_INFO is not valid update information:" >&2
+        echo "    gh-releases-zsync|OWNER|REPO|latest|NAME-*-x86_64.AppImage.zsync or zsync|URL," >&2
+        echo "    at most 1000 characters (the .upd_info section holds 1024 bytes)." >&2
+        exit 1
+    fi
+    update_args=(-u "$NADARE_UPDATE_INFO")
+    echo "[*] update information: $NADARE_UPDATE_INFO"
+fi
+
 # --- resolve and verify appimagetool (fail before the long build) -----------
 #: Release tag and SHA-256 of the appimagetool build pinned for releases.  Both
 #: are intentionally empty in the source tree: a release build (NADARE_RELEASE=1)
@@ -245,6 +269,30 @@ copy_system_libs libxkbcommon-x11.so.0 libxcb-cursor.so.0 libxcb-icccm.so.4 libx
     libxcb-shape.so.0 libxcb-sync.so.1 libxcb-xfixes.so.0 libxcb-randr.so.0 libxcb-shm.so.0 \
     libxcb-render.so.0
 
+# The build host's fontconfig (2.13 on Ubuntu 22.04) cannot parse the /etc/fonts of current
+# distributions and prints a wall of errors (#669). Keep the copies aside as a fallback: the
+# entry point loads the host's own fontconfig and freetype first (nadare/core/fontlibs.py).
+mkdir -p AppDir/usr/bin/_internal/fallback-libs
+for lib in libfontconfig.so.1 libfreetype.so.6; do
+    if [[ -e "AppDir/usr/bin/_internal/$lib" ]]; then
+        mv "AppDir/usr/bin/_internal/$lib" AppDir/usr/bin/_internal/fallback-libs/
+        echo "    > $lib moved to fallback-libs"
+    fi
+done
+
+# Size (#842, measured on b22: 86.1 -> 67.9 MB together): debug info of the bundled libraries
+# (never their dynamic symbols), Qt PDF (nothing in Nadare loads a PDF; only its image plugin
+# links it), zstandard's CFFI backend (the spec asks for backend_c, which is what imports) and
+# the static symbol table of libpython (the bootloader looks symbols up in .dynsym).
+internal=AppDir/usr/bin/_internal
+rm -f "$internal/libQt6Pdf.so.6" "$internal/PyQt6/Qt6/lib/libQt6Pdf.so.6" \
+    "$internal/PyQt6/Qt6/plugins/imageformats/libqpdf.so"
+rm -f "$internal"/zstandard/_cffi.*.so
+find "$internal" -name '*.so*' -type f -exec strip --strip-debug {} + 2>/dev/null || true
+for lib in "$internal"/libpython3*.so.1.0; do
+    [[ -e "$lib" ]] && strip --strip-all "$lib"
+done
+
 # Optional GTK3 platform theme plugin: it needs libgtk-3 we do not bundle and
 # Qt falls back to its own theme cleanly. Drop it so the bundle has no dangling
 # shared-library dependency.
@@ -253,6 +301,8 @@ rm -f AppDir/usr/bin/_internal/PyQt6/Qt6/plugins/platformthemes/libqgtk3.so
 # GPL: redistributed binaries carry the license text.
 mkdir -p AppDir/usr/share/licenses/nadare
 cp LICENSE AppDir/usr/share/licenses/nadare/LICENSE
+# Third-party licence texts: Python wheels from their metadata, system libraries via dpkg (#587).
+"$PY" scripts/collect_licences.py --internal "$internal" --toc build/nadare/PYZ-00.toc --out AppDir/usr/share/licenses/nadare/third-party
 
 cp packaging/nadare.desktop AppDir/nadare.desktop
 cp packaging/nadare.svg AppDir/nadare.svg
@@ -266,7 +316,14 @@ echo "[*] Building $image"
 rm -f "$image"
 # APPIMAGE_EXTRACT_AND_RUN lets an AppImage-packaged appimagetool run without
 # FUSE (containers, minimal CI); it is ignored by a native appimagetool.
-ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$appimagetool" "${runtime_args[@]}" AppDir "$image"
+ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$appimagetool" "${runtime_args[@]}" "${update_args[@]}" AppDir "$image"
+
+# appimagetool -u runs its bundled zsyncmake in the current directory: keep that
+# .zsync next to the image, not in the source tree.
+stray_zsync="$PWD/$(basename "$image").zsync"
+if [[ -f "$stray_zsync" && "$stray_zsync" != "$image.zsync" ]]; then
+    mv -f "$stray_zsync" "$image.zsync"
+fi
 
 echo "[+] Built: $image  ($(du -h "$image" | cut -f1))"
 echo "    sha256 $(sha256sum "$image" | cut -d' ' -f1)"

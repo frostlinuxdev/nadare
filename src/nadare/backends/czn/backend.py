@@ -33,6 +33,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -47,6 +48,8 @@ from ...core import (
     paths,
     prefixmove,
     process,
+    removal,
+    runlock,
     sandbox,
     vcredist,
     webview2,
@@ -54,6 +57,7 @@ from ...core import (
 from ...core import runners as core_runners
 from ...core import umu as umu_mod
 from ...core.backends import (
+    PREFIX_HELP,
     BackendError,
     GameBackend,
     Option,
@@ -86,10 +90,16 @@ HEARTBEAT_SECONDS = 15.0
 #: driver makes the WebView2 installer exit silently (exit 8, nothing installed)
 #: on some setups; an installer needs no window, so it always runs via XWayland.
 _INSTALLER_ENV = {"PROTON_ENABLE_WAYLAND": "0"}
-#: The stub ships prebuilt (reproducible ``build_stub.sh --container`` output)
-#: so users need no mingw-w64; it is used only when it matches this digest.
+#: Both stubs ship prebuilt so users need no mingw-w64; each is used only when it
+#: matches its digest. The default is the Go build (``scripts/build_stub_go.sh``,
+#: reproducible in a pinned container); the C build (``scripts/build_stub.sh
+#: --container``) ships for one release as a fallback. A profile picks the C stub
+#: with ``pcsdk_stub = "c"``, or the environment with ``NADARE_CZN_STUB=c``.
 STUB_PREBUILT = Path(__file__).resolve().parents[2] / "assets" / STUB_NAME
-STUB_PREBUILT_SHA256 = "fe4a5bad970750e974cf999e31e3b87132fbb25f9c04c9eea69e3acc2e243185"
+STUB_PREBUILT_SHA256 = "0a8cc27d2b6a7eb5097d65ca04214de997693da34483e11bc5d76211caddbdf7"
+STUB_C_NAME = "czn_pcsdk_stub_c.exe"
+STUB_C_PREBUILT = Path(__file__).resolve().parents[2] / "assets" / STUB_C_NAME
+STUB_C_PREBUILT_SHA256 = "fe4a5bad970750e974cf999e31e3b87132fbb25f9c04c9eea69e3acc2e243185"
 DEFAULT_RUNNER = "dwproton"  # the tested DW-Proton release
 WEBVIEW2_URL = webview2.DEFAULT_URL
 #: The bootstrapper is fetched through a mutable Microsoft redirector, so the
@@ -368,7 +378,20 @@ def stub_identity(path: Path) -> tuple[str | None, bool]:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None, False
-    return digest[:12], digest == STUB_PREBUILT_SHA256
+    return digest[:12], digest in (STUB_PREBUILT_SHA256, STUB_C_PREBUILT_SHA256)
+
+
+def _stub_label(path: Path) -> str:
+    """``(Go)``, ``(C)`` or ``(not shipped)``: which build ``path`` is, for the launch log."""
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return "(unreadable)"
+    if digest == STUB_PREBUILT_SHA256:
+        return "(Go)"
+    if digest == STUB_C_PREBUILT_SHA256:
+        return "(C)"
+    return "(not shipped)"
 
 
 def _cmdline_has_exe(raw: bytes, prefix: str, *, exclude: frozenset[str] = frozenset()) -> bool:
@@ -438,7 +461,7 @@ class CznBackend(GameBackend):
         _live_clear(profile)
 
     options = (
-        Option("prefix", "Wine prefix", "path_dir", "WINEPREFIX used for this game."),
+        Option("prefix", "Wine prefix", "path_dir", PREFIX_HELP),
         Option(
             "runner",
             "Runner",
@@ -712,7 +735,7 @@ class CznBackend(GameBackend):
 
     def _cleanup_stale_session(self) -> None:
         """Drop session files left by a crash — never while our game runs."""
-        if self._game_running():
+        if self._running():
             return
         for path in (
             self._session(),
@@ -759,6 +782,14 @@ class CznBackend(GameBackend):
 
     def _stub(self) -> Path:
         return self.ctx.profile_dir("stub") / STUB_NAME
+
+    def _shipped_stub(self) -> tuple[Path, str, str]:
+        """``(asset, digest, label)`` of the shipped stub this profile should run."""
+        raw = os.environ.get("NADARE_CZN_STUB") or _profile_setting(self.ctx.profile, "pcsdk_stub")
+        choice = str(raw or "").strip().lower()
+        if choice == "c":
+            return STUB_C_PREBUILT, STUB_C_PREBUILT_SHA256, "C"
+        return STUB_PREBUILT, STUB_PREBUILT_SHA256, "Go"
 
     def _data_dir(self) -> Path:
         return self.ctx.data_dir()
@@ -1269,10 +1300,18 @@ class CznBackend(GameBackend):
         """The game itself is running (a lingering crash handler is not)."""
         return bool(self._game_pids(helpers=False))
 
+    def _running_elsewhere(self) -> bool:
+        """Another Flatpak instance launched this prefix's game."""
+        return sandbox.in_flatpak() and runlock.running(self.prefix())
+
+    def _running(self) -> bool:
+        return self._game_running() or self._running_elsewhere()
+
     # ---- status ------------------------------------------------------------
     def status(self) -> Status:
         installed = self.installed()
-        running = self._game_running()
+        elsewhere = self._running_elsewhere()
+        running = self._game_running() or elsewhere
         version = None
         try:
             version = "v" + str(json.loads(self.upf().read_text())["local_version"])
@@ -1307,6 +1346,7 @@ class CznBackend(GameBackend):
                 "installed": installed,
                 "can_repair": installed,
                 "renderer": self._renderer or "",
+                **({"running_elsewhere": True} if elsewhere else {}),
             },
         )
 
@@ -1334,6 +1374,12 @@ class CznBackend(GameBackend):
         # Only a tree this call creates is cleaned up on failure: an existing prefix (even a
         # half-built one the user pointed us at) is never deleted.
         created = not prefix.exists()
+        try:
+            # An existing empty folder is as good as a new one; one holding anything else is
+            # the user's, and must never be stamped as Nadare's (uninstall deletes stamped ones).
+            ours = created or not any(prefix.iterdir())
+        except OSError:
+            ours = False
         prefix.mkdir(parents=True, exist_ok=True)
         self.ctx.emit(Event("step", f"Creating the Wine prefix at {prefix}…"))
         try:
@@ -1350,9 +1396,28 @@ class CznBackend(GameBackend):
             if created:
                 shutil.rmtree(prefix, ignore_errors=True)
             raise
+        self._write_prefix_markers(prefix, self.runner_name(), created=ours)
+
+    @staticmethod
+    def _write_prefix_markers(prefix: Path, runner: str, *, created: bool = True) -> None:
+        """Record who made the prefix without writing through a symlink planted at a name.
+
+        ``created=False`` (a folder that already held the user's files) records only the runner.
+        """
+        markers = [("czn-runner", runner + "\n")]
+        if created:
+            markers.insert(0, (PREFIX_MARKER, "created by Nadare\n"))
         try:
-            (prefix / PREFIX_MARKER).write_text("created by Nadare\n")
-            (prefix / "czn-runner").write_text(self.runner_name() + "\n")
+            for name, text in markers:
+                fd, tmp = tempfile.mkstemp(dir=prefix, prefix=f".{name}.")
+                try:
+                    with os.fdopen(fd, "w") as handle:
+                        handle.write(text)
+                    os.replace(tmp, prefix / name)
+                except OSError:
+                    with contextlib.suppress(OSError):
+                        os.unlink(tmp)
+                    raise
         except OSError:
             pass
 
@@ -1530,9 +1595,10 @@ class CznBackend(GameBackend):
 
     def _ensure_stub(self) -> Path:
         stub = self._stub()
+        source, digest, _ = self._shipped_stub()
         if stub.is_file():
             return self._refresh_stub(stub)
-        if self._install_prebuilt_stub(stub):
+        if self._install_prebuilt_stub(stub, source, digest):
             self._note_stub(stub)
             return stub
         script = Path(__file__).with_name("build_stub.sh")
@@ -1553,17 +1619,21 @@ class CznBackend(GameBackend):
         sha, shipped = stub_identity(stub)
         if sha is not None:
             kind = "the shipped one" if shipped else "not the shipped one"
-            self.info(f"PCSDK stub: sha256 {sha}… ({kind})")
+            self.info(f"PCSDK stub {_stub_label(stub)}: sha256 {sha}… ({kind})")
 
     def _refresh_stub(self, stub: Path) -> Path:
-        """Keep a profile's stub in step with the shipped one, never losing the old copy.
+        """Keep a profile's stub in step with the selected shipped one, never losing the old copy.
 
-        A copy made by an older Nadare (or swapped in by hand) would otherwise run forever.
+        A copy made by an older Nadare (or swapped in by hand) would otherwise run forever;
+        that includes the other shipped build when the profile switched between them.
         """
-        sha, shipped = stub_identity(stub)
-        if sha is None:
+        source, digest, _ = self._shipped_stub()
+        try:
+            current = hashlib.sha256(stub.read_bytes()).hexdigest()
+        except OSError:
             return stub  # unreadable: let the launch report whatever is wrong with it
-        if shipped:
+        sha = current[:12]
+        if current == digest:
             self._note_stub(stub)
             return stub
         backup = stub.with_name(stub.name + ".old")
@@ -1572,10 +1642,10 @@ class CznBackend(GameBackend):
         except OSError:
             self._note_stub(stub)
             return stub
-        if self._install_prebuilt_stub(stub):
+        if self._install_prebuilt_stub(stub, source, digest):
             self.info(
-                f"PCSDK stub: sha256 {sha}… differed from the shipped one; replaced it "
-                f"(the old copy is kept as {backup.name})"
+                f"PCSDK stub {_stub_label(stub)}: sha256 {sha}… differed from the shipped one; "
+                f"replaced it (the old copy is kept as {backup.name})"
             )
             return stub
         try:
@@ -1589,13 +1659,17 @@ class CznBackend(GameBackend):
         return stub
 
     @staticmethod
-    def _install_prebuilt_stub(dest: Path) -> bool:
+    def _install_prebuilt_stub(
+        dest: Path, source: Path | None = None, digest: str | None = None
+    ) -> bool:
         """Copy the bundled stub to ``dest`` if present and digest-verified."""
+        source = STUB_PREBUILT if source is None else source
+        digest = STUB_PREBUILT_SHA256 if digest is None else digest
         try:
-            data = STUB_PREBUILT.read_bytes()
+            data = source.read_bytes()
         except OSError:
             return False
-        if hashlib.sha256(data).hexdigest() != STUB_PREBUILT_SHA256:
+        if hashlib.sha256(data).hexdigest() != digest:
             return False
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1608,7 +1682,7 @@ class CznBackend(GameBackend):
         return True
 
     def install(self) -> None:
-        if self._game_running():
+        if self._running():
             self._fail("install", 8)
         self.ctx.set("prefix", str(self.prefix()))
         self._ensure_prefix()
@@ -1624,7 +1698,7 @@ class CznBackend(GameBackend):
         self.ctx.emit(Event("done", "Chaos Zero Nightmare is installed"))
 
     def update(self, *, full: bool = False) -> None:
-        if self._game_running():
+        if self._running():
             self._fail("update", 8)
         args = ["update", "--apply", *(["--full"] if full else [])]
         code = self._run_module(UPDATE_MODULE, args)
@@ -1635,7 +1709,7 @@ class CznBackend(GameBackend):
         self.ctx.emit(Event("done", "Game is up to date"))
 
     def repair(self) -> None:
-        if self._game_running():
+        if self._running():
             self._fail("repair", 8)
         self.ctx.emit(Event("step", "Checking every game file"))
         self.update(full=True)
@@ -1650,7 +1724,7 @@ class CznBackend(GameBackend):
 
     def remake_prefix(self) -> None:
         """Move the corrupted prefix aside and rebuild it, keeping the game files."""
-        if self._game_running():
+        if self._running():
             self._fail("remake_prefix", 8)
         # Only this game's folder is restored, so another profile's game in the same prefix
         # would be left in the backup (#919).
@@ -2116,8 +2190,19 @@ class CznBackend(GameBackend):
         return self._stream(cmd, env, cwd=cwd)
 
     def launch(self) -> int:
+        with self._run_lock():
+            return self._launch()
+
+    def _run_lock(self) -> contextlib.AbstractContextManager[None]:
+        """Inside the Flatpak, let other Nadare instances see this launch and ask it to stop."""
+        if not sandbox.in_flatpak():
+            return contextlib.nullcontext()
+        return runlock.guard(self.prefix(), self.ctx.cancel.cancel)
+
+    def _launch(self) -> int:
         if not self.installed():
             raise BackendError("the game is not installed", 1)
+        # The run lock this launch holds itself would look like another instance.
         if self._game_running():
             self._fail("launch", 8)
         if os.environ.get("CZN_SKIP_UPDATE") != "1":
@@ -2162,7 +2247,10 @@ class CznBackend(GameBackend):
                 self._win(self.shield()),
                 self._win_cwd(self.game_dir()),
             ]
-            full, env = self._prefix_command(cmd, {"CZN_STUB_LOG": self._win(log)})
+            full, env = self._prefix_command(cmd)
+            # Set after _prefix_command: its env cleanup drops every CZN_* name, and
+            # without this path the stub never logs, so the game never looks started.
+            env["CZN_STUB_LOG"] = self._win(log)
             full = self._mangohud_wrap(full, env)
             cwd = self.game_dir() if self.game_dir().is_dir() else self.prefix()
             _renderer, note = graphics.effective_renderer(self.ctx.profile)
@@ -2186,7 +2274,8 @@ class CznBackend(GameBackend):
                     beat_until=lambda: self._stub_connected(log),
                 )
         finally:
-            # session.json holds a live game token; it must not outlive the run.
+            # session.json holds a live game token; it must not outlive the run. The Go
+            # stub already read and deleted it at start (#811); this covers the C stub.
             session.unlink(missing_ok=True)
             probe.stop()
             probe.join(timeout=1.0)
@@ -2222,6 +2311,14 @@ class CznBackend(GameBackend):
     def stop(self) -> None:
         pids = self._game_pids()
         if not pids:
+            if self._running_elsewhere():
+                self.info("asking the other Nadare window to stop the game")
+                runlock.request_stop(self.prefix())
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline and runlock.running(self.prefix()):
+                    time.sleep(0.2)
+                if runlock.running(self.prefix()):
+                    self.info("the game did not stop within 20 s")
             return
         for pid in pids:
             try:
@@ -2300,7 +2397,7 @@ class CznBackend(GameBackend):
         return None
 
     def uninstall(self, purge: bool = False) -> None:
-        if self._game_running():
+        if self._running():
             self._fail("uninstall", 8)
         prefix = self.prefix()
         left: list[str] = []
@@ -2312,9 +2409,17 @@ class CznBackend(GameBackend):
             else:
                 self.ctx.emit(Event("step", f"Removing the game prefix {prefix}…"))
                 try:
-                    shutil.rmtree(prefix)
+                    outcome = removal._rmtree_safely(prefix)
                 except OSError as exc:
                     failed.append(f"{prefix}: {exc}")
+                else:
+                    left.extend(
+                        f"{m} is a separate mounted drive, left in place"
+                        for m in outcome.mounts
+                    )
+                    failed.extend(
+                        removal._leftover_warning(p, e) for p, e in outcome.leftovers
+                    )
         if purge:
             data = self._data_dir()
             safe, reason = tree_safety(self.ctx.config.profiles, self.ctx.name, data)
@@ -2323,9 +2428,17 @@ class CznBackend(GameBackend):
             else:
                 self.ctx.emit(Event("step", "Purging profile data (login, session, stub)…"))
                 try:
-                    shutil.rmtree(data)
+                    outcome = removal._rmtree_safely(data)
                 except OSError as exc:
                     failed.append(f"{data}: {exc}")
+                else:
+                    left.extend(
+                        f"{m} is a separate mounted drive, left in place"
+                        for m in outcome.mounts
+                    )
+                    failed.extend(
+                        removal._leftover_warning(p, e) for p, e in outcome.leftovers
+                    )
         for item in left:
             self.ctx.emit(Event("step", f"Left in place: {item}"))
         if failed:
@@ -2347,7 +2460,11 @@ class CznBackend(GameBackend):
             resolved = prefix.resolve()
         except OSError:
             return "cannot be resolved"
-        if resolved == own or own in resolved.parents:
+        if resolved == own:
+            # The game's own Nadare folder also holds its login, session and stub: a plain
+            # uninstall must not take them with the prefix (final round).
+            return "is this game's own Nadare folder, which also holds its login"
+        if own in resolved.parents:
             return ""
         if (prefix / PREFIX_MARKER).is_file():
             return ""

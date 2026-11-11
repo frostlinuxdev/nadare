@@ -62,15 +62,27 @@ def request_steam_install(
     key = _numeric_id(app_id)
     argv = [*steamtools.steam_command(binary), f"steam://install/{key}"]
     code = run(argv)
+    if code == _NOT_FOUND:
+        return ActionResult(False, _NO_STEAM_COMMAND)
     if code != 0:
         return ActionResult(False, f"Steam could not start the install (exit code {code}).")
     return ActionResult(True, f"Steam is installing app {key}.")
+
+
+#: The shell's "command not found", which ``steamglue`` also returns when the client is missing.
+_NOT_FOUND = 127
+_NO_STEAM_COMMAND = (
+    "Nadare could not find Steam's start command. Start Steam yourself and try again, or set "
+    "the Steam command in this game's Settings."
+)
 
 
 def unlock_h264(*, run: Callable[[list[str]], int], binary: str | None = None) -> ActionResult:
     """Run the client's own global H.264 unlock request once."""
     argv = steamtools.unlockh264_command(binary)
     code = run(argv)
+    if code == _NOT_FOUND:
+        return ActionResult(False, _NO_STEAM_COMMAND)
     if code != 0:
         return ActionResult(False, f"Steam's H.264 request failed (exit code {code}).")
     return ActionResult(True, "Steam's H.264 video support was requested.")
@@ -232,7 +244,7 @@ def set_wayland(
             if edit.changed
             else f"Native Wayland was already on for app {app_id}.{note}"
         ),
-        undo_of=lambda edit: steamwayland.LaunchUndo(edit.previous),
+        undo_of=lambda edit: steamwayland.LaunchUndo(edit.previous, edit.value),
     )
 
 
@@ -247,7 +259,27 @@ def restore_wayland(
     binary: str | None = None,
     game_running: Callable[[], bool] | None = None,
 ) -> ActionResult:
-    """Put a game's earlier launch options back exactly."""
+    """Put a game's earlier launch options back exactly, if Steam still has what Nadare wrote.
+
+    When the player changed them in Steam since, nothing is written: an undo must not delete
+    their newer options. An undo saved before Nadare recorded what it wrote restores as before.
+    """
+    known = previous.written is not steamwayland.UNKNOWN
+
+    def wanted(current: str | None) -> str | None:
+        if known and current != previous.written:
+            return current  # changed in Steam since: leave it
+        return previous.previous
+
+    def describe(edit: Any, note: str) -> str:
+        if known and edit.previous != previous.written:
+            return (
+                f"The launch options of app {app_id} were changed in Steam after Nadare set "
+                "them, so nothing was undone. Edit them in Steam: the game's Properties → "
+                f"Launch options.{note}"
+            )
+        return f"The earlier launch options are back for app {app_id}.{note}"
+
     return _change_runner(
         app_id,
         config_path=localconfig_path,
@@ -257,9 +289,9 @@ def restore_wayland(
         binary=binary,
         game_running=game_running,
         change=lambda: steamtools.apply_launch_options(
-            localconfig_path, app_id, previous.previous, steam_running_fn=steam_running
+            localconfig_path, app_id, wanted, steam_running_fn=steam_running
         ),
-        describe=lambda edit, note: f"The earlier launch options are back for app {app_id}.{note}",
+        describe=describe,
         undo_of=lambda edit: None,
     )
 

@@ -406,3 +406,42 @@ def test_the_restart_gives_up_waiting_for_an_old_process_that_never_exits(tmp_pa
     argv, _env = selfupdate.restart_command(tmp_path / NAME, {}, pid=123)
     script = argv[2]
     assert "kill -0" in script and "-lt" in script  # bounded: it must not wait forever
+
+
+# ---- #1209 P0-1: the release signature ---------------------------------------------------------
+def test_the_signature_is_fetched_next_to_the_appimage_and_checked(tmp_path, monkeypatch):
+    from nadare.core import releasesig
+
+    urls = selfupdate.AssetUrls(
+        "https://github.com/frostlinuxdev/nadare/releases/download/v0.1.0b24/N.AppImage",
+        "https://github.com/frostlinuxdev/nadare/releases/download/v0.1.0b24/SHA256SUMS",
+        "N.AppImage",
+    )
+    assert urls.signature.endswith("/N.AppImage.asc")
+    image = tmp_path / "N.AppImage"
+    image.write_bytes(b"new")
+    asked: list[str] = []
+    monkeypatch.setattr(selfupdate, "_fetch_sums", lambda url: asked.append(url) or "SIG")
+    checked: list[tuple] = []
+    monkeypatch.setattr(releasesig, "verify_detached",
+                        lambda path, text, **kw: checked.append((path, text)))
+    selfupdate.verify_signature(urls, image)
+    assert asked == [urls.signature] and checked == [(image, "SIG")]
+
+    def bad(path, text, **kw):
+        raise releasesig.SignatureError("bad signature")
+
+    monkeypatch.setattr(releasesig, "verify_detached", bad)
+    with pytest.raises(selfupdate.SelfUpdateError, match="release key"):
+        selfupdate.verify_signature(urls, image)
+
+
+def test_a_release_without_a_signature_is_not_installed(tmp_path, monkeypatch):
+    urls = selfupdate.AssetUrls("https://github.com/o/r/releases/download/v1/N", "x", "N")
+
+    def missing(url):
+        raise selfupdate.SelfUpdateError("HTTP 404")
+
+    monkeypatch.setattr(selfupdate, "_fetch_sums", missing)
+    with pytest.raises(selfupdate.SelfUpdateError, match="release page"):
+        selfupdate.verify_signature(urls, tmp_path / "N")

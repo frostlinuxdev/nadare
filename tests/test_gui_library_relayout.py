@@ -20,6 +20,9 @@ from nadare.core.config import Config
 from nadare.gui.main_window import MainWindow
 from nadare.gui.theme import apply_theme
 
+# This file restyles the whole app: end earlier tests' windows first (#1024).
+pytestmark = pytest.mark.usefixtures("restyle_safe")
+
 
 @pytest.fixture(scope="module")
 def qapp():

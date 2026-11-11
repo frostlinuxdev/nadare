@@ -11,9 +11,27 @@ SHA-256 against the digest published for that artifact on the releases page:
 
 ```sh
 sha256sum Nadare-*-x86_64.AppImage
-chmod +x Nadare-*-x86_64.AppImage
-./Nadare-*-x86_64.AppImage
+# optional, from 0.1.0b22 on: check the release signature (key: packaging/signing/)
+gpg --verify Nadare-*-x86_64.AppImage.asc Nadare-*-x86_64.AppImage
+chmod +x Nadare-*-x86_64.AppImage && ./Nadare-*-x86_64.AppImage
 ```
+
+Double-clicking the download does nothing at all, with no error: browsers write the file
+without the executable bit, and `application/vnd.appimage` is a sub-type of
+`application/vnd.squashfs`, so the desktop hands it to GNOME Disks' image mounter, which
+ignores it. Run the two commands above instead. If you would rather not use a terminal, on
+Cinnamon/Nemo right-click the file → **Properties** → **Permissions** → tick **Allow
+executing file as program**, then double-click it. On KDE/Dolphin the double-click at
+least asks *Would you like to launch this file?*, but on Kubuntu 26.10 **Launch** left the
+file non-executable and started nothing, so use the commands above there too.
+
+No terminal? Install [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever) from your
+Software app (Flathub). It registers itself for AppImages, so a double-click then opens the
+file in Gear Lever, which can add Nadare to your app menu (checked on Ubuntu 26.04 with
+Gear Lever 4.6.2: the default handler changes from the disk-image mounter to Gear Lever).
+
+Double-clicking never installs Nadare — there is no installer step, the Store is inside
+the app.
 
 The beta is published as a single x86_64 AppImage (there is no Flatpak or
 `.deb` release yet). Its bundled runtime needs no `libfuse2` package: it uses
@@ -143,8 +161,9 @@ published a new build: wait about 15 minutes and click install again.
 
 ## 4. When something breaks
 
-Open an issue on the project's GitHub page (one problem per
-issue; a short title naming the game and what failed). Run
+Open an issue at
+[github.com/frostlinuxdev/nadare/issues](https://github.com/frostlinuxdev/nadare/issues)
+(one problem per issue; a short title naming the game and what failed). Run
 `./Nadare-*.AppImage doctor` and attach its output, plus:
 
 - your distro and version, GPU and driver version, desktop (KDE/GNOME, Wayland/X11)
@@ -167,7 +186,7 @@ Tick off what you can; a one-line note per item is plenty:
       Starting Nadare again meanwhile should bring the window back
 - [ ] Start an install, **Cancel** it part way, then install again: it should
       resume (not start from zero) and finish
-- [ ] **Settings → Remove from library…**: only the choices you tick are deleted
+- [ ] **Settings → Uninstall or remove…**: only the choices you tick are deleted
       (try it on a game you don't mind losing)
 - [ ] Second start while it is open: the existing window comes to the front
 - [ ] Leave it a day, launch again: update or "up to date" works
@@ -185,25 +204,20 @@ Known limits:
   is much worse than that.
 - The first hours are the worst: the GPU driver's shader cache is cold, so new effects can
   hitch once and then not again. Judge smoothness after a few sessions, not the first.
-- Chaos Zero Nightmare does not start inside a virtual machine that shows itself as one:
-  STOVE's `ssr-stove-shield.exe` waits forever (no CPU, no game window, no error). If you
-  test in a VM, hide the hypervisor (for QEMU: `-cpu host,-hypervisor,kvm=off` and a
-  non-QEMU `-smbios type=1,manufacturer=...`); the game then reaches its login screen (tested
-  with a virtio-gpu Venus GPU).
+- Chaos Zero Nightmare does not start inside a virtual machine that identifies itself as one:
+  its start-up check waits forever (no CPU, no game window, no error). Test on real hardware.
 - MangoHud can stop the game from starting under `umu-run`; leave it off.
 - Chaos Zero Nightmare is tested on **native Wayland**. With *Display backend* set to
   X11 (XWayland) its window showed only a flat colour on NVIDIA + KDE Plasma 6.8 (the
   game runs and connects, it just does not draw). Leave the setting on Auto, and
   tell us if X11 works or fails on yours.
-- Chaos Zero Nightmare may close itself about two minutes into a session with the in-game notice
-  `uncheater@0xe0190266` if you play over a VPN or proxy (STOVE's anti-cheat). A tester saw exactly
-  that with Mullvad over Shadowsocks until the VPN was turned off, so turn it off before you launch
-  the game.
-- FGO (Fate/Grand Order) **does not install in 0.1.0b4**: its lepton-fgo release
-  is not in the public index yet (planned for a later beta). It is experimental, needs
-  podman and a binderfs kernel, and on SELinux
-  distros (Fedora) it installs a system policy module that stays after you delete
-  Nadare. Remove it with `sudo semodule -r lepton_binder`
+- Chaos Zero Nightmare may close itself about two minutes into a session if you play over a VPN
+  or proxy. Turn the VPN off before you launch the game.
+- FGO (Fate/Grand Order) is **not** in the beta AppImage. Source checkouts, the
+  AUR package and packages built with FGO include it (the add-game wizard lists
+  it when the backend is present). It is experimental, needs podman, zstd and a binderfs
+  kernel, and on SELinux distros (Fedora) it installs a system policy module that
+  stays after you delete Nadare. Remove it with `sudo semodule -r lepton_binder`
   (or `setup-host-selinux.sh --remove`).
 - The window disappearing while a game runs is intended (see the checklist above):
   Nadare keeps running in the background until the game exits.

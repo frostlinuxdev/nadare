@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _timing import scaled
 
 from nadare.backends import script as script_mod
 from nadare.backends import wine as wine_mod
@@ -124,7 +125,7 @@ def test_stop_from_another_command_also_stops_what_the_script_started(tmp_path):
 
         backend.stop()  # as a separate `nadare stop` would: nothing here owns the process
 
-        for _ in range(100):
+        for _ in range(int(scaled(100))):
             if not _alive(child):
                 break
             time.sleep(0.05)

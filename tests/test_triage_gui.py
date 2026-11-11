@@ -187,11 +187,33 @@ def test_remember_me_enabled_while_busy_is_applied_when_idle(tmp_path, qapp, mon
 
 
 # ---- #100 -----------------------------------------------------------------
-def test_unusable_runtime_dir_falls_back_to_a_bare_name(monkeypatch, tmp_path):
+def test_unusable_runtime_dir_falls_back_to_nadares_private_state_folder(monkeypatch, tmp_path):
+    """#811: a bare name lands in the shared temp folder, where another user can claim it."""
+    import shutil
+    import stat
+    import tempfile
+
+    from nadare.core import paths
     from nadare.gui import single_instance
 
-    missing = tmp_path / "does-not-exist"
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(missing))
+    short = tempfile.mkdtemp(prefix="ns")  # pytest's own folder is too deep for a socket path
+    try:
+        monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "does-not-exist"))
+        monkeypatch.setenv("XDG_STATE_HOME", short)
+        uid = os.getuid() if hasattr(os, "getuid") else 0
+        name = single_instance.server_name()
+        folder = paths.state_dir() / "run"
+        assert name == str(folder / f"nadare-{uid}.sock")
+        assert stat.S_IMODE(folder.stat().st_mode) == 0o700
+    finally:
+        shutil.rmtree(short, ignore_errors=True)
+
+
+def test_a_state_folder_too_deep_for_a_socket_keeps_the_bare_name(monkeypatch, tmp_path):
+    from nadare.gui import single_instance
+
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "does-not-exist"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / ("d" * 120)))
     uid = os.getuid() if hasattr(os, "getuid") else 0
     assert single_instance.server_name() == f"nadare-{uid}"
 

@@ -31,7 +31,7 @@ def qapp():
     yield app
 
 
-def test_second_profile_gets_its_own_folder_and_prefix(tmp_path, qapp):
+def test_a_second_copy_of_a_catalog_game_is_refused(tmp_path, qapp):
     config = Config.load(tmp_path / "config.json")
     data_root = tmp_path / "data"
     first = AddGameDialog(config, data_root=data_root)
@@ -47,19 +47,16 @@ def test_second_profile_gets_its_own_folder_and_prefix(tmp_path, qapp):
     second = AddGameDialog(config, data_root=data_root)
     try:
         second.set_backend("arknights-yostar")
-        second_folder = second.folder.text()
-        second_prefix = second.prefix.text()
-        assert second_folder != first_folder
-        assert second_prefix != first_prefix
-        assert second.create_profile() == "arknights-2"
+        assert second.create_profile() is None
+        assert "already in your library" in second.error_label.text()
     finally:
         second.deleteLater()
         qapp.processEvents()
 
+    assert set(config.profiles) == {"arknights"}
     one = config.profile("arknights")
-    two = config.profile("arknights-2")
-    assert one["install_dir"] != two["install_dir"]
-    assert one["prefix"] != two["prefix"]
+    assert one["install_dir"] == first_folder
+    assert one["prefix"] == first_prefix
 
 
 def test_import_rejects_a_nonexistent_folder(tmp_path, qapp):

@@ -115,16 +115,42 @@ def _gfl2_card(page: StorePage):
     return next(c for c in page._cards.values() if c.title_label.text() == "Girls' Frontline 2")
 
 
-def test_the_version_count_ignores_the_tier_filter(qapp, dispose):
+def test_the_version_count_ignores_the_filters(qapp, dispose):
     page = StorePage()
     dispose(page)
     page.resize(1400, 900)
     page.show()
     qapp.processEvents()
-    everything = _gfl2_card(page).delivery_label.text()
-    assert "3 versions" in everything
-    # Verified keeps two of the three GFL2 builds (Darkwinter and Haoplay direct): still one
-    # card for the game, and it still counts the launcher build the filter hides.
-    page.tier_filter.setCurrentText("Verified")
+    assert "2 versions" in _gfl2_card(page).delivery_label.text()
+    # (Both GFL2 builds are Verified since the launcher kinds were retired, so a tier filter
+    # cannot hide one of them any more; the search below is the case that can.)
+    # A search that keeps one build still shows the whole game, not that build alone.
+    page.tier_filter.setCurrentText("All tiers")
+    page.search.setText("haoplay")
     qapp.processEvents()
-    assert "3 versions" in _gfl2_card(page).delivery_label.text()
+    assert "2 versions" in _gfl2_card(page).delivery_label.text()
+
+
+# ---- the unofficial notice is shown whole, not clipped under its heading -------------------
+def test_quick_install_shows_every_wrapped_line_of_the_notice(qapp, dispose):
+    from PyQt6.QtWidgets import QLabel
+
+    from nadare.core.backends import UNOFFICIAL_NOTICE
+
+    dialog = QuickInstallDialog(
+        "Genshin Impact",
+        notice=UNOFFICIAL_NOTICE,
+        describe=lambda chosen: (
+            "/home/me/.local/share/nadare/profiles/genshin-impact/install",
+            "306 GiB free",
+            "Installing Genshin Impact downloads about 94 GiB and needs about as much "
+            "free space (306 GiB free).",
+        ),
+    )
+    dispose(dialog)
+    dialog.show()
+    qapp.processEvents()
+    for label in dialog.findChildren(QLabel):
+        if label.isVisible() and label.wordWrap():
+            need = label.heightForWidth(label.width())
+            assert label.height() >= need, (label.text()[:40], label.height(), need)

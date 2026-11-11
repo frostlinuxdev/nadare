@@ -9,10 +9,10 @@
 #
 #   NADARE_INDEX_DIR=~/nadare-index scripts/refresh_index.sh
 #
-# Yostar manifests (Arknights/Stella Sora) need the per-game signing salts
-# (SALT_<TAG>/VERSION_<TAG>, see ci/yostar-manifests/README.md). Put them in
-# NADARE_YOSTAR_ENV (default ~/nadare-index-refresh/yostar.env, mode 600); when
-# that file is absent the Yostar step is skipped, as before.
+# Yostar manifests (Arknights/Stella Sora) need per-game signing material; the
+# publishing job holds it (see ci/yostar-manifests/README.md). Point
+# NADARE_YOSTAR_ENV at an environment file outside this checkout if you run that
+# step locally; when it is absent the Yostar step is skipped, as before.
 #
 # The runtime canary (scripts/check_runtime_canary.py) runs first and turns the
 # heartbeat "down" when a new runner needs a Steam Runtime the pinned umu lacks;
@@ -30,10 +30,24 @@
 #
 # Set NADARE_INDEX_CATALOG=1 to also publish catalog/ (latest game versions and cover-art pointers).
 #
-# Set NADARE_HEARTBEAT_URL (e.g. an Uptime Kuma push monitor URL) to be pinged
+# Set NADARE_HEARTBEAT_URL (a push-monitor URL) to be pinged
 # after every successful run, including "nothing to publish". A monitor that
 # expects a ping every ~15 minutes then alerts when the whole pipeline stops.
 set -uo pipefail
+
+# A run that fails says so (#1209 P0-4): the three nodes share one heartbeat, so a node that
+# only stayed silent was never noticed while another node kept pinging (sw1, 24 days in 2026).
+report_failure() {
+    local rc=$?
+    (( rc != 0 )) || return 0
+    [[ -n "${NADARE_HEARTBEAT_URL:-}" ]] || return 0
+    curl -fsS -m 10 --retry 2 -o /dev/null -G \
+        --data-urlencode "status=down" \
+        --data-urlencode "msg=$(hostname -s): refresh_index failed (exit $rc), see journalctl -u nadare-index-refresh" \
+        "${NADARE_HEARTBEAT_URL%%\?*}" >/dev/null 2>&1 \
+        || echo "refresh_index: heartbeat ping failed" >&2
+}
+trap report_failure EXIT
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 index="${NADARE_INDEX_DIR:-$root/../nadare-index}"
@@ -42,6 +56,7 @@ index="${NADARE_INDEX_DIR:-$root/../nadare-index}"
 # Set by the runtime canary below when a runner needs a Steam Runtime the pinned
 # umu does not know; the heartbeat then reports "down" with that message.
 canary_down=
+
 
 heartbeat() {
     [[ -n "${NADARE_HEARTBEAT_URL:-}" ]] || return 0

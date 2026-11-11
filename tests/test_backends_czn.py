@@ -2127,6 +2127,28 @@ class TestEphemeralSession:
         # Restore minted the session once right before launch.
         assert len(calls) == 1
 
+    def test_the_stub_is_told_where_to_log_despite_the_env_cleanup(
+        self, make_backend_context, tmp_path, fake_keyring, monkeypatch
+    ):
+        """sanitize_game_env drops every CZN_* name, which took CZN_STUB_LOG with it: the
+        stub never logged, so the launch never saw the game connect and kept printing
+        "Starting the game… (the first launch through umu downloads…)" while it ran."""
+        backend = _cred_backend(make_backend_context, tmp_path, remember=True)
+        backend._save_credential(SENTINEL, "42")
+        self._launchable(backend, tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            backend,
+            "_run_module",
+            _auth_runner([], {"refresh_token": "rotated", "member_no": "42"}),
+        )
+        seen: dict[str, str] = {}
+        monkeypatch.setattr(backend, "_stream", lambda cmd, env, **kw: seen.update(env) or 0)
+
+        assert backend.launch() == 0
+        assert seen["CZN_STUB_LOG"] == backend._win(backend._stub_log())
+        # The cleanup itself still holds for everything else.
+        assert not [k for k in seen if k.startswith("CZN_") and k != "CZN_STUB_LOG"]
+
     def test_launch_deletes_session_even_when_launch_fails(
         self, make_backend_context, tmp_path, fake_keyring, monkeypatch
     ):

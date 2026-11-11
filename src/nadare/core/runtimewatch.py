@@ -10,9 +10,20 @@ keeps those two flags and decorates the message on demand.
 
 from __future__ import annotations
 
+import re
+
 from . import umu, userns
 
-__all__ = ["RuntimeWatch"]
+__all__ = ["NO_OPENGL_HINT", "RuntimeWatch"]
+
+#: The game's own GLFW message when the Windows side gets no OpenGL from the host (#132).
+_NO_OPENGL = re.compile(r"WGL: The driver does not appear to support OpenGL", re.IGNORECASE)
+
+NO_OPENGL_HINT = (
+    "The game could not get OpenGL from your system. Run `nadare doctor`: it names missing GL "
+    "libraries (usually your distribution's libglvnd / mesa packages). If umu-run is not "
+    "installed, installing umu-launcher fixes this on most systems."
+)
 
 
 class RuntimeWatch:
@@ -21,11 +32,13 @@ class RuntimeWatch:
     userns_blocked: bool = False
     umu_setup_failed: bool = False
     umu_runtime_mismatch: bool = False
+    no_opengl: bool = False
 
     def __init__(self) -> None:
         self.userns_blocked = False
         self.umu_setup_failed = False
         self.umu_runtime_mismatch = False
+        self.no_opengl = False
 
     def feed(self, line: str) -> None:
         """Record any failure that ``line`` reveals. Never raises."""
@@ -36,6 +49,8 @@ class RuntimeWatch:
                 self.umu_setup_failed = True
             if umu.is_runtime_mismatch_line(line):
                 self.umu_runtime_mismatch = True
+            if _NO_OPENGL.search(line):
+                self.no_opengl = True
         except Exception:  # pragma: no cover - defensive: output must never break a run
             pass
 
@@ -46,4 +61,6 @@ class RuntimeWatch:
             out = out + "\n" + umu.SETUP_HINT
         if self.umu_runtime_mismatch:
             out = out + "\n" + umu.RUNTIME_MISMATCH_HINT
+        if self.no_opengl:
+            out = out + "\n" + NO_OPENGL_HINT
         return out

@@ -14,6 +14,7 @@ try:  # pragma: no cover - exercised only when PyQt6 is missing
 except Exception:  # noqa: BLE001
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
+from nadare.core.events import Event
 from nadare.gui import game_view as game_view_mod
 from nadare.gui.game_view import GameView
 
@@ -143,3 +144,32 @@ def test_a_crash_signal_right_after_start_is_still_a_failure(view, monkeypatch, 
 def test_stop_signals_are_a_normal_close(view, monkeypatch, warnings, code):
     _finish_after(view, monkeypatch, "launch", code, 2)
     assert warnings == []
+
+
+def test_the_end_of_a_game_is_said_once_when_the_backend_already_said_it(
+    view, monkeypatch, warnings
+):
+    """CZN reports "Game exited normally" itself; the page must not add a second line."""
+    now = [1_000_000.0]
+    monkeypatch.setattr(game_view_mod.time, "time", lambda: now[0])
+    view.set_busy("launch")
+    view.append_event(Event("done", "Game exited normally"))
+    now[0] += 600
+    view.finish("launch", 0)
+    assert view.console.toPlainText().lower().count("exited normally") == 1
+
+
+def test_a_backend_that_says_nothing_still_gets_the_line(view, monkeypatch, warnings):
+    _finish_after(view, monkeypatch, "launch", 0, 600)
+    assert view.console.toPlainText().count("game exited normally") == 1
+
+
+def test_a_setup_line_during_the_launch_does_not_hide_the_exit_line(view, monkeypatch, warnings):
+    """A first launch can report "umu is ready" before the game runs."""
+    now = [1_000_000.0]
+    monkeypatch.setattr(game_view_mod.time, "time", lambda: now[0])
+    view.set_busy("launch")
+    view.append_event(Event("done", "umu is ready"))
+    now[0] += 600
+    view.finish("launch", 0)
+    assert "game exited normally" in view.console.toPlainText()

@@ -12,6 +12,7 @@ symlink pointing elsewhere).
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 import shutil
@@ -20,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
 
-from . import backends, paths, process, runlog, shortcuts
+from . import backends, libraries, paths, process, runlock, runlog, shortcuts
 
 _TREE_KEYS = ("install_dir", "prefix", "wineprefix")
 _BACKUP_KEY = "prefix_backup"
@@ -41,6 +42,9 @@ class RemovalResult:
     trees_removed: list[Path] = field(default_factory=list)
     #: True when a requested deletion was refused/failed and the profile was kept.
     profile_kept: bool = False
+    #: True when Remove stopped before deleting or forgetting anything (the game runs, another
+    #: Nadare command holds it, the settings cannot be saved). Not set for a partial deletion.
+    refused: bool = False
 
 
 @dataclass
@@ -303,6 +307,16 @@ def _not_owned_reason(profile, key: str, path: Path, name: str) -> str:
         resolved = path.resolve()
     except OSError:
         return _NOT_CREATED
+    if key in ("prefix", "wineprefix") and not _setting(profile, "prefix") and not _setting(
+        profile, "wineprefix"
+    ):
+        # The backend's default prefix lives in this profile's own folder: Nadare made it.
+        default = paths.profiles_dir() / name / "prefix"
+        try:
+            if not default.is_symlink() and resolved == default.resolve():
+                return ""
+        except OSError:
+            pass
     owned = profile.get("owned_trees")
     if isinstance(owned, list) and key in owned:
         recorded = profile.get("owned_paths")
@@ -374,6 +388,14 @@ def _backup_reason(profile, path: Path) -> str:
     return ""
 
 
+def default_prefix(name: str) -> Path | None:
+    """The prefix a Wine-family profile that sets none uses: ``<profiles_dir>/<name>/prefix``."""
+    path = paths.profiles_dir() / name / "prefix"
+    if path.is_dir() and not path.is_symlink():
+        return path
+    return None
+
+
 def removable_trees(config, name: str) -> list[RemovableTree]:
     """List the install/prefix trees configured for ``name`` and whether each is safe to delete."""
     profile = config.profiles.get(name, {})
@@ -381,12 +403,19 @@ def removable_trees(config, name: str) -> list[RemovableTree]:
     for key in _TREE_KEYS:
         value = _setting(profile, key)
         if not value or not isinstance(value, str):
-            continue
-        expanded = Path(value).expanduser()
-        if not expanded.is_dir():
-            continue
+            if key != "prefix":
+                continue
+            expanded = default_prefix(name)
+            if expanded is None:
+                continue
+        else:
+            expanded = Path(value).expanduser()
+            if not expanded.is_dir():
+                continue
         safe, reason = tree_safety(config.profiles, name, expanded)
         if safe:
+            # The default prefix is inside this profile's own folder, so ``_not_owned_reason``
+            # already counts it as Nadare's.
             reason = _not_owned_reason(profile, key, expanded, name)
             if reason:
                 safe = False
@@ -425,6 +454,21 @@ def removable_trees(config, name: str) -> list[RemovableTree]:
     return found
 
 
+def _drop_lone_manifest(folder: Path) -> None:
+    """Delete the library manifest when it is all that is left in the game's folder.
+
+    With the game's files gone the manifest describes nothing. When files were kept it stays,
+    so adding the library back finds the game again; a file the user put there keeps it too.
+    """
+    manifest = folder / libraries.MANIFEST_NAME
+    try:
+        entries = list(folder.iterdir())
+        if entries == [manifest] and manifest.is_file() and not manifest.is_symlink():
+            manifest.unlink()
+    except OSError:
+        pass
+
+
 def _wrapper_folders(profile: dict) -> list[str]:
     """The per-game folders Nadare made around the game: ``owned_dirs``, else the Add Game shape.
 
@@ -433,7 +477,29 @@ def _wrapper_folders(profile: dict) -> list[str]:
     """
     dirs = profile.get("owned_dirs")
     if isinstance(dirs, list) and dirs:
-        return [str(d) for d in dirs]
+        # Only the game's own wrapper counts (#622): a folder Nadare recorded for this game
+        # (install folder, prefix, their recorded paths, prefix backups) or the folder directly
+        # around one, as Add Game lays it out. A hand-edited or damaged entry pointing anywhere
+        # else is ignored, so removal never rmdirs an unrelated empty folder.
+        recorded: list[object] = [profile.get("install_dir"), profile.get("prefix")]
+        paths_map = profile.get("owned_paths")
+        if isinstance(paths_map, dict):
+            recorded += list(paths_map.values())
+        backups = profile.get("prefix_backups")
+        if isinstance(backups, list):
+            recorded += backups
+        allowed: set[Path] = set()
+        for value in recorded:
+            if value:
+                own = Path(str(value)).expanduser()
+                if own.is_absolute():
+                    allowed.update((own, own.parent))
+        kept = []
+        for d in dirs:
+            entry = Path(str(d)).expanduser()
+            if entry.is_absolute() and entry in allowed:
+                kept.append(str(d))
+        return kept
     owned = profile.get("owned_trees")
     prefix, install = (
         Path(str(profile.get(k) or "")).expanduser() for k in ("prefix", "install_dir")
@@ -483,14 +549,14 @@ def remove_game(
         try:
             game_lock.acquire()
         except process.ProfileLockError:
-            result = RemovalResult(profile=name, profile_kept=True)
+            result = RemovalResult(profile=name, profile_kept=True, refused=True)
             result.warnings.append(
                 "this game's profile is in use by another Nadare command; nothing was deleted"
             )
             return result
         problem = _running_problem(config, name)
         if problem is not None:
-            result = RemovalResult(profile=name, profile_kept=True)
+            result = RemovalResult(profile=name, profile_kept=True, refused=True)
             result.warnings.append(problem)
             return result
         return _remove_locked(
@@ -515,6 +581,11 @@ def _running_problem(config, name: str) -> str | None:
     The same status probe Move uses. A probe that cannot answer refuses too:
     deleting a prefix under a possibly running game is not recoverable.
     """
+    profile = config.profiles.get(name) or {}
+    if backends.retired_replacement(profile.get("backend")):
+        # A retired kind has no backend to ask (``create`` raises), but a b22 user may still
+        # have its game open: look for anything running in its prefix instead.
+        return _retired_running_problem(profile, name)
     try:
         backend = backends.create(name, config)
     except Exception:  # noqa: BLE001 - no loadable backend: nothing of Nadare's can be running
@@ -525,6 +596,25 @@ def _running_problem(config, name: str) -> str | None:
         return f"could not check whether the game is running ({exc}); nothing was deleted"
     if state == "running":
         return "the game is running (stop it first); nothing was deleted"
+    return None
+
+
+def _retired_running_problem(profile: dict, name: str) -> str | None:
+    """Whether anything still runs in a retired-kind game's prefix (its Wine processes or a
+    run lock held by another Nadare); a scan that cannot answer refuses too."""
+    raw = str(_setting(profile, "prefix") or _setting(profile, "wineprefix") or "").strip()
+    prefix = Path(raw).expanduser() if raw else default_prefix(name)
+    if prefix is None:
+        return None
+    try:
+        busy = bool(process.prefix_pids(prefix))
+        busy = busy or runlock.running(prefix)
+    except Exception as exc:  # noqa: BLE001 - unknown means do not delete
+        return f"could not check whether the game is running ({exc}); nothing was deleted"
+    if busy:
+        return (
+            "the game or its launcher is still running (close it first); nothing was deleted"
+        )
     return None
 
 
@@ -541,6 +631,9 @@ def _remove_locked(
     drop_profile: bool,
 ) -> RemovalResult:
     result = RemovalResult(profile=name)
+    # The game's wrapper folders, worked out before anything is deleted: the steps below drop
+    # recorded backups (and maybe the profile), which would hide what the wrapper held.
+    wrappers = _wrapper_folders(copy.deepcopy(config.profiles.get(name, {})))
 
     # 1. Check every requested tree first. A missing or unsafe one is skipped
     # with a warning (and the profile is kept), but it must not cancel the safe
@@ -586,6 +679,7 @@ def _remove_locked(
         except OSError as exc:
             result.warnings.append(f"could not save config: {exc}")
             result.profile_kept = True
+            result.refused = True
             return result
 
     # 3. The game could have started since the probe in ``remove_game``; a launch
@@ -595,18 +689,40 @@ def _remove_locked(
     if problem is not None:
         result.warnings.append(problem)
         result.profile_kept = True
+        result.refused = True
         return result
 
     # 4. Opt-in deletion of the configured install dir / prefix trees. These go
     # first: only when every requested tree was handled without a skip or a
     # failure may the shortcuts, login and data folder follow.
     done: list[Path] = []
+    touched = False  # any deletion started (a partly deleted tree is not "nothing changed")
+    # Trees of this profile the user did not tick: never delete one nested inside a ticked
+    # one. Only those inside each tree are passed on, so an unrelated unticked tree does
+    # not stop the ticked tree's own (now empty) root from going.
+    all_trees = removable_trees(config, name) if requested else []
+    chosen_keys = set(requested)
+    if chosen_keys & {"prefix", "wineprefix"}:
+        chosen_keys |= {"prefix", "wineprefix"}  # two names for the same tree
+    unticked = [t.path for t in all_trees if t.key not in chosen_keys]
     # Outermost first; a tree already gone with its parent is not an error.
     for tree in sorted(trees, key=lambda t: len(t.path.parts)):
         if any(d == tree.path or d in tree.path.parents for d in done):
             continue
         try:
-            outcome = _rmtree_safely(tree.path)
+            tree_resolved = tree.path.resolve()
+        except OSError:
+            tree_resolved = tree.path
+        inner_keep: list[Path] = []
+        for path in unticked:
+            try:
+                if path.resolve().is_relative_to(tree_resolved):
+                    inner_keep.append(path)
+            except OSError:
+                continue
+        touched = True
+        try:
+            outcome = _rmtree_safely(tree.path, keep=inner_keep)
             for mount in outcome.mounts:
                 result.warnings.append(f"{mount} is a separate mounted drive, left alone")
             if outcome.mounts:
@@ -614,6 +730,12 @@ def _remove_locked(
             for path, exc in outcome.leftovers:
                 result.warnings.append(_leftover_warning(path, exc))
                 keep_profile = True
+            for kept in inner_keep:
+                if kept.exists() or kept.is_symlink():
+                    result.warnings.append(
+                        f"kept {kept} because it was not selected for deletion"
+                    )
+                    keep_profile = True
             if not tree.path.exists():
                 result.trees_removed.append(tree.path)
                 done.append(tree.path)
@@ -669,6 +791,15 @@ def _remove_locked(
                 result.login_forgotten = True
             except Exception as exc:  # noqa: BLE001 - best effort, never fatal
                 result.warnings.append(f"could not forget saved login: {exc}")
+        # A backend that keeps its own copy of a sign-in in the profile's data folder (NIKKE)
+        # drops it here, even when the rest of that folder is kept.
+        forget_files = getattr(cls, "forget_session_files", None) if cls is not None else None
+        if forget_files is not None:
+            try:
+                if forget_files(name):
+                    result.login_forgotten = True
+            except OSError as exc:
+                result.warnings.append(f"could not forget saved login: {exc}")
 
         # 5b. Profile data folder, strictly inside profiles_dir().
         if delete_data:
@@ -720,30 +851,38 @@ def _remove_locked(
     # the logs folder does. A kept profile keeps its logs too: they are the evidence of
     # whatever was left behind (#972). Mounted drives inside are never entered.
     if delete_data and not keep_profile:
-        log_folder = paths.logs_dir() / runlog.game_id(name)
-        if log_folder.is_symlink():
-            result.warnings.append(f"refusing to delete symlink: {log_folder}")
-        elif log_folder.is_dir():
-            try:
-                outcome = _rmtree_safely(log_folder)
-                for mount in outcome.mounts:
-                    result.warnings.append(f"{mount} is a separate mounted drive, left alone")
-                for path, exc in outcome.leftovers:
-                    result.warnings.append(_leftover_warning(path, exc))
-                if not log_folder.exists():
-                    result.logs_removed = log_folder
-            except OSError as exc:
-                result.warnings.append(f"could not remove the logs: {exc}")
+        log_folders = [paths.logs_dir() / runlog.game_id(name)]
+        legacy = paths.logs_dir() / name
+        if legacy != log_folders[0] and legacy.exists():
+            # A profile that predates the hashed ids kept its logs in ``logs/<name>``.
+            log_folders.append(legacy)
+        for log_folder in log_folders:
+            if log_folder.is_symlink():
+                result.warnings.append(f"refusing to delete symlink: {log_folder}")
+            elif log_folder.is_dir():
+                try:
+                    outcome = _rmtree_safely(log_folder)
+                    for mount in outcome.mounts:
+                        result.warnings.append(
+                            f"{mount} is a separate mounted drive, left alone"
+                        )
+                    for path, exc in outcome.leftovers:
+                        result.warnings.append(_leftover_warning(path, exc))
+                    if not log_folder.exists():
+                        result.logs_removed = log_folder
+                except OSError as exc:
+                    result.warnings.append(f"could not remove the logs: {exc}")
 
     # 5c. The per-game folder Nadare made around them goes too, but only when it is now empty
     # (``rmdir`` never touches contents), so a file the user put there survives. The empty
     # ``Nadare`` parent it was created in goes with it, unless it turns out to be home.
     if done and not keep_profile:
         home = Path.home().resolve()
-        for entry in _wrapper_folders(config.profiles.get(name, {})):
+        for entry in wrappers:
             folder = Path(str(entry))
             if not (folder.is_absolute() and not folder.is_symlink()):
                 continue
+            _drop_lone_manifest(folder)
             try:
                 folder.rmdir()
             except FileNotFoundError:
@@ -765,6 +904,15 @@ def _remove_locked(
 
     # 6. Drop the profile and persist.
     result.profile_kept = keep_profile
+    if keep_profile and not touched and not (
+        result.shortcuts_removed
+        or result.login_forgotten
+        or result.data_dir_removed
+        or result.logs_removed
+        or result.trees_removed
+    ):
+        # Every requested tree was refused (unsafe, missing): nothing was touched (round 6).
+        result.refused = True
     if drop_profile and not keep_profile:
         config.remove_profile(name)
         if save:
@@ -773,4 +921,11 @@ def _remove_locked(
     return result
 
 
-__all__ = ["RemovableTree", "RemovalResult", "remove_game", "removable_trees", "tree_safety"]
+__all__ = [
+    "RemovableTree",
+    "RemovalResult",
+    "default_prefix",
+    "remove_game",
+    "removable_trees",
+    "tree_safety",
+]

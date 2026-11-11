@@ -27,9 +27,10 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
-from ..core import process
+from ..core import process, sandbox
 from ..core.backends import BackendError, GameBackend, Option, Status
 from ..core.events import Event, mask
 from .wine import (
@@ -119,6 +120,45 @@ def _applaunch_pids(app_id: str, *, proc_root: str | os.PathLike[str] = "/proc")
     return remember_start(hits)
 
 
+
+#: Seconds a host lookup of Steam is reused: status runs every 30 s and each lookup spawns
+#: ``flatpak-spawn``; a Steam installed meanwhile is found after this.
+HOST_CLIENT_TTL = 300.0
+_HOST_CLIENT: dict[str, tuple[float, list[str] | None]] = {}
+STEAM_FLATPAK = "com.valvesoftware.Steam"
+NO_HOST_STEAM = (
+    "Steam was not found on this computer. Nadare's Flatpak starts the Steam installed on your "
+    "system (the steam program, or the Steam Flatpak)"
+)
+
+
+def clear_host_client_cache() -> None:
+    _HOST_CLIENT.clear()
+
+
+def _host_client(parts: list[str]) -> list[str]:
+    """Inside Nadare's Flatpak: the host's Steam, started through ``flatpak-spawn --host``.
+
+    The sandbox's PATH has no Steam (maintainer, 2026-11-11: a Steam game showed "SET GAME FILE
+    IN SETTINGS"). A distro Steam is found on the host's PATH; the Steam Flatpak by its data
+    folder, which Nadare's Flatpak may see.
+    """
+    key = "\0".join(parts)
+    seen = _HOST_CLIENT.get(key)
+    if seen is not None and time.monotonic() - seen[0] < HOST_CLIENT_TTL:
+        client = seen[1]
+    else:
+        client = None
+        found = sandbox.host_which(parts[0])
+        if found:
+            client = sandbox.host_argv([found, *parts[1:]])
+        elif parts == ["steam"] and (Path.home() / ".var" / "app" / STEAM_FLATPAK).is_dir():
+            client = sandbox.host_argv(["flatpak", "run", STEAM_FLATPAK])
+        _HOST_CLIENT[key] = (time.monotonic(), client)
+    if client is None:
+        raise BackendError(NO_HOST_STEAM)
+    return list(client)
+
 class SteamBackend(GameBackend):
     kind = "steam"
     supports_update = False  # Steam updates its own games
@@ -172,6 +212,8 @@ class SteamBackend(GameBackend):
             raise BackendError(f"invalid steam_binary {configured!r}: {exc}") from exc
         if not parts:
             parts = ["steam"]
+        if sandbox.in_flatpak():
+            return _host_client(parts)
         resolved = shutil.which(parts[0])
         if not resolved:
             raise BackendError(f"{parts[0]!r} is not on PATH (install Steam or set steam_binary)")
@@ -212,8 +254,8 @@ class SteamBackend(GameBackend):
             return Status(state="error", message=str(exc), data=data)
         try:
             client = self._client()
-        except BackendError:
-            return Status(state="not_installed", message="Steam client not found", data=data)
+        except BackendError as exc:
+            return Status(state="not_installed", message=str(exc), data=data)
         pids = self._matching_pids(app_id)
         installed = _has_app_manifest(app_id)
         data.update({"app_id": app_id, "client": client[0], "pids": pids, "installed": installed})
@@ -244,7 +286,7 @@ class SteamBackend(GameBackend):
         self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
         return stream(
             argv,
-            process.child_environ(),
+            process.drop_secret_env(process.child_environ()),  # a Steam it starts keeps it (#811)
             on_line=lambda line: self.info(mask(line)),
             cancel=self.ctx.cancel,
             stop_wine=False,

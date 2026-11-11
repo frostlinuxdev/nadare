@@ -97,7 +97,7 @@ def _fake_managed(tmp_path, monkeypatch):
 def test_managed_umu_needs_the_shebang_interpreter(tmp_path, monkeypatch):
     target = _fake_managed(tmp_path, monkeypatch)
     monkeypatch.setattr(umu, "SHEBANG_PYTHON", str(tmp_path / "no-such-python3"))
-    monkeypatch.setattr(umu.shutil, "which", lambda name: "/home/u/.pyenv/shims/python3")
+    monkeypatch.setattr(umu.shutil, "which", lambda name, *_a, **_k: "/home/u/.pyenv/shims/python3")
     assert umu.managed() is None
     fake_python = tmp_path / "python3"
     fake_python.write_text("")

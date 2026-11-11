@@ -66,7 +66,7 @@ def test_host_argv_allows_non_secret_env(monkeypatch):
 
 def test_host_which_outside_flatpak_uses_shutil(monkeypatch):
     monkeypatch.setattr(sandbox, "in_flatpak", lambda: False)
-    monkeypatch.setattr(sandbox.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(sandbox.shutil, "which", lambda name, *_a, **_k: "/usr/bin/" + name)
     assert sandbox.host_which("mytool") == "/usr/bin/mytool"
 
 

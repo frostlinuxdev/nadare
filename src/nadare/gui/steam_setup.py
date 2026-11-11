@@ -58,6 +58,7 @@ class _Signals(QObject):
 
     done = pyqtSignal(object, object, object)  # result, new plan (or None), plan error (or None)
     planned = pyqtSignal(object, object)  # plan (or None), error (or None)
+    progress = pyqtSignal(str)  # a running step's progress line (the runner download)
 
 
 def _plan_of(plan_fn):
@@ -128,6 +129,7 @@ class SteamSetupDialog(QDialog):
         app_id: str = "",
         initial_undo: tuple[str, object] | None = None,
         cancel_fn=None,
+        next_undo_fn=None,
     ) -> None:
         super().__init__(parent)
         #: The Steam app this checklist is for (the main window keeps one window per game).
@@ -143,11 +145,16 @@ class SteamSetupDialog(QDialog):
         self._can_undo = False
         self._running_action = ""
         self._cancel_fn = cancel_fn
+        #: The saved undo to offer once one was used (the change before it), or ``None``.
+        self._next_undo_fn = next_undo_fn
         self._cancel_requested = False
+        #: A re-check keeps the last result line; the first look replaces "Checking Steam…".
+        self._rechecking = False
         self.rows: dict[str, QFrame] = {}
         self._signals = _Signals(self)
         self._signals.done.connect(self._on_done)
         self._signals.planned.connect(self._on_planned)
+        self._signals.progress.connect(self._on_progress)
 
         self.setWindowTitle("Set up")
         self.resize(620, 560)
@@ -196,6 +203,11 @@ class SteamSetupDialog(QDialog):
         self.cancel_button.setVisible(False)
         self.cancel_button.clicked.connect(self._cancel_step)
         footer.addWidget(self.cancel_button)
+        # Steam installs or updates the game in the background: look again without closing.
+        self.check_button = QPushButton("Check again")
+        self.check_button.setObjectName("GhostButton")
+        self.check_button.clicked.connect(self.check_again)
+        footer.addWidget(self.check_button)
         footer.addStretch(1)
         self.close_button = QPushButton("Close")
         self.close_button.setObjectName("GhostButton")
@@ -236,21 +248,33 @@ class SteamSetupDialog(QDialog):
         return self._busy
 
     def refresh(self) -> None:
-        """Ask the planner again and redraw the checklist (the result line stays).
+        """Ask the planner again and redraw the checklist (the result line stays)."""
+        self.check_again()
 
-        While the first check or a step is running on the pool, that work redraws the list when
-        it ends, and planning here would run Vulkan and Steam probes on the GUI thread (#925).
+    def check_again(self) -> None:
+        """Look at Steam again, off the GUI thread (the result line stays).
+
+        Planning runs Vulkan and Steam probes, so it never runs on the GUI thread (#925). While
+        the first check or a step is running on the pool, that work redraws the list when it ends.
         """
         if self._busy:
             return
-        self._plan = self._plan_fn()
-        self._render()
+        self._busy = True
+        self._rechecking = True
+        # A finished step leaves its action name behind; without clearing it a re-check
+        # would offer a Cancel that cancels nothing and poison the next real step.
+        self._running_action = ""
+        self._cancel_requested = False
+        self.cancel_button.setText("Cancel")
+        self._apply_enabled()
+        QThreadPool.globalInstance().start(_PlanTask(self._plan_fn, self._signals))
 
     # ---- closing -----------------------------------------------------------
     def done(self, result: int) -> None:  # noqa: D102 - Qt override
         # Escape, the title-bar X and Close all end here. A step that is running has to finish
         # (Steam may be closed in the middle of it); the window waits.
-        if self._busy and self._plan is not None:
+        # A re-check only reads Steam: closing then is fine (its late result is dropped).
+        if self._busy and not self._rechecking and self._plan is not None:
             self.result_label.setText("A step is still running. Please wait until it finishes.")
             return
         super().done(result)
@@ -334,7 +358,8 @@ class SteamSetupDialog(QDialog):
         enabled = not self._busy
         has_next = self._plan is not None and self._plan.next_item is not None
         self.next_button.setEnabled(has_next and enabled)
-        self.close_button.setEnabled(enabled or self._plan is None)
+        self.check_button.setEnabled(enabled)
+        self.close_button.setEnabled(enabled or self._plan is None or self._rechecking)
         self.undo_button.setVisible(self._can_undo and self._undo_fn is not None)
         self.undo_button.setEnabled(enabled and self._undo_fn is not None)
         self.cancel_button.setVisible(self._can_cancel())
@@ -350,6 +375,7 @@ class SteamSetupDialog(QDialog):
         action = self._running_action
         return (
             self._busy
+            and not self._rechecking
             and self._cancel_fn is not None
             and self._plan is not None
             and (action == "set_runner" or action.startswith("install_prefix:"))
@@ -377,6 +403,15 @@ class SteamSetupDialog(QDialog):
         self._running_action = item.action
         self._start(self._act_fn, item, undoing=False)
 
+    def report_progress(self, text: str) -> None:
+        """Show ``text`` instead of "Working…" while a step runs; safe from a worker thread."""
+        with contextlib.suppress(RuntimeError):  # the window may be gone by now
+            self._signals.progress.emit(text)
+
+    def _on_progress(self, text: str) -> None:
+        if self._busy:  # a finished step keeps its result line
+            self.result_label.setText(text)
+
     def _run_undo(self) -> None:
         if self._busy or not self._can_undo or self._undo_fn is None:
             return
@@ -396,8 +431,9 @@ class SteamSetupDialog(QDialog):
         )
 
     def _on_planned(self, plan, error) -> None:
-        """The first look at Steam is in (computed off the GUI thread)."""
+        """A look at Steam is in (computed off the GUI thread)."""
         self._busy = False
+        rechecking, self._rechecking = self._rechecking, False
         if plan is None:
             self._plan = None
             self._render()
@@ -406,6 +442,8 @@ class SteamSetupDialog(QDialog):
         self._plan = plan
         self._adopt_initial_undo()
         self._render()
+        if rechecking:
+            return  # a re-check keeps what the last step said
         self.result_label.setText("")
         self.result_label.setObjectName("Hint")
         set_state_property(self.result_label, "")
@@ -423,11 +461,13 @@ class SteamSetupDialog(QDialog):
             )
         self._cancel_requested = False
         self.cancel_button.setText("Cancel")
+        offer_next = False
         if self._undoing:
             self._undoing = False
             if result.ok:  # a failed undo stays available to try again
                 self._can_undo = False
                 self._undo_previous = None
+                offer_next = self._next_undo_fn is not None
         elif self._running_action in _UNDO_LABELS and result.ok and result.changed:
             # Only a runner or launch-option change can be undone, and only the last one.
             self._can_undo = self._undo_fn is not None
@@ -435,6 +475,10 @@ class SteamSetupDialog(QDialog):
             self.undo_button.setText(_UNDO_LABELS[self._running_action])
         if plan is not None:
             self._plan = plan
+        if offer_next:
+            # The change before the undone one, if it is still in place (#1031).
+            self._initial_undo = self._next_undo_fn()
+            self._adopt_initial_undo()
         self._render()  # also re-enables the buttons, whatever happened
         if plan_error is not None:
             result = ActionResult(

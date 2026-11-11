@@ -126,7 +126,7 @@ and it was not re-checked. All of these are public and need no login.
   `content_id`, `title`, `pub_timestamp` (unix seconds, as a string), `pic_urls[]`. Article page
   `https://nikke-en.com/newsdetail.html?content_id=<content_id>`. Hosts:
   `na-community.playerinfinite.com`, `na-nikke-aws.playerinfinite.com`.
-- **Neverness to Everness** (`direct-nte`, `launcher-nte`). A static JavaScript file, not JSON
+- **Neverness to Everness** (`direct-nte`). A static JavaScript file, not JSON
   (it has trailing commas): `GET https://nte.perfectworld.com/include/newsData<YYYYMMDD>.js`, whose
   name changes on each rebuild; read it from the `<script src>` in
   `https://nte.perfectworld.com/en/main.html`. `var newsdataObj = {"en": {"news": [...], "gamenews":

@@ -132,12 +132,12 @@ def test_launcher_argv_flatpak() -> None:
 
 
 def test_launcher_argv_which(monkeypatch) -> None:
-    monkeypatch.setattr(shortcuts.shutil, "which", lambda name: "/usr/bin/nadare")
+    monkeypatch.setattr(shortcuts.shutil, "which", lambda name, *_a, **_k: "/usr/bin/nadare")
     assert shortcuts.launcher_argv({}, False) == ["/usr/bin/nadare"]
 
 
 def test_launcher_argv_fallback(monkeypatch) -> None:
-    monkeypatch.setattr(shortcuts.shutil, "which", lambda name: None)
+    monkeypatch.setattr(shortcuts.shutil, "which", lambda name, *_a, **_k: None)
     assert shortcuts.launcher_argv({}, False, exe="/py") == ["/py", "-m", "nadare"]
 
 

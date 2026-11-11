@@ -7,6 +7,8 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import time
+
 import pytest
 
 try:  # pragma: no cover - only when PyQt6 is missing
@@ -87,9 +89,9 @@ def test_setting_the_state_from_code_does_not_fire_the_signal(view):
 
 
 def test_a_blocked_switch_is_greyed_out_with_the_reason(view):
-    view.set_sandbox(True, False, blocked="Not available in the Flatpak version yet.")
+    view.set_sandbox(True, False, blocked="Not available right now.")
     assert not view.sandbox.isEnabled()
-    assert "Flatpak" in view.sandbox.toolTip()
+    assert "Not available" in view.sandbox.toolTip()
 
 
 def test_the_tooltip_says_it_can_still_use_the_network(view):
@@ -142,11 +144,21 @@ def test_a_failed_save_puts_the_switch_back_and_says_so(qapp, tmp_path, monkeypa
         _close(window, qapp)
 
 
-def test_opening_a_game_shows_its_saved_sandbox_state(qapp, tmp_path):
+def test_opening_a_game_shows_its_saved_sandbox_state(qapp, tmp_path, monkeypatch):
+    from nadare.core import gamesandbox
+
+    # The pill needs a bubblewrap that really starts.
+    monkeypatch.setattr(gamesandbox, "ready", lambda: True)
     window = _window(tmp_path, secure_mode=True)
     try:
         window._sync_sandbox("pgr")
         assert window.game.sandbox.isChecked() and not window.game.sandbox.isHidden()
+        # The bubblewrap probe answers from a background thread (#1207 b191).
+        deadline = time.monotonic() + 3
+        while window._sandbox_probe_running and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
+        qapp.processEvents()
         assert not window.game.sandbox_pill.isHidden()
     finally:
         _close(window, qapp)
@@ -161,15 +173,17 @@ def test_a_game_without_sandbox_shows_no_switch(qapp, tmp_path):
         _close(window, qapp)
 
 
-def test_in_flatpak_the_switch_is_disabled(qapp, tmp_path, monkeypatch):
-    from nadare.core import sandbox
+def test_in_the_flatpak_the_switch_is_enabled(qapp, tmp_path, monkeypatch):
+    from nadare.core import gamesandbox, sandbox
 
     monkeypatch.setattr(sandbox, "in_flatpak", lambda: True)
+    monkeypatch.setattr(
+        gamesandbox, "_flatpak_spawn", lambda: "/usr/bin/flatpak-spawn", raising=False
+    )
     window = _window(tmp_path)
     try:
         window._sync_sandbox("pgr")
-        assert not window.game.sandbox.isEnabled()
-        assert "Flatpak" in window.game.sandbox.toolTip()
+        assert window.game.sandbox.isEnabled()
     finally:
         _close(window, qapp)
 
@@ -186,11 +200,11 @@ def test_the_switch_is_locked_while_the_game_runs_and_back_after(view):
     assert view.sandbox.isEnabled()
 
 
-def test_a_flatpak_block_stays_after_the_game_stops(view):
-    view.set_sandbox(True, False, "Not available in the Flatpak version yet.")
+def test_a_blocked_switch_stays_blocked_after_the_game_stops(view):
+    view.set_sandbox(True, False, "Not available right now.")
     view._busy_op = "launch"
     view._refresh_actions()
     view._busy_op = None
     view._refresh_actions()
     assert not view.sandbox.isEnabled()
-    assert "Flatpak" in view.sandbox.toolTip()
+    assert "Not available" in view.sandbox.toolTip()

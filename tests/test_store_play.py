@@ -58,9 +58,8 @@ def test_an_installed_game_shows_play_as_the_main_button(qapp):
     assert not widget.play_button.isHidden()
     assert widget.play_button.text() == "Play"
     assert widget.play_button.objectName() == "Primary"
-    # Installing another copy is still possible, but it is no longer the main action.
-    assert widget.install_button.text() == "Add another copy"
-    assert widget.install_button.objectName() != "Primary"
+    # A catalog game has one profile, so there is no second copy to install.
+    assert widget.install_button.isHidden()
 
 
 def test_a_game_that_is_not_installed_has_no_play_button(qapp):

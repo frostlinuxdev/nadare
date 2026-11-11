@@ -310,7 +310,7 @@ wheels = [
 
 [[package]]
 name = "nadare-launcher"
-version = "0.1.0b21"
+version = "0.1.0b22"
 source = { editable = "." }
 dependencies = [
     { name = "certifi" },

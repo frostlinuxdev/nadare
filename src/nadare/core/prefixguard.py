@@ -100,14 +100,31 @@ def unsafe_reason(
             if not isinstance(value, str) or not value.strip():
                 continue
             other = _real(value)
+            # A legacy profile saved with a folder that can be nobody's game folder (home, a
+            # folder holding it, / or a drive) must not claim everything below it (#1207 b077).
+            broad = other == home or other in home.parents or os.path.ismount(other)
+            if broad and resolved != other:
+                continue
             if resolved == other or resolved in other.parents or other in resolved.parents:
                 title = str(profile.get("title") or name)
-                return f"already used by {title}"
+                return f"{_USED_BY}{title}"
     if as_prefix and resolved.is_dir() and not is_wine_prefix(resolved) and not _is_empty(resolved):
-        return "a folder that holds other files and is not a Wine prefix"
+        return _HOLDS_OTHER_FILES
     return ""
 
 
+_HOLDS_OTHER_FILES = "a folder that holds other files and is not a Wine prefix"
+_USED_BY = "already used by "
+
+
 def explain(path: str | os.PathLike[str], reason: str) -> str:
-    """A plain sentence for a refused ``path``."""
+    """A plain sentence for a refused ``path``, with advice that fits the reason."""
+    if reason.startswith(_USED_BY):
+        # A folder inside another game's folder is refused as well, so do not suggest one.
+        return f"{path} is {reason}. Each game needs its own folder: pick a different one."
+    if reason == _HOLDS_OTHER_FILES:
+        return (
+            f"{path} is {reason}. Pick an empty folder (or a new one), or the game's "
+            "existing Wine prefix."
+        )
     return f"{path} is {reason}. Pick a folder inside it instead, for example Nadare/<game>."

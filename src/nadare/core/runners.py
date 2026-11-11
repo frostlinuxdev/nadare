@@ -129,6 +129,14 @@ def _looks_like_runner(path: Path) -> bool:
     return (path / "files" / "bin" / "wine").is_file()
 
 
+def looks_like_runner(path: Path | str) -> bool:
+    """Whether ``path`` is a Proton or Wine tree Nadare can start (the launcher's rule)."""
+    try:
+        return _looks_like_runner(Path(path).expanduser())
+    except (OSError, ValueError):
+        return False
+
+
 def _expand(value: str) -> Path:
     return Path(os.path.expanduser(value))
 
@@ -777,13 +785,20 @@ def _extract(tar_path: Path, *, cancel: Cancel | None, emit: Emitter) -> Path:
         stale: Path | None = None
         if dest.exists():
             stale = root / f".{dest.name}.old-{uuid.uuid4().hex}"
-            os.replace(dest, stale)
-            # Mark the backup as owned by this live install so a concurrent
-            # _prune_stale cannot delete it during the swap window (NV-3).
+            # Mark the tree as owned by this live install BEFORE it becomes a hidden backup,
+            # so a concurrent _prune_stale can never see it unowned (NV-3, #974).
             try:
-                (stale / _OWNER_MARKER).write_text(str(os.getpid()))
+                (dest / _OWNER_MARKER).write_text(str(os.getpid()))
             except OSError:
                 pass
+            try:
+                os.replace(dest, stale)
+            except BaseException:
+                try:
+                    (dest / _OWNER_MARKER).unlink()
+                except OSError:
+                    pass
+                raise
         try:
             os.replace(tops[0], dest)
         except BaseException:
@@ -830,6 +845,21 @@ def runner_size(runner: str | os.PathLike[str]) -> int:
     return total
 
 
+def _profile_value(profile: Mapping[str, Any], key: str) -> Any:
+    """``key`` from the top level, else from ``extra``: how backends read it (``profile_setting``).
+
+    Usage must see the runner a launch would use, or a runner chosen under ``extra`` looks
+    unused and can be deleted (#974).
+    """
+    value = profile.get(key)
+    if value not in (None, ""):
+        return value
+    extra = profile.get("extra")
+    if isinstance(extra, Mapping) and extra.get(key) not in (None, ""):
+        return extra[key]
+    return None
+
+
 def runner_usage(profiles: Mapping[str, Mapping[str, Any]]) -> dict[str, list[str]]:
     """Which profiles use which Nadare-installed runner (path -> profile names).
 
@@ -850,7 +880,9 @@ def runner_usage(profiles: Mapping[str, Mapping[str, Any]]) -> dict[str, list[st
     }
 
     for name, profile in profiles.items():
-        value = str(profile.get("proton_runner") or profile.get("runner") or "").strip()
+        value = str(
+            _profile_value(profile, "proton_runner") or _profile_value(profile, "runner") or ""
+        ).strip()
         targets: list[Path | None] = []
         if not value:
             if profile.get("backend") in PROTON_DEFAULT_BACKENDS:

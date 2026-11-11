@@ -43,8 +43,9 @@ from pathlib import Path
 from typing import Any
 
 from ..core import graphics, hostlibs, monitors, paths, process, runners, sandbox, umu, vcredist
-from ..core.backends import BackendError, GameBackend, Option, Status
+from ..core.backends import PREFIX_HELP, BackendError, GameBackend, Option, Status
 from ..core.events import Cancel, Cancelled, Event, mask
+from ..core.sandboxed import SandboxMixin
 
 #: Wine builds probed, in order, when the profile leaves ``wine_binary`` empty.
 WINE_CANDIDATES = (
@@ -282,7 +283,11 @@ def _environ_map(entry: Path) -> dict[str, str]:
 def _same_path(first: str | None, second: str | None) -> bool:
     if not first or not second:
         return False
-    return os.path.normpath(first) == os.path.normpath(second)
+    if os.path.normpath(first) == os.path.normpath(second):
+        return True
+    # A game in the Flatpak Sandbox is told the real path of a symlinked game folder
+    # (~/Games -> another drive), while the profile names the symlink.
+    return os.path.realpath(first) == os.path.realpath(second)
 
 
 def _is_prefix(value: str, prefix: str) -> bool:
@@ -316,6 +321,11 @@ def _query_matches(query: ProcessQuery, argv: list[str], env: dict[str, str]) ->
     return belongs
 
 
+def _own_pid() -> int:
+    """This process's PID, which a scan never reports (tests point it away from fake PIDs)."""
+    return os.getpid()
+
+
 def _scan_query(query: ProcessQuery, *, proc_root: str | os.PathLike[str] = "/proc") -> list[int]:
     """Return PIDs that belong to ``query`` under ``proc_root``."""
     prefix = str(query.prefix).strip() if query.prefix else ""
@@ -324,7 +334,7 @@ def _scan_query(query: ProcessQuery, *, proc_root: str | os.PathLike[str] = "/pr
     wanted_args = {arg for arg in query.args if arg}
     if not prefix and not names and not extra and not wanted_args:
         return []
-    me = os.getpid()
+    me = _own_pid()
     uid = os.getuid()
     hits: list[int] = []
     proc = Path(proc_root)
@@ -359,9 +369,16 @@ def _scan_query(query: ProcessQuery, *, proc_root: str | os.PathLike[str] = "/pr
 _SCAN_START: dict[int, str | None] = {}
 
 
+#: Status probes scan every few seconds; keep only the newest records.
+_SCAN_START_MAX = 4096
+
+
 def remember_start(pids: list[int]) -> list[int]:
     for pid in pids:
+        _SCAN_START.pop(pid, None)  # re-insert: newest last
         _SCAN_START[pid] = process._pid_starttime(pid)
+    while len(_SCAN_START) > _SCAN_START_MAX:
+        del _SCAN_START[next(iter(_SCAN_START))]
     return pids
 
 
@@ -398,7 +415,7 @@ def scan_pids(
     wanted = [p for p in patterns if p]
     if not wanted:
         return []
-    me = os.getpid()
+    me = _own_pid()
     hits: list[int] = []
     proc = Path(proc_root)
     try:
@@ -422,10 +439,16 @@ def scan_pids(
 
 
 def stop_pids(pids: Iterable[int], signal_: int = _SIGNAL_TERM) -> None:
+    """Signal ``pids`` that are still the processes a scan saw.
+
+    A PID whose start time was not recorded (it was unreadable at the scan, usually because the
+    process had just ended) is never signalled: its number may belong to anything by now. The
+    record is kept, so a second Stop checks again instead of signalling blind.
+    """
     for pid in pids:
-        started = _SCAN_START.pop(pid, None)
-        if started is not None and process._pid_starttime(pid) != started:
-            continue  # PID was recycled onto an unrelated process
+        started = _SCAN_START.get(pid)
+        if started is None or process._pid_starttime(pid) != started:
+            continue  # gone, recycled onto an unrelated process, or never identified
         try:
             os.kill(pid, signal_)
         except OSError:
@@ -444,9 +467,11 @@ def first_wine() -> Path:
 
 
 # --------------------------------------------------------------------------
-class WineBackend(GameBackend):
+class WineBackend(SandboxMixin, GameBackend):
     kind = "wine"
     supports_update = False  # the game or its own launcher updates itself
+    supports_secure_mode = True
+    sandbox_default_on = False
 
     options = (
         Option("install_dir", "Game folder", "path_dir", "Where the game lives."),
@@ -456,7 +481,7 @@ class WineBackend(GameBackend):
             "text",
             "Windows executable, relative to the game folder.",
         ),
-        Option("prefix", "Wine prefix", "path_dir", "WINEPREFIX used for this game."),
+        Option("prefix", "Wine prefix", "path_dir", PREFIX_HELP),
         Option("runner", "Runner", "runner", "Proton build/tag; empty uses system Wine."),
         Option(
             "renderer",
@@ -467,6 +492,15 @@ class WineBackend(GameBackend):
             choices=graphics.RENDERER_CHOICES,
         ),
         Option("launch_args", "Launch arguments", "args", "Extra arguments after the executable."),
+        Option(
+            "secure_mode",
+            "Sandbox",
+            "bool",
+            "Hides your home folder from the game (needs bubblewrap). The game can still use "
+            "the network. Off by default for a game you added yourself: turn it on if the "
+            "game needs nothing outside its folder. See docs/SECURE-MODE.md.",
+            default=False,
+        ),
         Option(
             "wine_binary",
             "Wine binary",
@@ -535,6 +569,18 @@ class WineBackend(GameBackend):
         if target is None or not target.is_file():
             raise BackendError(f"game executable not found: {target}")
         return target
+
+    def _sandbox_prefix(self) -> Path:
+        return self._prefix()
+
+    def _sandbox_game_dir(self) -> Path | None:
+        install_dir = self._install_dir()
+        try:
+            target = self._target().resolve()
+        except BackendError:
+            return install_dir
+        install_dir = install_dir.resolve()
+        return install_dir if target.is_relative_to(install_dir) else target.parent
 
     def _runner(self) -> str | None:
         raw = profile_setting(self.ctx.profile, "proton_runner") or profile_setting(
@@ -610,9 +656,24 @@ class WineBackend(GameBackend):
             # launcher dialogs/updaters behave (see the stella launcher notes).
             env.setdefault("PROTON_ENABLE_WAYLAND", "1")
             configured = str(profile_setting(self.ctx.profile, "umu_binary", "umu-run"))
+            # An installed managed copy counts as it does in status(), complete host libraries
+            # or not; only a download waits for missing ones (#973).
             umu_run = umu.system(configured)
+            if umu_run is None:
+                managed = umu.managed()
+                umu_run = str(managed) if managed else None
             missing = None
-            if umu_run is None and not sandbox.in_flatpak():
+            if umu_run is None and sandbox.in_flatpak():
+                # Inside the Flatpak, umu's Steam Runtime is what Proton was built for (the
+                # Flatpak runtime lacks libraries its video decoding needs). This backend never
+                # runs in the Sandbox, so umu's container is always allowed here.
+                umu_run = umu.resolve(
+                    configured,
+                    allow_download=True,
+                    emit=self.ctx.emit,
+                    cancel=self.ctx.cancel,
+                )
+            elif umu_run is None:
                 missing = hostlibs.missing_32bit()
                 if missing:
                     umu_run = umu.resolve(
@@ -663,6 +724,7 @@ class WineBackend(GameBackend):
             args += [str(a) for a in extra_args]
         target = self._target()
         argv, env = self._prefix_command([str(target), *args])
+        argv, env = self._secure_wrap(argv, env)
         return argv, env, self._prefix(), target
 
     # ---- Visual C++ runtime (shared in nadare.core.vcredist) ----------------
@@ -752,26 +814,29 @@ class WineBackend(GameBackend):
     def launch(self) -> int:
         self.ctx.cancel.raise_if_cancelled()
         self._run_vcredist()
-        argv, env, _prefix, target = self.build()
-        runner = self._runner()
-        tag = "Proton" if runner else "Wine"
-        self.ctx.emit(Event("step", f"{tag}: launching {target.name}"))
-        self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
-        _renderer, note = graphics.effective_renderer(self.ctx.profile)
-        if note:
-            self.info(note)
-        probe = graphics.RendererProbe(
-            lambda: scan_pids(self._patterns()),
-            on_result=lambda label: self.info(f"renderer: {label}"),
-        ).start()
         try:
-            return stream(
-                argv, env, on_line=lambda line: self.info(mask(line)), cancel=self.ctx.cancel
-            )
+            argv, env, _prefix, target = self.build()
+            runner = self._runner()
+            tag = "Proton" if runner else "Wine"
+            self.ctx.emit(Event("step", f"{tag}: launching {target.name}"))
+            self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
+            _renderer, note = graphics.effective_renderer(self.ctx.profile)
+            if note:
+                self.info(note)
+            probe = graphics.RendererProbe(
+                lambda: scan_pids(self._patterns()),
+                on_result=lambda label: self.info(f"renderer: {label}"),
+            ).start()
+            try:
+                return stream(
+                    argv, env, on_line=lambda line: self.info(mask(line)), cancel=self.ctx.cancel
+                )
+            finally:
+                probe.stop()
+                probe.join(timeout=1.0)
+                self._renderer = probe.result
         finally:
-            probe.stop()
-            probe.join(timeout=1.0)
-            self._renderer = probe.result
+            self._stop_link_relay()
 
     def stop(self) -> None:
         pids = scan_pids(self._patterns())

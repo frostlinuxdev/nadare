@@ -188,18 +188,12 @@ def test_the_install_button_stays_reachable_at_the_minimum_window_size(tmp_path,
 
 
 def test_launcher_games_do_not_show_the_old_100_gib_placeholder(qapp):
-    from nadare.core import backends
 
     sizes = {e.kind: e.size_bytes for e in entries() if e.kind.startswith("launcher-")}
-    assert set(sizes) == {"launcher-nikke", "launcher-nte", "launcher-gfl2-haoplay"}
+    assert set(sizes) == {"launcher-nikke"}  # the NTE/GFL2 launcher kinds were retired
     assert all(size != 100 * 1024**3 for size in sizes.values())
     # NIKKE: measured on a real install (27 GiB including the Wine prefix).
     assert sizes["launcher-nikke"] == 27 * 1024**3
-    # The launcher installs the same game as the direct kind.
-    assert sizes["launcher-nte"] == backends.install_size_hint("direct-nte")
-    # GFL2: a tiny launcher, then the game downloads about 88 GB inside itself (measured: 87.7 GB
-    # of game files for one voice language, plus the ~3 GB prefix).
-    assert 88 * 10**9 <= sizes["launcher-gfl2-haoplay"] <= 100 * 10**9
 
 
 def test_a_background_installed_change_does_not_move_keyboard_focus(qapp):
@@ -217,9 +211,9 @@ def test_a_background_installed_change_does_not_move_keyboard_focus(qapp):
     # Install had focus, so the user's place moves to Play (their next step)...
     assert widget.focusWidget() is widget.play_button
     # ...but a later background refresh must not steal focus from wherever it now is.
-    widget.install_button.setFocus()
+    widget.back_button.setFocus()
     widget.set_entry(dataclasses.replace(entry, installed=True))
-    assert widget.focusWidget() is widget.install_button
+    assert widget.focusWidget() is widget.back_button
 
 
 def test_opening_the_page_for_another_game_focuses_play(qapp):

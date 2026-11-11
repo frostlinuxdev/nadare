@@ -4,14 +4,17 @@
 
 The first GUI process listens on a Unix-domain socket named after the user id;
 each later process connects, sends ``activate`` and exits so the running window
-is raised instead of a second one opening. The CLI never touches this: only
-``nadare gui`` / the menu entry acquire the lock.
+is raised instead of a second one opening. A later start with ``--profile`` then
+sends ``show-profile:<name>`` on a second connection, so the running window shows
+that game (#624); an older Nadare refuses that line and still activates. The CLI
+never touches this: only ``nadare gui`` / the menu entry acquire the lock.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import stat
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -24,6 +27,10 @@ _CONNECT_TIMEOUT_MS = 300
 
 #: The payload a later instance sends to the primary to ask it to activate.
 _ACTIVATE_MESSAGE = b"activate"
+
+#: ``show-profile:<name>\n`` asks the primary to show a profile; the newline ends the name.
+_PROFILE_PREFIX = b"show-profile:"
+_PROFILE_LIMIT = len(_PROFILE_PREFIX) + 256
 
 
 def server_name() -> str:
@@ -49,7 +56,36 @@ def server_name() -> str:
             usable = False
         if usable:
             return str(base / f"nadare-{uid}.sock")
-    return f"nadare-{uid}"
+    private = _private_socket(uid)
+    return private if private is not None else f"nadare-{uid}"
+
+
+#: A Unix socket path must fit ``sun_path`` (108 bytes on Linux, with its terminating NUL).
+_SOCKET_PATH_MAX = 100
+
+
+def _private_socket(uid: int) -> str | None:
+    """A socket in Nadare's own state folder (mode 0700), or ``None`` when that cannot be had.
+
+    Without a runtime dir a bare name lands in the shared temp folder, where another local user
+    could create it first and answer our activation (#811).
+    """
+    from ..core import paths
+
+    folder = paths.state_dir() / "run"
+    path = str(folder / f"nadare-{uid}.sock")
+    if len(os.fsencode(path)) > _SOCKET_PATH_MAX:
+        return None
+    try:
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        info = folder.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            return None
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            folder.chmod(0o700)
+    except (OSError, AttributeError):
+        return None
+    return path
 
 
 class SingleInstance(QObject):
@@ -61,10 +97,16 @@ class SingleInstance(QObject):
     """
 
     activation_requested = pyqtSignal()
+    #: A later start asked for this profile (already checked to be a valid profile name).
+    profile_requested = pyqtSignal(str)
 
-    def __init__(self, name: str | None = None, parent: QObject | None = None) -> None:
+    def __init__(
+        self, name: str | None = None, parent: QObject | None = None, profile: str | None = None
+    ) -> None:
         super().__init__(parent)
         self._name = name or server_name()
+        #: Sent to a running primary after activating it, when this start has ``--profile``.
+        self._profile = profile or ""
         self._server: QLocalServer | None = None
         self._connections: list[QLocalSocket] = []
         #: Bytes read per connection so a split ``activate`` payload reassembles.
@@ -81,6 +123,7 @@ class SingleInstance(QObject):
         self.status = ""
         if self._ping():
             self.status = "another instance is already running"
+            self._send_profile()
             return False
         # Do not unlink the socket up front: another process may have bound it
         # since the ping above. Try to bind; only a provably stale socket (no
@@ -91,6 +134,7 @@ class SingleInstance(QObject):
             if self._ping():
                 server.close()
                 self.status = "another instance is already running"
+                self._send_profile()
                 return False
             QLocalServer.removeServer(self._name)
             if not server.listen(self._name):
@@ -119,11 +163,19 @@ class SingleInstance(QObject):
     # ---- internals ---------------------------------------------------------
     def _ping(self) -> bool:
         """Send ``activate`` to a running instance. ``True`` if one answered."""
+        return self._send(_ACTIVATE_MESSAGE)
+
+    def _send_profile(self) -> None:
+        """Ask the running instance to show ``--profile``'s game (a separate connection)."""
+        if self._profile and _profile_name(self._profile.encode("utf-8")) is not None:
+            self._send(_PROFILE_PREFIX + self._profile.encode("utf-8") + b"\n")
+
+    def _send(self, payload: bytes) -> bool:
         socket = QLocalSocket(self)
         socket.connectToServer(self._name)
         if not socket.waitForConnected(_CONNECT_TIMEOUT_MS):
             return False
-        socket.write(_ACTIVATE_MESSAGE)
+        socket.write(payload)
         socket.flush()
         socket.waitForBytesWritten(_CONNECT_TIMEOUT_MS)
         socket.disconnectFromServer()
@@ -160,7 +212,20 @@ class SingleInstance(QObject):
             connection.disconnectFromServer()
             self.activation_requested.emit()
             return
-        if _ACTIVATE_MESSAGE.startswith(data):
+        raw = bytes(buffer)
+        if raw.startswith(_PROFILE_PREFIX) and raw.endswith(b"\n"):
+            self._buffers.pop(connection, None)
+            connection.disconnectFromServer()
+            name = _profile_name(raw[len(_PROFILE_PREFIX) : -1])
+            if name is not None:
+                self.activation_requested.emit()
+                self.profile_requested.emit(name)
+            return
+        if (
+            _ACTIVATE_MESSAGE.startswith(data)
+            or _PROFILE_PREFIX.startswith(raw)
+            or (raw.startswith(_PROFILE_PREFIX) and b"\n" not in raw and len(raw) <= _PROFILE_LIMIT)
+        ):
             # A (still empty or partial) prefix: wait for the rest.
             return
         # Anything that can never grow into the message is refused.
@@ -172,6 +237,17 @@ class SingleInstance(QObject):
         if connection in self._connections:
             self._connections.remove(connection)
         connection.deleteLater()
+
+
+def _profile_name(raw: bytes) -> str | None:
+    """The profile name in a ``show-profile`` request, or ``None`` when it is not a valid one."""
+    from ..core.config import valid_profile_name
+
+    try:
+        name = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return name if name and valid_profile_name(name) else None
 
 
 __all__ = ["SingleInstance", "server_name"]

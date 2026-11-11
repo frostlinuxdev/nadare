@@ -17,6 +17,7 @@ reads ``/proc/<pid>/maps`` to see which renderer a running game actually uses.
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import re
 import shutil
@@ -27,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import process
+from . import process, vkprobe
 
 #: Renderer profile values, in Settings order.
 RENDERER_CHOICES: tuple[tuple[str, str], ...] = (
@@ -248,7 +249,14 @@ def _query_vulkan() -> VulkanInfo:
                 return VulkanInfo(available=False)
         except (OSError, subprocess.SubprocessError):
             pass
-    # No usable vulkaninfo. The loader's instance version alone says nothing about
+    # No usable vulkaninfo (the Flatpak never has it, most distros do not install it): ask the
+    # driver itself in a helper process, the way vulkaninfo does.
+    probed = _run_vkprobe()
+    if probed is not None:
+        from_probe = _info_from_probe(probed)
+        if from_probe is not None:
+            return from_probe
+    # No answer either. The loader's instance version alone says nothing about
     # a device, but an installed *hardware* ICD does: ``vulkan-tools`` is not
     # installed by default on most distros, so a missing vulkaninfo must not demote
     # a machine with a real GPU driver to WineD3D.
@@ -259,6 +267,53 @@ def _query_vulkan() -> VulkanInfo:
                 available=True, api_version=loader.api_version, loader_only=True
             )
     return VulkanInfo(available=False)
+
+
+#: Seconds the driver probe may take (a first Vulkan instance can compile shader caches).
+_VKPROBE_TIMEOUT = 20
+
+
+def _run_vkprobe() -> dict | None:
+    """``nadare _vkprobe`` in its own process: its JSON answer, or ``None`` on any failure."""
+    try:
+        proc = subprocess.run(  # noqa: S603 - our own executable, fixed argv
+            vkprobe.command(),
+            env=process.child_environ(),
+            capture_output=True,
+            text=True,
+            timeout=_VKPROBE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout or "")
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) and isinstance(data.get("devices"), list) else None
+
+
+def _info_from_probe(data: Mapping[str, Any]) -> VulkanInfo | None:
+    """The best GPU the probe found; ``None`` when it found no device at all."""
+    devices = [d for d in data.get("devices", []) if isinstance(d, Mapping)]
+    if not devices:
+        return None
+    gpus = [d for d in devices if d.get("type") != "cpu"]
+    if not gpus:
+        return VulkanInfo(available=False, driver="software")
+
+    def rank(device: Mapping[str, Any]) -> tuple:
+        numbers = tuple(int(part) for part in re.findall(r"\d+", str(device.get("api") or "")))
+        return (numbers, device.get("type") == "discrete")
+
+    best = max(gpus, key=rank)
+    return VulkanInfo(
+        available=True,
+        api_version=_normalize_version(best.get("api")),
+        device=str(best.get("name") or "") or None,
+    )
 
 
 def has_display(environ: Mapping[str, str] | None = None) -> bool:
@@ -291,7 +346,8 @@ def dxvk_ok() -> bool:
 
 _LOADER_ONLY_NOTE = (
     "Vulkan version could not be read from the driver (vulkan-tools is missing); "
-    "DXVK was assumed to work. If the game shows a black screen, try the OpenGL renderer."
+    "DXVK was assumed to work. If the game shows a black screen, set Renderer to OpenGL "
+    "(Settings → Game, Show advanced options)."
 )
 
 
@@ -300,8 +356,10 @@ def vulkan_note() -> str:
     if dxvk_ok():
         return _LOADER_ONLY_NOTE if vulkan_info().loader_only else ""
     return (
+        # Renderer is an advanced row: say how to reach it, not just "open Settings".
         "Your graphics driver looks old for Vulkan games. If the game will not "
-        "start, open Settings and try the OpenGL renderer."
+        "start, open Settings → Game, tick Show advanced options and set Renderer "
+        "to OpenGL."
     )
 
 

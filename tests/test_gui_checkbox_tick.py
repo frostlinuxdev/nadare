@@ -20,6 +20,10 @@ _INK = (0x08, 0x13, 0x1F)
 _ACCENT = (0x3D, 0x8B, 0xFD)
 
 
+# This file restyles the whole app: end earlier tests' windows first (#1024).
+pytestmark = pytest.mark.usefixtures("restyle_safe")
+
+
 @pytest.fixture(scope="module")
 def qapp():
     app = QApplication.instance()

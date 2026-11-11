@@ -34,13 +34,17 @@ _SRC = str(REPO / "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from nadare.core import archivepins  # noqa: E402
+from nadare.core import archivepins, installerpins  # noqa: E402
 
 UNCHANGED = 3
 #: Games whose publisher gives no md5 for the archive. Their pin is built from what the node
 #: streamed (trust on first use): it still stops a later swap on the CDN, but it cannot prove
 #: the first copy was genuine. Every other game needs the publisher's md5 on each part.
-FIRST_USE_GAMES = frozenset({"gfl2"})
+FIRST_USE_GAMES = frozenset(
+    {"gfl2", "bd2", "nikke-installer", "endfield-installer"}
+)
+#: Tags whose URL never changes, so an existing pin must be hashed again every run.
+ALWAYS_REPIN = frozenset({"nikke-installer"})
 DEFAULT_MAX_BYTES = 128 << 30
 DEFAULT_DEADLINE = 2 * 3600
 _READ_CHUNK = 1 << 20
@@ -69,14 +73,17 @@ def _check_block_size(block_size: int) -> None:
 
 def resolver_for(tag: str) -> Callable[[], Any]:
     """The resolver that produces the latest plan for ``tag``."""
-    from nadare.core.sources import aethergazer, endfield, gfl2, hoyo, mongil
+    from nadare.core.sources import aethergazer, bd2, endfield, gfl2, hoyo, mongil
 
     resolvers = {
         "aethergazer": aethergazer.resolve,
         "mongil": mongil.resolve,
         "endfield": endfield.resolve,
         "gfl2": gfl2.resolve,
+        "bd2": bd2.resolve,
         "hi3": lambda: hoyo.resolve("bh3_global"),
+        "nikke-installer": lambda: installerpins.resolve("nikke-installer"),
+        "endfield-installer": lambda: installerpins.resolve("endfield-installer"),
     }
     resolver = resolvers.get(tag)
     if resolver is None:
@@ -281,6 +288,7 @@ def publish_pin(
             pinned = existing.get(archive.name)
             if (
                 pinned is not None
+                and tag not in ALWAYS_REPIN
                 and pinned.matches(parts, md5)
                 and pinned.block_size == block_size
                 and pinned.publisher_md5 == expected_md5

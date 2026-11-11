@@ -51,7 +51,10 @@ def resolve(fetch: Fetch | None = None) -> directdl.Plan:
         raise directdl.DirectError("update file name has no md5")
 
     source = directdl.RemoteFile(path=name, url=url, md5=md5)
-    archive = directdl.Archive(name=name, source=source, unwrap=("zip",), stream=True)
+    # The zip is named after the version and its MD5: one "client" across versions (#967).
+    archive = directdl.Archive(
+        name=name, source=source, unwrap=("zip",), stream=True, slot="client"
+    )
     return directdl.Plan(
         game_tag="aethergazer",
         version=version,

@@ -17,6 +17,15 @@ import pytest
 
 from nadare.core import graphics
 
+
+@pytest.fixture(autouse=True)
+def _no_real_driver_probe(monkeypatch):
+    """These tests are about vulkaninfo and the fallbacks; the driver probe has test_vkprobe.py.
+
+    Without this the real probe would answer from the test machine's GPU.
+    """
+    monkeypatch.setattr(graphics, "_run_vkprobe", lambda: None)
+
 # ---------------------------------------------------------------------------
 # vulkaninfo parsing
 # ---------------------------------------------------------------------------

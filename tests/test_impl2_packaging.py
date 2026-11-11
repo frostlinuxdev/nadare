@@ -11,6 +11,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from _timing import scaled
 
 from nadare import app
 from nadare.core import logging as nadare_logging
@@ -197,7 +198,7 @@ def test_wheel_includes_locale_assets(tmp_path):
         ],
         check=True,
         cwd=work,
-        timeout=120,
+        timeout=int(scaled(120)),
     )
     wheel = next(out.glob("*.whl"))
     names = zipfile.ZipFile(wheel).namelist()

@@ -14,12 +14,24 @@ issue tracker are at [github.com/frostlinuxdev/nadare](https://github.com/frostl
 
 1. Download `Nadare-<version>-x86_64.AppImage` from the releases page and check its
    SHA-256 against the sum published there.
-2. Make it executable and run it:
+2. Start it. A downloaded AppImage is not allowed to run yet, so double-clicking it does
+   nothing at all on Mint or Ubuntu (KDE asks "Launch?" and then also does nothing).
+   Pick one:
 
-   ```sh
-   chmod +x Nadare-*-x86_64.AppImage
-   ./Nadare-*-x86_64.AppImage
-   ```
+   - **Terminal, one line:**
+
+     ```sh
+     chmod +x Nadare-*-x86_64.AppImage && ./Nadare-*-x86_64.AppImage
+     ```
+
+   - **No terminal:** install [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever)
+     from your Software app (Flathub), then double-click the AppImage. Gear Lever opens it
+     and can add Nadare to your app menu.
+   - **Mint, without Gear Lever:** right-click the file → **Properties** → **Permissions**
+     → tick **Allow executing file as program**, then double-click it.
+
+   Double-clicking never installs anything: the Store is inside the app. Step-by-step with
+   pictures: [docs/INSTALL.md](docs/INSTALL.md).
 
    Without FUSE (containers, some hardened systems), add `--appimage-extract-and-run`.
 3. Open the **Store** (first item in the sidebar), pick a game, choose an install folder,
@@ -53,7 +65,7 @@ New here? Read the [tester guide](docs/TESTERS.md). Something wrong?
 Run `./Nadare-*.AppImage doctor` and see [Troubleshooting](docs/TROUBLESHOOTING.md).
 
 Tested on NVIDIA + CachyOS and on AMD (RX 7900 XTX, Mesa, Debian 13), and the AppImage
-starts on Ubuntu 22.04 and 24.04, Debian 12, Fedora 44, Arch and Mint 22.1. Real game runs on
+starts from the command above on Ubuntu 22.04 and 24.04, Debian 12, Fedora 44, Arch and Mint 22.1. Real game runs on
 Intel GPUs are not verified yet.
 
 ---
@@ -77,7 +89,6 @@ is covered by tests but has not been played end to end, or needs a workaround.
 | Genshin Impact, Honkai: Star Rail, Zenless Zone Zero | Verified |
 | Wuthering Waves, NIKKE | Verified |
 | Arknights: Endfield, Neverness to Everness (direct install), Mongil: Star Dive | Verified |
-| Girls' Frontline 2 (Haoplay launcher), Neverness to Everness (publisher's launcher) | Experimental |
 | Fate/Grand Order (NA) | Experimental, source checkouts only, needs podman and an NVIDIA GPU |
 
 How the catalog works, and how to add a game, is in [docs/CATALOG.md](docs/CATALOG.md).
@@ -93,6 +104,8 @@ How the catalog works, and how to add a game, is in [docs/CATALOG.md](docs/CATAL
   can afford to lose.**
 - Nadare **does not touch, bypass or disable anti-cheat.** It is not a cheat and changes
   nothing inside the game.
+- Games run in a **Sandbox** by default that hides your home folder, other drives and your
+  keyring from them. You can turn it off per game on its page.
 - **No game files, credentials or provider secrets are shipped.** Games come from the
   publishers' own servers, and tokens are minted from your own login.
 - Nadare installs Microsoft's official Visual C++ 2015-2022 runtime (downloaded from
@@ -129,8 +142,8 @@ and Fate/Grand Order.
 
 Nadare tells you when a new release is out. When it runs from an AppImage in a folder you can
 write to, the banner says **Update**: Nadare downloads the new AppImage, checks it against a
-checksum from the Nadare index, keeps your old copy as `*.previous`, and asks before
-restarting. Otherwise, download the new AppImage and replace the old one. To remove Nadare and
+checksum from the Nadare index and against the release signature, keeps your old copy as
+`*.previous`, and asks before restarting. Otherwise, download the new AppImage and replace the old one. To remove Nadare and
 its data, see [Uninstall](docs/TROUBLESHOOTING.md#uninstall).
 
 ## Report a bug
@@ -159,7 +172,7 @@ pressed and what you expected. Never attach tokens, QR codes or full auth traffi
 ## License
 
 Nadare is free software, distributed under the **GNU General Public License v3.0 only**
-(`GPL-3.0-only`); the full text is in [LICENSE](LICENSE). Every source file carries an
+(`GPL-3.0-only`); the full text is in [LICENSE](LICENSE). Most source files carry an
 SPDX header. Most say `GPL-3.0-or-later`, but `src/nadare/backends/czn/auth.py` is
 **GPL-3.0-only** because it derives from a project that grants no "or later" clause, so
 keep its header intact. Packagers: use `License: GPL-3.0-only`. How the code was produced,

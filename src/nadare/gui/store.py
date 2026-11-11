@@ -389,7 +389,9 @@ class StorePage(QWidget):
         for game in games:
             primary = game.primary
             shown = primary
-            if len(game.entries) > 1:
+            # Count the whole game's builds, not the ones the search left: a search that keeps
+            # one build of a grouped game must still show it as the game (and "Added").
+            if len(whole[primary.kind].entries) > 1:
                 shown = replace(
                     primary,
                     title=game.title,

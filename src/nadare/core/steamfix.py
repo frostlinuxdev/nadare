@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -366,12 +367,13 @@ def make_backup(prefix: Path, dest: Path) -> Backup:
     size = prefix_size(prefix)
     dest.parent.mkdir(parents=True, exist_ok=True)
     diskspace.check_space(dest.parent, size)  # a copy that fills the disk breaks Steam too
-    staging = dest.with_name(f".{dest.name}.partial-{os.getpid()}")
+    staging = dest.with_name(f".{dest.name}.partial-{os.getpid()}-{uuid.uuid4().hex}")
     try:
         shutil.copytree(prefix, staging, symlinks=True)
         staging.rename(dest)
     except OSError as exc:
-        shutil.rmtree(staging, ignore_errors=True)
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
         raise BackendError(f"could not back up the prefix to {dest}: {exc}") from exc
     return Backup(source=prefix, dest=dest, size_bytes=size)
 

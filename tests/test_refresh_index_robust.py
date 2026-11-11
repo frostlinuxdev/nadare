@@ -101,3 +101,63 @@ def test_the_refresher_runs_the_art_index_canary_unless_canaries_are_skipped():
     assert (
         'exit "$' not in text[block_start : block_start + 700]
     )  # a canary never blocks publishing
+
+
+# ---- #1209 P0-4: a failing node says so, with its name -----------------------------------------
+HEARTBEAT = "https://kuma.example/api/push/SECRET-TOKEN-123?status=up&msg=OK&ping="
+
+
+def _fake_curl(tmp_path: Path) -> tuple[Path, Path]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    log = tmp_path / "curl.log"
+    curl = bin_dir / "curl"
+    curl.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> {log}\n')
+    curl.chmod(0o755)
+    return bin_dir, log
+
+
+def test_a_failed_run_pings_down_with_the_node_name(tmp_path):
+    """sw1 failed for 24 days unseen: the shared heartbeat only heard the nodes that worked."""
+    import socket
+
+    bin_dir, log = _fake_curl(tmp_path)
+    full = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "HOME": str(tmp_path / "home"),
+        "NADARE_INDEX_DIR": str(tmp_path / "no-such-index"),  # fails at once
+        "NADARE_SKIP_CANARY": "1",
+        "NADARE_HEARTBEAT_URL": HEARTBEAT,
+    }
+    (tmp_path / "home").mkdir(exist_ok=True)
+    result = subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True, env=full,
+                            timeout=60, check=False)
+    assert result.returncode != 0
+    pings = log.read_text().splitlines() if log.exists() else []
+    assert len(pings) == 1
+    assert "status=down" in pings[0]
+    assert socket.gethostname().split(".")[0] in pings[0]
+    assert "SECRET-TOKEN-123" not in result.stdout + result.stderr  # the URL is a secret
+
+
+def test_a_run_that_finds_another_run_going_pings_nothing(tmp_path):
+    bin_dir, log = _fake_curl(tmp_path)
+    runtime = tmp_path / "rt"
+    runtime.mkdir()
+    holder = subprocess.Popen(  # another run holds the lock
+        ["flock", str(runtime / "nadare-refresh-index.lock"), "sleep", "5"]
+    )
+    try:
+        import time
+
+        time.sleep(0.3)
+        result = _run(
+            tmp_path,
+            XDG_RUNTIME_DIR=str(runtime),
+            PATH=f"{bin_dir}:{os.environ['PATH']}",
+            NADARE_HEARTBEAT_URL=HEARTBEAT,
+        )
+    finally:
+        holder.kill()
+    assert result.returncode == 0 and "already running" in result.stdout
+    assert not log.exists()

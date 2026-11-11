@@ -590,7 +590,6 @@ def _local(tmp_path: Path) -> Path:
 
 
 def test_the_wayland_step_closes_steam_sets_the_option_and_starts_steam_again(tmp_path):
-    from nadare.core import steamwayland
 
     path = _local(tmp_path)
     rec = Recorder()
@@ -604,7 +603,8 @@ def test_the_wayland_step_closes_steam_sets_the_option_and_starts_steam_again(tm
         "PROTON_ENABLE_WAYLAND=1 %command%"
     )
     assert result.backup is not None and result.backup.read_text() == LOCAL_CONFIG
-    assert result.previous == steamwayland.LaunchUndo(None)
+    assert result.previous.previous is None
+    assert result.previous.written == "PROTON_ENABLE_WAYLAND=1 %command%"
     assert "Wayland" in result.line
 
 
@@ -638,6 +638,43 @@ def test_the_wayland_step_can_be_undone_to_exactly_what_was_there(tmp_path):
     )
     assert undone.ok
     assert path.read_text() == LOCAL_CONFIG
+
+
+def test_undo_leaves_launch_options_the_player_changed_afterwards(tmp_path):
+    """Steam finding 4: Undo wrote the old string back over options typed in Steam later."""
+    path = _local(tmp_path)
+    rec = Recorder(steam_up=False)
+    done = steamrun.set_wayland(
+        "3224770", localconfig_path=path, run=rec.run,
+        steam_running=rec.running, wait_gone=rec.wait_gone,
+    )
+    edited = steamtools.edit_launch_options_text(
+        path.read_text(), "3224770", "PROTON_ENABLE_WAYLAND=1 -dx11 %command%"
+    )
+    path.write_text(edited)  # the player added -dx11 in Steam's Properties
+    undone = steamrun.restore_wayland(
+        "3224770", done.previous, localconfig_path=path, run=rec.run,
+        steam_running=rec.running, wait_gone=rec.wait_gone,
+    )
+    assert path.read_text() == edited
+    assert not undone.changed
+    assert "changed" in undone.line and "Steam" in undone.line
+
+
+def test_an_older_saved_undo_without_what_was_written_still_restores(tmp_path):
+    from nadare.core import steamwayland
+
+    path = _local(tmp_path)
+    rec = Recorder(steam_up=False)
+    steamrun.set_wayland(
+        "3224770", localconfig_path=path, run=rec.run,
+        steam_running=rec.running, wait_gone=rec.wait_gone,
+    )
+    undone = steamrun.restore_wayland(
+        "3224770", steamwayland.LaunchUndo(None), localconfig_path=path, run=rec.run,
+        steam_running=rec.running, wait_gone=rec.wait_gone,
+    )
+    assert undone.ok and path.read_text() == LOCAL_CONFIG
 
 
 def test_steam_that_does_not_close_leaves_the_launch_options_alone(tmp_path):
@@ -748,3 +785,14 @@ def test_the_wayland_step_writes_the_games_extra_variables_too(tmp_path):
     assert steamtools.read_launch_options(path.read_text(), "3224770") == (
         "PROTON_ENABLE_WAYLAND=1 UMU_ID=0 %command%"
     )
+
+
+def test_a_steam_command_that_cannot_be_found_is_said_plainly():
+    """Exit code 127 is the shell's "command not found": say that, not a bare number."""
+    for result in (
+        steamrun.request_steam_install("3224770", run=lambda argv: 127),
+        steamrun.unlock_h264(run=lambda argv: 127),
+    ):
+        assert not result.ok
+        assert "127" not in result.line
+        assert "could not find" in result.line and "Steam" in result.line

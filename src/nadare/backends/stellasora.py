@@ -24,7 +24,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..core import graphics, monitors
-from ..core.backends import BackendError, Option
+from ..core.backends import PREFIX_HELP, BackendError, Option
 from .arknights import INSTALLED_PREFIX_KEY, ArknightsBackend
 from .arknights_news import IMAGE_HOSTS, fetch_stellasora_news
 
@@ -55,7 +55,7 @@ class StellaSoraBackend(ArknightsBackend):
     dxvk_config = ""  # Stella Sora presents fine with DXVK 3.1.1
 
     options = (
-        Option("prefix", "Wine prefix", "path_dir", "WINEPREFIX used for this game."),
+        Option("prefix", "Wine prefix", "path_dir", PREFIX_HELP),
         Option("install_dir", "Game folder", "path_dir", "Where the game lives."),
         Option("exe_name", "Game executable", "text", advanced=True),
         Option(
@@ -108,8 +108,8 @@ class StellaSoraBackend(ArknightsBackend):
             "Sandbox",
             "bool",
             "Hides your home folder from the game (needs bubblewrap). The game can still use "
-            "the network. Experimental: see docs/SECURE-MODE.md.",
-            default=False,
+            "the network. See docs/SECURE-MODE.md.",
+            default=True,
         ),
         Option("wine_binary", "Wine binary", "path_file", advanced=True),
         Option("umu_binary", "umu-run binary", "path_file", advanced=True),

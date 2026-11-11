@@ -16,12 +16,12 @@ def _text(rel: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# #38 - the maintainer units stay system units that read their root-only env files
+# #38 - the optional units stay system units that read a root-only env file
 # ---------------------------------------------------------------------------
 class TestMaintainerUnits:
     def test_the_pin_unit_still_reads_its_root_only_environment_file(self):
-        # A `systemctl --user` unit cannot read /etc/*.env (mode 600, root); the nodes run
-        # this as a system unit with User= set.
+        # A `systemctl --user` unit cannot read a root-owned env file (mode 600); it has to
+        # run as a system unit with User= set.
         service = _text("packaging/systemd/nadare-pin-publisher.service")
         assert "EnvironmentFile=-/etc/nadare-pin-publisher.env" in service
         assert "WantedBy=default.target" not in service

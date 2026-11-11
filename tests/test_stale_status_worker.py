@@ -74,3 +74,15 @@ def test_a_status_check_on_an_idle_page_still_finishes_it(window):
     window.game._busy_op = "status"
     window._on_succeeded("g", "status", 0)
     assert window.game._busy_op is None
+
+
+def test_a_status_failure_for_a_removed_game_does_not_bring_its_state_back(window):
+    """Round 4: _on_result had a generation guard, _on_failed did not."""
+    from types import SimpleNamespace
+
+    window._start("g", "status", silent=True)  # records the worker's generation
+    window._on_game_removed("g", SimpleNamespace(profile_kept=False, warnings=[]))
+    assert "g" not in window.config.profiles
+    window._on_failed("g", "status", "offline")
+    assert "g" not in window._snapshots
+    assert "g" not in window._status_errors

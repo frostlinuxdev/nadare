@@ -181,3 +181,75 @@ def test_does_not_quit_while_a_queued_remember_me_worker_runs(tmp_path, qapp, mo
         assert quits == [1]
     finally:
         _teardown(window, qapp)
+
+
+# ---- #114: say that Nadare is still there ------------------------------------------------
+def _sent(monkeypatch):
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        mw.notify, "send", lambda summary, body="": calls.append((summary, body)) or True
+    )
+    return calls
+
+
+def test_hidden_text_names_the_game_and_how_to_come_back():
+    summary, body = mw.notify.still_running_text(["Wuthering Waves"])
+    assert summary == "Nadare is still running"
+    assert "Wuthering Waves is running" in body
+    assert "quits when the game exits" in body
+    assert "Start Nadare again" in body
+
+
+def test_hidden_text_with_two_games():
+    _summary, body = mw.notify.still_running_text(["B", "A"])
+    assert "A and B are running" in body
+    assert "quits when the games exit" in body
+
+
+def test_close_during_game_sends_one_notification(tmp_path, qapp, monkeypatch):
+    sent = _sent(monkeypatch)
+    window = _window(tmp_path, qapp)
+    window.config.add_profile("wuwa", backend="wine", title="Wuthering Waves")
+    window.controller._workers["wuwa"] = _FakeWorker("launch")
+    try:
+        _close(window, qapp)
+        assert len(sent) == 1
+        assert sent[0][0] == "Nadare is still running"
+        assert "Wuthering Waves" in sent[0][1]
+    finally:
+        _teardown(window, qapp)
+
+
+def test_close_without_game_sends_nothing(tmp_path, qapp, monkeypatch):
+    sent = _sent(monkeypatch)
+    window = _window(tmp_path, qapp)
+    try:
+        _close(window, qapp)
+        assert sent == []
+    finally:
+        _teardown(window, qapp)
+
+
+def test_close_from_a_signal_sends_nothing(tmp_path, qapp, monkeypatch):
+    sent = _sent(monkeypatch)
+    window = _window(tmp_path, qapp)
+    window.controller._workers["game"] = _FakeWorker("launch")
+    try:
+        window._request_close_from_signal()
+        qapp.processEvents()
+        assert not window.isVisible()
+        assert sent == []
+    finally:
+        _teardown(window, qapp)
+
+
+def test_notifications_off_sends_nothing(tmp_path, qapp, monkeypatch):
+    sent = _sent(monkeypatch)
+    window = _window(tmp_path, qapp)
+    window.config.data["notify_when_done"] = False
+    window.controller._workers["game"] = _FakeWorker("launch")
+    try:
+        _close(window, qapp)
+        assert sent == []
+    finally:
+        _teardown(window, qapp)

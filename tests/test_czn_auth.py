@@ -1109,3 +1109,24 @@ def test_a_refresh_keeps_the_known_identity(authmod, monkeypatch):
     stove, _ = _stove(authmod, monkeypatch, state={"member_no": "111", "guid": "G1"})
     stove._apply_signin({"code": 0, "value": {"access_token": "AT", "refresh_token": "RT"}})
     assert stove.member_no == "111" and stove.guid == "G1"
+
+
+def test_renew_fails_on_an_http_error_without_a_code(authmod, monkeypatch, tmp_path):
+    """Sweep b23r1 c02: a 401/500 JSON body with no ``code`` was taken as a renewal."""
+    cred = tmp_path / "cred.json"
+    monkeypatch.setenv("CZN_CREDENTIAL_OUT", str(cred))
+    stove, _ = _stove(
+        authmod, monkeypatch, [FakeResponse({"error": "unauthorized"}, status_code=401)]
+    )
+    stove.launcher_refresh = "RT1"
+    with pytest.raises(RuntimeError, match="HTTP 401"):
+        stove.renew()
+    assert not cred.exists()
+
+
+def test_qr_signin_fails_on_an_http_error_without_a_code(authmod, monkeypatch):
+    stove, _ = _stove(
+        authmod, monkeypatch, [FakeResponse({"error": "unauthorized"}, status_code=401)]
+    )
+    with pytest.raises(RuntimeError, match="HTTP 401"):
+        stove.signin_qr("sess")

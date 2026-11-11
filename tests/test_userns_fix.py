@@ -46,12 +46,12 @@ def test_default_script_targets_the_real_paths_only() -> None:
 
 
 def test_can_fix_needs_pkexec_and_no_flatpak(monkeypatch) -> None:
-    monkeypatch.setattr(userns.shutil, "which", lambda name: "/usr/bin/pkexec")
+    monkeypatch.setattr(userns.shutil, "which", lambda name, *_a, **_k: "/usr/bin/pkexec")
     monkeypatch.setattr(sandbox, "in_flatpak", lambda: False)
     assert userns.can_fix() is True
-    monkeypatch.setattr(userns.shutil, "which", lambda name: None)
+    monkeypatch.setattr(userns.shutil, "which", lambda name, *_a, **_k: None)
     assert userns.can_fix() is False
-    monkeypatch.setattr(userns.shutil, "which", lambda name: "/usr/bin/pkexec")
+    monkeypatch.setattr(userns.shutil, "which", lambda name, *_a, **_k: "/usr/bin/pkexec")
     monkeypatch.setattr(sandbox, "in_flatpak", lambda: True)
     assert userns.can_fix() is False
 

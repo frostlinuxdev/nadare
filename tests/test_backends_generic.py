@@ -132,7 +132,8 @@ class TestWineBuild:
         (proton / "files" / "bin").mkdir(parents=True)
         (proton / "files" / "bin" / "wine").write_text("")
         monkeypatch.setattr(
-            wine_mod.shutil, "which", lambda name: "/opt/umu-run" if name == "umu-run" else None
+            wine_mod.shutil, "which",
+            lambda name, *_a, **_k: "/opt/umu-run" if name == "umu-run" else None,
         )
         ctx = make_context(
             tmp_path,
@@ -172,7 +173,8 @@ class TestWineBuild:
         proton.mkdir()
         (proton / "proton").write_text("")
         monkeypatch.setattr(
-            wine_mod.shutil, "which", lambda name: "/opt/umu-run" if name == "umu-run" else None
+            wine_mod.shutil, "which",
+            lambda name, *_a, **_k: "/opt/umu-run" if name == "umu-run" else None,
         )
         ctx = make_context(
             tmp_path,
@@ -206,7 +208,7 @@ class TestWineBuild:
         proton = tmp_path / "proton"
         proton.mkdir()
         (proton / "proton").write_text("")
-        monkeypatch.setattr(wine_mod.shutil, "which", lambda name: None)
+        monkeypatch.setattr(wine_mod.shutil, "which", lambda name, *_a, **_k: None)
         ctx = make_context(
             tmp_path,
             "wine",
@@ -274,7 +276,8 @@ class TestWineBuild:
 class TestSteamBuild:
     def test_rungameid_uri(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            steam_mod.shutil, "which", lambda name: "/usr/bin/steam" if name == "steam" else None
+            steam_mod.shutil, "which",
+            lambda name, *_a, **_k: "/usr/bin/steam" if name == "steam" else None,
         )
         ctx = make_context(tmp_path, "steam", {"steam_app_id": "12345", "steam_binary": "steam"})
         argv, app_id = SteamBackend(ctx).build()
@@ -307,7 +310,7 @@ class TestSteamBuild:
             SteamBackend(ctx).build()
 
     def test_status_without_client_is_not_installed(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(steam_mod.shutil, "which", lambda name: None)
+        monkeypatch.setattr(steam_mod.shutil, "which", lambda name, *_a, **_k: None)
         ctx = make_context(tmp_path, "steam", {"steam_app_id": "1"})
         status = SteamBackend(ctx).status()
         assert status.state == "not_installed"
@@ -320,7 +323,8 @@ class TestSteamBuild:
     def test_whitespace_binary_falls_back_to_default(self, tmp_path, monkeypatch):
         """05-5: a whitespace-only steam_binary must not raise IndexError."""
         monkeypatch.setattr(
-            steam_mod.shutil, "which", lambda name: "/usr/bin/steam" if name == "steam" else None
+            steam_mod.shutil, "which",
+            lambda name, *_a, **_k: "/usr/bin/steam" if name == "steam" else None,
         )
         ctx = make_context(tmp_path, "steam", {"steam_app_id": "1", "steam_binary": "   "})
         argv, app_id = SteamBackend(ctx).build()

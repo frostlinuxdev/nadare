@@ -118,20 +118,23 @@ def test_arknights_and_stella_offer_the_display_choice(tmp_path, qapp):
         qapp.processEvents()
 
 
-def test_a_custom_runner_that_does_not_exist_is_warned_about_on_save(tmp_path, qapp, monkeypatch):
+def test_a_custom_runner_that_does_not_exist_is_refused_on_save(tmp_path, qapp, monkeypatch):
     shown: list[str] = []
     monkeypatch.setattr(
-        "nadare.gui.settings.QMessageBox.open", lambda self, *a: shown.append(self.text())
+        "nadare.gui.settings.QMessageBox.warning",
+        staticmethod(lambda parent, title, text, *a, **k: shown.append(text)),
     )
     config = _config(tmp_path, "stove-czn")
+    before = config.profile("sample").get("runner", "")
     page = SettingsPage()
     try:
         page.load(config, "sample")
         page.runner.setEditText("not-a-real-runner")
         page.save()
-        assert shown, "saving a missing custom runner must warn"
+        assert shown, "saving a missing custom runner must say why it was not saved"
         assert "not installed" in shown[0].lower()
         assert "pick one from the list" in shown[0].lower()
+        assert config.profile("sample").get("runner", "") == before
     finally:
         page.deleteLater()
         qapp.processEvents()

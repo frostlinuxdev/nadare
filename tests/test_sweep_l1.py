@@ -15,10 +15,10 @@ from nadare.core.config import Config
 
 REPO = Path(__file__).resolve().parents[1]
 
-#: These pin the wording of the maintainer docs (README/TESTERS/TESTING). The public
-#: tree has its own shorter docs and no TESTING.md, so they skip there.
+#: These pin the wording of the longer docs (README/TESTERS/TESTING). Some checkouts
+#: carry shorter docs and no TESTING.md, so they skip there.
 maintainer_docs = pytest.mark.skipif(
-    not (REPO / "TESTING.md").exists(), reason="maintainer docs are not in the public tree"
+    not (REPO / "TESTING.md").exists(), reason="the longer docs are not in this checkout"
 )
 
 

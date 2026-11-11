@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Decrypt the packets captured by client.exe and compare with the session file.
+"""Decrypt a handshake packet and compare it with the session file.
 
 usage: verify.py <priv.pem> <session.json> <got.txt>
 """

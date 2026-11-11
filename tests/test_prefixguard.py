@@ -114,3 +114,28 @@ def test_broad_means_home_its_ancestors_a_hidden_mount_or_a_drive(home, monkeypa
     assert prefixguard.too_broad_to_bind(home.parent, home)
     assert prefixguard.too_broad_to_bind(Path("/"), home)
     assert not prefixguard.too_broad_to_bind(home / "Games" / "A", home)
+
+
+def test_explain_advises_a_folder_inside_a_broad_location(home):
+    text = prefixguard.explain(home, prefixguard.unsafe_reason(home))
+    assert "Pick a folder inside it" in text
+
+
+def test_explain_for_a_folder_another_game_uses_does_not_say_pick_inside(home):
+    shared = home / "Games" / "one"
+    profiles = {"one": {"title": "One", "prefix": str(shared)}}
+    reason = prefixguard.unsafe_reason(shared, profiles=profiles)
+    text = prefixguard.explain(shared, reason)
+    assert "already used by One" in text
+    assert "inside it" not in text  # a folder inside another game's folder is refused too
+    assert "its own folder" in text
+
+
+def test_explain_for_a_folder_with_other_files_asks_for_an_empty_one(home):
+    busy = home / "Stuff"
+    busy.mkdir()
+    (busy / "notes.txt").write_text("x")
+    reason = prefixguard.unsafe_reason(busy, as_prefix=True)
+    text = prefixguard.explain(busy, reason)
+    assert "inside it" not in text
+    assert "empty folder" in text

@@ -438,7 +438,7 @@ def test_a_flatpak_steam_is_seen_as_running(tmp_path):
 
 
 LOGINUSERS = (
-    '"users"\n{\n\t"76561198313531351"\n\t{\n\t\t"AccountName"\t\t"old"\n'
+    '"users"\n{\n\t"76561198000000040"\n\t{\n\t\t"AccountName"\t\t"old"\n'
     '\t\t"MostRecent"\t\t"0"\n\t}\n\t"76561198000000042"\n\t{\n'
     '\t\t"AccountName"\t\t"now"\n\t\t"MostRecent"\t\t"1"\n\t}\n}\n'
 )

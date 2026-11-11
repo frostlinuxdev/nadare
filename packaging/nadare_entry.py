@@ -48,9 +48,12 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
     if getattr(sys, "frozen", False):
+        from nadare.core.fontlibs import prefer_host_font_libs_frozen
         from nadare.core.process import restore_host_env
 
         restore_host_env()
+        # Before anything imports Qt: the host's fontconfig reads the host's /etc/fonts (#669).
+        prefer_host_font_libs_frozen()
 
     # PyInstaller-frozen interpreter shim. The CZN backend spawns its helper
     # modules (auth/update/runners) with ``sys.executable -m <module>``; see

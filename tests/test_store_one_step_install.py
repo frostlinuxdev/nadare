@@ -86,9 +86,13 @@ def test_the_notice_is_shown_once_and_remembered(tmp_path, qapp, monkeypatch):
         assert shown[0].notice_text  # first time: the notice is part of the dialog
         assert cfg.data["unofficial_notice_ack"] == [KIND]
         assert Config.load(tmp_path / "config.json").data["unofficial_notice_ack"] == [KIND]
+        # Reinstalling after removing the game keeps the acknowledgement.
+        (name,) = cfg.profiles
+        cfg.remove_profile(name)
+        cfg.save()
         window._store_install(KIND)
         assert shown[1].notice_text == ""  # already acknowledged
-        assert len(cfg.profiles) == 2 and len(started) == 2
+        assert len(cfg.profiles) == 1 and len(started) == 2
     finally:
         window.close()
 

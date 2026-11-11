@@ -58,9 +58,10 @@ def test_a_missing_bwrap_stops_the_launch_and_says_why(tmp_path, monkeypatch):
     assert "Sandbox" in message and "bubblewrap" in message
 
 
-def test_flatpak_is_refused_instead_of_silently_unprotected(tmp_path, monkeypatch, has_bwrap):
+def test_flatpak_without_flatpak_spawn_refuses_an_explicit_sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(sandbox, "in_flatpak", lambda: True)
-    with pytest.raises(BackendError, match="Sandbox"):
+    monkeypatch.setattr(gamesandbox, "_flatpak_spawn", lambda: None)
+    with pytest.raises(BackendError, match="flatpak-spawn"):
         _backend(tmp_path, secure_mode=True).build_launch()
 
 
@@ -82,7 +83,7 @@ def test_every_launcher_game_and_every_direct_game_offer_the_option():
     direct_kinds = [k for k in kinds() if issubclass(get(k), DirectBackend)]
     launcher_kinds = [k for k in kinds() if issubclass(get(k), LauncherBackend)]
     assert len(direct_kinds) >= 10, direct_kinds
-    assert {"launcher-nikke", "launcher-nte", "launcher-gfl2-haoplay"} <= set(launcher_kinds)
+    assert "launcher-nikke" in launcher_kinds
     for kind in [*launcher_kinds, *direct_kinds]:
         assert _offers(kind), kind
         assert get(kind).supports_secure_mode, kind
@@ -90,7 +91,6 @@ def test_every_launcher_game_and_every_direct_game_offer_the_option():
 
 def test_games_that_cannot_use_it_do_not_offer_it():
     for kind in (
-        "wine",
         "steam",
         "script",
         "stove-czn",
@@ -102,14 +102,15 @@ def test_games_that_cannot_use_it_do_not_offer_it():
 
 
 def test_a_launcher_game_runs_play_inside_the_sandbox(tmp_path, monkeypatch, has_bwrap):
-    """The publisher's launcher is the code Secure mode exists for: NTE's launcher too."""
-    from nadare.backends.launcher import NteBackend
+    """The publisher's launcher is the code Secure mode exists for."""
+    from _backend_helpers import fake_launcher_backend
 
     prefix = tmp_path / "prefix"
-    backend = NteBackend(
+    launcher_cls = fake_launcher_backend()
+    backend = launcher_cls(
         make_context(
             tmp_path,
-            "launcher-nte",
+            launcher_cls.kind,
             {"prefix": str(prefix), "wine_binary": "/usr/bin/wine", "secure_mode": True},
         )
     )
@@ -270,7 +271,7 @@ def test_a_link_the_game_opens_is_logged_by_host_only(tmp_path, monkeypatch, has
 
     backend = _direct_game(tmp_path)
     lines = []
-    monkeypatch.setattr(backend, "info", lines.append)
+    monkeypatch.setattr(backend, "info", lambda message, **_data: lines.append(message))
     captured = {}
     real_init = linkrelay.LinkRelay.__init__
 

@@ -23,6 +23,8 @@
 #   * a scan of stdout/stderr for ImportError, missing shared objects and
 #     Qt platform-plugin failures
 #   * a check that XDG config/data landed under the throwaway HOME
+#   * with NADARE_TEST_NETWORK=1: a real HTTPS download (fetch-art) through the
+#     bundled TLS stack
 #
 # It prints PASS/FAIL per check and exits non-zero if anything failed.
 #
@@ -176,6 +178,19 @@ if inx 'command -v Xvfb >/dev/null 2>&1 && command -v xvfb-run >/dev/null 2>&1';
     run_check "$xvfb_label" 'QT_QPA_PLATFORM=xcb NADARE_SMOKE_EXIT_MS=2000 timeout 60 xvfb-run -a "./nadare-test.AppImage"'
 else
     ck INFO "$xvfb_label" "skipped: Xvfb is not installed in the box"
+fi
+
+# --- a real HTTPS download through the bundled TLS stack (opt-in) ----------
+# NADARE_TEST_NETWORK=1 runs `fetch-art` for a catalog game: the index and the publisher's
+# cover come over HTTPS, so a broken bundled OpenSSL/CA bundle or curl_cffi fails here (#110).
+# Off by default: the rest of this script needs no network. Download cancel/resume is covered
+# by the unit tests (tests/test_download.py), which need no AppImage.
+net_label="HTTPS fetch through the bundled TLS stack (fetch-art)"
+if [ "${NADARE_TEST_NETWORK:-}" = 1 ]; then
+    run_check "$net_label" 'mkdir -p "$HOME/.config/nadare" && printf "%s" '"'"'{"schema": 1, "active_profile": "nettest", "profiles": {"nettest": {"backend": "direct-bd2", "title": "Brown Dust 2"}}}'"'"' > "$HOME/.config/nadare/config.json" && timeout 120 "./nadare-test.AppImage" fetch-art -p nettest && ls "$HOME/.local/share/nadare/covers" | grep -q .'
+    inx 'rm -f "$HOME/.config/nadare/config.json"; rm -rf "$HOME/.local/share/nadare/covers"' >/dev/null 2>&1
+else
+    ck INFO "$net_label" "skipped: set NADARE_TEST_NETWORK=1"
 fi
 
 # --- config under the throwaway HOME, nowhere else --------------------------

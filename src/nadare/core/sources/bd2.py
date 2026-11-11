@@ -65,6 +65,7 @@ def resolve(fetch: Fetch | None = None) -> directdl.Plan:
         source=source,
         unwrap=("zip", "zip"),
         inner_crc32=crc,
+        slot="client",  # the file is named after the version (#967)
     )
     return directdl.Plan(
         game_tag=_GAME_TAG,

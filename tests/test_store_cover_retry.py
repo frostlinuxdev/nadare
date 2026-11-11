@@ -27,9 +27,13 @@ def qapp():
 @pytest.fixture
 def page(qapp, monkeypatch):
     started: list[str] = []
-    monkeypatch.setattr(
-        QThreadPool, "start", lambda self, runnable, *a: started.append(runnable.kind)
-    )
+    def start(self, runnable, *a):
+        # Only cover fetches are counted. A fetch queued before this test can finish while
+        # it is set up and ask the image loader for a decode (#1024): that is not a request.
+        if isinstance(runnable, store._FetchArt):
+            started.append(runnable.kind)
+
+    monkeypatch.setattr(QThreadPool, "start", start)
     widget = StorePage()
     widget.show()  # builds the grid
     qapp.processEvents()

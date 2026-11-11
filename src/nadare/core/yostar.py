@@ -2,10 +2,9 @@
 # Copyright (C) 2026 Nadare contributors
 """Yostar direct downloads from a CI-signed manifest.
 
-Yostar's launcher API is authenticated with a per-game *salt* that must never
-ship in a GPL client.  A scheduled CI job
-(``ci/yostar-manifests/``) signs the calls with the salt and publishes a plain,
-normalised manifest.  This module is the client half:
+Yostar's launcher API is authenticated with per-game signing material that must
+never ship in a GPL client. A publishing job signs the calls and publishes a
+plain, normalised manifest. This module is the client half:
 
 * :func:`load_manifest` — read/validate a manifest (https URL, local path, or an
   index that points at per-game manifests);
@@ -72,6 +71,8 @@ __all__ = [
     "GAME_TAGS",
     "ALLOWED_HOST_SUFFIX",
     "ManifestError",
+    "ManifestRefused",
+    "SyncBusy",
     "Manifest",
     "ManifestFile",
     "crc64",
@@ -121,6 +122,19 @@ SCHEMA = 1
 
 class ManifestError(RuntimeError):
     """A manifest is missing, malformed, or failed verification."""
+
+
+class ManifestRefused(ManifestError):
+    """:func:`sync` refused before it wrote anything (untrusted host, another sync running)."""
+
+    #: True when another install or update holds this folder: its own marker is not ours to drop.
+    busy = False
+
+
+class SyncBusy(ManifestRefused):
+    """Another install or update already syncs this folder."""
+
+    busy = True
 
 
 # ---------------------------------------------------------------------------
@@ -998,7 +1012,15 @@ def _sync_entry(
         raise ManifestError(f"refusing to download {url}: host {host!r} is not allowed")
     destination = root / entry.path
     _refuse_symlinked_parent(root, destination, entry.path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    except (FileExistsError, NotADirectoryError) as exc:
+        # A file sits where the manifest needs a folder (left from an older build): a clear
+        # manifest error, not a raw FileExistsError out of a worker (#1207 b136).
+        raise ManifestError(
+            f"cannot create the folder for {entry.path}: a file is in the way ({exc}). "
+            "Repair the game, or move that file aside."
+        ) from exc
     part = destination.with_name(destination.name + ".part")
     key = entry.path
     last_error = "checksum mismatch"
@@ -1032,7 +1054,10 @@ def _sync_entry(
                 raise
             last_error = str(exc)
             if attempt == attempts - 1:
-                part.unlink(missing_ok=True)
+                # Keep what arrived after a network fault: the next sync resumes it, as
+                # download.stream_download intends (final round). Anything else starts over.
+                if not _is_network_download_error(exc):
+                    part.unlink(missing_ok=True)
                 if _is_network_download_error(exc):
                     log.info("download failed for %s: %s", url, exc)
                     raise ManifestError(
@@ -1077,7 +1102,7 @@ def _install_lock(install_dir: Path) -> Iterator[None]:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            raise ManifestError(
+            raise SyncBusy(
                 f"another install or update is already running for {install_dir}"
             ) from None
         yield
@@ -1137,17 +1162,17 @@ def _sync(
     base_host = parsed_base.hostname
     if not base_url_trusted(manifest.base_url, allowed_hosts):
         if parsed_base.scheme != "https" and (base_host or "").lower() not in _LOOPBACK_HOSTS:
-            raise ManifestError(
+            raise ManifestRefused(
                 f"refusing plain http download (https required): {manifest.base_url}"
             )
-        raise ManifestError(
+        raise ManifestRefused(
             f"refusing to download from untrusted host {base_host!r} "
             f"(manifest base_url {manifest.base_url!r})"
         )
     # FRESH-5: loopback is only a test affordance; a manifest fetched from a
     # remote host may not point the download at a localhost service (SSRF).
     if (base_host or "").lower() in _LOOPBACK_HOSTS and not _source_is_local(manifest.source):
-        raise ManifestError(
+        raise ManifestRefused(
             f"refusing a loopback download base_url from a remote manifest: "
             f"{manifest.base_url!r}"
         )

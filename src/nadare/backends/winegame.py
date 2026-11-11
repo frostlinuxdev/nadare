@@ -12,11 +12,15 @@ common lifecycle.  The Yostar-specific manifest machinery stays in
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
+import signal
+import subprocess
 import tempfile
 import time
 import urllib.parse
@@ -27,18 +31,19 @@ from typing import Any
 from ..core import (
     diskspace,
     download,
-    gamesandbox,
     graphics,
     hostlibs,
-    linkrelay,
+    installerpins,
     monitors,
     paths,
     prefixmove,
     process,
+    runlock,
     runners,
     runtimewatch,
     sandbox,
     umu,
+    umunoise,
     vcredist,
 )
 from ..core.backends import (
@@ -49,6 +54,7 @@ from ..core.backends import (
     Status,
 )
 from ..core.events import Event, mask
+from ..core.sandboxed import SandboxMixin
 from .arknights_news import IMAGE_HOSTS
 from .wine import (
     ProcessQuery,
@@ -111,6 +117,13 @@ INSTALLED_PREFIX_KEY = "installed_prefix"
 #: executable is already on disk. Installs from before this existed have no
 #: marker and still count as installed.
 INSTALL_MARKER = ".nadare-install-incomplete"
+#: The marker's second line when the sync it guards updates a finished install (#831).
+_UPDATE_LINE = re.compile(r"^update from (\S+) to (\S+)$")
+
+
+def _marker_version(version: str) -> str:
+    """A version as the marker can hold it: no whitespace, at most 64 characters."""
+    return re.sub(r"\s", "_", str(version))[:64]
 
 
 #: Written after a successful direct sync: the manifest version actually installed.
@@ -218,7 +231,7 @@ def _purge_target(data_dir: Path, recorded_prefix: str | None = None) -> Path | 
     raise BackendError(f"refusing to purge {data_dir}: it resolves outside the profile directory")
 
 
-class WineGameBackend(GameBackend):
+class WineGameBackend(SandboxMixin, GameBackend):
     unofficial_notice = True
     install_size_hint = int(3.5 * 1024**3)
 
@@ -243,6 +256,8 @@ class WineGameBackend(GameBackend):
     #: Installer defaults and trust, overridable by launcher-only games.
     default_installer_url: str = DEFAULT_INSTALLER_URL
     installer_api: str | None = INSTALLER_API
+    #: Pin document tag for this game's installer, when the index publishes one.
+    installer_pin_tag: str | None = None
 
     #: A non-strict runner setup failure, kept so a new prefix never falls back
     #: to a bare ``wine`` that is not installed (or not wanted).
@@ -259,6 +274,19 @@ class WineGameBackend(GameBackend):
         self._watch.feed(line)
         self.info(mask(line))
 
+    def _begin_game_output(self) -> None:
+        """A game run starts: umu-run's Stop traceback is folded into one line (#675)."""
+        self._stop_noise = umunoise.StopNoiseFilter()
+
+    def _on_game_line(self, line: str) -> None:
+        self._watch.feed(line)
+        for out in self._stop_noise.feed(line):
+            self.info(mask(out))
+
+    def _end_game_output(self) -> None:
+        for out in self._stop_noise.flush():
+            self.info(mask(out))
+
     def _data_dir(self) -> Path:
         return self.ctx.data_dir()
 
@@ -274,6 +302,12 @@ class WineGameBackend(GameBackend):
         if configured is not None:
             return configured
         return self.prefix() / self.install_subdir
+
+    def _sandbox_prefix(self) -> Path:
+        return self.prefix()
+
+    def _sandbox_game_dir(self) -> Path | None:
+        return self.install_dir()
 
     def cache_dir(self) -> Path:
         return paths.cache_dir() / KIND
@@ -457,6 +491,15 @@ class WineGameBackend(GameBackend):
             emit=self.ctx.emit,
             cancel=self.ctx.cancel,
         )
+        if pinned is None and self.installer_pin_tag:
+            try:
+                installerpins.check(self.installer_pin_tag, url, result.path, info=self.info)
+            except installerpins.InstallerPinError as exc:
+                raise BackendError(
+                    f"{self.display_name}: the downloaded installer does not match Nadare's "
+                    f"published checksum list ({exc}). Try again later, and report it if it "
+                    "keeps happening."
+                ) from exc
         return result.path
 
     def direct_target(self) -> Path | None:
@@ -488,9 +531,13 @@ class WineGameBackend(GameBackend):
         """Only the Yostar backend has a manifest; direct mode never reaches this."""
         raise NotImplementedError
 
+    def _running_elsewhere(self) -> bool:
+        """Another Flatpak instance launched this prefix's game."""
+        return sandbox.in_flatpak() and runlock.running(self.prefix())
+
     def _refuse_if_running(self, what: str) -> None:
         """Stop before replacing game files under a running game (#933)."""
-        if scan_pids(self._patterns()):
+        if scan_pids(self._patterns()) or self._running_elsewhere():
             raise BackendError(f"Stop the game before {what}", 8)
 
     def _sync_direct(self) -> dict[str, Any]:
@@ -504,8 +551,11 @@ class WineGameBackend(GameBackend):
     def _install_marker_path(self) -> Path:
         return self.install_dir() / INSTALL_MARKER
 
-    def _write_install_marker(self) -> None:
+    def _write_install_marker(self, update: tuple[str, str] | None = None) -> None:
         """Write the install-incomplete marker without following a link planted at its path.
+
+        ``update`` (old, new version) records that the sync updates a finished install, so a
+        restart after an interruption can say "update interrupted" instead of "not installed".
 
         The marker sits in a folder a game can write to. A plain ``write_text`` would truncate
         whatever a symlink there points at; a fresh sibling file moved over the name replaces the
@@ -517,6 +567,9 @@ class WineGameBackend(GameBackend):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write("sync in progress\n")
+                if update is not None:
+                    old, new = (_marker_version(part) for part in update)
+                    handle.write(f"update from {old} to {new}\n")
             os.replace(name, marker)
         except BaseException:
             Path(name).unlink(missing_ok=True)
@@ -524,6 +577,27 @@ class WineGameBackend(GameBackend):
 
     def _install_incomplete(self) -> bool:
         return self._install_marker_path().is_file()
+
+    def _interrupted_update(self) -> tuple[str, str] | None:
+        """``(old, new)`` when the incomplete sync was an update of a finished install (#831).
+
+        The marker sits where the game can write, so a link there is not followed and only a
+        little of the file is read.
+        """
+        try:
+            fd = os.open(self._install_marker_path(), os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            return None
+        try:
+            with os.fdopen(fd, "rb") as handle:
+                raw = handle.read(1024)
+        except OSError:
+            return None
+        for line in raw.decode("utf-8", "replace").splitlines():
+            match = _UPDATE_LINE.match(line.strip())
+            if match:
+                return _marker_version(match.group(1)), _marker_version(match.group(2))
+        return None
 
     def _version_path(self) -> Path:
         return self.install_dir() / VERSION_FILE
@@ -535,8 +609,17 @@ class WineGameBackend(GameBackend):
         (installs from before this existed have no file).
         """
         try:
-            payload = json.loads(self._version_path().read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            fd = os.open(self._version_path(), os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            return None
+        try:
+            with os.fdopen(fd, "rb") as handle:
+                raw = handle.read(64 * 1024)
+        except OSError:
+            return None
+        try:
+            payload = json.loads(raw)
+        except ValueError:
             return None
         if not isinstance(payload, dict):
             return None
@@ -650,6 +733,55 @@ class WineGameBackend(GameBackend):
                 text = text.replace(secret, "<redacted>")
         return text
 
+    #: Environment names a launch log reports: Nadare's own plus what shapes a game's graphics.
+    _LAUNCH_ENV_PREFIXES = (
+        "WINE",
+        "PROTON",
+        "STEAM_",
+        "DXVK",
+        "VKD3D",
+        "UMU",
+        "GAMEID",
+        "STORE",
+        "MESA",
+        "RADV",
+        "__GL",
+        "DRI_PRIME",
+        "SDL_",
+        "WAYLAND_DISPLAY",
+        "DISPLAY",
+        "XDG_SESSION_TYPE",
+        "LD_LIBRARY_PATH",
+    )
+
+    def _log_launch_details(self, env: dict[str, str]) -> None:
+        """Write the environment and GPU the game got, so a bundled log can explain a bad run."""
+        profile_env = profile_setting(self.ctx.profile, "extra_env")
+        wanted = set(profile_env) if isinstance(profile_env, dict) else set()
+        wanted.update(self.launch_extra_env())
+        keys = [
+            key
+            for key in env
+            if (key.startswith(self._LAUNCH_ENV_PREFIXES) or key in wanted)
+            and not process._is_secret_name(key)
+        ]
+        pairs = " ".join(f"{key}={env[key]}" for key in sorted(keys))
+        # The whole line goes through _redacted: a value from extra_env may be a launch secret.
+        self.info(self._redacted(f"env: {pairs}".rstrip()))
+        info = graphics.vulkan_info()
+        if not info.available:
+            self.info("gpu: Vulkan unavailable")
+            return
+        parts = [info.device] if info.device else []
+        details = []
+        if info.driver:
+            details.append(info.driver)
+        if info.api_version:
+            details.append(f"Vulkan {info.api_version}")
+        if details:
+            parts.append(f"({', '.join(details)})")
+        self.info(f"gpu: {' '.join(parts) or 'Vulkan available'}")
+
     def _direct_argv(self, target: Path) -> list[str]:
         """The program and arguments handed to umu-run for a direct launch."""
         return [str(target), *self._extra_args("launch_args"), *self.launch_extra_args()]
@@ -662,24 +794,38 @@ class WineGameBackend(GameBackend):
         argv, env = self._prefix_command(
             self._direct_argv(target),
             self.launch_extra_env() or None,
+            sandboxed=self.secure_mode_enabled(),
         )
-        argv, env = self._secure_wrap(argv, env)
-        self.ctx.emit(Event("step", f"{self.display_name}: launching {target.name}"))
-        self.info(self._runtime_note())
-        self.info(self._redacted("exec: " + " ".join(shlex.quote(part) for part in argv)))
-        _renderer, note = graphics.effective_renderer(self.ctx.profile)
-        if note:
-            self.info(note)
-        probe = self._renderer_probe().start()
         try:
-            return stream(
-                argv, env, on_line=self._on_line, cancel=self.ctx.cancel
-            )
+            argv, env = self._secure_wrap(argv, env)
+            self.ctx.emit(Event("step", f"{self.display_name}: launching {target.name}"))
+            self.info(self._runtime_note())
+            self.info(self._redacted("exec: " + " ".join(shlex.quote(part) for part in argv)))
+            self._log_launch_details(env)
+            _renderer, note = graphics.effective_renderer(self.ctx.profile)
+            if note:
+                self.info(note)
+            self._watch = runtimewatch.RuntimeWatch()  # this launch's output only
+            self._launch_started = time.monotonic()
+            probe = self._renderer_probe().start()
+            try:
+                # Held while the game runs, so other Nadare instances (a Flatpak desktop
+                # shortcut has its own process namespace) see it and can ask it to stop.
+                with self._run_lock():
+                    self._begin_game_output()
+                    try:
+                        code = stream(
+                            argv, env, on_line=self._on_game_line, cancel=self.ctx.cancel
+                        )
+                    finally:
+                        self._end_game_output()
+            finally:
+                probe.stop()
+                probe.join(timeout=1.0)
+                self._renderer = probe.result
         finally:
             self._stop_link_relay()
-            probe.stop()
-            probe.join(timeout=1.0)
-            self._renderer = probe.result
+        return self._checked_launch_exit(code)
 
     def _explicit_target(self) -> Path | None:
         raw = profile_setting(self.ctx.profile, "exe_name") or profile_setting(
@@ -709,6 +855,17 @@ class WineGameBackend(GameBackend):
             if depth < _SEARCH_MAX_DEPTH:
                 stack.extend((entry, depth + 1) for entry in entries if entry.is_dir())
         return None
+
+    def _launcher_state(self) -> tuple[str, int | None, int | None] | None:
+        """Identity of the launcher on disk, so a failed attempt's file is not counted again."""
+        target = self.find_launcher()
+        if target is None:
+            return None
+        try:
+            info = target.stat()
+        except OSError:
+            return str(target), None, None
+        return str(target), info.st_mtime_ns, info.st_size
 
     def find_launcher(self) -> Path | None:
         """Return the launcher exe, or ``None`` when it cannot be found."""
@@ -750,11 +907,31 @@ class WineGameBackend(GameBackend):
             return "1"
         return "1" if self.default_display == "wayland" else "0"
 
+    def _display_in_use(self) -> str:
+        """The display Proton will really use, as :meth:`_prefix_command` sets it up (#675).
+
+        On "auto" a ``PROTON_ENABLE_WAYLAND`` the user exported is kept; without a Wayland
+        session Proton runs on X11 whatever is asked.
+        """
+        choice = str(profile_setting(self.ctx.profile, "display") or "auto").strip().lower()
+        if choice in ("x11", "xwayland", "wayland"):
+            value = self._wayland_default()
+        else:
+            value = os.environ.get("PROTON_ENABLE_WAYLAND", self._wayland_default())
+        profile_env = profile_setting(self.ctx.profile, "extra_env")
+        if isinstance(profile_env, dict) and "PROTON_ENABLE_WAYLAND" in profile_env:
+            value = str(profile_env["PROTON_ENABLE_WAYLAND"])
+        if value != "1":
+            return "x11"
+        if not os.environ.get("WAYLAND_DISPLAY"):
+            return "x11 (no Wayland session)"
+        return "wayland"
+
     def _runtime_note(self) -> str:
         """One log line naming the runner build, display driver and renderer requested."""
         proton, kind = self.resolve_runner()
         runner = runners.runner_version(Path(proton)).split(" ", 1)[-1] if proton else kind
-        display = "wayland" if self._wayland_default() == "1" else "x11"
+        display = self._display_in_use()
         renderer, _note = graphics.effective_renderer(self.ctx.profile)
         requested = graphics.renderer_choice(self.ctx.profile)
         api = "Vulkan (DXVK)" if renderer == "vulkan" else "OpenGL (WineD3D)"
@@ -763,88 +940,38 @@ class WineGameBackend(GameBackend):
 
     #: Whether this game offers the Sandbox (the home folder hidden while it plays).
     supports_secure_mode = False
-    _link_relay: linkrelay.LinkRelay | None = None
-
-    def secure_mode_enabled(self) -> bool:
-        asked = profile_setting(self.ctx.profile, "secure_mode") is True
-        return self.supports_secure_mode and asked
-
-    def _secure_wrap(
-        self, argv: list[str], env: dict[str, str]
-    ) -> tuple[list[str], dict[str, str]]:
-        """Run the game inside bubblewrap with the home hidden, when the profile asks for it.
-
-        Only Play goes through here; installs, prefix setup and runtime installers stay
-        unwrapped. A user who turned the Sandbox on must never get an unprotected launch
-        without being told, so a missing bubblewrap or Flatpak is an error, not a fallback.
-        """
-        if not self.secure_mode_enabled():
-            return argv, env
-        if sandbox.in_flatpak():
-            raise BackendError("Sandbox is not available in the Flatpak version yet.")
-        located = gamesandbox.locate()
-        if located.binary is None:
-            if not located.found:
-                command = gamesandbox.install_hint(hostlibs.distro_family())
-                raise BackendError(
-                    "Sandbox needs bubblewrap and Nadare could not find a copy. It comes "
-                    "with the game runtime Nadare downloads the first time a game runs; or "
-                    f"install it with: {command}. Turn Sandbox off to play without it."
-                )
-            raise BackendError(
-                f"Sandbox cannot start here ({located.why}). On Ubuntu 24.04 and newer the "
-                "system blocks it; `nadare doctor` shows the fix and docs/SECURE-MODE.md "
-                "explains it. Turn Sandbox off to play without it."
-            )
-        self.info("Sandbox: your home folder is hidden from this game.")
-        # Links the game opens (a "Sign in with Google" button) reach the browser through
-        # Nadare, because the session bus the Steam Runtime would use is hidden too.
-        self._stop_link_relay()
-        self._link_relay = linkrelay.LinkRelay(on_open=self._note_link)
-        try:
-            pipe = self._link_relay.start()
-        except OSError as exc:
-            self._link_relay = None
-            pipe = None
-            self.info(f"Sandbox: links in the game cannot open your browser ({exc}).")
-        try:
-            return gamesandbox.wrap(
-                argv,
-                env,
-                prefix=self.prefix(),
-                install_dir=self.install_dir(),
-                runner_dir=Path(env["PROTONPATH"]) if env.get("PROTONPATH") else None,
-                link_pipe=pipe,
-                bwrap=located.binary,
-            )
-        except gamesandbox.BroadBindError as exc:
-            self._stop_link_relay()
-            raise BackendError(
-                f"Sandbox cannot hide your home folder from this game: {exc}. Move the game to "
-                "a folder of its own in Settings (Game options), or turn Sandbox off."
-            ) from exc
-
-    def _note_link(self, url: str) -> None:
-        host = urllib.parse.urlsplit(url).hostname or "a site"
-        self.info(f"Sandbox: the game opened a link to {host} in your browser.")
-
-    def _stop_link_relay(self) -> None:
-        relay, self._link_relay = self._link_relay, None
-        if relay is not None:
-            relay.stop()
+    sandbox_default_on: bool = True
 
     def _prefix_command(
-        self, args: list[str], extra_env: dict[str, str] | None = None
+        self,
+        args: list[str],
+        extra_env: dict[str, str] | None = None,
+        *,
+        sandboxed: bool = False,
     ) -> tuple[list[str], dict[str, str]]:
-        """Build the Wine/``umu-run`` command and environment for ``args``."""
+        """Build the Wine/``umu-run`` command and environment for ``args``.
+
+        ``sandboxed`` says the command will run in the Sandbox. Inside the Flatpak that decides
+        how Proton starts: through umu and the Steam Runtime (as in the AppImage), or, in the
+        Sandbox, directly. umu's container needs the session bus, which a Sandboxed game must
+        not have: with it a game could ask Flatpak for a process outside the Sandbox.
+        """
         prefix = self.prefix()
         env = process.build_env(None, extra={"WINEPREFIX": str(prefix)})
         proton, kind = self.resolve_runner()
         if kind == "proton":
             configured = str(profile_setting(self.ctx.profile, "umu_binary", "umu-run"))
-            umu_run = umu.system(configured)
+            flatpak = sandbox.in_flatpak()
+            umu_run = None if flatpak and sandboxed else umu.system(configured)
             missing = None
-            if umu_run is None and not sandbox.in_flatpak():
+            if umu_run is None and flatpak and not sandboxed:
+                umu_run = umu.resolve(
+                    configured,
+                    allow_download=True,
+                    emit=self.ctx.emit,
+                    cancel=self.ctx.cancel,
+                )
+            if umu_run is None and not flatpak:
                 missing = hostlibs.missing_32bit()
                 if missing:
                     umu_run = umu.resolve(
@@ -855,7 +982,14 @@ class WineGameBackend(GameBackend):
                     )
             env["PROTONPATH"] = str(proton)
             env["STEAM_COMPAT_DATA_PATH"] = str(prefix)
-            env.setdefault("PROTON_ENABLE_WAYLAND", self._wayland_default())
+            # A Display choice in the profile beats a PROTON_ENABLE_WAYLAND inherited from the
+            # desktop: "x11" is the escape hatch for the NVIDIA first-frame hang and was
+            # silently ignored. "auto" still respects a value the user exported.
+            choice = str(profile_setting(self.ctx.profile, "display") or "auto").strip().lower()
+            if choice in ("x11", "xwayland", "wayland"):
+                env["PROTON_ENABLE_WAYLAND"] = self._wayland_default()
+            else:
+                env.setdefault("PROTON_ENABLE_WAYLAND", self._wayland_default())
             if umu_run:
                 argv = [umu_run, *args]
             else:
@@ -907,7 +1041,49 @@ class WineGameBackend(GameBackend):
     def _run_in_prefix(self, argv: list[str]) -> int:
         """Run ``argv`` inside this profile's Wine/Proton prefix."""
         cmd, env = self._prefix_command(list(argv))
-        return stream(cmd, env, on_line=self._on_line, cancel=self.ctx.cancel)
+        try:
+            return stream(cmd, env, on_line=self._on_line, cancel=self.ctx.cancel)
+        finally:
+            self._wait_for_direct_proton(cmd, env)
+
+    @staticmethod
+    def _is_direct_proton(argv: list[str]) -> bool:
+        """True for the ``<runner>/proton run`` command used when umu-run is absent."""
+        return len(argv) >= 2 and Path(argv[0]).name == "proton" and argv[1] == "run"
+
+    def _wait_for_direct_proton(self, argv: list[str], env: dict[str, str]) -> None:
+        """Wait for Wine to finish; ``proton run`` returns before wineboot does.
+
+        umu-run waits by itself, but the direct Proton path inside the Flatpak
+        does not: without this the next install step saw Wine's own processes in
+        the prefix and refused with "Stop the game before installing".
+        """
+        if not self._is_direct_proton(argv):
+            return
+        proton = env.get("PROTONPATH")
+        data = env.get("STEAM_COMPAT_DATA_PATH")
+        if not proton or not data:
+            return
+        wineserver = Path(proton) / "files" / "bin" / "wineserver"
+        if not wineserver.is_file():
+            self.info(f"wineserver not found at {wineserver}; not waiting for Wine to finish")
+            return
+        wait_env = dict(env)
+        # Proton keeps the Wine prefix in <STEAM_COMPAT_DATA_PATH>/pfx.
+        wait_env["WINEPREFIX"] = str(Path(data) / "pfx")
+        try:
+            subprocess.run(
+                [str(wineserver), "-w"],
+                env=wait_env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=120,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            self.info("Wine did not finish within 120 s; carrying on")
+        except OSError as exc:
+            self.info(f"could not wait for Wine to finish ({exc}); carrying on")
 
     def _runtime_available(self) -> bool:
         """Whether a Wine/Proton runtime is explicitly configured for direct mode.
@@ -951,9 +1127,49 @@ class WineGameBackend(GameBackend):
     def build_launch(self) -> tuple[list[str], dict[str, str], Path]:
         """Return ``(argv, env, target)`` for launching the client."""
         target = self._target()
-        argv, env = self._prefix_command([str(target), *self._extra_args("launch_args")])
+        argv, env = self._prefix_command(
+            [str(target), *self._extra_args("launch_args")], sandboxed=self.secure_mode_enabled()
+        )
         argv, env = self._secure_wrap(argv, env)
         return argv, env, target
+
+    def _run_lock(self) -> contextlib.AbstractContextManager[None]:
+        """Inside the Flatpak, let other Nadare instances see this launch and ask it to stop."""
+        if not sandbox.in_flatpak():
+            return contextlib.nullcontext()
+        return runlock.guard(self.prefix(), self._stop_from_elsewhere)
+
+    def _stop_from_elsewhere(self) -> None:
+        """Another Nadare instance asked to stop this game: end its processes, then the wait.
+
+        Cancelling alone ends only ``flatpak-spawn``: a Sandboxed game shares Nadare's process
+        namespace and keeps running (measured), but its processes are visible here.
+        """
+        pids = scan_pids(self._patterns())
+        if pids:
+            self.info(f"stopping {len(pids)} process(es) for another Nadare window: {pids}")
+            self._stop_game_processes(pids)
+        self.ctx.cancel.cancel()
+
+    def _stop_game_processes(self, pids: list[int]) -> None:
+        """Stop ``pids``; inside the Flatpak, look again until no process of the game is left.
+
+        A Sandboxed game's Wine helpers can outlive the first sweep (measured: a winedevice.exe
+        that ignored SIGTERM and kept the launching Flatpak instance alive), and the app's
+        ``wineserver -k`` cannot reach the Sandbox's wineserver.
+        """
+        stop_pids(pids)
+        if not sandbox.in_flatpak():
+            return
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            pids = scan_pids(self._patterns())
+            if not pids:
+                return
+            # Still there after SIGTERM: winedevice.exe ignores it (measured), and the app's
+            # wineserver -k cannot reach the Sandbox's wineserver.
+            stop_pids(pids, signal.SIGKILL)
 
     def status(self) -> Status:
         prefix = self.prefix()
@@ -961,6 +1177,8 @@ class WineGameBackend(GameBackend):
         target = self.direct_target() if direct else self.find_launcher()
         incomplete = direct and self._install_incomplete()
         pids = scan_pids(self._patterns(target))
+        elsewhere = self._running_elsewhere()
+        running = bool(pids) or elsewhere
         data = {
             "prefix": str(prefix),
             "exe": str(target) if target else "",
@@ -970,6 +1188,8 @@ class WineGameBackend(GameBackend):
             "can_repair": direct and self.install_dir().is_dir(),
             "renderer": getattr(self, "_renderer", None) or "",
         }
+        if elsewhere:
+            data["running_elsewhere"] = True
         version: str | None = None
         if direct:
             additions, version, early = self._direct_status_parts(target, incomplete)
@@ -1002,9 +1222,9 @@ class WineGameBackend(GameBackend):
         if note:
             message = note
         return Status(
-            state="running" if pids else "installed",
+            state="running" if running else "installed",
             version=version,
-            running=bool(pids),
+            running=running,
             message=message,
             data=data,
         )
@@ -1022,15 +1242,28 @@ class WineGameBackend(GameBackend):
         published = str(latest["version"]) if latest else None
         # Purely local: the published version is refreshed by check_update().
         additions["update_available"] = bool(version and published and published != version)
+        if additions["update_available"]:
+            additions["latest_version"] = published  # the page names what Update brings
         if target is None or not target.is_file() or incomplete:
             # Files may already be on disk from a cancelled/failed install, but
             # only a finished sync counts as installed.
-            message = (
-                "installation incomplete — click RESUME to finish; "
-                "what is already downloaded is kept"
-                if incomplete
-                else f"{self.display_name} is not installed yet"
-            )
+            interrupted = self._interrupted_update() if incomplete else None
+            if interrupted is not None:
+                message = (
+                    f"update to {interrupted[1]} was interrupted — click RESUME to finish it; "
+                    "only what is missing is downloaded"
+                )
+            elif incomplete:
+                # Say how much is on disk, so "Cancel" is not mistaken for "deleted" (#991).
+                # status() runs off the GUI thread; only an interrupted install walks the tree.
+                partial = diskspace.tree_bytes(self.install_dir())
+                additions["partial_bytes"] = partial
+                message = (
+                    f"installation incomplete — {diskspace.human_size(partial)} downloaded so "
+                    "far; click RESUME to finish, or remove the game to delete it"
+                )
+            else:
+                message = f"{self.display_name} is not installed yet"
             if incomplete:
                 additions["incomplete"] = True
             return (
@@ -1085,6 +1318,7 @@ class WineGameBackend(GameBackend):
             code = stream(
                 argv, env, on_line=self._on_line, cancel=self.ctx.cancel
             )
+            self._wait_for_direct_proton(argv, env)
             if code != 0 or not (prefix / "drive_c").is_dir():
                 raise BackendError(
                     self._watch.explain(f"prefix creation failed (exit {code})")
@@ -1100,6 +1334,7 @@ class WineGameBackend(GameBackend):
 
     def install(self) -> None:
         self.ctx.cancel.raise_if_cancelled()
+        self._direct_attempt_failed = False
         self._ensure_default_runner(strict=False)
         # Record the prefix the install uses so uninstall may later remove an
         # explicitly configured external prefix (and only that one).
@@ -1108,16 +1343,44 @@ class WineGameBackend(GameBackend):
             self._ensure_direct_prefix()
             self._sync_direct()
             return
-        url = self.require_installer_url(resolve=True)
         self.ctx.set("prefix", str(self.prefix()))
         if not self._ensure_prefix():
             self._run_vcredist(created=False)
+        launcher_before_direct = self._launcher_state()
+        if self._install_launcher_directly():
+            self.ctx.emit(Event("done", self.install_done_message()))
+            return
+        url = self.require_installer_url(resolve=True)
         installer = self._download_installer(url)
-        had_launcher = self.find_launcher() is not None
+        direct_failed = (
+            self._direct_attempt_failed
+            and self._launcher_state() != launcher_before_direct
+        )
+        # A launcher the failed direct download just wrote is not evidence for the installer.
+        planted = self._launcher_state() if direct_failed else None
+        had_launcher = False if direct_failed else self.find_launcher() is not None
         code = self._run_installer(installer)
+        left_by_failed_attempt = (
+            direct_failed and planted is not None and self._launcher_state() == planted
+        )
         # A launcher left by an earlier install says nothing about this attempt (#934).
-        if self.find_launcher() is None or (had_launcher and code != 0):
+        if (
+            self.find_launcher() is None
+            or (had_launcher and code != 0)
+            or left_by_failed_attempt
+        ):
             self.info(f"{self.display_name} installer exited with code {code} and left no launcher")
+            if getattr(self, "_installer_sandboxed", False):
+                # Inside the Sandbox the home folder is an empty stand-in: an installer that
+                # installed into S: or the home wrote into it, and that is gone now.
+                raise BackendError(
+                    self._watch.explain(
+                        f"The {self.display_name} installer left no launcher. It ran in the "
+                        "Sandbox, which hides your home folder: if it offered a folder on S: or "
+                        "in your home, run Install again and choose a folder on C: (or turn "
+                        "Sandbox off for this game)."
+                    )
+                )
             raise BackendError(
                 self._watch.explain(
                     f"The {self.display_name} installer did not finish. Try Install again. "
@@ -1125,11 +1388,30 @@ class WineGameBackend(GameBackend):
                     "fails, open Settings → Runner and choose Proton-CachyOS."
                 )
             )
-        self.ctx.emit(Event("done", f"{self.display_name} installer finished"))
+        self.ctx.emit(Event("done", self.install_done_message()))
+
+    def install_done_message(self) -> str:
+        """The last line of a successful launcher install (a subclass may say what is next)."""
+        return f"{self.display_name} installer finished"
+
+    def _install_launcher_directly(self) -> bool:
+        """A backend that fetches its launcher files itself does so here and returns True.
+
+        Returning True means the publisher's installer must not run at all.
+        """
+        return False
 
     def _run_installer(self, installer: Path) -> int:
         """Run the publisher's installer in the prefix and wait for it; its exit code."""
-        argv, env = self._prefix_command([str(installer), *self._extra_args("installer_args")])
+        argv, env = self._prefix_command(
+            [str(installer), *self._extra_args("installer_args")],
+            sandboxed=self.secure_mode_enabled(),
+        )
+        plain = argv
+        argv, env = self._secure_wrap(
+            argv, env, subject="installer", read_only=(installer,), links=False
+        )
+        self._installer_sandboxed = argv is not plain
         self.ctx.emit(
             Event("step", f"Running the {self.display_name} installer in {self.prefix()}")
         )
@@ -1188,7 +1470,7 @@ class WineGameBackend(GameBackend):
 
     def remake_prefix(self) -> None:
         """Move the corrupted prefix aside and rebuild it, keeping the game files."""
-        if scan_pids(self._patterns()):
+        if scan_pids(self._patterns()) or self._running_elsewhere():
             raise BackendError("Stop the game before rebuilding its Wine prefix", 8)
         # The rebuild restores only this game's folder, so a game of another profile in the
         # same prefix would be left in the backup (#919).
@@ -1234,29 +1516,80 @@ class WineGameBackend(GameBackend):
         if self.direct_mode():
             return self._launch_direct()
         self._run_vcredist(created=False)
-        argv, env, target = self.build_launch()
-        self.ctx.emit(Event("step", f"{self.display_name}: launching {target.name}"))
-        self.info(self._runtime_note())
-        self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
-        _renderer, note = graphics.effective_renderer(self.ctx.profile)
-        if note:
-            self.info(note)
-        probe = self._renderer_probe().start()
+        self._watch = runtimewatch.RuntimeWatch()  # this launch's output only
+        self._launch_started = time.monotonic()
         try:
-            return stream(
-                argv, env, on_line=self._on_line, cancel=self.ctx.cancel
-            )
+            argv, env, target = self.build_launch()
+            self.ctx.emit(Event("step", f"{self.display_name}: launching {target.name}"))
+            self.info(self._runtime_note())
+            self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
+            self._log_launch_details(env)
+            _renderer, note = graphics.effective_renderer(self.ctx.profile)
+            if note:
+                self.info(note)
+            probe = self._renderer_probe().start()
+            try:
+                # Held while the game runs, so other Nadare instances (a Flatpak desktop
+                # shortcut has its own process namespace) see it and can ask it to stop.
+                with self._run_lock():
+                    self._begin_game_output()
+                    try:
+                        code = stream(
+                            argv, env, on_line=self._on_game_line, cancel=self.ctx.cancel
+                        )
+                    finally:
+                        self._end_game_output()
+            finally:
+                probe.stop()
+                probe.join(timeout=1.0)
+                self._renderer = probe.result
         finally:
             self._stop_link_relay()
-            probe.stop()
-            probe.join(timeout=1.0)
-            self._renderer = probe.result
+        return self._checked_launch_exit(code)
+
+    #: A launch that ends sooner than this with a runtime failure in its output never ran.
+    _QUICK_EXIT_SECONDS = 30
+
+    def _checked_launch_exit(self, code: int) -> int:
+        """``code``, unless the output showed the runtime failed: then say why.
+
+        A blocked sandbox or a runtime umu could not set up looks like an ordinary exit (umu
+        even exits 0), and the page only said "exit code N". Install and update already
+        explained these; a launch now does too. After a long session that ended with 0, such a
+        line came from a helper the game started, not from the start itself: the hint is shown,
+        but the launch is not reported as failed.
+        """
+        watch = self._watch
+        if (
+            watch.userns_blocked
+            or watch.umu_setup_failed
+            or watch.umu_runtime_mismatch
+            or watch.no_opengl
+        ):
+            message = watch.explain(
+                f"{self.display_name} could not start (exit code {code})."
+            )
+            started = getattr(self, "_launch_started", None)
+            ran = time.monotonic() - started if started is not None else 0.0
+            if code != 0 or ran < self._QUICK_EXIT_SECONDS:
+                raise BackendError(message)
+            self.ctx.emit(Event("status", message))
+        return code
 
     def stop(self) -> None:
         pids = scan_pids(self._patterns())
         if pids:
             self.info(f"stopping {len(pids)} process(es): {pids}")
-            stop_pids(pids)
+            self._stop_game_processes(pids)
+        elif self._running_elsewhere():
+            self.info("asking the other Nadare window to stop the game")
+            runlock.request_stop(self.prefix())
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and runlock.running(self.prefix()):
+                time.sleep(0.2)
+            if runlock.running(self.prefix()):
+                self.info("the game did not stop within 20 s")
+            return
         proton: str | None = None
         try:
             resolved, kind = self.resolve_runner()
@@ -1341,7 +1674,7 @@ class WineGameBackend(GameBackend):
             )
 
     def uninstall(self, purge: bool = False) -> None:
-        if scan_pids(self._patterns()):
+        if scan_pids(self._patterns()) or self._running_elsewhere():
             raise BackendError("Stop the game before uninstalling it", 8)
         prefix = self.prefix()
         data_dir = self._data_dir()

@@ -14,6 +14,7 @@ The GUI talks to games only through ``core.backends.create`` and the
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import sys
 from typing import Any
@@ -102,9 +103,24 @@ class EnterActivatesButtons:
         return keyfilter
 
 
+def desktop_file_name() -> str:
+    """The menu entry Nadare was started from, which Qt uses as the Wayland app id.
+
+    Without it every window said ``nadare`` while the Flatpak's entry is
+    ``io.github.frostlinuxdev.Nadare.desktop``: KDE could not match them, and its launch
+    feedback (a bouncing Nadare icon on the cursor) ran until its timeout (2026-11-11).
+    """
+    if sandbox.in_flatpak():
+        return os.environ.get("FLATPAK_ID") or FLATPAK_ID
+    return "nadare"
+
+
 def _application():
+    from PyQt6.QtGui import QGuiApplication
     from PyQt6.QtWidgets import QApplication
 
+    # Before any window exists: Qt reads it when a window gets its Wayland app id.
+    QGuiApplication.setDesktopFileName(desktop_file_name())
     app = QApplication.instance()
     if app is None:
         from . import nativedialogs
@@ -192,6 +208,12 @@ def _activate(window: Any) -> None:
     QApplication.alert(window)
 
 
+def _show_profile(window: Any, profile: str) -> None:
+    """Show the game a later ``nadare gui --profile`` asked for, if this window knows it (#624)."""
+    if profile in window.config.profiles:
+        window.open_game(profile)
+
+
 def _config_recovery_text(cfg: Config) -> str:
     """Add a plain next step to a quarantined-config notice (#332 F-08)."""
     text = cfg.notice or ""
@@ -237,7 +259,7 @@ def run(config: Config | None = None, profile: str | None = None) -> int:
     if cfg.data.get("lock_to_single_instance", True):
         from .single_instance import SingleInstance
 
-        instance = SingleInstance()
+        instance = SingleInstance(profile=profile)
         if not instance.start():
             code = _single_instance_exit(instance)
             if code == EXIT_NO_SINGLE_INSTANCE:
@@ -266,6 +288,7 @@ def run(config: Config | None = None, profile: str | None = None) -> int:
         QMessageBox.information(window, "Nadare", _config_recovery_text(cfg))
     if instance is not None:
         instance.activation_requested.connect(lambda: _activate(window))
+        instance.profile_requested.connect(lambda name: _show_profile(window, name))
         window._single_instance = instance  # keep the server alive with the window
     try:
         code = application.exec()
@@ -273,7 +296,11 @@ def run(config: Config | None = None, profile: str | None = None) -> int:
         _restore_signal_handlers(previous_handlers)
     controller = getattr(window, "controller", None)
     window.deleteLater()
+    from ..core import artwork
     from .workers import wait_detached
+
+    # No thread may be inside Qt image code while Python finalises (#1062).
+    gate_ok = artwork.close_qt_images()
 
     if controller is not None:
         # A queued success callback may have raced the last closeEvent; make
@@ -282,9 +309,10 @@ def run(config: Config | None = None, profile: str | None = None) -> int:
             controller.shutdown()
         except Exception:  # noqa: BLE001 - teardown must never raise
             log.debug("final controller shutdown failed", exc_info=True)
-    if not wait_detached(5000):
-        # A fetch is still blocked in the network; letting Python tear down its
-        # running QThread would abort with a core dump, so leave immediately.
+    if not wait_detached(5000) or not gate_ok:
+        # A fetch is still blocked in the network (or a Qt image call outlived its
+        # timeout); letting Python tear down its running QThread would abort with a
+        # core dump, so leave immediately.
         # Give an install/update that is still writing a longer grace period
         # first, so the hard exit cannot truncate the game files (06-5).
         _wait_for_mutating_workers(controller)

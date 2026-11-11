@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _timing import scaled
 
 from nadare.core import process
 
@@ -92,7 +93,7 @@ def test_interrupt_kills_child_that_ignores_sigterm(monkeypatch: pytest.MonkeyPa
         assert _wait_dead(marks["pid"], process.GRACE_SECONDS + 5), (
             "child that ignored SIGTERM survived the interrupt"
         )
-        assert elapsed < process.GRACE_SECONDS + 5, "interrupt cleanup was not bounded"
+        assert elapsed < process.GRACE_SECONDS + scaled(5), "interrupt cleanup was not bounded"
     finally:
         _kill_quietly(marks.get("pid"))
 

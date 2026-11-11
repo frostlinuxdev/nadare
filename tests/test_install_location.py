@@ -466,3 +466,55 @@ def test_no_final_path_is_shown_for_an_import_or_a_prefix_only_game(tmp_path, qa
         assert czn.install_summary.isHidden()
     finally:
         czn.close()
+
+
+def test_a_catalog_game_in_a_picked_library_gets_a_manifest(tmp_path, qapp):
+    from nadare.core import libraries
+
+    d = dialog(tmp_path, qapp, kind="arknights-yostar")
+    try:
+        folder = tmp_path / "Games"
+        game_dir = folder / "Nadare" / add_game._folder_name(d._selected_game().title)
+        profile = _create(d, folder)
+        manifest = libraries.read_manifest(game_dir)
+        assert manifest is not None
+        assert manifest.kind == "arknights-yostar"
+        assert manifest.prefix == Path(profile["prefix"]).resolve()
+    finally:
+        d.close()
+
+
+def test_a_catalog_game_in_the_default_place_gets_a_manifest(tmp_path, qapp):
+    from nadare.core import libraries
+
+    d = dialog(tmp_path, qapp, kind="arknights-yostar")
+    try:
+        name = d.create_profile()
+        assert name
+        assert libraries.read_manifest(tmp_path / "data" / name) is not None
+    finally:
+        d.close()
+
+
+def test_a_generic_or_imported_game_gets_no_manifest(tmp_path, qapp):
+    from nadare.core import libraries
+
+    d = dialog(tmp_path, qapp)
+    try:
+        folder = tmp_path / "Games"
+        _create(d, folder)
+        assert not list(folder.rglob(libraries.MANIFEST_NAME))
+    finally:
+        d.close()
+    d = dialog(tmp_path / "second", qapp, kind="arknights-yostar")
+    try:
+        game = d._selected_game()
+        root = tmp_path / "pfx" / "drive_c" / game.install_subdir.replace("\\", "/")
+        root.mkdir(parents=True)
+        (root / game.exes[0]).write_text("x")
+        d.set_mode(True)
+        d.set_install_dir(str(root))
+        assert d.create_profile()
+        assert not list((tmp_path / "pfx").rglob(libraries.MANIFEST_NAME))
+    finally:
+        d.close()

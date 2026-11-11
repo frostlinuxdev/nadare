@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -133,9 +134,11 @@ def _sophon_plan(biz: str, fetch: Fetch, language: str) -> directdl.Plan:
     if audio_entry is None:
         raise directdl.DirectError(f"no hoyo audio manifest for language {language}")
 
-    game = _sophon_package(game_entry, f"{game_tag}-{version}")
+    game = _sophon_package(
+        game_entry, f"{game_tag}-{version}", _supersedes(game_tag, None)
+    )
     audio = _sophon_package(
-        audio_entry, f"{game_tag}-{version}-audio-{language}"
+        audio_entry, f"{game_tag}-{version}-audio-{language}", _supersedes(game_tag, language)
     )
     return directdl.Plan(
         game_tag=game_tag,
@@ -146,7 +149,7 @@ def _sophon_plan(biz: str, fetch: Fetch, language: str) -> directdl.Plan:
     )
 
 
-def _sophon_package(entry: Mapping[str, Any], name: str) -> Any:
+def _sophon_package(entry: Mapping[str, Any], name: str, supersedes: str = "") -> Any:
     from ..sophon import SophonPackage
 
     manifest = entry.get("manifest")
@@ -171,7 +174,20 @@ def _sophon_package(entry: Mapping[str, Any], name: str) -> Any:
         chunk_url=_url(chunk_download.get("url_prefix")).rstrip("/"),
         manifest_id=manifest_id,
         size=_size(stats.get("uncompressed_size")),
+        supersedes=supersedes,
     )
+
+
+def _supersedes(game_tag: str, language: str | None) -> str:
+    """The names of earlier versions of a package: ``zzz-<version>`` or its audio twin.
+
+    A version has no dash, so the game pattern never matches an audio package and one
+    language never matches another.
+    """
+    tag = re.escape(game_tag)
+    if language is None:
+        return rf"{tag}-[^-/]+"
+    return rf"{tag}-[^-/]+-audio-{re.escape(language)}"
 
 
 def _load_from(url: str, fetch: Fetch, label: str) -> Mapping[str, Any]:

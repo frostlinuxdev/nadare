@@ -30,6 +30,7 @@ from ..core import (
     webview2,
 )
 from ..core.backends import BackendError
+from ..core.diskspace import human_size
 from ..core.events import Cancel
 from .steam_setup import SteamSetupDialog
 
@@ -228,6 +229,21 @@ def build_dialog(
             probed.append(vulkan_version_fn())
         return steamglue.plan_for(app_id, root=steam_root, vulkan_version=probed[0])
 
+    #: The dialog, once made: the runner download reports its progress to it.
+    shown: list[SteamSetupDialog] = []
+
+    def progress(event) -> None:
+        if event.kind != "progress" or event.progress is None or not shown:
+            return
+        done = event.data.get("done") if isinstance(event.data, dict) else None
+        total = event.data.get("total") if isinstance(event.data, dict) else None
+        sizes = ""
+        if isinstance(done, int) and isinstance(total, int) and total > 0:
+            sizes = f" ({human_size(done)} of {human_size(total)})"
+        shown[0].report_progress(
+            f"Downloading the runner: {int(event.progress * 100)} %{sizes}"
+        )
+
     #: The token of the step that is running now (each step gets a fresh one).
     current_cancel: list[Cancel] = [Cancel()]
     #: The Steam account file the last launch-option change in this window was made in.
@@ -253,6 +269,7 @@ def build_dialog(
             install_prefix_fn=prefix_fn,
             binary=steam_command,
             cancel=token,
+            emit=progress,
         )
         result = do_action(item)
         if item.action in steamundo.UNDOABLE and result.ok and result.changed:
@@ -274,7 +291,8 @@ def build_dialog(
             local = steamglue.active_localconfig_path(steam_root)
             if local is None:
                 return steamrun.ActionResult(False, "Nadare could not find the Steam account file.")
-            made_for = (acted_on[0] if acted_on else "") or steamundo.where(app_id)
+            # The saved undo knows its own file; this window's last change may be another kind.
+            made_for = steamundo.where(app_id) or (acted_on[0] if acted_on else "")
             if made_for and made_for != str(local):
                 return steamrun.ActionResult(
                     False,
@@ -292,13 +310,18 @@ def build_dialog(
             )
         else:
             config = steamglue.config_vdf(steam_root)
-            made_in = (acted_on[0] if acted_on else "") or steamundo.where(app_id)
+            made_in = steamundo.where(app_id) or (acted_on[0] if acted_on else "")
             if made_in and made_in != str(config):
                 return steamrun.ActionResult(
                     False,
                     "This undo was saved for another Steam installation, so it was not applied. "
                     "Open Set up from that Steam to undo it, or change the runner by hand.",
                 )
+            # The tool the game uses now: the runner step's link, once nothing uses it, goes too.
+            linked = ""
+            with contextlib.suppress(OSError, BackendError):
+                entry = steamtools.read_compat_entry(config.read_text(encoding="utf-8"), app_id)
+                linked = entry.tool if entry is not None else ""
             result = restore_fn(
                 app_id,
                 previous,
@@ -308,12 +331,17 @@ def build_dialog(
                 wait_gone=wait_gone,
                 binary=steam_command,
             )
+            if result.ok and linked:
+                with contextlib.suppress(OSError):
+                    steamglue.remove_unused_tool(
+                        steam_root, linked, config.read_text(encoding="utf-8")
+                    )
         if result.ok:
             with contextlib.suppress(OSError):
                 steamundo.clear(app_id)
         return result
 
-    return SteamSetupDialog(
+    dialog = SteamSetupDialog(
         parent,
         plan_fn=plan_fn,
         act_fn=act_fn,
@@ -323,4 +351,7 @@ def build_dialog(
         app_id=str(app_id),
         initial_undo=_undo_for_this_account(app_id, steam_root),
         cancel_fn=cancel_fn,
+        next_undo_fn=lambda: _undo_for_this_account(app_id, steam_root),
     )
+    shown.append(dialog)
+    return dialog

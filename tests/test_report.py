@@ -161,7 +161,10 @@ def test_the_report_stub_hash_matches_the_backend_pin() -> None:
     from nadare.backends.czn import backend
     from nadare.core import report
 
-    assert report.STUB_PREBUILT_SHA256 == backend.STUB_PREBUILT_SHA256
+    assert report.STUB_SHIPPED_SHA256 == (
+        backend.STUB_PREBUILT_SHA256,
+        backend.STUB_C_PREBUILT_SHA256,
+    )
 
 
 def _czn_fixture(tmp_path: Path):
@@ -246,7 +249,9 @@ def test_a_shipped_stub_is_reported_as_shipped(tmp_path: Path, monkeypatch) -> N
     config, logs, profiles, home = _czn_fixture(tmp_path)
     stub = profiles / "czn" / "stub" / "czn_pcsdk_stub.exe"
     monkeypatch.setattr(
-        report_mod, "STUB_PREBUILT_SHA256", hashlib.sha256(stub.read_bytes()).hexdigest()
+        report_mod,
+        "STUB_SHIPPED_SHA256",
+        (hashlib.sha256(stub.read_bytes()).hexdigest(),),
     )
     text = build_report(
         config,

@@ -20,8 +20,9 @@ stacks (Wine/Proton, native Steam, Android-in-a-container, shell scripts).
 The `direct-*` kinds are `direct-bd2`, `direct-aethergazer`, `direct-mongil`,
 `direct-wuwa`, `direct-gfl2`, `direct-endfield`, `direct-pgr`, `direct-nte`,
 `direct-gfl2-haoplay`, `direct-genshin`, `direct-hsr`, `direct-hi3` and
-`direct-zzz`. The `launcher-*` kinds are `launcher-nikke`, `launcher-nte` and
-`launcher-gfl2-haoplay`. Their catalogue rows live in
+`direct-zzz`. The only `launcher-*` kind is `launcher-nikke` (its sign-in needs the
+publisher's launcher); `launcher-nte` and `launcher-gfl2-haoplay` were retired for their direct
+kinds (2026-11-10). Their catalogue rows live in
 `core/directkinds.py`; see [docs/CATALOG.md](docs/CATALOG.md) for how they work
 and how to add one.
 

@@ -47,6 +47,9 @@ class _BatchWine(WineBackend):
     (#862). The delegate runs exactly what the script backend identified.
     """
 
+    #: Script profiles offer no Sandbox switch, so a hand-edited key must not turn one on.
+    supports_secure_mode = False
+
     def __init__(self, ctx: Any, chosen: Path) -> None:
         super().__init__(ctx)
         self._chosen = chosen
@@ -91,7 +94,7 @@ class ScriptBackend(GameBackend):
             "prefix",
             "Wine prefix (.bat/.cmd)",
             "path_dir",
-            "WINEPREFIX used when the script is a Windows .bat or .cmd file.",
+            "The Windows folder (a Wine prefix) a .bat or .cmd script runs in.",
         ),
         Option(
             "process_match",
@@ -158,8 +161,12 @@ class ScriptBackend(GameBackend):
             script = self._script()
         except BackendError as exc:
             return Status(state="not_installed", message=str(exc), data=data)
-        pids = scan_pids(self._patterns(script))
-        data.update({"script": str(script), "batch": self._is_batch(), "pids": pids})
+        batch = self._is_batch()
+        # A batch file runs under Wine (launch and stop delegate to _BatchWine): look for it
+        # the way stop does, or a running batch game reads as installed (#973).
+        query = _BatchWine(self.ctx, script)._patterns() if batch else self._patterns(script)
+        pids = scan_pids(query)
+        data.update({"script": str(script), "batch": batch, "pids": pids})
         return Status(
             state="running" if pids else "installed",
             running=bool(pids),
@@ -182,14 +189,13 @@ class ScriptBackend(GameBackend):
         self.ctx.emit(Event("step", f"Script: launching {script.name}"))
         self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
         extra_env = profile_setting(self.ctx.profile, "extra_env")
-        env = process.build_env(
-            None,
-            extra=(
-                {str(k): str(v) for k, v in extra_env.items()}
-                if isinstance(extra_env, dict)
-                else None
-            ),
+        extra = (
+            {str(k): str(v) for k, v in extra_env.items()} if isinstance(extra_env, dict) else {}
         )
+        # Nadare's own environment loses its credential-looking variables (#811); what the
+        # profile sets on purpose is the user's choice and stays.
+        env = process.drop_secret_env(process.build_env(None))
+        env.update(extra)
         return stream(
             argv,
             env,

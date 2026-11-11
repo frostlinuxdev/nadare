@@ -74,9 +74,9 @@ def _flags(argv):
 
 
 def test_available_follows_which(monkeypatch):
-    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name: None)
+    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name, *_a, **_k: None)
     assert gamesandbox.available() is False
-    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name, *_a, **_k: "/usr/bin/bwrap")
     assert gamesandbox.available() is True
 
 
@@ -124,6 +124,23 @@ def test_the_prefix_is_bound_read_write_and_resolved(layout, tmp_path):
     link.symlink_to(real, target_is_directory=True)
     argv, _ = gamesandbox.wrap(["x"], layout["env"], prefix=link, home=layout["home"])
     assert (str(real), str(real)) in _pairs(_flags(argv), "--bind")
+
+
+def test_a_folder_reached_through_a_symlink_in_the_home_is_also_bound_at_that_path(
+    layout, tmp_path
+):
+    """~/Games -> another drive: the home becomes an empty tmpfs, so the symlink is gone in the
+    Sandbox while Wine is still told ~/Games/...; bind the real folder at that path too."""
+    drive = tmp_path / "drive" / "aether"
+    (drive / "prefix").mkdir(parents=True)
+    link = layout["home"] / "Games"
+    link.mkdir()
+    (link / "aether").symlink_to(drive, target_is_directory=True)
+    given = link / "aether" / "prefix"
+    argv, _ = gamesandbox.wrap(["x"], layout["env"], prefix=given, home=layout["home"])
+    binds = _pairs(_flags(argv), "--bind")
+    assert (str(drive.resolve() / "prefix"), str(drive.resolve() / "prefix")) in binds
+    assert (str(drive.resolve() / "prefix"), str(given)) in binds
 
 
 def test_an_install_dir_outside_the_prefix_is_bound_and_one_inside_is_not_repeated(
@@ -330,7 +347,7 @@ def test_no_runtime_yet_means_no_runtime_copy(tmp_path, monkeypatch):
 
 def test_a_working_runtime_copy_is_preferred_over_the_system_one(tmp_path, monkeypatch):
     srt = _runtime_copy(tmp_path, monkeypatch)
-    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name, *_a, **_k: "/usr/bin/bwrap")
     tried = []
     monkeypatch.setattr(
         gamesandbox, "works", lambda binary=gamesandbox.BINARY: tried.append(binary) or (True, "")
@@ -342,7 +359,7 @@ def test_a_working_runtime_copy_is_preferred_over_the_system_one(tmp_path, monke
 
 def test_a_blocked_runtime_copy_falls_back_to_the_system_one(tmp_path, monkeypatch):
     srt = _runtime_copy(tmp_path, monkeypatch)
-    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name, *_a, **_k: "/usr/bin/bwrap")
 
     def works(binary=gamesandbox.BINARY):
         if binary == str(srt):
@@ -356,7 +373,7 @@ def test_a_blocked_runtime_copy_falls_back_to_the_system_one(tmp_path, monkeypat
 
 def test_with_only_the_system_copy_that_is_used(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "nothing"))
-    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name, *_a, **_k: "/usr/bin/bwrap")
     monkeypatch.setattr(gamesandbox, "works", lambda binary=gamesandbox.BINARY: (True, ""))
     found = gamesandbox.locate()
     assert (found.binary, found.source) == ("bwrap", "system")
@@ -364,7 +381,7 @@ def test_with_only_the_system_copy_that_is_used(tmp_path, monkeypatch):
 
 def test_when_every_copy_is_blocked_the_first_reason_is_kept(tmp_path, monkeypatch):
     _runtime_copy(tmp_path, monkeypatch)
-    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name, *_a, **_k: "/usr/bin/bwrap")
     monkeypatch.setattr(
         gamesandbox, "works", lambda binary=gamesandbox.BINARY: (False, "setting up uid map")
     )
@@ -374,7 +391,7 @@ def test_when_every_copy_is_blocked_the_first_reason_is_kept(tmp_path, monkeypat
 
 def test_when_there_is_no_copy_at_all_it_says_not_found(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "nothing"))
-    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name: None)
+    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name, *_a, **_k: None)
     found = gamesandbox.locate()
     assert found.binary is None and not found.found
 
@@ -432,7 +449,7 @@ def test_the_first_use_records_the_copies_that_are_there(tmp_path, monkeypatch):
     import json
 
     srt = _runtime_copy(tmp_path, monkeypatch)
-    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name: None)
+    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name, *_a, **_k: None)
     _record_tried(monkeypatch)
     assert gamesandbox.locate().binary == str(srt)
     pins = json.loads(gamesandbox.pins_path().read_text())
@@ -441,7 +458,7 @@ def test_the_first_use_records_the_copies_that_are_there(tmp_path, monkeypatch):
 
 def test_a_copy_that_appears_later_is_never_run(tmp_path, monkeypatch):
     old = _runtime_copy(tmp_path, monkeypatch)
-    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name: None)
+    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name, *_a, **_k: None)
     tried = _record_tried(monkeypatch)
     assert gamesandbox.locate().binary == str(old)  # first use records it
     planted = _another_copy(tmp_path, "steamrt-zzz")
@@ -454,7 +471,7 @@ def test_a_copy_that_appears_later_is_never_run(tmp_path, monkeypatch):
 
 def test_a_pinned_copy_whose_content_changed_is_not_run(tmp_path, monkeypatch):
     srt = _runtime_copy(tmp_path, monkeypatch)
-    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name: None)
+    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name, *_a, **_k: None)
     tried = _record_tried(monkeypatch)
     gamesandbox.locate()
     srt.write_text("#!/bin/sh\n# replaced by the game\n")
@@ -465,7 +482,7 @@ def test_a_pinned_copy_whose_content_changed_is_not_run(tmp_path, monkeypatch):
 
 def test_only_unrecorded_copies_and_no_system_bubblewrap_says_what_to_do(tmp_path, monkeypatch):
     srt = _runtime_copy(tmp_path, monkeypatch)
-    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name: None)
+    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name, *_a, **_k: None)
     _record_tried(monkeypatch)
     gamesandbox.locate()
     srt.unlink()  # umu replaced its runtime; the new copy is not one Nadare recorded
@@ -477,7 +494,7 @@ def test_only_unrecorded_copies_and_no_system_bubblewrap_says_what_to_do(tmp_pat
 
 def test_an_unrecorded_copy_gives_way_to_the_system_bubblewrap(tmp_path, monkeypatch):
     srt = _runtime_copy(tmp_path, monkeypatch)
-    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name, *_a, **_k: "/usr/bin/bwrap")
     tried = _record_tried(monkeypatch)
     gamesandbox.locate()
     srt.unlink()
@@ -490,7 +507,7 @@ def test_an_unrecorded_copy_gives_way_to_the_system_bubblewrap(tmp_path, monkeyp
 
 def test_a_damaged_record_trusts_nothing_instead_of_everything(tmp_path, monkeypatch):
     _runtime_copy(tmp_path, monkeypatch)
-    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name: None)
+    monkeypatch.setattr(gamesandbox.shutil, "which", lambda name, *_a, **_k: None)
     tried = _record_tried(monkeypatch)
     gamesandbox.pins_path().parent.mkdir(parents=True, exist_ok=True)
     gamesandbox.pins_path().write_text("{ not json")

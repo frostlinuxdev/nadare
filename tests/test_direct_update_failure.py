@@ -125,3 +125,55 @@ def test_the_real_sync_leaves_changed_clear_when_nothing_was_replaced(tmp_path, 
     with pytest.raises(dd.DirectError):
         dd.sync(plan, tmp_path / "game", workers=1, changed=changed)
     assert not changed.is_set()
+
+
+# ---- #831: an interrupted update says it was an update, also after a restart ---------------
+def _killed_mid_update(backend, monkeypatch):
+    """The process ends mid-sync (window closed, crash): the except blocks never run."""
+
+    class Killed(BaseException):
+        pass
+
+    def fake(plan, dest, *, emit=None, cancel=None, workers=4, check_workers=None, changed=None):
+        changed.set()
+        raise Killed()
+
+    monkeypatch.setattr(dd, "sync", fake)
+    with pytest.raises(Killed):
+        backend._sync_direct()
+
+
+def test_an_interrupted_update_is_remembered_as_an_update(tmp_path, monkeypatch):
+    backend = _backend(tmp_path, installed=True)
+    _killed_mid_update(backend, monkeypatch)
+    assert backend._interrupted_update() == ("1.0", "2.0")
+
+
+def test_resuming_an_interrupted_update_keeps_what_it_was(tmp_path, monkeypatch):
+    backend = _backend(tmp_path, installed=True)
+    _killed_mid_update(backend, monkeypatch)
+    _killed_mid_update(backend, monkeypatch)  # a second try that also stops part-way
+    assert backend._interrupted_update() == ("1.0", "2.0")
+
+
+def test_a_fresh_install_is_not_called_an_update(tmp_path, monkeypatch):
+    backend = _backend(tmp_path, installed=False)
+    _killed_mid_update(backend, monkeypatch)
+    assert backend._install_incomplete()
+    assert backend._interrupted_update() is None
+
+
+def test_the_status_says_update_interrupted_not_install(tmp_path, monkeypatch):
+    backend = _backend(tmp_path, installed=True)
+    _killed_mid_update(backend, monkeypatch)
+    message = backend.status().message
+    assert "update to 2.0 was interrupted" in message.lower()
+    assert "RESUME" in message
+
+
+def test_a_linked_marker_is_not_read(tmp_path, monkeypatch):
+    backend = _backend(tmp_path, installed=True)
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_text("sync in progress\nupdate from 0.1 to 9.9\n", encoding="utf-8")
+    backend._install_marker_path().symlink_to(elsewhere)
+    assert backend._interrupted_update() is None

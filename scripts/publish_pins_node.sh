@@ -14,7 +14,7 @@
 #
 # Settings (environment, or an EnvironmentFile for the systemd unit):
 #   NADARE_PIN_INDEX_DIR      git checkout of the index (required)
-#   NADARE_PIN_GAMES          space-separated game tags (default: aethergazer mongil endfield gfl2 hi3)
+#   NADARE_PIN_GAMES          space-separated game tags (default: aethergazer mongil endfield gfl2 hi3 bd2 nikke-installer endfield-installer)
 #   NADARE_PIN_DEADLINE       seconds for the whole run (default: publish_pins.py's own)
 #   NADARE_PIN_PUSH           0 = commit but do not push
 #   NADARE_PIN_STATUS         status file (default ~/nadare-pins/status.json)
@@ -28,7 +28,7 @@ set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 index="${NADARE_PIN_INDEX_DIR:-}"
-games="${NADARE_PIN_GAMES:-aethergazer mongil endfield gfl2 hi3}"
+games="${NADARE_PIN_GAMES:-aethergazer mongil endfield gfl2 hi3 bd2 nikke-installer endfield-installer}"
 status_file="${NADARE_PIN_STATUS:-$HOME/nadare-pins/status.json}"
 push="${NADARE_PIN_PUSH:-1}"
 heartbeat_url="${NADARE_PIN_HEARTBEAT_URL:-}"
@@ -53,7 +53,7 @@ heartbeat() { # heartbeat ok|down MESSAGE
             || echo "publish_pins_node: heartbeat ping failed" >&2
     else
         curl -fsS -m 10 --retry 2 -o /dev/null -G \
-            --data-urlencode "status=down" --data-urlencode "msg=${2:0:400}" \
+            --data-urlencode "status=down" --data-urlencode "msg=$(hostname -s): ${2:0:400}" \
             "${heartbeat_url%%\?*}" >/dev/null 2>&1 \
             || echo "publish_pins_node: heartbeat ping failed" >&2
     fi

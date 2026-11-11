@@ -15,6 +15,10 @@ from . import paths, process
 
 FLATPAK_INFO = Path("/.flatpak-info")
 
+#: Pinned Debian copies of the Steam Runtime libraries Proton was built against.
+#: The Freedesktop runtime ships newer, incompatible sonames (and no Kerberos).
+PROTON_LIBS = Path("/app/lib/nadare-proton")
+
 #: ``flatpak-spawn --env=K=V`` values land in the *host* process table, which
 #: every local user can read; variables whose names look like credentials are
 #: therefore refused rather than leaked.
@@ -111,11 +115,26 @@ def proton_direct(
         "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(client),
         "STEAM_COMPAT_DATA_PATH": str(prefix),
     }
+    # umu points this at the game's folder and Proton maps it as drive S:. Do the same, so a
+    # game that saved its install path sees the same drive whether or not it runs in the
+    # Sandbox (which skips umu in the Flatpak).
+    program = Path(str(args[0])) if args else None
+    if program is not None and program.is_absolute() and program.is_file():
+        env["STEAM_COMPAT_INSTALL_PATH"] = str(program.parent)
+    # Proton expects the Steam Runtime's libraries; the Flatpak runtime has different
+    # versions. Only Proton gets this path, never Nadare itself.
+    if PROTON_LIBS.is_dir():
+        parts = [str(PROTON_LIBS / "x86_64"), str(PROTON_LIBS / "i386")]
+        existing = os.environ.get("LD_LIBRARY_PATH")
+        if existing:
+            parts.append(existing)
+        env["LD_LIBRARY_PATH"] = ":".join(parts)
     return argv, env
 
 
 __all__ = [
     "FLATPAK_INFO",
+    "PROTON_LIBS",
     "host_argv",
     "host_which",
     "in_flatpak",

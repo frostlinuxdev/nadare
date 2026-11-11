@@ -120,6 +120,31 @@ def test_an_old_burst_leaves_the_window():
     assert meter.update(1000 * MIB + 29 * 10 * MIB, 30.0) == pytest.approx(10 * MIB, rel=0.05)
 
 
+def test_a_burst_after_the_view_was_busy_is_not_a_speed_spike():
+    """#1133: events queued while the GUI was busy arrive microseconds apart.
+
+    The bytes behind them came in over the whole pause, so the speed is the real rate,
+    not tens of MB divided by a few microseconds (the tab showed ~6 GiB/s).
+    """
+    rate = 70 * MIB
+    meter = SpeedMeter()
+    t = 0.0
+    while t < 10.0:
+        meter.update(rate * t, t)
+        t = round(t + 0.1, 6)
+    # GUI busy for 6 s (switching tabs); the 60 queued events land at once at t = 16.
+    shown = []
+    for i in range(1, 61):
+        shown.append(meter.update(rate * (10.0 + i * 0.1), 16.0 + i * 1e-6))
+    assert max(s for s in shown if s is not None) < 2 * rate
+
+
+def test_samples_microseconds_apart_give_no_speed_yet():
+    meter = SpeedMeter()
+    meter.update(0, 0.0)
+    assert meter.update(10 * MIB, 0.000_01) is None
+
+
 def test_speed_starts_over_when_the_counter_drops():
     meter = SpeedMeter()
     meter.update(0, 0.0)

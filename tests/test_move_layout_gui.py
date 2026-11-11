@@ -202,3 +202,13 @@ def test_a_missing_game_folder_never_leaves_a_half_moved_profile(make, tmp_path)
     assert Path(saved["prefix"]).is_dir() and not Path(profile["prefix"]).exists()
     assert not any("did not arrive" in text for text in rig.shown)
     assert "stays" in rig.questions[0].lower()
+
+
+def test_a_move_that_keeps_the_game_folder_does_not_bring_back_a_removed_library(tmp_path):
+    """Round 5: only a Move of the game's folder remembers its (new) library."""
+    from nadare.core import libraries
+
+    data = {"owned_dirs": ["/old/Nadare/G"], "prefix": "/a"}
+    after = {"owned_dirs": ["/old/Nadare/G"], "prefix": "/b"}
+    assert libraries.folder_moved(data, after) is False
+    assert libraries.folder_moved(data, {"owned_dirs": ["/new/Nadare/G"]}) is True

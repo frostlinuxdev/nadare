@@ -45,10 +45,22 @@ _LONG_SECRET_RE = re.compile(
     r"[A-Za-z0-9_\-+=]{24,}|(?=[A-Za-z0-9_\-+=]*[0-9A-Z+/=])[A-Za-z0-9_\-+=]{12,}"
 )
 
+#: A 12-23 character run made only of readable words and short numbers, joined by ``-``/``_``,
+#: is a name (``GE-Proton9-20``, ``WutheringWaves``, ``UnityPlayer_x64``), not a secret (#242).
+#: A word is lower case, Capitalised, CamelCase with at most three humps, or up to five
+#: capitals, optionally followed by up to three digits; a number has at most four digits.
+#: Generated values (hex, base64, a word glued to a long number) do not split that way.
+_READABLE_PART = r"(?:\d{1,4}|(?:[A-Z]{1,5}|[A-Z]?[a-z]+(?:[A-Z][a-z]{2,}){0,2})\d{0,3})"
+_READABLE_RE = re.compile(rf"{_READABLE_PART}(?:[-_]{_READABLE_PART})*")
+
 #: One pass matching either a placeholder (kept verbatim) or a secret-shaped run.
 _SECRET_OR_PLACEHOLDER_RE = re.compile(
     f"(?:{_PLACEHOLDER_RE.pattern})|(?:{_LONG_SECRET_RE.pattern})"
 )
+
+#: A run log's crash signal name (``signal=SIGSEGV``) is short but carries upper case, so the
+#: heuristic would mask it; a log that cannot name the crash is useless (#1126).
+_KNOWN_SIGNAL_RE = re.compile(r"signal=SIG(?:ILL|ABRT|BUS|FPE|SEGV)")
 
 _REDACTED = "<redacted>"
 
@@ -57,9 +69,15 @@ _REDACTED = "<redacted>"
 _USERINFO_RE = re.compile(r"(?<=//)[^/@:\s]*:[^/@\s]+@")
 
 
+#: A setting named ``*_token``, ``*_secret``, ``*_password`` or ``*_key`` holds a secret too
+#: (``nm_device_key``, ``sgdb_api_key``, #811).
+_SECRET_SUFFIX = re.compile(r"(?i).+[_-](token|secret|password|passwd|key)")
+
+
 def is_secret_key(key: Any) -> bool:
     """True when ``key`` names a value that must never be logged verbatim."""
-    return bool(_TOKEN_KEYS.fullmatch(str(key)))
+    text = str(key)
+    return bool(_TOKEN_KEYS.fullmatch(text) or _SECRET_SUFFIX.fullmatch(text))
 
 
 @dataclass
@@ -176,7 +194,15 @@ def mask(text: str) -> str:
 
     def _replace(match: re.Match[str]) -> str:
         value = match.group(0)
-        return value if value.startswith("%(") else _masked_value(value)
+        if value.startswith("%(") or (
+            len(value) < 24
+            and _READABLE_RE.fullmatch(value)
+            and any(character.islower() for character in value)
+        ):
+            return value
+        if _KNOWN_SIGNAL_RE.fullmatch(value):
+            return value
+        return _masked_value(value)
 
     out = _USERINFO_RE.sub(f"{_REDACTED}@", text)
     out = _TOKEN_VALUE_RE.sub(lambda m: f"{m.group(1)}={_REDACTED}", out)

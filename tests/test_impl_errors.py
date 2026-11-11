@@ -239,7 +239,7 @@ def test_arknights_install_runner_failure_is_not_a_wine_binary_hint(tmp_path, mo
             {"installer_url": "https://launcher-pkg-ark-en.yo-star.com/a-setup.exe"},
         )
     )
-    monkeypatch.setattr(wg.shutil, "which", lambda name: None)
+    monkeypatch.setattr(wg.shutil, "which", lambda name, *_a, **_k: None)
     monkeypatch.setattr(wg.runners, "installed_pinned", lambda family="dwproton": None)
 
     def offline(*_a, **_k):

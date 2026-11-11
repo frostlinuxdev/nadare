@@ -19,11 +19,21 @@ VARIABLE = "PROTON_ENABLE_WAYLAND"
 _ASSIGNMENT = re.compile(rf"(^|\s){VARIABLE}=(\S*)")
 
 
+#: ``LaunchUndo.written`` of an undo saved before Nadare recorded what it wrote.
+UNKNOWN = object()
+
+
 @dataclass(frozen=True)
 class LaunchUndo:
-    """What an undo puts back: the earlier launch options, or ``None`` for "there were none"."""
+    """What an undo puts back: the earlier launch options, or ``None`` for "there were none".
+
+    ``written`` is what Nadare set; the undo only applies while Steam still has exactly that,
+    so options the player typed in Steam afterwards are never overwritten. ``UNKNOWN`` marks
+    an undo saved before this was recorded.
+    """
 
     previous: str | None
+    written: str | None | object = UNKNOWN
 
 
 def _split(options: str) -> tuple[str, str]:

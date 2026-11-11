@@ -321,10 +321,10 @@ def test_the_profiles_own_steam_command_wins(tmp_path):
 def _two_accounts(root: Path) -> None:
     (root / "config").mkdir(exist_ok=True)
     (root / "config" / "loginusers.vdf").write_text(
-        '"users"\n{\n\t"76561198313531351"\n\t{\n\t\t"MostRecent"\t\t"0"\n\t}\n'
+        '"users"\n{\n\t"76561198000000040"\n\t{\n\t\t"MostRecent"\t\t"0"\n\t}\n'
         '\t"76561198000000042"\n\t{\n\t\t"MostRecent"\t\t"1"\n\t}\n}\n'
     )
-    for number, flag in ((76561198313531351 - 76561197960265728, "1"),
+    for number, flag in ((76561198000000040 - 76561197960265728, "1"),
                          (76561198000000042 - 76561197960265728, "0")):
         cfg = root / "userdata" / str(number) / "config"
         cfg.mkdir(parents=True)

@@ -67,8 +67,8 @@ class TestCznLocationRows:
             prefix = tmp_path / "czn-prefix"
             (prefix / "drive_c").mkdir(parents=True)
             dialog.set_prefix(prefix)
-            assert dialog.create_profile() == "chaos-zero-nightmare"
-            profile = config.profile("chaos-zero-nightmare")
+            assert dialog.create_profile() == "czn"
+            profile = config.profile("czn")
             assert profile["prefix"] == str(prefix)
             assert profile.get("install_dir") == ""
         finally:
@@ -85,8 +85,8 @@ class TestCznLocationRows:
 
             assert not dialog.folder.isVisible()
             # The prefix is still created by the backend; its default is kept.
-            assert dialog.create_profile() == "chaos-zero-nightmare"
-            profile = config.profile("chaos-zero-nightmare")
+            assert dialog.create_profile() == "czn"
+            profile = config.profile("czn")
             assert profile.get("install_dir") == ""
             assert profile["prefix"].endswith("/prefix")
         finally:

@@ -42,7 +42,7 @@ def test_main_window_constructs_and_closes(tmp_path, qapp):
         assert window.windowTitle()
         assert window.centralWidget() is not None
         assert not hasattr(window, "profile_combo")
-        assert window.stack.currentIndex() == 0  # library page
+        assert window.stack.currentIndex() == 3  # no games yet: the Store
     finally:
         window.close()
         window.deleteLater()
@@ -604,8 +604,8 @@ def test_game_view_console_collapses_with_news_and_expands_on_busy_or_error(tmp_
         qapp.processEvents()
 
 
-def test_game_view_without_news_source_keeps_console_expanded(tmp_path, qapp):
-    """A backend with no official feed hides the section and leaves the log."""
+def test_game_view_without_news_source_keeps_the_output_header(tmp_path, qapp):
+    """A backend with no official feed hides the section and leaves the log (folded, #993)."""
     from nadare.core.events import Event
     from nadare.core.news import NewsResult
     from nadare.gui.game_view import GameView
@@ -616,12 +616,12 @@ def test_game_view_without_news_source_keeps_console_expanded(tmp_path, qapp):
         view.append_event(Event("log", "something to read"))  # an empty log is hidden
         qapp.processEvents()
         assert view.news_frame.isHidden()
-        assert not view.console.isHidden()
+        assert not view.output_head.isHidden() and view.console.isHidden()
 
         view.set_news(NewsResult(items=[], available=False))
         qapp.processEvents()
         assert view.news_frame.isHidden()
-        assert not view.console.isHidden()
+        assert not view.output_head.isHidden() and view.console.isHidden()
     finally:
         view.deleteLater()
         qapp.processEvents()
@@ -2111,7 +2111,12 @@ def test_failed_removal_clears_the_removing_status(tmp_path, qapp, monkeypatch):
         window.close()
 
 
-def test_enter_in_the_add_game_form_adds_the_game_not_browse(tmp_path, qapp):
+def test_enter_in_the_add_game_form_presses_no_button(tmp_path, qapp):
+    """Not Browse (the old bug), and not Add game either: Enter only finishes typing.
+
+    Add game used to be the default button, so Enter in the name field created the
+    preselected game at once (tests/test_add_game.py has the key-press test).
+    """
     from PyQt6.QtWidgets import QPushButton
 
     from nadare.gui.add_game import AddGameDialog
@@ -2119,7 +2124,8 @@ def test_enter_in_the_add_game_form_adds_the_game_not_browse(tmp_path, qapp):
     dialog = AddGameDialog(_empty_config(tmp_path))
     try:
         buttons = {b.text(): b for b in dialog.findChildren(QPushButton)}
-        assert buttons["Add game"].isDefault()
+        assert not any(b.isDefault() for b in buttons.values())
+        assert not buttons["Add game"].autoDefault()
         assert not buttons["Browse"].autoDefault()
         assert not buttons["Cancel"].autoDefault()
     finally:
@@ -2250,6 +2256,7 @@ def test_tab_skips_scroll_frames_and_reaches_the_add_game_card(tmp_path, qapp):
 
     window = MainWindow(_empty_config(tmp_path))
     try:
+        window.show_library()  # with no games the window starts on the Store
         window.show()
         qapp.processEvents()
         window.activateWindow()

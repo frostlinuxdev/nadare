@@ -133,8 +133,14 @@ def _game_folder_logs(
     return found
 
 
-def read_tail(path: Path | str, max_bytes: int = 512 * 1024) -> str:
-    """Return the end of ``path``, whole lines only, with a notice when cut."""
+def read_tail_with_size(
+    path: Path | str, max_bytes: int = 512 * 1024
+) -> tuple[str, int, int]:
+    """Like :func:`read_tail`, plus the read's end offset and trailing partial-line bytes.
+
+    The offset comes from the same open handle that read the text, so a file growing
+    between the read and a later ``stat`` cannot make a follower skip bytes.
+    """
     try:
         with Path(path).open("rb") as handle:
             handle.seek(0, os.SEEK_END)
@@ -152,10 +158,22 @@ def read_tail(path: Path | str, max_bytes: int = 512 * 1024) -> str:
             else:
                 handle.seek(0)
                 data = handle.read()
+            end = handle.tell()
     except OSError:
-        return ""
+        return "", 0, 0
+    partial = data[data.rfind(b"\n") + 1 :]
     text = data.decode("utf-8", errors="replace")
-    return (_TAIL_NOTICE + text) if prefixed else text
+    return ((_TAIL_NOTICE + text) if prefixed else text, end, len(partial))
+
+
+def read_tail(path: Path | str, max_bytes: int = 512 * 1024) -> str:
+    """Return the end of ``path``, whole lines only, with a notice when cut."""
+    return read_tail_with_size(path, max_bytes)[0]
+
+
+def has_session_header(text: str) -> bool:
+    """True when ``text`` starts a new run (a ``=====`` header line)."""
+    return bool(_HEADER.search(text))
 
 
 def sessions(text: str) -> list[str]:
@@ -330,6 +348,7 @@ __all__ = [
     "filter_lines",
     "list_logs",
     "read_tail",
+    "read_tail_with_size",
     "redacted",
     "sessions",
     "trim_sessions",

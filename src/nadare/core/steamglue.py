@@ -17,9 +17,9 @@ import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
-from . import process, runners, steamfix, steamrun, steamsetup, steamtools, steamwayland
+from . import paths, process, runners, steamfix, steamrun, steamsetup, steamtools, steamwayland
 from .backends import BackendError
-from .events import Cancel, Cancelled
+from .events import Cancel, Cancelled, Emitter
 
 _ROOTS = (
     Path(".local") / "share" / "Steam",
@@ -162,6 +162,33 @@ def ensure_steam_tool(root: Path, runner: Path) -> str:
     return runner.name
 
 
+def remove_unused_tool(root: Path, tool: str, config_text: str | None) -> bool:
+    """Remove the link :func:`ensure_steam_tool` made for ``tool`` once no game uses it.
+
+    Only Nadare's own link goes: a symlink in ``compatibilitytools.d`` pointing into Nadare's
+    runners folder. A real folder, a link to anything else, a tool a game is still mapped to, or
+    a ``config.vdf`` that cannot be read keeps it. Returns whether it was removed.
+    """
+    if not tool or config_text is None:
+        return False
+    if tool in {".", ".."} or "/" in tool or "\\" in tool:
+        return False
+    in_use = steamtools.mapped_tools(config_text)
+    if in_use is None or tool in in_use:
+        return False
+    link = tool_dir(root) / tool
+    if not link.is_symlink():
+        return False
+    try:
+        target = link.resolve()
+        if not target.is_relative_to(paths.runners_dir().resolve()):
+            return False
+        link.unlink()
+    except OSError:
+        return False
+    return True
+
+
 # ---- running things -----------------------------------------------------------------------
 def run(argv: list[str], *, settle: float = 5.0) -> int:
     """Start ``argv`` and report how it began.
@@ -266,8 +293,12 @@ def make_actions(
     confirm_timeout: float = 20.0,
     poll: float = 0.5,
     cancel: Cancel | None = None,
+    emit: Emitter | None = None,
 ) -> Callable[[steamsetup.SetupItem], steamrun.ActionResult]:
-    """One function that performs a checklist item's named action. Unknown actions are refused."""
+    """One function that performs a checklist item's named action. Unknown actions are refused.
+
+    ``emit`` receives the runner download's progress events (a multi-GB download).
+    """
     key = str(app_id)
 
     def act(item: steamsetup.SetupItem) -> steamrun.ActionResult:
@@ -298,7 +329,7 @@ def make_actions(
                 game = steamsetup.game_for(key)
                 family = game.runner if game is not None else "dwproton"
                 fetch = ensure_runner_fn or (
-                    lambda: runners.ensure_pinned(family, cancel=cancel)
+                    lambda: runners.ensure_pinned(family, cancel=cancel, emit=emit)
                 )
                 try:
                     runner = fetch()

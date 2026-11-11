@@ -208,11 +208,10 @@ class StoreDetail(QWidget):
             self.notice_label.hide()
             self.notice_link.hide()
         steam_tile = steamstore.app_id_of(entry.kind) is not None
-        # A Steam tile reopens its one game, so "Add another copy" would promise a copy it
-        # never makes.
-        installed_label = "Open" if steam_tile else "Add another copy"
-        self.install_button.setText(installed_label if entry.installed else "Install")
-        # An installed game is played first; installing another copy is a quiet second choice.
+        # A Steam tile reopens its one game; a catalog game can only be added once, so an
+        # installed catalog game offers Play alone.
+        self.install_button.setText("Open" if steam_tile and entry.installed else "Install")
+        self.install_button.setVisible(not entry.installed or steam_tile)
         self._restyle(self.install_button, "GhostButton" if entry.installed else "Primary")
         self.play_button.setVisible(entry.installed)
         if move_focus:

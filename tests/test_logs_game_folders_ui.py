@@ -70,3 +70,20 @@ def test_a_run_of_another_operation_does_not_steal_the_selection(qapp, tmp_path)
     _run(logs, "G", "launch", "20261105-110000", "launching\n", 20)
     dlg._tick()
     assert dlg._selected_path() == install
+
+
+def test_an_older_run_the_user_picked_stays_selected(qapp, tmp_path):
+    """Sweep b23r1 c31: picking an older run jumped back to the newest one every second."""
+    logs = tmp_path / "logs"
+    older = _run(logs, "G", "launch", "20261105-100000", "older crash\n", 10)
+    newer = _run(logs, "G", "launch", "20261105-110000", "newer run\n", 20)
+    dlg = LogsDialog(["G"], profile="G", directory=logs, follow=False, operation="launch")
+    assert dlg._selected_path() == newer
+    dlg._select_path(older)
+    dlg._tick()
+    dlg._tick()
+    assert dlg._selected_path() == older
+    assert "older crash" in dlg.view.toPlainText()
+    third = _run(logs, "G", "launch", "20261105-120000", "third\n", 30)
+    dlg._tick()  # a run that starts now is still followed
+    assert dlg._selected_path() == third

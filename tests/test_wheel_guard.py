@@ -26,6 +26,9 @@ except Exception:  # pragma: no cover - optional GUI dependencies
 
 from nadare.gui import wheelguard
 
+# This file restyles the whole app: end earlier tests' windows first (#1024).
+pytestmark = pytest.mark.usefixtures("restyle_safe")
+
 
 @pytest.fixture(scope="module")
 def qapp():

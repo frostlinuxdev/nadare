@@ -300,19 +300,69 @@ def test_czn_display_help_does_not_recommend_x11(qapp):
     assert "try it if" not in display.help
 
 
-def test_unmatched_quote_in_launch_args_is_warned_about(tmp_path, qapp, monkeypatch):
+def test_unmatched_quote_in_launch_args_blocks_the_save(tmp_path, qapp, monkeypatch):
+    """The game would not start with it: say so before anything is written, not after."""
     shown = []
     monkeypatch.setattr(
-        "nadare.gui.settings.QMessageBox.open", lambda self, *a: shown.append(self.text())
+        "nadare.gui.settings.QMessageBox.warning",
+        staticmethod(lambda parent, title, text, *a, **k: shown.append(text)),
     )
     config = _config(tmp_path, "wine")
     page = SettingsPage()
+    saved = []
+    page.saved.connect(lambda *a: saved.append(a))
     try:
         page.load(config, "sample")
         page.option_widget("launch_args").setText('--flag "oops')
         page.save()
-        assert shown and "no closing quote" in shown[0]
-        assert config.profile("sample")["launch_args"] == '--flag "oops'
+        assert shown and "no closing quote" in shown[0] and "not saved" in shown[0]
+        assert config.profile("sample").get("launch_args", "") != '--flag "oops'
+        assert saved == []
+        page.option_widget("launch_args").setText('--flag "fine"')
+        page.save()
+        assert config.profile("sample")["launch_args"] == '--flag "fine"'
+    finally:
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_typed_runner_that_is_not_installed_blocks_the_save(tmp_path, qapp, monkeypatch):
+    shown = []
+    monkeypatch.setattr(
+        "nadare.gui.settings.QMessageBox.warning",
+        staticmethod(lambda parent, title, text, *a, **k: shown.append(text)),
+    )
+    config = _config(tmp_path, "wine")
+    before = config.profile("sample").get("runner", "")
+    page = SettingsPage()
+    try:
+        page.load(config, "sample")
+        page.runner.setEditText("GE-Proton-does-not-exist")
+        page.save()
+        assert shown and "Runner" in shown[0] and "not installed" in shown[0]
+        assert config.profile("sample").get("runner", "") == before
+    finally:
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_saved_runner_that_went_missing_does_not_block_other_changes(
+    tmp_path, qapp, monkeypatch
+):
+    shown = []
+    monkeypatch.setattr(
+        "nadare.gui.settings.QMessageBox.warning",
+        staticmethod(lambda parent, title, text, *a, **k: shown.append(text)),
+    )
+    config = _config(tmp_path, "wine", runner="/runner/that/was/deleted")
+    page = SettingsPage()
+    try:
+        page.load(config, "sample")
+        page.title.setText("Renamed")
+        page.save()
+        assert shown == []
+        assert config.profile("sample")["title"] == "Renamed"
+        assert config.profile("sample")["runner"] == "/runner/that/was/deleted"
     finally:
         page.deleteLater()
         qapp.processEvents()

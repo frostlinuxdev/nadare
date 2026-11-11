@@ -83,16 +83,16 @@ def test_the_fixture_really_has_many_solid_blocks():
 
 def test_sequential_extraction_of_the_fixture_is_correct(tmp_path):
     with open(ARCHIVE, "rb") as fh:
-        assert sevenz.extract(fh, tmp_path) == len(CONTENT)
-    assert tree(tmp_path) == CONTENT
+        assert sevenz.extract(fh, tmp_path / "out") == len(CONTENT)
+    assert tree(tmp_path / "out") == CONTENT
 
 
 @pytest.mark.parametrize("workers", [2, 4, 8])
 def test_parallel_extraction_matches_the_original_tree(tmp_path, workers):
     opener = Opener()
     with open(ARCHIVE, "rb") as fh:
-        n = sevenz.extract(fh, tmp_path, workers=workers, open_reader=opener)
-    assert tree(tmp_path) == CONTENT
+        n = sevenz.extract(fh, tmp_path / "out", workers=workers, open_reader=opener)
+    assert tree(tmp_path / "out") == CONTENT
     assert n == len(CONTENT)
     assert opener.open_now == 0, "every worker reader must be closed"
 
@@ -100,7 +100,7 @@ def test_parallel_extraction_matches_the_original_tree(tmp_path, workers):
 def test_parallel_extraction_really_runs_blocks_at_the_same_time(tmp_path):
     opener = Opener(delay=0.002)  # slow reads so the workers overlap
     with open(ARCHIVE, "rb") as fh:
-        sevenz.extract(fh, tmp_path, workers=4, open_reader=opener)
+        sevenz.extract(fh, tmp_path / "out", workers=4, open_reader=opener)
     assert opener.max_open >= 2
     assert 2 <= len(opener.opened) <= 4, "one reader per worker, not one per block"
     assert len({id(r) for r in opener.opened}) == len(opener.opened)
@@ -122,7 +122,7 @@ def test_parallel_progress_is_serialised_monotonic_and_complete(tmp_path):
             inside.release()
 
     with open(ARCHIVE, "rb") as fh:
-        sevenz.extract(fh, tmp_path, workers=4, open_reader=Opener(), progress=progress)
+        sevenz.extract(fh, tmp_path / "out", workers=4, open_reader=Opener(), progress=progress)
     assert not overlap, "progress must never be called concurrently"
     dones = [d for d, _ in calls]
     assert dones == sorted(dones), "progress must not go backwards"
@@ -130,7 +130,18 @@ def test_parallel_progress_is_serialised_monotonic_and_complete(tmp_path):
     assert len({t for _, t in calls}) == 1
 
 
-def test_parallel_cancel_stops_all_workers(tmp_path):
+def test_parallel_cancel_stops_all_workers(tmp_path, monkeypatch):
+    # Watch only the pools sevenz itself makes: under xdist other tests in the
+    # same process may still own idle ThreadPoolExecutor threads (#1024).
+    pools = []
+    real = sevenz.ThreadPoolExecutor
+
+    class Recording(real):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            pools.append(self)
+
+    monkeypatch.setattr(sevenz, "ThreadPoolExecutor", Recording)
     cancel = Cancel()
     seen = []
 
@@ -141,11 +152,12 @@ def test_parallel_cancel_stops_all_workers(tmp_path):
     opener = Opener(delay=0.001)
     with open(ARCHIVE, "rb") as fh, pytest.raises(Cancelled):
         sevenz.extract(
-            fh, tmp_path, workers=4, open_reader=opener, cancel=cancel, progress=progress
+            fh, tmp_path / "out", workers=4, open_reader=opener, cancel=cancel, progress=progress
         )
     assert opener.open_now == 0
-    assert not [t for t in threading.enumerate() if t.name.startswith("ThreadPoolExecutor")]
-    for name, data in tree(tmp_path).items():
+    assert pools, "the parallel path was not taken"
+    assert not [t for pool in pools for t in pool._threads if t.is_alive()]
+    for name, data in tree(tmp_path / "out").items():
         assert data == CONTENT[name], f"a partly written file was left behind: {name}"
 
 
@@ -165,8 +177,10 @@ def test_only_filter_opens_readers_only_for_blocks_that_are_needed(tmp_path):
     opener = Opener()
     wanted = {name for name in CONTENT if name.startswith("dir1/")}
     with open(ARCHIVE, "rb") as fh:
-        sevenz.extract(fh, tmp_path, only=wanted.__contains__, workers=8, open_reader=opener)
-    assert tree(tmp_path) == {k: CONTENT[k] for k in wanted}
+        sevenz.extract(
+            fh, tmp_path / "out", only=wanted.__contains__, workers=8, open_reader=opener
+        )
+    assert tree(tmp_path / "out") == {k: CONTENT[k] for k in wanted}
     assert len(opener.opened) <= len(wanted)
 
 
@@ -187,4 +201,4 @@ def test_a_reader_that_cannot_be_opened_is_reported(tmp_path):
         raise OSError("connection refused")
 
     with open(ARCHIVE, "rb") as fh, pytest.raises(OSError, match="refused"):
-        sevenz.extract(fh, tmp_path, workers=4, open_reader=broken)
+        sevenz.extract(fh, tmp_path / "out", workers=4, open_reader=broken)

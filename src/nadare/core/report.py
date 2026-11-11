@@ -20,7 +20,10 @@ from typing import Any
 from . import events, paths, process, runlog
 
 MAX_REPORT_BYTES = 300_000
-STUB_PREBUILT_SHA256 = "fe4a5bad970750e974cf999e31e3b87132fbb25f9c04c9eea69e3acc2e243185"
+STUB_SHIPPED_SHA256 = (
+    "0a8cc27d2b6a7eb5097d65ca04214de997693da34483e11bc5d76211caddbdf7",
+    "fe4a5bad970750e974cf999e31e3b87132fbb25f9c04c9eea69e3acc2e243185",
+)
 
 
 def redact(
@@ -163,7 +166,8 @@ def build_report(
     appimage = os.environ.get("APPIMAGE")
     lines += [
         f"Nadare: {__version__}",
-        f"Run kind: AppImage ({appimage})" if appimage else "Run kind: source/pip",
+        # Not the path: a file name can say more about a person than the problem needs.
+        "Run kind: AppImage" if appimage else "Run kind: source/pip",
     ]
     try:
         release = Path(os_release_path).read_text(encoding="utf-8")
@@ -185,8 +189,9 @@ def build_report(
         f"{os.environ.get('XDG_SESSION_TYPE', 'unknown')} / "
         f"{_display_kind()} / "
         f"{os.environ.get('XDG_CURRENT_DESKTOP', 'unknown')}",
-        f"GPU: {_command(run_command, ['lspci'])}",
-        f"Locale: {os.environ.get('LANG', 'unknown')}; timezone: {os.environ.get('TZ', 'system')}",
+        f"GPU: {_graphics_cards(_command(run_command, ['lspci']))}",
+        # The language helps with text problems in games; the timezone only says where someone is.
+        f"Language: {os.environ.get('LANG', 'unknown')}",
         f"umu-run: {_command(run_command, ['umu-run', '--version'])}",
     ]
     doctor = events.mask(doctor_text) if doctor_text else "unavailable: doctor checks not supplied"
@@ -218,7 +223,7 @@ def build_report(
                 while not folder.exists() and folder != folder.parent:
                     folder = folder.parent  # the nearest folder that exists
                 free = shutil.disk_usage(folder).free
-                lines.append(f"Free disk ({label}): {free} bytes")
+                lines.append(f"Free disk ({label}): {free / 2**30:.0f} GiB")
             except OSError as exc:
                 lines.append(f"Free disk ({label}): unavailable: {exc}")
         if "czn" in str(profile.get("backend", "")).lower():
@@ -227,7 +232,7 @@ def build_report(
                 digest = hashlib.sha256(stub.read_bytes()).hexdigest()
                 lines.append(
                     f"CZN stub: {stub.name} sha256={digest[:12]} "
-                    f"shipped={'yes' if digest == STUB_PREBUILT_SHA256 else 'no'}"
+                    f"shipped={'yes' if digest in STUB_SHIPPED_SHA256 else 'no'}"
                 )
                 stub_log = logs / f"{name}-czn-stub.log"
                 try:
@@ -267,18 +272,13 @@ def build_report(
     own_folder = runlog.game_id(name) if name else ""
     for path in _newest_runs(logs / own_folder) if own_folder else []:
         lines += [f"### {own_folder}/{path.name}", _tail(path)]
+    # Other games are counted, not named: which games someone plays, and when, is theirs.
     try:
-        for path in sorted(logs.iterdir(), key=lambda p: p.name):
-            if path.is_dir():
-                if path.name != own_folder:
-                    files = [f for f in path.iterdir() if f.is_file()]
-                    total = sum(f.stat().st_size for f in files)
-                    lines.append(f"Other: {path.name}/ files={len(files)} size={total}")
-            elif path not in log_files:
-                stat = path.stat()
-                lines.append(f"Other: {path.name} size={stat.st_size} mtime={stat.st_mtime}")
+        others = sum(1 for path in logs.iterdir() if path.is_dir() and path.name != own_folder)
     except OSError:
-        pass
+        others = 0
+    if others:
+        lines.append(f"Logs for {others} other game{'s' if others != 1 else ''} (not included).")
     result = redact(
         "\n".join(lines), username=username, home=home, hostname=hostname, mask=False
     )
@@ -289,6 +289,23 @@ def build_report(
         )
         result = "# Nadare support report (truncated; newest content kept)\n\n" + suffix
     return result
+
+
+#: ``lspci`` classes that are graphics cards; everything else in the machine stays out.
+_GPU_CLASSES = ("VGA compatible controller", "3D controller", "Display controller")
+
+
+def _graphics_cards(lspci: str) -> str:
+    """The graphics cards from ``lspci``, by name only (no bus address, no other devices)."""
+    if lspci.startswith("unavailable"):
+        return lspci
+    cards = []
+    for line in lspci.splitlines():
+        _address, _, rest = line.partition(" ")
+        kind, _, name = rest.partition(": ")
+        if kind.strip() in _GPU_CLASSES and name.strip():
+            cards.append(name.strip())
+    return "; ".join(cards) if cards else "none found"
 
 
 def _display_kind() -> str:

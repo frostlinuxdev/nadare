@@ -10,6 +10,31 @@ These small value types hold the rules; the GUI reads from them.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .backends import Status
+
+
+def primary_operation(status: Status | None) -> str | None:
+    """The game page's main action for this status (``None`` when there is no clear one)."""
+    if status is None:
+        return None
+    if status.running or status.state == "running":
+        return "stop"
+    if status.state == "error":
+        # A retired kind (a launcher Nadare no longer runs) can only be removed (b23).
+        return "remove" if (status.data or {}).get("retired") else "retry"
+    if status.state == "not_installed":
+        if (status.data or {}).get("can_install") is False:
+            return "settings"
+        return "install"
+    data = status.data or {}
+    if data.get("update_available"):
+        return "update"
+    if data.get("login_required") and not data.get("logged_in"):
+        return "login"
+    return "launch"
 
 
 @dataclass(frozen=True)
@@ -24,12 +49,17 @@ class SandboxFacts:
     active: bool | None = None
     #: Why the switch cannot be used on this machine ("" when it can).
     blocked: str = ""
+    #: Whether a bubblewrap exists here; without one a game on by default plays unprotected.
+    ready: bool = True
+
+    def _can_run(self) -> bool:
+        return self.ready and not self.blocked
 
     def protected_now(self) -> bool:
         """Whether the process now running (or about to start) is sandboxed."""
         if self.running and self.active is not None:
             return self.active
-        return self.chosen
+        return self.chosen and self._can_run()
 
     def pill(self) -> str:
         """The pill text for the game page ("" hides it)."""
@@ -37,7 +67,7 @@ class SandboxFacts:
             return ""
         if self.protected_now():
             return "SANDBOX"
-        if self.running and self.chosen:
+        if self.running and self.chosen and self._can_run():
             return "SANDBOX NEXT LAUNCH"
         return ""
 
@@ -49,6 +79,12 @@ class SandboxFacts:
             return self.blocked
         if self.running:
             return "Stop the game to change this; it applies the next time you play."
+        if self.chosen and not self.ready:
+            return (
+                "Sandbox needs bubblewrap, which is not on this computer yet (it comes with the "
+                "game runtime Nadare downloads on the first launch). Until then the game runs "
+                "without it; `nadare doctor` says more."
+            )
         return default
 
 

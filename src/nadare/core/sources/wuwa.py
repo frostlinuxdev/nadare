@@ -19,8 +19,8 @@ INDEX_URL = (
     "https://prod-alicdn-gamestarter.kurogame.com/launcher/game/G153/"
     f"50004_{BUILTIN_TOKEN}/index.json"
 )
-#: The key the launcher's own ``KRApp.conf`` carries for the bundle index (a shared launcher
-#: value, like the token above, not an account secret).
+#: Bundle-index key read by the launcher (a shared launcher value, like the token above,
+#: not an account secret).
 LAUNCHER_APP_KEY = "P7xcUZnEr1AXIGON25E6KjpOgTlVrg6e"
 BUNDLE_INDEX_URL = (
     "https://prod-alicdn-gamestarter.kurogame.com/launcher/game/"

@@ -10,14 +10,16 @@ from __future__ import annotations
 
 import importlib
 import logging
+import re
 import threading
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
 from .config import Config, valid_profile_name
-from .directkinds import CATALOG_BACKENDS
+from .directkinds import CATALOG_BACKENDS, RETIRED_KINDS
 from .events import Cancel, Cancelled, Emitter, emitter
 
 
@@ -123,6 +125,14 @@ class Option:
             raise ValueError(f"choice option {self.key!r} needs choices")
 
 
+#: Settings help for every game's "Wine prefix" folder, in a player's words (it used to say
+#: "WINEPREFIX used for this game").
+PREFIX_HELP = (
+    "The folder that acts as this game's Windows: its C: drive, settings and saves. "
+    "Nadare makes it; change it only to use one you already have."
+)
+
+
 #: Real profile settings a backend honours that Settings does not show: installer and
 #: manifest overrides, a download token, the Fate/Grand Order installer internals, and the
 #: Wine, umu-run and download-worker overrides almost nobody needs.
@@ -160,6 +170,10 @@ PROCESS_MATCH_SHOWN = frozenset({"script"})
 
 #: Backends where the user picks the executable (nothing else knows it), so it is shown.
 EXE_NAME_SHOWN = frozenset({"wine", "script"})
+
+#: Kinds where each profile is a different game (the user's own .exe, script, or Steam app),
+#: so any number of profiles is allowed.
+UNLIMITED_KINDS = frozenset({"wine", "script", "steam"})
 
 
 def config_only(kind: str, key: str) -> bool:
@@ -221,6 +235,16 @@ class GameBackend(ABC):
     #: ``(text, url, link_label)``, e.g. "also coming to Steam". The label
     #: defaults to "Learn more". Purely informational; never blocks anything.
     page_notice: ClassVar[tuple[str, str] | tuple[str, str, str] | None] = None
+
+    #: The key of one ``choice`` option the Store's install confirm asks for before the first
+    #: download (#990), e.g. a resource quality; ``install_choice_sizes`` gives each value's
+    #: download size so the confirm can say how much it fetches.
+    install_choice: ClassVar[str | None] = None
+    install_choice_sizes: ClassVar[dict[str, int]] = {}
+
+    #: One short line for the game page once the game is installed (#992); the whole
+    #: ``page_notice`` stays one click away. ``None`` uses the notice's first sentence.
+    page_summary: ClassVar[str | None] = None
 
     #: True for games Nadare runs without the publisher's blessing: the user is
     #: told once (per game type) before the first install, login or launch.
@@ -395,7 +419,20 @@ def is_available(kind: str) -> bool:
     return _load_builtin(kind) is not None
 
 
+def retired_replacement(kind: object) -> str | None:
+    """The direct kind that replaced a retired ``kind``, or ``None`` when it is not retired."""
+    row = RETIRED_KINDS.get(kind) if isinstance(kind, str) else None
+    return row[1] if row else None
+
+
 def get(kind: str) -> type[GameBackend]:
+    if isinstance(kind, str) and kind in RETIRED_KINDS:
+        title, _direct = RETIRED_KINDS[kind]
+        raise BackendError(
+            f"Nadare no longer runs {title} through the publisher's launcher; it installs "
+            f"{title} itself now. Remove this game here (its files stay unless you choose to "
+            f"delete them), then install {title} from the Store."
+        )
     backend = _load_builtin(kind)
     if backend is None:
         reason = _FAILED_IMPORTS.get(kind) if isinstance(kind, str) else None
@@ -446,6 +483,40 @@ def install_size_hint(kind: str) -> int | None:
         return None
 
 
+def install_choice(kind: str) -> tuple[Option, dict[str, int]] | None:
+    """The option ``kind`` asks for before its first download, and each value's size."""
+    try:
+        backend = get(kind)
+    except BackendError:
+        return None
+    key = getattr(backend, "install_choice", None)
+    if not key:
+        return None
+    option = next((o for o in backend.options if o.key == key and o.kind == "choice"), None)
+    if option is None:
+        return None
+    return option, dict(getattr(backend, "install_choice_sizes", {}) or {})
+
+
+def install_choice_label(kind: str, profile: Mapping[str, Any]) -> str:
+    """``"Resource quality: HD"`` for a game with an install choice, else ``""`` (#990).
+
+    The value is read like the backend reads it (top level, then ``extra``); an unknown value
+    shows the option's default, which is what the backend falls back to.
+    """
+    asked = install_choice(kind) if kind else None
+    if asked is None:
+        return ""
+    option = asked[0]
+    value = profile.get(option.key)
+    if value in (None, ""):
+        extra = profile.get("extra")
+        value = extra.get(option.key) if isinstance(extra, Mapping) else None
+    labels = {str(v): str(label) for label, v in (option.choices or ())}
+    shown = labels.get(str(value)) or labels.get(str(option.default), str(option.default))
+    return f"{option.label}: {shown}"
+
+
 def supports_update(kind: str) -> bool:
     """Whether ``kind`` can update its game (safe for unknown kinds)."""
     try:
@@ -458,6 +529,37 @@ def supports_sandbox(kind: str) -> bool:
     """Whether ``kind`` can run its game in the Sandbox (safe for unknown kinds)."""
     try:
         return bool(getattr(get(kind), "supports_secure_mode", False))
+    except BackendError:
+        return False
+
+
+def one_per_game(kind: str) -> bool:
+    """Whether ``kind`` is a catalog game with only one profile (safe for unknown kinds)."""
+    if not kind or kind in UNLIMITED_KINDS:
+        return False
+    try:
+        get(kind)
+    except BackendError:
+        return False
+    return True
+
+
+def existing_profile(kind: str, profiles: dict[str, Any]) -> str | None:
+    """The first profile (in dict order) already using ``kind``, when only one is allowed."""
+    if not one_per_game(kind):
+        return None
+    for name, data in profiles.items():
+        if isinstance(data, dict) and data.get("backend") == kind:
+            return name
+    return None
+
+
+def sandbox_default(kind: str) -> bool:
+    """Whether the Sandbox is on by default for ``kind`` (safe for unknown kinds)."""
+    if not supports_sandbox(kind):
+        return False
+    try:
+        return bool(getattr(get(kind), "sandbox_default_on", True))
     except BackendError:
         return False
 
@@ -486,6 +588,23 @@ def page_notice(kind: str) -> tuple[str, str] | tuple[str, str, str] | None:
         return None
 
 
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
+
+
+def page_summary(kind: str) -> str:
+    """The short line for ``kind``'s page notice: its ``page_summary``, else the first sentence."""
+    notice = page_notice(kind)
+    if not notice:
+        return ""
+    try:
+        explicit = getattr(get(kind), "page_summary", None)
+    except BackendError:
+        explicit = None
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    return _SENTENCE_END.split(notice[0].strip(), maxsplit=1)[0]
+
+
 def create(
     profile_name: str, config: Config, emit: Emitter | None = None, cancel: Cancel | None = None
 ) -> GameBackend:
@@ -496,6 +615,21 @@ def create(
     kind = profile.get("backend") or ""
     if not kind:
         raise BackendError(f"profile {profile_name!r} has no backend set")
+    if not isinstance(kind, str):
+        # A hand-edited or damaged config: say so instead of a TypeError (#1207 b045).
+        raise BackendError(f"profile {profile_name!r} has an invalid backend value {kind!r}")
+    if kind in RETIRED_KINDS:
+        try:
+            get(kind)
+        except BackendError as exc:
+            message = str(exc)
+        where = str(profile.get("prefix") or profile.get("wineprefix") or "").strip()
+        if where:
+            message += (
+                f" Its old files are in {where}; delete them yourself once the new install "
+                "works if you need the space."
+            )
+        raise BackendError(message)
     ctx = BackendContext(
         name=profile_name,
         profile=profile,
@@ -523,12 +657,20 @@ __all__ = [
     "supports_remember_me",
     "supports_login",
     "supports_update",
+    "UNLIMITED_KINDS",
+    "one_per_game",
+    "existing_profile",
     "unofficial_notice",
     "install_size_hint",
+    "install_choice_label",
+    "install_choice",
     "UNOFFICIAL_NOTICE",
     "page_notice",
+    "PREFIX_HELP",
+    "page_summary",
     "supports_news",
     "supports_media",
+    "sandbox_default",
     "unavailable",
     "is_available",
     "Cancelled",

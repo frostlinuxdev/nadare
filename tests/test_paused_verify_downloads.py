@@ -112,3 +112,21 @@ def test_the_usual_tooltips_come_back_after_a_pause(view):
     view._paused_op = None
     view._refresh_actions()
     assert view.verify.toolTip() == verify_tip and view.repair_btn.toolTip() == repair_tip
+
+
+# ---- Update would throw the paused download away too (b23 round 4) -------------------------
+def test_update_is_off_while_a_download_is_paused(view):
+    assert view.update_btn.isEnabled()
+    view.set_paused("repair")
+    assert not view.update_btn.isEnabled()
+    assert "paused" in view.update_btn.toolTip().lower()
+    view._paused_op = None
+    view._refresh_actions()
+    assert view.update_btn.isEnabled()
+
+
+def test_the_controller_keeps_a_paused_operation_when_update_is_asked_for(qapp):
+    controller = BackendController(None)
+    controller._paused["g"] = ("repair", None)
+    assert controller.start("g", "update") is False
+    assert controller.paused_operation("g") == "repair"

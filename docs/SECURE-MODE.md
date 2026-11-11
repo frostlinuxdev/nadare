@@ -1,13 +1,29 @@
-# Sandbox (experimental)
+# Sandbox
 
 The Sandbox runs a game with your real home folder hidden from it. It was called "Secure mode"
 before b21; the name changed because it does not make a game secure, it limits what the game can
-read (see "What it does not do"). It is off by default. Every game that runs a publisher's
+read (see "What it does not do"). It is on by default for every game that offers it. Every game
+that runs a publisher's
 launcher (NIKKE, NTE, the GFL2 Haoplay launcher) and every game Nadare downloads itself (the
 direct games) offers it, as a switch on the game's page and as "Sandbox" under Settings, Game
-options; Steam, the generic Wine game and Chaos Zero Nightmare do not yet. It needs `bubblewrap`
+options; the generic Wine game offers it but off by default (a game you added yourself may need
+files outside its folder), while Steam and Chaos Zero Nightmare do not yet. It needs `bubblewrap`
 (the `bwrap` command); `nadare doctor` says whether it is installed. The setting is stored as
 `secure_mode` in the profile (the old key, so nothing has to be migrated).
+
+## On by default
+
+A game you never set it for (no `secure_mode` in its profile) plays in the Sandbox. Turning the
+switch off saves `secure_mode: false` and that game stays off. When the Sandbox is on only by
+default and cannot run on this computer (no bubblewrap yet, or bubblewrap blocked), the game
+still starts, without the Sandbox, and the game's log says why; the page then shows no "SANDBOX"
+pill. When you turned it on yourself, those situations stop the launch with that message instead,
+so you are never unprotected without being told.
+
+A game whose folder is too broad to hide your home from (the home folder itself, a folder holding
+it, a whole drive) never starts unsandboxed, whether the Sandbox is on by default or switched on:
+the launch stops and says to move the game into a library or turn the Sandbox off for that game.
+NIKKE's launcher and game live inside its Wine prefix, so the Sandbox opens only that prefix.
 
 ## Why
 
@@ -47,6 +63,17 @@ extra needs installing. A sign-in that sends its result back through a custom li
 `game://login` is not covered; a result sent to a local address such as `http://localhost:port`
 is.
 
+## In the Flatpak
+
+Flatpak has its own sandbox, so the Flatpak version does not need bubblewrap. Nadare starts the
+game with `flatpak-spawn --sandbox`: the game gets an empty home folder and no `/mnt`, and only
+the folders it needs are exposed (the prefix, game folder and cache writable; the Proton runner
+and files Nadare downloaded read only). The display, sound, GPU and a filtered session bus are
+shared. The filtered bus reaches the desktop portals, so a "Sign in with Google" link opens in
+your browser directly; Nadare's own link relay is not used there. The game stays in Nadare's
+process namespace, so Stop still works and it exits when Nadare exits. If `flatpak-spawn` is
+missing, `nadare doctor` says so.
+
 ## What it does not do
 
 - It is not a full sandbox. X11 lets a program see and type into other windows, and `/tmp`, the
@@ -57,8 +84,7 @@ is.
   passes a login token to Mongil that way, and only to Mongil. The game cannot read other
   programs' files or environment through `/proc`: reading `/proc/<pid>/root` and `environ` is
   denied (tested with a planted secret file).
-- Installs and updates run without it: only Play is wrapped.
+- A publisher's installer (NIKKE, NTE, the Haoplay launcher) runs in the Sandbox too. Files Nadare downloads itself (the direct games) are written by Nadare, not by publisher code, so that step needs no Sandbox. A launcher that updates the game does so while it runs under Play, inside the Sandbox.
 - Publisher anti-cheat may refuse to run, and a launcher may fail to update itself.
 - Ubuntu 24.04 and newer restrict unprivileged user namespaces; bubblewrap may need an AppArmor
   allowance there (the same issue as `docs/TESTERS.md`).
-- The Flatpak version refuses to start with the Sandbox on rather than run unprotected.

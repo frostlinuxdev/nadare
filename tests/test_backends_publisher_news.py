@@ -380,7 +380,6 @@ def test_endfield_untrusted_cover_is_dropped_and_bad_envelope_raises():
         ("direct-bd2", bd2_news.fetch_bd2_news),
         ("direct-endfield", endfield_news.fetch_endfield_news),
         ("direct-nte", nte_news.fetch_nte_news),
-        ("launcher-nte", nte_news.fetch_nte_news),
         ("launcher-nikke", nikke_news.fetch_nikke_news),
     ],
 )

@@ -879,6 +879,34 @@ def test_an_undo_from_an_earlier_session_is_offered_while_the_change_is_still_th
         _close(dialog, qapp)
 
 
+def test_after_an_undo_the_change_before_it_can_be_undone_too(qapp):
+    """#1031: Wayland after the runner used to lose the runner's undo for good."""
+    plan = _plan([
+        _item("runner", "DW-Proton runner", steamsetup.STATE_DONE),
+        _item("wayland", "Native Wayland", steamsetup.STATE_DONE),
+    ])
+    runner_previous, wayland_previous = object(), object()
+    stack = [("set_runner", runner_previous)]
+    seen: list[object] = []
+    dialog = _dialog(
+        lambda: plan,
+        undo_fn=lambda arg: seen.append(arg) or ActionResult(True, "back"),
+        initial_undo=("set_wayland", wayland_previous),
+        next_undo_fn=lambda: stack.pop() if stack else None,
+    )
+    try:
+        assert dialog.undo_button.text() == "Undo native Wayland"
+        dialog.undo_button.click()
+        assert _wait(qapp, lambda: seen == [wayland_previous])
+        assert _wait(qapp, lambda: dialog.undo_button.text() == "Undo runner change")
+        assert not dialog.undo_button.isHidden()
+        dialog.undo_button.click()
+        assert _wait(qapp, lambda: seen == [wayland_previous, runner_previous])
+        assert _wait(qapp, lambda: dialog.undo_button.isHidden())
+    finally:
+        _close(dialog, qapp)
+
+
 def test_an_old_undo_is_not_offered_once_the_setting_is_no_longer_ours(qapp):
     # Steam's setting was changed by hand since: the step is not done any more
     plan = _plan([_item("runner", "DW-Proton runner", steamsetup.STATE_OPTIONAL)])

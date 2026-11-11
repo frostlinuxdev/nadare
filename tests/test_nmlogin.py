@@ -335,7 +335,7 @@ def test_launch_with_an_expired_login_says_so(tmp_path, store):
 def launch_spy(monkeypatch):
     seen: dict = {}
 
-    def fake_prefix_command(self, args, extra_env=None):
+    def fake_prefix_command(self, args, extra_env=None, **_kw):
         seen["args"], seen["extra_env"] = list(args), dict(extra_env or {})
         return ["umu-run", *args], dict(extra_env or {})
 
@@ -392,7 +392,7 @@ def test_launch_without_a_prefix_registry_still_works(tmp_path, store, sign_in, 
 def test_other_games_launch_unchanged(tmp_path, monkeypatch):
     seen = {}
 
-    def fake_prefix_command(self, args, extra_env=None):
+    def fake_prefix_command(self, args, extra_env=None, **_kw):
         seen["args"], seen["extra_env"] = list(args), extra_env
         return ["umu-run", *args], {}
 

@@ -35,10 +35,10 @@ _EXEC_RESERVED = set(' \t\n"\'\\><~|&;$*?#()`')
 def command_hint(subcommand: str) -> str:
     """How to run a Nadare command in this build (AppImage, Flatpak or ``nadare``)."""
     appimage = os.environ.get("APPIMAGE")
-    if appimage:
-        invocation = shlex.quote(appimage)
-    elif sandbox.in_flatpak():
+    if sandbox.in_flatpak():
         invocation = f"flatpak run {FLATPAK_ID}"
+    elif appimage:
+        invocation = shlex.quote(appimage)
     else:
         invocation = "nadare"
     return f"{invocation} {subcommand}"
@@ -58,12 +58,12 @@ def launcher_argv(
 ) -> list[str]:
     """Return the argv that starts Nadare again (AppImage, Flatpak, PATH, module)."""
     env = os.environ if environ is None else environ
-    appimage = env.get("APPIMAGE")
-    if appimage:
-        return [appimage]
     sandboxed = sandbox.in_flatpak() if in_flatpak is None else in_flatpak
     if sandboxed:
         return ["flatpak", "run", FLATPAK_ID]
+    appimage = env.get("APPIMAGE")
+    if appimage:
+        return [appimage]
     found = shutil.which("nadare")
     if found:
         return [found]
@@ -136,20 +136,38 @@ def _host_home() -> Path:
         return Path("/run/host/home")
 
 
+#: Where Flatpak shows a few host folders it does not share at their own path.
+HOST_ROOT = Path("/run/host")
+
+
+def _visible(path: Path) -> bool:
+    """The sandbox sees ``path``'s place: it, or a parent below the top-level folders, exists."""
+    top = {Path("/"), Path("/home"), Path("/run"), HOST_ROOT}
+    for candidate in (path, *path.parents):
+        if candidate in top:
+            return False
+        if candidate.exists():
+            return True
+    return False
+
+
 def _host_path(path: Path) -> Path:
-    """Where a host path appears inside the Flatpak sandbox (usually /run/host)."""
+    """Where a host path appears inside the Flatpak sandbox.
+
+    The home folder (and /mnt, /media) are shared at their own paths, so those are used as they
+    are. Only a place the sandbox cannot see there is looked up under /run/host: mapping every
+    path there sent shortcuts into the sandbox's private scratch space (rig, 2026-11-11).
+    """
     if not sandbox.in_flatpak():
         return path
     path = Path(path)
-    if not path.is_absolute() or path.is_relative_to("/run/host"):
-        return path
-    root = Path("/run/host")
-    if not root.is_dir():
+    if not path.is_absolute() or path.is_relative_to(HOST_ROOT) or _visible(path):
         return path
     try:
-        return root / path.relative_to("/")
+        mapped = HOST_ROOT / path.relative_to("/")
     except ValueError:
         return path
+    return mapped if _visible(mapped) else path
 
 
 def desktop_dir() -> Path:
@@ -243,6 +261,12 @@ def install_desktop_entry(
             digest = hashlib.sha1(profile.encode("utf-8")).hexdigest()[:8]
             name = f"nadare-{slug(profile)}-{digest}.desktop"
             break
+        candidate = directory / name
+        if owner is None and (candidate.exists() or candidate.is_symlink()):
+            # Not Nadare's file: use the hashed name instead of overwriting it.
+            digest = hashlib.sha1(profile.encode("utf-8")).hexdigest()[:8]
+            name = f"nadare-{slug(profile)}-{digest}.desktop"
+            break
     written = []
     menu = _applications_dir(applications_dir) / name
     _atomic_write(menu, text, 0o644)
@@ -310,6 +334,9 @@ def refresh_desktop_entries(
     argv: list[str] | None = None,
 ) -> dict[str, list[Path]]:
     """Rewrite existing entries with current data and drop deleted profiles."""
+    if not profiles:
+        # An empty list means the config is missing or unreadable, not that every game was removed.
+        return {"updated": [], "removed": []}
     resolved = list(argv) if argv is not None else launcher_argv()
     dirs: list[tuple[Path, int]] = [(_applications_dir(applications_dir), 0o644)]
     if desktop_dir is not None:
@@ -357,17 +384,24 @@ _INT_KEYS = (
 _SHORTCUTS_HEADER = b"\x00shortcuts\x00"
 
 
+def _cstr(text: str) -> bytes:
+    """``text`` as a binary-VDF C string body: a NUL would end it early and let the rest be
+    read back as new keys (a crafted title could add ``LaunchOptions``), so it is dropped (#811).
+    """
+    return text.replace("\x00", "").encode("utf-8")
+
+
 def _encode_value(key: str, value: Any) -> bytes:
     if isinstance(value, bool):
         value = int(value)
     if isinstance(value, Mapping):
-        buf = bytearray(b"\x00" + key.encode("utf-8") + b"\x00")
+        buf = bytearray(b"\x00" + _cstr(key) + b"\x00")
         buf += _encode_map(value)
         buf += b"\x08"
         return bytes(buf)
     if isinstance(value, int):
-        return b"\x02" + key.encode("utf-8") + b"\x00" + struct.pack("<i", value)
-    return b"\x01" + key.encode("utf-8") + b"\x00" + str(value).encode("utf-8") + b"\x00"
+        return b"\x02" + _cstr(key) + b"\x00" + struct.pack("<i", value)
+    return b"\x01" + _cstr(key) + b"\x00" + _cstr(str(value)) + b"\x00"
 
 
 def _encode_map(mapping: Mapping[str, Any]) -> bytes:
@@ -460,19 +494,26 @@ def vdf_loads(data: bytes, *, strict: bool = False) -> list[dict[str, Any]]:
         return []
 
 
-def steam_running() -> bool:
-    """True when a process named ``steam`` currently exists."""
-    proc = Path("/proc")
+def steam_running(*, proc_root: str | os.PathLike[str] = "/proc") -> bool:
+    """True when this user has a process named ``steam``.
+
+    Another account's Steam (a shared PC) does not count: it edits its own shortcuts.vdf, and
+    "close Steam first" would be advice this user cannot follow.
+    """
+    proc = Path(proc_root)
     if not proc.is_dir():
         return False
     try:
         entries = list(proc.iterdir())
     except OSError:
         return False
+    uid = os.getuid()
     for entry in entries:
         if not entry.name.isdigit():
             continue
         try:
+            if entry.stat().st_uid != uid:
+                continue
             comm = (entry / "comm").read_text(encoding="utf-8", errors="replace").strip()
         except OSError:
             continue
@@ -603,7 +644,10 @@ def remove_steam_shortcut(shortcuts_vdf: str | os.PathLike[str], profile: str) -
     if len(kept) == len(existing):
         return False
     if steam_running():
-        raise ShortcutError("Steam is running; close it before removing a shortcut")
+        raise ShortcutError(
+            f"Steam is running, so the Steam shortcut in {path} was not removed: close Steam "
+            "and remove it again."
+        )
     backup = path.with_name(path.name + ".nadare-bak")
     if not backup.exists():
         backup.write_bytes(path.read_bytes())
@@ -662,15 +706,21 @@ def installed_steam_shortcuts() -> list[tuple[Path, str, str]]:
 def refresh_steam_shortcuts(
     profiles: Mapping[str, Mapping[str, Any]],
     argv: list[str] | None = None,
+    *,
+    orphans_only: bool = False,
 ) -> dict[str, list[str] | list[Path]]:
     """Update Nadare Steam shortcut titles and drop deleted profiles.
 
     With ``argv`` (how Nadare starts now), a shortcut of Nadare's that still points at an older
-    path is repaired too.
+    path is repaired too. ``orphans_only`` (the automatic run at start) only drops entries whose
+    game is gone and changes nothing else (#1031).
 
     Files that cannot be read or written are reported in ``warnings`` and left
     untouched, as is every file while Steam is running.
     """
+    if not profiles:
+        # An empty list means the config is missing or unreadable, not that every game was removed.
+        return {"updated": [], "removed": [], "warnings": []}
     updated: list[Path] = []
     removed: list[str] = []
     warnings: list[str] = []
@@ -691,6 +741,9 @@ def refresh_steam_shortcuts(
             if profile not in profiles:
                 changed = True
                 gone.append(profile)
+                continue
+            if orphans_only:
+                kept.append(entry)
                 continue
             title = str(profiles[profile].get("title") or profile)
             if entry.get("AppName") != title:

@@ -74,7 +74,7 @@ def _stream_that(monkeypatch, lines: list[str], code: int) -> None:
 
     monkeypatch.setattr(wg, "stream", fake)
     monkeypatch.setattr(
-        ArknightsBackend, "_prefix_command", lambda self, args, extra_env=None: (["x"], {})
+        ArknightsBackend, "_prefix_command", lambda self, args, extra_env=None, **_kw: (["x"], {})
     )
 
 

@@ -331,7 +331,7 @@ def test_an_existing_prefix_with_system_wine_still_defaults_to_the_recommended_p
     config.add_profile("ark", backend="arknights-yostar", prefix=str(prefix))
     from nadare.backends import winegame as wg
 
-    monkeypatch.setattr(wg.shutil, "which", lambda name: "/usr/bin/wine")
+    monkeypatch.setattr(wg.shutil, "which", lambda name, *_a, **_k: "/usr/bin/wine")
     page = SettingsPage()
     try:
         page.load(config, "ark")

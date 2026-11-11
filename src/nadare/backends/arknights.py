@@ -3,12 +3,14 @@
 """Arknights (Yostar global PC client) backend (``arknights-yostar``).
 
 
-The official global PC client is a Windows program distributed by Yostar
-(``Arknights_EN_Gamelauncher-*-setup.exe``).  It is installed and run inside a
-Wine/Proton prefix, following the community guide that uses Proton-CachyOS
-(or DW-Proton): download the setup, run it in the prefix, then run the installed
-launcher from the same prefix.  The launcher itself handles
-downloading, updating and starting the actual game.
+By default Nadare installs the game itself, launcher-free: a CI-signed Yostar manifest from
+Nadare's index (``yostar/index.json``, see :func:`yostar.configured_manifest`) lists the files,
+which are synced into the Wine/Proton prefix and verified, and Play starts ``Arknights.exe``.
+
+Only when no manifest is configured (the index turned off, no ``manifest_index`` /
+``manifest_file``) does it fall back to the official route: Yostar's
+``Arknights_EN_Gamelauncher-*-setup.exe`` is run in the prefix and the installed launcher
+downloads, updates and starts the game.
 
 
 Profile keys (top level or under ``extra``):
@@ -66,6 +68,7 @@ from ..core import (
     yostar,
 )
 from ..core.backends import (
+    PREFIX_HELP,
     BackendError,
     Option,
 )
@@ -108,7 +111,7 @@ class ArknightsBackend(WineGameBackend):
     vcredist_default = False
 
     options = (
-        Option("prefix", "Wine prefix", "path_dir", "WINEPREFIX used for this game."),
+        Option("prefix", "Wine prefix", "path_dir", PREFIX_HELP),
         Option("install_dir", "Game folder", "path_dir", "Where the launcher/game lives."),
         Option("exe_name", "Launcher executable", "text", advanced=True),
         Option(
@@ -219,8 +222,14 @@ class ArknightsBackend(WineGameBackend):
     def direct_mode(self) -> bool:
         return bool(self.manifest_source())
 
-    def _manifest_error(self, exc: yostar.ManifestError) -> BackendError:
+    def _manifest_error(self, exc: yostar.ManifestError, *, changed: bool = False) -> BackendError:
         log.warning("invalid %s manifest: %s", self.display_name, exc)
+        if changed:
+            # A download or check failed part way: some files may already be new (final round).
+            return BackendError(
+                f"{self.display_name} could not finish downloading ({exc}). Some files may "
+                "already be updated: press Update again to finish."
+            )
         return BackendError(
             f"{self.display_name}'s download information is invalid or incomplete. "
             "Nothing was changed. Try again later or update Nadare."
@@ -246,6 +255,8 @@ class ArknightsBackend(WineGameBackend):
         manifest = self._load_manifest()
         workers = profile_setting(self.ctx.profile, "download_workers", 6)
         marker = self._install_marker_path()
+        # A marker already there (an interrupted earlier run) must stay until a sync completes.
+        was_marked = marker.exists() or marker.is_symlink()
         self._write_install_marker()
         self.ctx.emit(Event("step", f"{self.display_name}: syncing {manifest.version} directly"))
         try:
@@ -256,8 +267,17 @@ class ArknightsBackend(WineGameBackend):
                 cancel=self.ctx.cancel,
                 workers=workers,
             )
-        except yostar.ManifestError as exc:
+        except yostar.ManifestRefused as exc:
+            # Refused while checking the manifest's host or taking its lock, before any file is
+            # written ("Nothing was changed"): a complete game stays playable.
+            # Another sync holding the folder wrote the marker for its own run: never drop it.
+            if not was_marked and not exc.busy:
+                marker.unlink(missing_ok=True)
             raise self._manifest_error(exc) from exc
+        except yostar.ManifestError as exc:
+            # A download or check failed part way: files may already be replaced, so the
+            # marker stays and the next sync finishes the job (round 6).
+            raise self._manifest_error(exc, changed=True) from exc
         marker.unlink(missing_ok=True)
         self._record_synced_version(manifest)
         self.info(

@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices, QFontDatabase
+from PyQt6.QtGui import QDesktopServices, QFontDatabase, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -61,6 +61,11 @@ class LogsDialog(QDialog):
         self._directory = Path(directory) if directory is not None else paths.logs_dir()
         self._file_text = ""
         self._raw_text = ""
+        #: Bytes of the selected file already shown, up to its last complete line (#624).
+        self._read_upto = 0
+        #: (device, inode) of the file shown, to notice a rotation under the same name.
+        self._file_id: tuple[int, int] | None = None
+        self._listed: set[str] = set()  # the runs in the list when it was last loaded
         self._stat: tuple[int, int] | None = None
 
         layout = QVBoxLayout(self)
@@ -178,6 +183,7 @@ class LogsDialog(QDialog):
         )
         self.files.blockSignals(True)
         self.files.clear()
+        self._listed = {str(log.path) for log in files}
         for log in files:
             item_text = f"{log.label}   {_human_size(log.size)}  {_when(log.mtime)}"
             self.files.addItem(item_text)
@@ -216,12 +222,18 @@ class LogsDialog(QDialog):
             self._stat = None
             self._render()
             return
-        self._file_text = logview.read_tail(path)
+        text, end_offset, partial_bytes = logview.read_tail_with_size(path)
         try:
             stat = path.stat()
             self._stat = (stat.st_size, stat.st_mtime_ns)
+            self._file_id = (stat.st_dev, stat.st_ino)
         except OSError:
             self._stat = None
+            self._file_id = None
+        # A half-written last line waits for its end, so following can append whole lines.
+        cut = text.rfind("\n") + 1
+        self._file_text = text[:cut]
+        self._read_upto = max(0, end_offset - partial_bytes)
         self._render()
 
     def _render(self, *_args: object) -> None:
@@ -301,10 +313,14 @@ class LogsDialog(QDialog):
             siblings = list(path.parent.iterdir())
         except OSError:
             return None
+        # Only a run that started after the list was loaded: an older run the user picked
+        # on purpose stays selected (it used to jump back to the newest every second).
         later = [
             p
             for p in siblings
-            if runlog.operation_of(p) == operation and runlog.run_order(p) > mine
+            if runlog.operation_of(p) == operation
+            and runlog.run_order(p) > mine
+            and str(p) not in self._listed
         ]
         return max(later, key=runlog.run_order) if later else None
 
@@ -331,13 +347,56 @@ class LogsDialog(QDialog):
             self._reload_files()
             self._select_path(newer)
             return
+        if getattr(self, "_file_id", None) not in (None, (stat.st_dev, stat.st_ino)):
+            # Rotated: the same name is a new file now, read it from the start (#1207 b185).
+            self._load_selected()
+            return
         if self._stat == (stat.st_size, stat.st_mtime_ns):
             return
         scrollbar = self.view.verticalScrollBar()
         was_at_bottom = scrollbar.value() >= scrollbar.maximum() - 4
-        self._load_selected()
+        if not self._append_new(path, stat.st_size, stat.st_mtime_ns):
+            self._load_selected()
         if was_at_bottom:
             scrollbar.setValue(scrollbar.maximum())
+
+    #: Grown by more than this, or held past twice the tail size: read the tail again instead.
+    _APPEND_LIMIT = 512 * 1024
+
+    def _append_new(self, path: Path, size: int, mtime_ns: int) -> bool:
+        """Show only what was appended since the last tick; ``False`` asks for a full reload.
+
+        Re-reading, filtering and masking the whole tail every second froze the window during
+        long installs (#624); the new lines get the same filter and redaction on their own.
+        """
+        grown = size - self._read_upto
+        if grown < 0 or grown > self._APPEND_LIMIT:
+            return False  # rotated, truncated or a big burst
+        if len(self._file_text) > 2 * self._APPEND_LIMIT:
+            return False  # keep the in-memory text to about the tail read_tail would give
+        try:
+            with path.open("rb") as handle:
+                handle.seek(self._read_upto)
+                data = handle.read(grown)
+        except OSError:
+            return False
+        self._stat = (size, mtime_ns)
+        end = data.rfind(b"\n") + 1
+        if end == 0:
+            return True  # only a half-written line so far
+        new = data[:end].decode("utf-8", errors="replace")
+        if self.latest_only.isChecked() and logview.has_session_header(new):
+            return False  # a new run started: show just that run
+        self._read_upto += end
+        self._file_text += new
+        kept = logview.filter_lines(new, self.search.text())
+        self._raw_text += kept
+        if kept:
+            shown = logview.redacted(kept) if self.redact_box.isChecked() else kept
+            cursor = QTextCursor(self.view.document())  # not the user's cursor or selection
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.insertText(shown)
+        return True
 
 
 __all__ = ["LogsDialog"]

@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import Any
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -18,6 +20,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..core import libraries
 from .theme import apply_theme
 
 
@@ -45,6 +48,10 @@ class QuickInstallDialog(QDialog):
         notice: str,
         describe: Callable[[str | None], tuple[str, str, str]],
         parent: QWidget | None = None,
+        choice: Any = None,
+        choice_sizes: Mapping[str, int] | None = None,
+        on_choice: Callable[[str], None] | None = None,
+        libraries: list[tuple[str, str]] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("Root")
@@ -67,12 +74,30 @@ class QuickInstallDialog(QDialog):
 
         self.summary_label = self._label("")
         layout.addWidget(self.summary_label)
+        self.choice_combo: QComboBox | None = None
+        self._on_choice = on_choice
+        if choice is not None:
+            self._add_choice(layout, choice, choice_sizes or {})
         if notice:
             head = QLabel("Nadare is an unofficial launcher")
             head.setStyleSheet("font-weight: 600;")
             layout.addWidget(head)
             layout.addWidget(self._label(notice))
 
+        self.library_combo: QComboBox | None = None
+        if libraries:
+            # (label, folder) per library; the default library's folder is "".
+            lib_row = QHBoxLayout()
+            lib_row.addWidget(QLabel("Library"))
+            combo = QComboBox()
+            combo.setAccessibleName("Library")
+            for label, folder in libraries:
+                combo.addItem(label, folder)
+                combo.setItemData(combo.count() - 1, folder or label, Qt.ItemDataRole.ToolTipRole)
+            combo.currentIndexChanged.connect(self._library_changed)
+            lib_row.addWidget(combo, 1)
+            layout.addLayout(lib_row)
+            self.library_combo = combo
         self.folder_label = self._label("")
         layout.addWidget(self.folder_label)
         row = QHBoxLayout()
@@ -99,6 +124,60 @@ class QuickInstallDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _add_choice(self, layout: QVBoxLayout, option: Any, sizes: Mapping[str, int]) -> None:
+        """A backend's install-time choice (WuWa's quality), each value with its size (#990)."""
+        from ..core.diskspace import human_size
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel(option.label))
+        combo = QComboBox()
+        for label, value in option.choices or ():
+            size = sizes.get(value)
+            combo.addItem(f"{label}, about {human_size(size)}" if size else label, value)
+        combo.setAccessibleName(option.label)
+        index = combo.findData(option.default)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.currentIndexChanged.connect(self._choice_changed)
+        row.addWidget(combo)
+        row.addStretch(1)
+        layout.addLayout(row)
+        if option.help:
+            layout.addWidget(self._label(option.help))
+        self.choice_combo = combo
+
+    @property
+    def choice_value(self) -> str | None:
+        return None if self.choice_combo is None else self.choice_combo.currentData()
+
+    def _choice_changed(self, _index: int) -> None:
+        if self._on_choice is not None and self.choice_value is not None:
+            self._on_choice(self.choice_value)
+        try:
+            self.folder_text, self._free, self.summary_text = self._describe(
+                self.chosen_folder or None
+            )
+        except OSError:
+            return
+        self._show_folder()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        self._fit_height()
+
+    def _fit_height(self) -> None:
+        """Grow to the height the wrapped text needs at the width the dialog really has.
+
+        The size hint is worked out at the layout's preferred width; shown narrower, the
+        notice wraps to more lines and its first lines were cut off under the heading.
+        """
+        layout = self.layout()
+        if layout is None:
+            return
+        layout.activate()
+        need = layout.totalHeightForWidth(self.width())
+        if need > self.height():
+            self.resize(self.width(), need)
+
     @staticmethod
     def _label(text: str) -> QLabel:
         label = QLabel(text)
@@ -115,6 +194,8 @@ class QuickInstallDialog(QDialog):
         self.folder_label.setToolTip(self.folder_text if shown != self.folder_text else "")
         self.summary_label.setText(self.summary_text)
         self.summary_label.setVisible(bool(self.summary_text))
+        if self.isVisible():
+            self._fit_height()
 
     def _want_import(self) -> None:
         self.import_requested = True
@@ -123,8 +204,34 @@ class QuickInstallDialog(QDialog):
     def change_location(self) -> None:
         start = self.chosen_folder or str(Path.home())
         chosen = QFileDialog.getExistingDirectory(self, "Select folder", start)
-        if not chosen:
+        if chosen:
+            # A library's own "Nadare" folder means that library: select it, not a new entry.
+            chosen = str(libraries.library_of(chosen))
+        if not chosen or not self._use_folder(chosen):
             return
+        combo = self.library_combo
+        if combo is not None:
+            index = combo.findData(chosen)
+            if index < 0:
+                combo.addItem(chosen, chosen)
+                index = combo.count() - 1
+            combo.blockSignals(True)
+            combo.setCurrentIndex(index)
+            combo.blockSignals(False)
+
+    def _library_changed(self, _index: int) -> None:
+        combo = self.library_combo
+        if combo is None:
+            return
+        folder = combo.currentData() or ""
+        if not self._use_folder(folder or None):
+            combo.blockSignals(True)
+            back = combo.findData(self.chosen_folder)
+            combo.setCurrentIndex(back if back >= 0 else 0)
+            combo.blockSignals(False)
+
+    def _use_folder(self, chosen: str | None) -> bool:
+        """Show what installing into ``chosen`` (``None``: the default library) means."""
         try:
             folder_text, free, summary = self._describe(chosen)
         except OSError as exc:
@@ -139,7 +246,9 @@ class QuickInstallDialog(QDialog):
                 f"Nadare cannot use {chosen} ({reason}). Pick another folder."
             )
             self.summary_label.setVisible(True)
-            return
-        self.chosen_folder = chosen
+            self._fit_height()
+            return False
+        self.chosen_folder = chosen or ""
         self.folder_text, self._free, self.summary_text = folder_text, free, summary
         self._show_folder()
+        return True

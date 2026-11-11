@@ -118,6 +118,15 @@ def _is_secret_name(name: str) -> bool:
     return upper.endswith(_SECRET_SUFFIXES) or upper.startswith(_SECRET_PREFIXES)
 
 
+def drop_secret_env(env: Mapping[str, str]) -> dict[str, str]:
+    """A copy of ``env`` without credential-looking variables (see :func:`sanitize_game_env`).
+
+    For launches that start the user's own programs (a script, the Steam client): only the
+    secrets go; ``PATH`` and the Python variables stay as the user set them (#811).
+    """
+    return {key: value for key, value in env.items() if not _is_secret_name(key)}
+
+
 def sanitize_game_env(env: Mapping[str, str]) -> dict[str, str]:
     """A copy of ``env`` that is safe to hand to Proton/Wine/umu.
 
@@ -382,6 +391,22 @@ class ProcessScanRound:
             return self._records
 
 
+def prefix_pids(
+    prefix: str | os.PathLike[str], proc_root: str | os.PathLike[str] = "/proc"
+) -> list[int]:
+    """PIDs of this user's processes whose ``WINEPREFIX`` / ``STEAM_COMPAT_DATA_PATH`` is
+    ``prefix`` (or the ``pfx`` folder Proton keeps in it): whatever Wine runs in that prefix."""
+    want = {os.path.realpath(os.fspath(prefix)), os.path.realpath(os.path.join(prefix, "pfx"))}
+    hits: list[int] = []
+    for record in ProcessScanRound(proc_root).records():
+        for key in ("WINEPREFIX", "STEAM_COMPAT_DATA_PATH"):
+            value = record.environ.get(key)
+            if value and os.path.realpath(value) in want:
+                hits.append(record.pid)
+                break
+    return hits
+
+
 _PROCESS_SCAN_LOCAL = threading.local()
 
 
@@ -473,6 +498,19 @@ def _pid_starttime(pid: int, root: Path = Path("/proc")) -> str | None:
         return None
 
 
+def process_age_seconds(pid: int, root: Path = Path("/proc")) -> float | None:
+    """How long ``pid`` has been running, in seconds, or ``None`` when it cannot be read."""
+    ticks = _pid_starttime(pid, root)
+    if ticks is None:
+        return None
+    try:
+        uptime = float((root / "uptime").read_text(encoding="utf-8").split()[0])
+        hertz = os.sysconf("SC_CLK_TCK")
+        return max(0.0, uptime - int(ticks) / hertz)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def terminate(pid: int, *, grace: float = GRACE_SECONDS) -> bool:
     """SIGTERM a pid, escalating to SIGKILL. Returns True if it had to be killed."""
     started = _pid_starttime(pid)
@@ -561,7 +599,8 @@ def run(
     say = emitter(emit)
     say(Event("status", mask(f"$ {' '.join(str(a) for a in args)}"), data={"stage": "spawn"}))
 
-    stderr_mode = subprocess.STDOUT if forward_stderr else subprocess.PIPE
+    # Not forwarded = discarded: a pipe nobody reads blocks a chatty child forever (final round).
+    stderr_mode = subprocess.STDOUT if forward_stderr else subprocess.DEVNULL
     proc = spawn(args, env=env, cwd=cwd, stderr=stderr_mode, **popen_kwargs)
     # Keep the group id: once the direct child is reaped ``getpgid(proc.pid)``
     # fails, but the group can still hold grandchildren we must signal.

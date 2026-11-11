@@ -237,3 +237,48 @@ def test_the_button_that_ends_a_paused_download_says_the_files_stay(view):
     view.set_paused("install")
     assert view.cancel_paused_button.text() == "Stop download"
     assert "stays on disk" in view.cancel_paused_button.toolTip()
+
+
+def _no_boxes(monkeypatch) -> list[str]:
+    from nadare.gui import main_window
+
+    shown: list[str] = []
+    monkeypatch.setattr(
+        main_window.QMessageBox, "warning", lambda *a, **k: shown.append(str(a[2]))
+    )
+    return shown
+
+
+def test_a_refused_removal_keeps_the_paused_download(window, monkeypatch):
+    """Remove refused before anything was deleted (game running, profile locked): RESUME stays."""
+    from nadare.core.removal import RemovalResult
+
+    shown = _no_boxes(monkeypatch)
+    window.open_game("other")
+    window.controller._paused["other"] = ("install", None)
+    window.game.set_paused("install")
+    window._busy["other"] = "remove"
+    window.game.set_busy("remove")
+    refused = RemovalResult(profile="other", profile_kept=True, refused=True)
+    refused.warnings.append("Other is running. Stop it first, then remove it.")
+    window._on_game_removed("other", refused)
+    assert window.controller.is_paused("other")
+    assert "other" in window.config.profiles
+    assert "other" not in window._busy
+    assert window._current_profile == "other"  # still on the game page, not the Library
+    assert window.game.primary.text() == "RESUME"
+    assert shown and "running" in shown[0]
+
+
+def test_a_removal_that_deleted_files_still_forgets_the_pause(window, tmp_path, monkeypatch):
+    """Some files went before the refusal: nothing may resume into a half-deleted folder."""
+    from nadare.core.removal import RemovalResult
+
+    _no_boxes(monkeypatch)
+    window.controller._paused["other"] = ("install", None)
+    partial = RemovalResult(profile="other", profile_kept=True)
+    partial.trees_removed.append(tmp_path / "prefix")
+    partial.warnings.append("not deleting install_dir: outside")
+    window._on_game_removed("other", partial)
+    assert not window.controller.is_paused("other")
+    assert "other" in window.config.profiles

@@ -4,13 +4,8 @@
 
 Kuro's PGR index sits behind a launcher token. It normally comes from Nadare's published
 token index (``catalog/kuro-tokens.json`` in the index repo), so a rotation needs no Nadare
-release. ``TOKEN`` is the offline fallback: it is what the official launcher
-(``https://download.kurogames.net/transfer/pns/official/global/en/pc_app``, which serves
-``pclauncher.exe``) asks for on its first start, and the index it opened matched the size of
-a current Steam install to within 0.002%. The profile's ``kuro_token`` overrides both; the
-value to use is the ``50015_<token>`` part of the launcher's
-``.../launcher/launcher/50015_<token>/G143`` request, which shows with
-``WINEDEBUG=+winhttp`` under DW-Proton.
+release. ``TOKEN`` is the offline fallback, a shared launcher value rather than an account
+secret. The profile's ``kuro_token`` overrides both.
 """
 
 from __future__ import annotations

@@ -63,7 +63,12 @@ def test_busy_indicators_are_cleared_when_the_operation_ends(qapp, monkeypatch, 
             view.cancelled()
 
         assert view.progress.isHidden(), f"progress bar still visible after {ending}"
-        assert view.step_label.text() == ""
+        if ending == "finish-ok":
+            # The busy text is gone; the line says it worked instead (OUTPUT is folded, #993).
+            assert view.step_label.text().startswith("✓ ")
+            assert "Downloading" not in view.step_label.text()
+        else:
+            assert view.step_label.text() == ""
         assert view.elapsed_label.text() == ""
     finally:
         view.deleteLater()
@@ -259,7 +264,8 @@ def test_vulkan_note_is_plain_language(monkeypatch):
     monkeypatch.setattr(graphics, "dxvk_ok", lambda: False)
     assert graphics.vulkan_note() == (
         "Your graphics driver looks old for Vulkan games. If the game will not "
-        "start, open Settings and try the OpenGL renderer."
+        "start, open Settings → Game, tick Show advanced options and set Renderer "
+        "to OpenGL."
     )
 
 

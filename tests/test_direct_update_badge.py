@@ -98,9 +98,14 @@ class TestStatusUpdateBadge:
         assert status.data["version"] == "1.0.0"
         assert status.data["update_available"] is True
 
+    def test_the_published_version_is_named_so_the_page_can_say_it(self, tmp_path):
+        _backend, status = self._status(tmp_path, "1.0.0", "1.1.0")
+        assert status.data["latest_version"] == "1.1.0"
+
     def test_equal_versions_do_not(self, tmp_path):
         _backend, status = self._status(tmp_path, "1.0.0", "1.0.0")
         assert status.data["update_available"] is False
+        assert "latest_version" not in status.data
 
     def test_missing_cache_does_not(self, tmp_path):
         _backend, status = self._status(tmp_path, "1.0.0", None)
@@ -278,6 +283,11 @@ class TestGuiWiring:
             window._update_checked.clear()
             seen: list[str] = []
             self._record_start(monkeypatch, window, seen)
+            # conftest switches the automatic check off; _start records here, nothing runs.
+            monkeypatch.setattr(
+                type(window), "_maybe_start_check_update",
+                type(window)._real_maybe_start_check_update,
+            )
             window._after_status("sample")
             window._after_status("sample")
             assert seen.count("check_update") == 1

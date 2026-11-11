@@ -11,8 +11,6 @@ from nadare.core import backends
 
 SKIPPED = (
     "launcher-nikke",
-    "launcher-nte",
-    "launcher-gfl2-haoplay",
     "direct-nte",
     "direct-endfield",
     "direct-genshin",

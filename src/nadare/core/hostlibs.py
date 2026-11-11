@@ -244,6 +244,15 @@ def install_command(missing: list[str], family: str | None) -> str | None:
     return _INSTALL[family or ""].format(pkgs=" ".join(packages))
 
 
+def install_command_in(message: str) -> str:
+    """The install command a :func:`hint` carries, or ``""`` (for a Copy button)."""
+    lines = message.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() == "Install them with:" and index + 1 < len(lines):
+            return lines[index + 1].strip()
+    return ""
+
+
 def hint(missing: list[str], os_release: str | None = None) -> str:
     """Text telling the user how to fix the missing libraries.
 
@@ -273,6 +282,7 @@ def hint(missing: list[str], os_release: str | None = None) -> str:
 
 
 __all__ = [
+    "install_command_in",
     "REQUIRED_32BIT",
     "REQUIRED_GL",
     "distro_family",

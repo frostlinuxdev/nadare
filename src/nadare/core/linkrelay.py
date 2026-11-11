@@ -142,18 +142,29 @@ class LinkRelay:
 
     def start(self) -> Path:
         self._dir = Path(tempfile.mkdtemp(prefix="nadare-links-", dir=self._parent))
-        self._dir.chmod(0o700)
-        os.mkfifo(self.path, 0o600)
-        # O_RDWR keeps the pipe from ever reporting end-of-file when a writer closes.
-        self._fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
-        self._thread = threading.Thread(target=self._run, name="nadare-link-relay", daemon=True)
-        self._thread.start()
+        try:
+            self._dir.chmod(0o700)
+            os.mkfifo(self.path, 0o600)
+            # O_RDWR keeps the pipe from ever reporting end-of-file when a writer closes.
+            self._fd = os.open(self.path, os.O_RDWR | os.O_NONBLOCK)
+            self._thread = threading.Thread(
+                target=self._run, name="nadare-link-relay", daemon=True
+            )
+            self._thread.start()
+        except BaseException:
+            # The temp dir and FIFO are already on disk: clean them before the caller drops
+            # this object, which would otherwise have no handle left to stop.
+            self.stop()
+            raise
         return self.path
 
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=2)
+            # ``start()`` may fail in ``Thread.start`` after the temp dir exists: joining a
+            # thread that never started raises, and would hide the original error.
+            if self._thread.is_alive():
+                self._thread.join(timeout=2)
             self._thread = None
         if self._fd >= 0:
             os.close(self._fd)

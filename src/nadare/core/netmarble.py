@@ -2,12 +2,9 @@
 # Copyright (C) 2026 Nadare contributors
 """Netmarble account login for Mongil: Star Dive.
 
-The game wants a *launcher token* (a JWT) handed over by Netmarble's launcher. The
-public sign-in page at ``members.netmarble.com/auth`` produces exactly that: with
-``supportFeature=redirectParams|accessToken`` it appends ``accessToken=<jwt>`` to the
-``redirectUrl`` and navigates there. Nadare runs a one-shot HTTP server on
-``127.0.0.1`` for that redirect, so the user signs in in their own browser and no
-password ever passes through Nadare.
+Netmarble's public sign-in flow can hand an access token back to a redirect URL, so
+Nadare runs a one-shot HTTP server on ``127.0.0.1`` and the user signs in in their own
+browser; no password ever passes through Nadare.
 
 The game is then started with ``NMAUTH_TYPE=netmarble`` and ``NMAUTH_TOKEN=<jwt>``
 (as arguments) and a device key in the Wine registry that

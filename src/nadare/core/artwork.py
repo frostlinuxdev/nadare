@@ -24,6 +24,7 @@ Nothing here ever raises into the UI: :func:`fetch` logs a failure and returns
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import inspect
 import ipaddress
 import json
@@ -32,6 +33,7 @@ import re
 import socket
 import threading
 import time
+import unicodedata
 import uuid
 from collections.abc import Iterator
 from html.parser import HTMLParser
@@ -57,6 +59,8 @@ SOURCE_TIER = {SOURCE_USER: 0, SOURCE_OFFICIAL: 1, SOURCE_THIRDPARTY: 2}
 
 #: Files the old fetcher dropped in the cover cache (``*-cover.*`` etc.).
 _FETCHED_SUFFIX = re.compile(r".+-(?:cover|hero|logo|icon|thumb)\.[A-Za-z0-9]+$")
+#: Temporary files :func:`_part_path` makes: ``<name>.<pid>.<32 hex>.part``.
+_CACHE_PART = re.compile(r".+\.[0-9]+\.[0-9a-f]{32}\.part$")
 
 STEAM_STORE_API = "https://store.steampowered.com/api/appdetails"
 STEAM_CDN = "https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/{name}"
@@ -496,6 +500,43 @@ def _guess_ext(url: str, headers) -> str:
     return _EXT_BY_TYPE.get(content_type.split(";")[0].strip().lower(), "jpg")
 
 
+#: One gate around every Qt image call made off the GUI thread (#1062). At exit
+#: :func:`close_qt_images` waits for the call in progress and refuses new ones, so no thread is
+#: inside Qt while Python finalises: a WebP encode into a QBuffer that finalisation collected
+#: crashed the AppImage on exit (exit 139, reproduced under host load).
+_qt_gate = threading.Lock()
+_qt_closed = False
+
+
+class _QtImagesClosed(RuntimeError):
+    """Nadare is exiting; Qt image work is no longer allowed."""
+
+
+@contextlib.contextmanager
+def _qt_images() -> Iterator[None]:
+    with _qt_gate:
+        if _qt_closed:
+            raise _QtImagesClosed("Qt image work is closed for exit")
+        yield
+
+
+def close_qt_images(timeout: float = 5.0) -> bool:
+    """Refuse further Qt image work; ``True`` when no call was still running after ``timeout``."""
+    global _qt_closed
+    got = _qt_gate.acquire(timeout=max(0.0, timeout))
+    _qt_closed = True
+    if got:
+        _qt_gate.release()
+    return got
+
+
+def _looks_like_image(content: bytes) -> bool:
+    head = content[:12]
+    return head.startswith(
+        (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"BM")
+    ) or (head[:4] == b"RIFF" and head[8:12] == b"WEBP")
+
+
 def _is_image(content: bytes) -> bool:
     """True when ``content`` is an image Qt can decode (magic bytes when Qt is absent).
 
@@ -506,12 +547,12 @@ def _is_image(content: bytes) -> bool:
     try:
         from PyQt6.QtGui import QImage
     except Exception:  # noqa: BLE001 - no Qt (tests, CLI): fall back to the signatures
-        head = content[:12]
-        return head.startswith(
-            (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a", b"BM")
-        ) or (head[:4] == b"RIFF" and head[8:12] == b"WEBP")
+        return _looks_like_image(content)
     try:
-        return not QImage.fromData(content).isNull()
+        with _qt_images():
+            return not QImage.fromData(content).isNull()
+    except _QtImagesClosed:
+        return _looks_like_image(content)
     except Exception:  # noqa: BLE001 - a body Qt chokes on is not an image
         return False
 
@@ -760,7 +801,14 @@ def slug(profile: dict, title: str | None = None) -> str:
         or profile.get("name")
         or "artwork"
     )
-    slug = re.sub(r"[^a-z0-9]+", "-", str(source).lower()).strip("-")
+    text = str(source)
+    # Accents fold to their letters; what is left outside ASCII (Japanese, Chinese, ...) would
+    # vanish and make different titles share one cache file, so it adds a short hash (#622).
+    folded = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "-", folded.lower()).strip("-")
+    if any(not ch.isascii() and ch.isalnum() for ch in unicodedata.normalize("NFKD", text)):
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
+        return f"{slug or 'artwork'}-{digest}"
     return slug or "artwork"
 
 
@@ -1140,15 +1188,16 @@ def _recode_webp(content: bytes, ext: str) -> tuple[bytes, str]:
         from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
         from PyQt6.QtGui import QImage
 
-        image = QImage.fromData(content)
-        if image.isNull():
-            return content, ext
-        data = QByteArray()
-        buffer = QBuffer(data)
-        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-        if not image.save(buffer, "WEBP", WEBP_QUALITY):
-            return content, ext
-        encoded = bytes(data)
+        with _qt_images():
+            image = QImage.fromData(content)
+            if image.isNull():
+                return content, ext
+            data = QByteArray()
+            buffer = QBuffer(data)
+            buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+            if not image.save(buffer, "WEBP", WEBP_QUALITY):
+                return content, ext
+            encoded = bytes(data)
     except Exception as exc:  # noqa: BLE001 - recoding is an optimisation only
         log.debug("webp recode skipped: %s", exc)
         return content, ext
@@ -1172,8 +1221,11 @@ def migrate_cached_covers() -> int:
         log.debug("cached cover migration could not scan %s: %s", root, exc)
         return 0
     for source in sources:
+        if _qt_closed:
+            break  # Nadare is exiting (#1062)
         if (
-            not source.is_file()
+            not _FETCHED_SUFFIX.match(source.name)
+            or not source.is_file()
             or source.suffix.lower().lstrip(".") not in {"png", "jpg", "jpeg"}
         ):
             continue
@@ -1184,8 +1236,9 @@ def migrate_cached_covers() -> int:
                 continue
             from PyQt6.QtGui import QImage
 
-            if QImage.fromData(encoded).isNull():
-                continue
+            with _qt_images():
+                if QImage.fromData(encoded).isNull():
+                    continue
             target = source.with_suffix(".webp")
             if target.exists():
                 continue
@@ -1197,8 +1250,10 @@ def migrate_cached_covers() -> int:
                     fh.flush()
                     os.fsync(fh.fileno())
                 # Verify the durable temporary file before installing it.
-                if QImage.fromData(part.read_bytes()).isNull():
-                    continue
+                written = part.read_bytes()
+                with _qt_images():
+                    if QImage.fromData(written).isNull():
+                        continue
                 # The image and its sidecar go in as one step against a download of the same
                 # cover; a download that got there first keeps its WebP.
                 with _pair_lock:
@@ -1269,7 +1324,7 @@ def _cleanup_stale_cache_parts(root: Path) -> None:
     except OSError:
         return
     for path in entries:
-        if not path.name.endswith(".part") or path.is_symlink() or not path.is_file():
+        if not _CACHE_PART.match(path.name) or path.is_symlink() or not path.is_file():
             continue
         try:
             if path.stat().st_mtime >= cutoff or _part_owner_is_alive(path):

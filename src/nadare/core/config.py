@@ -21,7 +21,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -116,8 +116,15 @@ PROFILE_DEFAULTS: dict[str, Any] = {
     "extra": {},
 }
 
+#: The config format this build reads and writes. A change that older code would misread bumps
+#: it and adds a step to :data:`MIGRATIONS`.
+SCHEMA = 1
+
+#: ``MIGRATIONS[n]`` turns a raw schema-``n`` config into schema ``n + 1``, in place (#6).
+MIGRATIONS: dict[int, Callable[[dict[str, Any]], None]] = {}
+
 TOP_DEFAULTS: dict[str, Any] = {
-    "schema": 1,
+    "schema": SCHEMA,
     "active_profile": "",
     "lock_to_single_instance": True,
     "check_updates": True,
@@ -128,6 +135,20 @@ TOP_DEFAULTS: dict[str, Any] = {
     "sidebar_hide_uninstalled": False,  # hide games known not to be installed in the sidebar
     "language": "en",
     "telemetry": False,  # always false; kept explicit for the record
+}
+
+
+#: Every top-level setting Nadare itself reads or writes. Anything else in a config without a
+#: ``profiles`` section may be lost data and is kept aside (#365); these never are (#622).
+KNOWN_TOP_KEYS: frozenset[str] = frozenset(TOP_DEFAULTS) | {
+    "profiles",
+    "sgdb_api_key",
+    "default_monitor",
+    "max_concurrent_installs",
+    "output_expanded",
+    "page_notice_expanded",
+    "unofficial_notice_ack",
+    "libraries",  # game library roots the user added (core/libraries.py)
 }
 
 
@@ -238,6 +259,10 @@ class Config:
                     notice = f"{p} has no profiles section; {saved}"
         else:
             raw = {}
+        before_migration = copy.deepcopy(raw)
+        schema_note = cls._check_schema(p, raw)
+        if schema_note:
+            notice = f"{notice}\n\n{schema_note}" if notice else schema_note
         renames: dict[str, str] = {}
         cfg = cls(path=p, data=cls._normalise(raw, renames), notice=notice)
         cfg._renames = dict(renames)
@@ -257,6 +282,12 @@ class Config:
                 cfg.notice = f"{notice}\n\n{message}" if notice else message
         cfg._snapshot = on_disk if renames else copy.deepcopy(cfg.data["profiles"])
         cfg._top_snapshot = cfg._top_level()
+        if cls._migrated(before_migration):
+            # Like a rename, a migration's edits are local changes against what the file holds,
+            # or the next save would keep the old format on disk and migrate again every start.
+            held = cls._normalise(before_migration)
+            cfg._snapshot = held["profiles"]
+            cfg._top_snapshot = {k: v for k, v in held.items() if k != "profiles"}
         if renames and isinstance(raw_active, str) and raw_active in renames:
             cfg._top_snapshot["active_profile"] = raw_active
         return cfg
@@ -278,6 +309,11 @@ class Config:
                 continue
             old_dir = root / relative
             new_dir = root / new
+            if not old_dir.is_dir() and new_dir.is_dir():
+                # A previous run moved it but could not save the config (``nadare list``
+                # for one does not): point the stored paths at the moved folder too.
+                self._repoint_paths(self.profiles.get(new, {}), old_dir, new_dir)
+                continue
             if not old_dir.is_dir() or new_dir.exists():
                 continue
             try:
@@ -304,6 +340,52 @@ class Config:
                     value[key] = str(new_dir / Path(item).relative_to(old_dir))
             elif isinstance(item, (dict, list)):
                 Config._repoint_paths(item, old_dir, new_dir)
+
+    @classmethod
+    def _check_schema(cls, p: Path, raw: dict[str, Any]) -> str | None:
+        """Bring ``raw`` to :data:`SCHEMA` in place; return a note for the user, if any.
+
+        A missing or malformed number counts as the current format. A newer one (a newer Nadare
+        wrote the file) is loaded as far as this build understands it, after keeping a copy; the
+        marker on disk stays, because :meth:`save` only writes keys this process changed. An older
+        one runs :data:`MIGRATIONS` in order; a failing step keeps a copy and loads what it can.
+        """
+        current = SCHEMA
+        found = raw.get("schema")
+        if isinstance(found, bool) or not isinstance(found, int) or found < 1:
+            raw["schema"] = current
+            return None
+        if found > current:
+            backup = cls._quarantine(p, keep=True)
+            saved = f"a copy was saved to {backup}" if backup else "a copy could not be backed up"
+            raw["schema"] = current
+            return (
+                f"{p} was written by a newer Nadare (config format {found}, this one reads "
+                f"{current}); settings this version does not know may be ignored, and {saved}"
+            )
+        version = found
+        while version < current:
+            step = MIGRATIONS.get(version)
+            try:
+                if step is not None:
+                    step(raw)
+            except Exception as exc:  # noqa: BLE001 - a bad step must not lose the library
+                log.warning("config migration from format %s failed: %s", version, exc)
+                backup = cls._quarantine(p, keep=True)
+                saved = (
+                    f"a copy was saved to {backup}" if backup else "a copy could not be backed up"
+                )
+                raw["schema"] = current
+                return f"{p} could not be updated from config format {version}; {saved}"
+            version += 1
+        raw["schema"] = current
+        return None
+
+    @staticmethod
+    def _migrated(raw: dict[str, Any]) -> bool:
+        """True when ``raw`` (as read) holds an older, valid config format."""
+        found = raw.get("schema")
+        return isinstance(found, int) and not isinstance(found, bool) and 1 <= found < SCHEMA
 
     @staticmethod
     def _bad_profiles(raw: dict[str, Any]) -> bool:
@@ -333,7 +415,7 @@ class Config:
                 and all(isinstance(item, dict) for item in value.values())
             ):
                 return True
-        return any(key not in TOP_DEFAULTS for key in raw)
+        return any(key not in KNOWN_TOP_KEYS for key in raw)
 
     @staticmethod
     def _quarantine(p: Path, *, keep: bool = False) -> Path | None:
@@ -583,7 +665,13 @@ class Config:
         """
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except OSError:
+            return
+        except ValueError:
+            # Someone left text here that is not JSON (a hand edit cut short). The save that
+            # follows replaces it, so keep a copy first, as load() does (final round).
+            backup = self._quarantine(self.path, keep=True)
+            log.warning("config on disk is not valid JSON; kept a copy at %s", backup)
             return
         if not isinstance(raw, dict):
             return

@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import tempfile
 import threading
 import time
@@ -111,10 +112,21 @@ def _skip_state(prefix: Path) -> tuple[float, str] | None:
         return None
     marker = prefix / FAILED_MARKER
     try:
-        age = time.time() - marker.stat().st_mtime
-        text = marker.read_text(errors="replace")
+        # The game can write in its prefix: never follow a link it left, and never block on a
+        # FIFO or device it put there (a plain open() of a FIFO waits forever).
+        fd = os.open(marker, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     except OSError:
         return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        age = time.time() - info.st_mtime
+        text = os.read(fd, 256).decode("utf-8", "replace")
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
     kind = {_CANCELLED_TEXT: "cancelled", _SKIPPED_TEXT: "skipped"}.get(text, "failed")
     wait = RETRY_AFTER_FAILURE_SECONDS if kind == "failed" else RETRY_AFTER_CANCEL_SECONDS
     left = wait - age
@@ -130,8 +142,15 @@ def _failed_recently(prefix: Path) -> float | None:
 def _mark_failed(prefix: Path, *, kind: str = "failed") -> None:
     if not prefix.is_dir():
         return
+    marker = prefix / FAILED_MARKER
     try:
-        (prefix / FAILED_MARKER).write_text(_MARKER_TEXT[kind])
+        # The prefix is writable by the game: remove a link planted at the name instead of
+        # writing through it (as winegame's install marker, #964).
+        if marker.is_symlink() or marker.exists():
+            marker.unlink()
+        fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(_MARKER_TEXT[kind])
     except OSError:
         pass
 

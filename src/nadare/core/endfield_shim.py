@@ -2,10 +2,10 @@
 # Copyright (C) 2026 Nadare contributors
 """Build and stage the Endfield launcher shim inside a Wine prefix.
 
-Arknights: Endfield's launcher build only starts when its parent process is the
-official launcher's ``Games.exe``. Nadare therefore starts the game through a
-small Windows helper, ``suspend_start.exe --launcher <Games.exe> <game.exe>``,
-built from ``shim_src/suspend_start.c`` with mingw-w64. This module builds that
+Arknights: Endfield's launcher build expects to be started by the publisher's
+launcher. Nadare therefore starts the game through a small Windows helper,
+``suspend_start.exe --launcher <Games.exe> <game.exe>``, built from
+``shim_src/suspend_start.c`` with mingw-w64. This module builds that
 helper, obtains ``Games.exe`` (from a cached copy, the prefix, or the
 publisher's launcher installer) and stages both inside the prefix so the game
 can be launched with plain ``C:\\`` paths.
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import filecmp
 import hashlib
+import logging
 import os
 import shutil
 import subprocess
@@ -26,8 +27,11 @@ from pathlib import Path
 from typing import Any
 
 from . import download as _dl
-from . import process, sevenzip
+from . import installerpins, process, sevenzip
 from .shortcuts import command_hint
+
+#: The pin document tag the index uses for this launcher installer.
+INSTALLER_PIN_TAG = "endfield-installer"
 
 #: Endpoint returning the current Gryphline launcher installer (``exe_url``).
 LAUNCHER_API = (
@@ -47,6 +51,9 @@ SHIM_PREBUILT_SOURCE_SHA256 = "f4283acd84c5820d3d83071b12775ed4d521b470cd908bbd2
 
 #: Prefix-relative directory where the staged shim and launcher live.
 _STAGE_PARTS = ("drive_c", "Games", ".nadare", "endfield-shim")
+
+
+log = logging.getLogger(__name__)
 
 
 class ShimError(RuntimeError):
@@ -282,6 +289,7 @@ def _obtain_games(
     download: Callable[[str, Path], Any],
     which: Callable[[str], str | None],
     extract_run: Callable[..., subprocess.CompletedProcess[str]],
+    pin_check: Callable[[str, Path], None] | None = None,
 ) -> Path:
     """Return a local ``Games.exe``: the cache, the prefix, or a fresh download."""
     if cache.is_file():
@@ -307,6 +315,10 @@ def _obtain_games(
             step="fetch",
             hint=_report_hint(),
         )
+    if pin_check is None:
+
+        def pin_check(url: str, path: Path) -> None:
+            installerpins.check(INSTALLER_PIN_TAG, url, path, info=log.info)
 
     cache.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix="launcher-", suffix=".exe", dir=cache.parent)
@@ -320,6 +332,14 @@ def _obtain_games(
                 f"cannot download the launcher installer: {exc}",
                 step="fetch",
                 hint=_NETWORK_HINT,
+            ) from exc
+        try:
+            pin_check(url, installer)
+        except installerpins.InstallerPinError as exc:
+            raise ShimError(
+                f"the launcher installer does not match Nadare's published checksum list ({exc})",
+                step="fetch",
+                hint=_report_hint(),
             ) from exc
         extract_games_exe(installer, cache, which=which, run=extract_run)
     finally:

@@ -149,7 +149,7 @@ def test_doctor_names_a_system_7zip_and_mingw_when_present(monkeypatch, capsys) 
     from nadare.core import sevenzip
 
     _quiet_doctor(monkeypatch, lambda name, **k: f"/usr/bin/{name}")
-    monkeypatch.setattr(sevenzip.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(sevenzip.shutil, "which", lambda name, *_a, **_k: f"/usr/bin/{name}")
     monkeypatch.delenv("CC", raising=False)
 
     assert run_cli(["doctor"]) == 0
@@ -162,7 +162,7 @@ def test_doctor_reports_the_bundled_7zip_without_copying_it(monkeypatch, capsys,
     from nadare.core import sevenzip
 
     _quiet_doctor(monkeypatch, lambda name, **k: None)
-    monkeypatch.setattr(sevenzip.shutil, "which", lambda name: None)
+    monkeypatch.setattr(sevenzip.shutil, "which", lambda name, *_a, **_k: None)
     fake = tmp_path / "7zzs"
     fake.write_bytes(b"pretend 7-zip")
     monkeypatch.setattr(sevenzip, "BUNDLED", fake)
@@ -182,7 +182,7 @@ def test_doctor_explains_when_7zip_and_mingw_are_missing_but_stays_green(
     from nadare.core import sevenzip
 
     _quiet_doctor(monkeypatch, lambda name, **k: None)
-    monkeypatch.setattr(sevenzip.shutil, "which", lambda name: None)
+    monkeypatch.setattr(sevenzip.shutil, "which", lambda name, *_a, **_k: None)
     monkeypatch.setattr(sevenzip, "BUNDLED", tmp_path / "absent")
     monkeypatch.delenv("CC", raising=False)
 
@@ -197,7 +197,7 @@ def test_doctor_rejects_a_bundled_7zip_with_the_wrong_digest(monkeypatch, capsys
     from nadare.core import sevenzip
 
     _quiet_doctor(monkeypatch, lambda name, **k: None)
-    monkeypatch.setattr(sevenzip.shutil, "which", lambda name: None)
+    monkeypatch.setattr(sevenzip.shutil, "which", lambda name, *_a, **_k: None)
     fake = tmp_path / "7zzs"
     fake.write_bytes(b"tampered")
     monkeypatch.setattr(sevenzip, "BUNDLED", fake)
@@ -215,7 +215,7 @@ def test_doctor_honours_cc_for_the_mingw_line(monkeypatch, capsys) -> None:
         return f"/opt/{name}" if name == "my-mingw-gcc" else None
 
     _quiet_doctor(monkeypatch, which)
-    monkeypatch.setattr(sevenzip.shutil, "which", lambda name: None)
+    monkeypatch.setattr(sevenzip.shutil, "which", lambda name, *_a, **_k: None)
     monkeypatch.setenv("CC", "my-mingw-gcc")
     run_cli(["doctor"])
     assert "mingw-w64: /opt/my-mingw-gcc" in capsys.readouterr().out
@@ -305,6 +305,6 @@ def test_doctor_says_whether_secure_mode_can_run(monkeypatch, capsys) -> None:
     run_cli(["doctor"])
     assert "cannot start here (setting up uid map" in capsys.readouterr().out
 
-    monkeypatch.setattr(gamesandbox, "locate", lambda: gamesandbox.Located(None))
+    monkeypatch.setattr(gamesandbox, "locate", lambda **_: gamesandbox.Located(None))
     run_cli(["doctor"])
     assert "bubblewrap is not installed and no game runtime yet" in capsys.readouterr().out

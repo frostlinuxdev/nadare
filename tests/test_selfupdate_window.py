@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -23,6 +24,9 @@ from nadare.core.config import Config
 from nadare.core.updatecheck import UpdateInfo
 from nadare.gui import main_window as mw_mod
 from nadare.gui.main_window import MainWindow
+
+#: The fakes below "download" these bytes; the install step checks their hash again (#811).
+NEW_SHA = hashlib.sha256(b"new-bytes").hexdigest()
 
 INFO = UpdateInfo(
     version="0.1.0b20",
@@ -70,9 +74,11 @@ def _setup(tmp_path: Path, monkeypatch, *, updatable: bool = True, fail: str | N
     monkeypatch.setattr(
         selfupdate,
         "expected_sha256",
-        lambda info, **k: SimpleNamespace(sha256="a" * 64, source="index"),
+        lambda info, **k: SimpleNamespace(sha256=NEW_SHA, source="index"),
     )
     monkeypatch.setattr(selfupdate, "download_verified", download_verified)
+    # The release signature is tested in test_release_signature.py / test_selfupdate.py.
+    monkeypatch.setattr(selfupdate, "verify_signature", lambda urls, path: None)
     monkeypatch.setattr(selfupdate, "restart", seen.restarted.append)
     monkeypatch.setattr(
         mw_mod.QDesktopServices,

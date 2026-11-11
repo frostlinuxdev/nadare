@@ -123,7 +123,9 @@ def test_install_new_uses_defaults_under_the_data_root(tmp_path, qapp):
 
 def test_profile_name_defaults_to_title_and_is_unique(tmp_path, qapp):
     config = Config.load(tmp_path / "config.json")
-    config.add_profile("arknights", backend="arknights-yostar")
+    # Another game's profile already uses the default name; the name, not the catalog rule,
+    # makes the dialog pick a free one.
+    config.add_profile("arknights", backend="wine")
     dialog = AddGameDialog(config, data_root=tmp_path / "data")
     try:
         dialog.set_backend("arknights-yostar")
@@ -189,8 +191,8 @@ def test_import_stove_czn_folder_becomes_the_prefix(tmp_path, qapp):
         dialog.set_mode(True)
         dialog.set_install_dir(prefix)  # the "Existing install folder" field
         created = dialog.create_profile()
-        assert created == "chaos-zero-nightmare"
-        profile = config.profile("chaos-zero-nightmare")
+        assert created == "czn"
+        profile = config.profile("czn")
         assert profile["prefix"] == str(prefix)
     finally:
         dialog.deleteLater()
@@ -297,3 +299,67 @@ def test_a_second_fgo_copy_gets_its_own_android_context():
     assert unique_context(both) == "fgo-3"
     other = {"w": {"backend": "wine"}}
     assert unique_context(other) is None  # only FGO profiles use contexts
+
+
+def test_enter_in_a_text_field_does_not_create_the_game(tmp_path, qapp, monkeypatch):
+    """Enter finishes typing a name; it used to add the (preselected) game at once."""
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QFileDialog
+
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: pytest.fail("Browse"))
+    )
+    config = Config.load(tmp_path / "config.json")
+    dialog = AddGameDialog(config)
+    try:
+        dialog.show()
+        qapp.processEvents()
+        dialog.name.setFocus()
+        dialog.name.setText("my-game")
+        QTest.keyClick(dialog.name, Qt.Key.Key_Return)
+        qapp.processEvents()
+        assert config.profiles == {} and dialog.isVisible()
+        dialog.create_button.setFocus()
+        QTest.keyClick(dialog.create_button, Qt.Key.Key_Space)  # the button itself still works
+        qapp.processEvents()
+        assert len(config.profiles) == 1
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_an_error_is_shown_above_the_buttons_not_below_the_scrolled_form(tmp_path, qapp):
+    """On a short screen the message sat under the form, out of view: Add game "did nothing"."""
+    from PyQt6.QtCore import QPoint
+    from PyQt6.QtWidgets import QScrollArea
+
+    config = Config.load(tmp_path / "config.json")
+    config.add_profile("taken", backend="wine", title="Taken")
+    dialog = AddGameDialog(config)
+    try:
+        dialog.resize(560, 320)
+        dialog.show()
+        qapp.processEvents()
+        dialog.name.setText("taken")
+        dialog.create_profile()  # refused: the name is already used
+        qapp.processEvents()
+        assert dialog.error_label.text()
+        scroll = dialog.findChild(QScrollArea)
+        assert not scroll.isAncestorOf(dialog.error_label)
+        top_left = dialog.error_label.mapTo(dialog, QPoint(0, 0))
+        assert dialog.rect().contains(top_left) and dialog.error_label.isVisible()
+    finally:
+        dialog.close()
+        dialog.deleteLater()
+
+
+def test_no_empty_strip_above_the_buttons_while_there_is_no_error(tmp_path, qapp):
+    dialog = AddGameDialog(Config.load(tmp_path / "config.json"))
+    try:
+        dialog.show()
+        qapp.processEvents()
+        assert dialog.error_label.isHidden()
+    finally:
+        dialog.close()
+        dialog.deleteLater()

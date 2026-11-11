@@ -110,6 +110,15 @@ def test_store_button_is_the_first_nav_item_and_follows_the_page(tmp_path, qapp)
         _close(window, qapp)
 
 
+def test_first_start_with_no_games_opens_the_store(tmp_path, qapp):
+    window = _window(tmp_path)
+    try:
+        assert window.stack.currentIndex() == PAGE_STORE
+        assert window.store_button.property("active") == "true"
+    finally:
+        _close(window, qapp)
+
+
 def test_library_add_game_opens_the_store_not_the_dialog(tmp_path, qapp, monkeypatch):
     window = _window(tmp_path)
     built = []
@@ -249,7 +258,7 @@ def test_accepted_install_creates_the_profile_marks_it_added_and_opens_it(
         (name,) = window.config.profiles
         assert opened == [name] and started == [(name, "install")]
         assert not window.store.grid._cards["direct-pgr"].added_marker.isHidden()
-        assert window.store.detail.install_button.text() == "Add another copy"
+        assert window.store.detail.install_button.isHidden()
         assert not window.store.detail.installed_note.isHidden()
     finally:
         _close(window, qapp)
@@ -420,7 +429,7 @@ def test_unrelated_profile_changes_do_not_reset_the_hero(tmp_path, qapp, monkeyp
         assert _is(_hero_colour(flow), "#ff0000")
         assert flow.detail.install_button.text() == "Install"
         flow.set_installed_kinds(frozenset({"direct-pgr"}))
-        assert flow.detail.install_button.text() == "Add another copy"
+        assert flow.detail.install_button.isHidden()
     finally:
         flow.deleteLater()
         qapp.processEvents()

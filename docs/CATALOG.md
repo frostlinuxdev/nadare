@@ -21,12 +21,10 @@ install through HoYo's chunked "Sophon" downloads.
 When a Sophon update changes a file, Nadare stages its verified replacement beside the installed
 file before swapping it in; allow free space for the largest changed file during an update.
 
-HoYo's anti-cheat only works on Linux with DW-Proton's built-in fixes (it runs the game through
-`steam.exe` and automates the "disconnecting trick" during the anti-cheat's start-up), which it
-selects from the game's exe name. Nadare's default runner is DW-Proton; another runner (GE-Proton,
-plain Proton-CachyOS) can disconnect or fail the check. `WINE_DISABLE_DISCONNECT=1` turns the
-automatic disconnect off if it ever gets in the way. Honkai: Star Rail's `StarRail.exe` is not in
-DW-Proton's list, so it gets none of these fixes.
+HoYoverse titles start on Linux because DW-Proton carries the fixes their start-up sequence
+expects; it selects them from the game's exe name. Nadare's default runner is DW-Proton; another
+runner (GE-Proton, plain Proton-CachyOS) can fail that start-up sequence. Honkai: Star Rail's
+`StarRail.exe` is not in DW-Proton's list, so it gets none of these fixes.
 
 A **Community** tier for reviewed third-party entries is planned but has no entries yet. The
 tier of a kind is one line in `nadare/core/directkinds.py` (`VERIFIED_KINDS`).
@@ -71,10 +69,10 @@ Streamed archives can also be verified against published per-block checksums: se
 
 ### Manifests that are wrapped
 
-A few publishers wrap their file list. Neverness to Everness's `ResList.bin` is AES-128-CBC of
-zlib-compressed XML; the key and IV are built from public values (the app id and the string
-`PatcherSDK`), so `core/sources/nte.py` reads it with the small AES decryptor in
-`core/sources/_aes.py`. Nadare ships no crypto library.
+A few publishers wrap their file list. Neverness to Everness's `ResList.bin` is an AES-CBC
+wrapper around zlib-compressed XML; `core/sources/nte.py` unwraps it with the small AES decryptor
+in `core/sources/_aes.py`. Nadare ships no crypto library. How a given wrapper is opened is a
+per-game project decision; keep research notes out of this repository.
 
 ## How a `launcher-<game>` works
 
@@ -85,23 +83,17 @@ launcher. The launcher downloads and updates the game.
 
 ## Finding the endpoints
 
-Most launchers talk to an open JSON API. With DW-Proton you can watch them without a
-proxy, headless, so nothing touches your desktop:
+Most launchers talk to an open JSON API. When adding a source, use a public, unauthenticated
+endpoint. If you have to capture a launcher's traffic to find one, keep that work and its notes
+outside this repository and send the result — the endpoint, the parameters, and whether it needs
+a signed header — in the pull request.
 
-```sh
-export WINEPREFIX=$PWD/pfx PROTONPATH=<dw-proton dir> GAMEID=umu-0 DISPLAY=:91
-export WINEDEBUG=-all,+winhttp,+wininet
-Xvfb :91 -screen 0 1280x800x24 & unset WAYLAND_DISPLAY
-umu-run installer.exe 2> trace.log        # then drive the UI with xdotool, shoot with import -window root
-grep -a -o 'L"https\?://[^"]*"' trace.log | sort -u
-```
+Two practical notes that are not about capturing traffic:
 
-* Launchers built on Qt/libcurl (GFL2) do not use WinHTTP; look in their logs and config files
-  in the prefix instead, or probe the CDN with `HEAD` requests.
 * Installers often default to a drive that Wine maps to your home folder (`S:`, `X:`). Pick a
   folder on `C:`.
-* To check that a game really starts on the real GPU without opening a window on your
-  desktop: `WLR_BACKENDS=headless cage -s -- umu-run Game.exe`, then `grim` on cage's socket.
+* To check that a game really starts on the real GPU without opening a window on your desktop:
+  `WLR_BACKENDS=headless cage -s -- umu-run Game.exe`, then `grim` on cage's socket.
 
 ## Rules
 

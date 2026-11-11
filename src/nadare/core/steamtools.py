@@ -371,6 +371,23 @@ def read_compat_entry(text: str, app_id: str | int) -> CompatEntry | None:
     return CompatEntry(app_id=key, fields=_fields(entry), text=text[start:end])
 
 
+def mapped_tools(text: str) -> set[str] | None:
+    """Every tool name the ``CompatToolMapping`` uses, or ``None`` when it cannot be read."""
+    try:
+        items, _close, _index = _parse(_tokenize(text))
+        mapping = _mapping_node(items)
+    except Exception:  # noqa: BLE001 - an unreadable file is "unknown", never "unused"
+        return None
+    if mapping is None:
+        return None
+    return {name for block in _blocks(mapping.items) if (name := _fields(block).get("name"))}
+
+
+def tools_in_use(text: str) -> set[str]:
+    """The tool names games are mapped to (empty when none can be read)."""
+    return mapped_tools(text) or set()
+
+
 #: Steam's 64-bit ids of individual accounts start here; the folder number of an account under
 #: ``userdata/`` is its id minus this base.
 _STEAM_ID_BASE = 76561197960265728

@@ -449,3 +449,39 @@ def test_removing_a_czn_profile_also_drops_its_live_login(env, monkeypatch):
     removal.remove_game(cfg, "czn", delete_data=False, delete_trees=[])
 
     assert czn._live_get("czn") is None
+
+
+# ---- #622 item 9: owned_dirs must be the game's own wrapper, nothing else ---------------
+def test_an_unrelated_empty_folder_in_owned_dirs_is_never_removed(env, monkeypatch):
+    """A hand-edited or damaged config must not make removal rmdir any empty folder."""
+    cfg, tmp = env
+    _backend(monkeypatch)
+    install = _tree(tmp, "Games", "Nadare", "Gone", "install")
+    documents = tmp / "Documents"
+    documents.mkdir()
+    games = tmp / "Games"
+    cfg.profiles["gone"].update(
+        install_dir=str(install),
+        owned_trees=["install_dir"],
+        owned_dirs=[str(documents), str(games), str(tmp / "Games" / "Nadare" / "Gone")],
+    )
+    removal.remove_game(cfg, "gone", delete_trees=["install_dir"], applications_dir=tmp / "apps")
+    assert documents.is_dir(), "not the game's folder: kept"
+    assert games.is_dir(), "two levels up: kept"
+    assert not (tmp / "Games" / "Nadare" / "Gone").exists(), "the real wrapper still goes"
+
+
+def test_wrapper_folders_keep_only_the_games_own_parent(tmp_path):
+    install = tmp_path / "Lib" / "Nadare" / "Gone" / "install"
+    prefix = tmp_path / "Lib" / "Nadare" / "Gone" / "prefix"
+    profile = {
+        "install_dir": str(install),
+        "prefix": str(prefix),
+        "owned_dirs": [
+            str(tmp_path / "Lib" / "Nadare" / "Gone"),
+            str(tmp_path / "Lib"),
+            str(tmp_path / "elsewhere"),
+            "relative/path",
+        ],
+    }
+    assert removal._wrapper_folders(profile) == [str(tmp_path / "Lib" / "Nadare" / "Gone")]

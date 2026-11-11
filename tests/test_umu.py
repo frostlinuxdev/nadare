@@ -151,7 +151,8 @@ def test_ensure_extracts_only_umu_run_and_ignores_extras(monkeypatch) -> None:
     assert calls[0][0] == URL
     assert calls[0][2]["expected_sha256"] == umu.UMU_TAR_SHA256
     assert smoke and smoke[0][0][0] == "/usr/bin/python3"
-    assert smoke[0][0][1] == str(dest)
+    # The check ran on the private candidate before it was published (#974).
+    assert smoke[0][0][1] != str(dest)
 
 
 def test_ensure_rejects_a_symlinked_umu_run(monkeypatch) -> None:
@@ -324,14 +325,17 @@ def test_download_failure_falls_back_to_the_host_libs_hint(tmp_path, monkeypatch
     assert "libfreetype.so.6" in str(excinfo.value)
 
 
-def test_flatpak_behaviour_is_unchanged(tmp_path, monkeypatch) -> None:
-    backend, proton, exe = _ak_backend(tmp_path, monkeypatch, ["libfreetype.so.6"])
+def test_flatpak_runs_an_unsandboxed_game_through_the_managed_umu(tmp_path, monkeypatch) -> None:
+    """Inside the Flatpak, Proton runs in umu's Steam Runtime like in the AppImage (measured:
+    on the bare Flatpak runtime a game's intro video fails). Arknights has no Sandbox."""
+    backend, proton, exe = _ak_backend(tmp_path, monkeypatch, [])
     monkeypatch.setattr(wg.sandbox, "in_flatpak", lambda: True)
     monkeypatch.setattr(wg.shutil, "which", lambda name, *a, **k: None)
-    monkeypatch.setattr(umu, "ensure_managed", lambda **k: pytest.fail("downloaded"))
+    monkeypatch.setattr(umu, "system", lambda *_a, **_k: None)
+    monkeypatch.setattr(umu, "resolve", lambda *_a, allow_download, **_k: "/managed/umu-run")
 
     argv, _env, _target = backend.build_launch()
-    assert argv == [str(proton / "proton"), "run", str(exe)]
+    assert argv == ["/managed/umu-run", str(exe)]
 
 
 # ---------------------------------------------------------------------------

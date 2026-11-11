@@ -17,6 +17,8 @@ from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 
+from . import paths
+
 #: Runs kept per operation, and the most one game's folder may hold.
 KEEP_RUNS = 5
 GAME_CAP_BYTES = 50 * 1024 * 1024
@@ -29,19 +31,33 @@ _SAFE_ID = re.compile(r"[a-z0-9][a-z0-9._-]*")
 _RUN_NAME = re.compile(r"(?P<operation>[a-z0-9_]+)-(?P<stamp>\d{8}-\d{6})(?:-(?P<n>\d+))?\.log")
 
 
+#: What :func:`game_id` makes of a key it has to clean: a slug, a dash and six hex digits.
+_GENERATED_ID = re.compile(r".+-[0-9a-f]{6}")
+
+
 def game_id(profile: str) -> str:
     """A folder name for ``profile`` that is safe on every filesystem.
 
     A key that is already lowercase and made of ``a-z 0-9 . _ -`` is its own id. Anything else
     (spaces, capitals, Unicode, a leading dot) becomes a lowercase slug plus a short hash of the
     exact key, so two keys that slug alike (or differ only by case, on a case-insensitive disk)
-    never share a folder.
+    never share a folder. A safe key that itself looks like such an id (``blue-archive-fc51ab``)
+    gets a hash too, or it would share the folder of the key it looks generated from (#972).
     """
+    digest = hashlib.sha256(profile.encode("utf-8")).hexdigest()[:6]
     if _SAFE_ID.fullmatch(profile) and profile not in {".", ".."}:
-        return profile
+        if not _GENERATED_ID.fullmatch(profile):
+            return profile
+        generated = f"{profile}-{digest}"
+        # An older Nadare used the key itself as the folder name. Keep that folder until
+        # the hashed one exists (or the old one is gone), so an existing profile's logs do
+        # not move out from under it (#972 follow-up).
+        logs = paths.logs_dir()
+        if not (logs / generated).exists() and (logs / profile).is_dir():
+            return profile
+        return generated
     slug = re.sub(r"[^a-z0-9._-]+", "-", profile.lower()).strip(".-_")
     slug = slug[:40].strip(".-_") or "game"
-    digest = hashlib.sha256(profile.encode("utf-8")).hexdigest()[:6]
     return f"{slug}-{digest}"
 
 

@@ -858,6 +858,7 @@ def test_migrate_cached_cover_writes_webp_and_is_idempotent(tmp_path, monkeypatc
     assert artwork.migrate_cached_covers() == 0
 
 
+@pytest.mark.real_cover_migration
 def test_cached_lookup_runs_the_existing_cover_migration(tmp_path, monkeypatch):
     source = tmp_path / "game-cover.jpg"
     source.write_bytes(_png_bytes())
@@ -935,20 +936,24 @@ def test_official_sidecar_precedes_migrated_image_install(tmp_path, monkeypatch)
     assert not target.exists() or artwork.src_sidecar(target).is_file()
 
 
+@pytest.mark.real_cover_migration
 def test_startup_sweep_removes_only_old_inactive_cover_parts(tmp_path, monkeypatch):
     import os
     import time
 
     root = tmp_path / "covers"
     root.mkdir()
-    stale = root / "orphan.part"
+    stale = root / f"cover.webp.{2**22 + 7}.{'b' * 32}.part"
+    orphan = root / "orphan.part"
     fresh = root / "fresh.part"
     active = root / f"cover.webp.{os.getpid()}.0123456789abcdef0123456789abcdef.part"
     stale.write_bytes(b"old")
+    orphan.write_bytes(b"not Nadare's")
     fresh.write_bytes(b"fresh")
     active.write_bytes(b"in use")
     old_time = time.time() - 2 * 24 * 60 * 60
     os.utime(stale, (old_time, old_time))
+    os.utime(orphan, (old_time, old_time))
     os.utime(active, (old_time, old_time))
     outside = tmp_path / "outside.part"
     outside.write_bytes(b"outside")
@@ -971,6 +976,7 @@ def test_startup_sweep_removes_only_old_inactive_cover_parts(tmp_path, monkeypat
     artwork.cached("game", "cover")
 
     assert not stale.exists()
+    assert orphan.exists()
     assert fresh.exists()
     assert active.exists()
     assert linked.is_symlink()
@@ -1083,6 +1089,7 @@ def test_migrate_cached_jpeg_extension(tmp_path, monkeypatch):
     assert not source.exists()
 
 
+@pytest.mark.real_cover_migration
 def test_cached_lookup_schedules_one_background_migration(tmp_path, monkeypatch):
     source = tmp_path / "game-cover.jpg"
     source.write_bytes(_png_bytes())

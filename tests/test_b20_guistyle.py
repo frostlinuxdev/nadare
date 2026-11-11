@@ -23,6 +23,9 @@ from nadare.core.config import Config
 from nadare.gui import theme
 from nadare.gui.add_game import PREFIX_ONLY_KINDS, AddGameDialog, detect_import
 
+# This file restyles the whole app: end earlier tests' windows first (#1024).
+pytestmark = pytest.mark.usefixtures("restyle_safe")
+
 
 @pytest.fixture(scope="module")
 def qapp():
@@ -85,7 +88,14 @@ def test_apply_theme_refreshes_the_stylesheet_on_a_font_change(qapp):
         large = QFont(qapp.font())
         large.setPointSizeF(20)
         qapp.setFont(large)
-        qapp.processEvents()
+        # The refresh runs from a 0 ms timer (re-entering Qt's font code inside the signal can
+        # crash it); under CI load one pass of the event loop may not reach it.
+        import time
+
+        deadline = time.monotonic() + 3
+        while _base_font_px(qapp.styleSheet()) < 20 and time.monotonic() < deadline:
+            qapp.processEvents()
+            time.sleep(0.01)
         assert _base_font_px(qapp.styleSheet()) >= 20
     finally:
         qapp.setFont(original)
@@ -271,8 +281,8 @@ def test_import_existing_fgo_keeps_the_lepton_prefix(tmp_path, qapp):
         dialog.set_backend("fgo-lepton")
         dialog.set_mode(True)
         dialog.set_install_dir(prefix)
-        assert dialog.create_profile() == "fate-grand-order"
-        profile = config.profile("fate-grand-order")
+        assert dialog.create_profile() == "fgo"
+        profile = config.profile("fgo")
         assert profile["prefix"] == str(prefix)
         assert not profile.get("install_dir")
     finally:

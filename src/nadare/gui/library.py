@@ -8,6 +8,7 @@ and shows a state pill that the main window feeds with ``Status`` objects.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from PyQt6.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
@@ -21,13 +22,20 @@ from PyQt6.QtWidgets import (
     QLayout,
     QLayoutItem,
     QMenu,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
-from ..core.directkinds import DIRECT_KINDS, DIRECT_LABEL, LAUNCHER_KINDS, LAUNCHER_LABEL
+from ..core.directkinds import (
+    DIRECT_KINDS,
+    DIRECT_LABEL,
+    LAUNCHER_KINDS,
+    LAUNCHER_LABEL,
+    RETIRED_KINDS,
+)
 from .images import ImageLoader
 from .theme import ACCENT, badge_style, cover_pixmap, repolish
 
@@ -69,6 +77,7 @@ _BACKEND_LABELS = {
     **dict.fromkeys(DIRECT_KINDS, DIRECT_LABEL),
     **dict.fromkeys(LAUNCHER_KINDS, LAUNCHER_LABEL),
     "fgo-lepton": "Android container",
+    **dict.fromkeys(RETIRED_KINDS, "Old launcher (retired)"),
     "wine": "Wine / Proton game",
     "steam": "Steam game",
     "script": "Custom script",
@@ -173,26 +182,41 @@ class FlowLayout(QLayout):
         effective = rect.adjusted(
             margins.left(), margins.top(), -margins.right(), -margins.bottom()
         )
-        x, y, line_height = effective.x(), effective.y(), 0
+        # Split into lines first, then place each line with its items centred vertically
+        # (a pill and a plain label of different heights stay on one baseline).
+        lines: list[list[tuple[QLayoutItem, QSize]]] = [[]]
+        x = effective.x()
         for item in self._items:
+            if item.isEmpty():
+                continue  # a hidden widget takes no place (and no spacing)
             hint = item.sizeHint()
-            next_x = x + hint.width() + self._spacing
-            if next_x - self._spacing > effective.right() and line_height > 0:
+            if lines[-1] and x + hint.width() > effective.right() + 1:
+                lines.append([])
                 x = effective.x()
-                y += line_height + self._spacing
-                next_x = x + hint.width() + self._spacing
-                line_height = 0
+            lines[-1].append((item, hint))
+            x += hint.width() + self._spacing
+        y = effective.y()
+        for number, line in enumerate(lines):
+            if not line:
+                continue
+            if number:
+                y += self._spacing
+            height = max(hint.height() for _item, hint in line)
             if apply:
-                item.setGeometry(QRect(QPoint(x, y), hint))
-            x = next_x
-            line_height = max(line_height, hint.height())
-        return y + line_height - rect.y() + margins.bottom()
+                x = effective.x()
+                for item, hint in line:
+                    top = y + (height - hint.height()) // 2
+                    item.setGeometry(QRect(QPoint(x, top), hint))
+                    x += hint.width() + self._spacing
+            y += height
+        return y - rect.y() + margins.bottom()
 
 
 class GameCard(QFrame):
     """One game in the library grid: art, title, backend and a state pill."""
 
     clicked = pyqtSignal(str)  # profile name
+    play_clicked = pyqtSignal(str)  # profile name
 
     def __init__(
         self,
@@ -245,11 +269,22 @@ class GameCard(QFrame):
         meta_row.setSpacing(6)
         self.meta_label = QLabel(backend_label(backend))
         self.meta_label.setObjectName("CardMeta")
-        self.meta_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.meta_label.setToolTip(backend_label(backend))
+        # The pill and Play keep their full size; the kind line gives way (it was cutting the
+        # pill to "NOT INSTALLEI" next to "Publisher's launcher").
+        self.meta_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.meta_label.setMinimumWidth(0)
         meta_row.addWidget(self.meta_label, 1)
         self.badge = QLabel("")
         self.badge.setObjectName("Pill")
         meta_row.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignRight)
+        self.play_button = QPushButton("Play")
+        self.play_button.setObjectName("CardPlay")
+        self.play_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.play_button.setAccessibleName(f"Play {title}")
+        self.play_button.clicked.connect(lambda: self.play_clicked.emit(self.profile))
+        self.play_button.hide()
+        meta_row.addWidget(self.play_button, 0, Qt.AlignmentFlag.AlignRight)
         footer_layout.addLayout(meta_row)
         layout.addWidget(footer)
 
@@ -261,6 +296,10 @@ class GameCard(QFrame):
         repolish(self.badge)
         self.setProperty("running", bool(running))
         repolish(self)
+        ready = state == "installed" and not running
+        # Like the game page: an idle, installed game is "ready" by its Play button.
+        self.badge.setVisible(not ready)
+        self.play_button.setVisible(ready)
 
     def enterEvent(self, event) -> None:  # noqa: N802 - Qt naming
         self._shadow.setBlurRadius(34)
@@ -361,6 +400,7 @@ class LibraryPage(QWidget):
     """Scrollable grid of :class:`GameCard` widgets plus the add card."""
 
     open_game = pyqtSignal(str)
+    play_game = pyqtSignal(str)
     add_game = pyqtSignal()
     remove_game = pyqtSignal(str)
 
@@ -368,6 +408,8 @@ class LibraryPage(QWidget):
         super().__init__(parent)
         self.setObjectName("Page")
         self._cards: dict[str, GameCard] = {}
+        #: What the cards were last built from (see :meth:`_signature`), to skip a no-op rebuild.
+        self._shown: tuple | None = None
         # Cover art is decoded off the GUI thread; cards show a placeholder first.
         self._images = ImageLoader(parent=self)
 
@@ -411,8 +453,11 @@ class LibraryPage(QWidget):
     def card_menu(self, profile: str) -> QMenu:
         """The right-click menu of a game card."""
         menu = QMenu(self)
+        card = self._cards.get(profile)
+        if card is not None and not card.play_button.isHidden():
+            menu.addAction("Play").triggered.connect(lambda: self.play_game.emit(profile))
         menu.addAction("Open").triggered.connect(lambda: self.open_game.emit(profile))
-        menu.addAction("Remove from library…").triggered.connect(
+        menu.addAction("Uninstall or remove…").triggered.connect(
             lambda: self.remove_game.emit(profile)
         )
         return menu
@@ -423,6 +468,10 @@ class LibraryPage(QWidget):
 
         A keyboard user's place survives the rebuild: the card that had focus gets it back (#942).
         """
+        shown = self._signature(profiles)
+        if shown == self._shown:
+            return  # nothing a card shows changed: keep the cards and their decoded covers (#624)
+        self._shown = shown
         focused = QApplication.focusWidget()
         focused_name = next((n for n, c in self._cards.items() if c is focused), None)
         add_focused = isinstance(focused, AddGameCard)
@@ -438,6 +487,7 @@ class LibraryPage(QWidget):
                 parent=self._container,
             )
             card.clicked.connect(self.open_game.emit)
+            card.play_clicked.connect(self.play_game.emit)
             card.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             card.customContextMenuRequested.connect(
                 lambda pos, n=name, c=card: self.card_menu(n).exec(c.mapToGlobal(pos))
@@ -464,6 +514,23 @@ class LibraryPage(QWidget):
             self._cards[focused_name].setFocus()
         elif add_focused:
             add.setFocus()
+
+    @staticmethod
+    def _signature(profiles: dict[str, dict[str, Any]]) -> tuple:
+        """Everything a card shows: order, title, kind and each art file with its mtime."""
+        rows = []
+        for name, profile in profiles.items():
+            art = []
+            for path in profile_art_candidates(profile):
+                try:
+                    stamp = os.stat(path).st_mtime_ns
+                except OSError:
+                    stamp = None
+                art.append((path, stamp))
+            rows.append(
+                (name, display_title(name, profiles), str(profile.get("backend") or ""), tuple(art))
+            )
+        return tuple(rows)
 
     def _request_art(self, name: str, card: GameCard, title: str, candidates: list[str]) -> None:
         """Decode one cover in the background, then update its card if still shown."""

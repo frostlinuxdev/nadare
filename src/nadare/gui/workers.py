@@ -23,7 +23,7 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, QRunnable, QThread, pyqtSignal
 
 from .. import __version__
-from ..core import diskspace, paths, runlog, vcredist
+from ..core import diskspace, exitcode, friendly, paths, runlog, vcredist
 from ..core.backends import BackendError, BackendUnsupported, create
 from ..core.config import Config
 from ..core.events import Cancel, Cancelled, Event, mask
@@ -81,6 +81,12 @@ MUTATING = frozenset(
         "logout",
     }
 )
+
+
+#: Operations refused while a download is paused: they would drop its RESUME entry (#855).
+#: Sign-in operations wait too (round 6): run beside a paused entry, Cancel and the page's end
+#: of the operation treated the paused download as theirs.
+_WAIT_FOR_PAUSED = frozenset({"verify", "repair", "update", "login", "logout", "set_remember"})
 
 
 class _CallSignals(QObject):
@@ -200,6 +206,7 @@ class BackendWorker(QThread):
         return diskspace.reserve(path, needed, owner=self._profile)
 
     def run(self) -> None:  # noqa: D401 - QThread entry point
+        started = time.monotonic()
         code: int | None = None
         lock = None
         reservation = None
@@ -228,26 +235,43 @@ class BackendWorker(QThread):
             else:
                 code = self._dispatch(backend)
         except Cancelled:
-            self._note("cancelled by user")
+            self._note(self._end_text("cancelled by user", started))
             self.cancelled.emit()
             return
         except BackendUnsupported as exc:
-            self._fail_exception(exc)
+            self._end_failed(exc, started)
             return
         except BackendError as exc:
-            self._fail_exception(exc)
+            self._end_failed(exc, started)
             return
         except Exception as exc:  # noqa: BLE001 - surfaced to the user, logged raw
             self._note(traceback.format_exc())
-            self._fail_exception(exc)
+            self._end_failed(exc, started)
             return
+        else:
+            code = 0 if code is None else int(code)
+            detail = f"exit={code}"
+            signal = exitcode.crash_signal(code)
+            if signal:
+                detail += f" signal={signal}"
+            self._note(self._end_text(detail, started))
         finally:
             if reservation is not None:
                 reservation.release()
             if lock is not None:
                 lock.release()
             self._close_log()
-        self.succeeded.emit(0 if code is None else int(code))
+        self.succeeded.emit(code)
+
+    def _end_text(self, detail: str, started: float) -> str:
+        """One ``[end]`` line: the log must say how the run ended even when no dialog was read."""
+        elapsed = exitcode.short_duration(time.monotonic() - started)
+        return f"[end] {detail} after {elapsed}"
+
+    def _end_failed(self, exc: Exception, started: float) -> None:
+        """Report the failure and then end the log with the same one-line message."""
+        message = self._fail_exception(exc)
+        self._note(self._end_text(f"failed: {' '.join(message.split())}", started))
 
     def _dispatch(self, backend) -> int:
         op = self._operation
@@ -342,7 +366,9 @@ class BackendWorker(QThread):
         try:
             timeout = max(1, int(deadline - time.monotonic()))
             media = yostar.load_media(source, game_tag=game_tag or None, timeout=timeout)
-        except yostar.MediaError:
+        except (yostar.MediaError, yostar.ManifestError, OSError, ValueError):
+            # Bad or unreachable media: the page shows no banners, the worker does not fail
+            # (#1207 b251). A cancel is not one of these and still stops the worker.
             return empty
         cached = yostar.cache_media(
             media, artwork.slug(profile, title), deadline=deadline, cancel=self._cancel_token
@@ -400,15 +426,16 @@ class BackendWorker(QThread):
         self.backend_event.emit(Event("error", message))
         self.failed.emit(message)
 
-    def _fail_exception(self, exc: Exception) -> None:
-        """Report an exception's own text; keep the class name in the log only."""
+    def _fail_exception(self, exc: Exception) -> str:
+        """Report an exception in plain words where a common cause is known, else its own text."""
         log.warning("%s: %s", type(exc).__name__, exc)
-        text = str(exc)
-        if text:
-            self._fail(text)
-            return
-        detail = getattr(exc, "message", "")
-        self._fail(f"{type(exc).__name__}: {detail}")
+        if str(exc):
+            message = friendly.user_text(exc)
+        else:
+            detail = getattr(exc, "message", "")
+            message = f"{type(exc).__name__}: {detail}"
+        self._fail(message)
+        return message
 
     # ---- raw log -----------------------------------------------------------
     def _open_log(self):
@@ -665,6 +692,11 @@ class BackendController(QObject):
         entry = self._paused.get(profile)
         return entry[0] if entry is not None else ""
 
+    def waiting_operation(self, profile: str) -> str:
+        """The operation waiting for a free install slot for ``profile`` ("" when none)."""
+        entry = self._waiting.get(profile)
+        return entry[0] if entry is not None else ""
+
     # ---- control -----------------------------------------------------------
     def start(self, profile: str, operation: str, payload: object = None) -> bool:
         """Start ``operation`` for ``profile``. Returns False if it cannot run.
@@ -675,6 +707,11 @@ class BackendController(QObject):
         the caller can show the usual Busy dialog.
         """
         if self._closed:
+            return False
+        if operation in _WAIT_FOR_PAUSED and profile in self._paused:
+            # A check or another download must not throw away a paused download's RESUME
+            # entry (#855), also not when it would queue behind a background probe (round 5);
+            # resume() pops the entry before it starts the operation again.
             return False
         pending = self._pending.get(profile)
         worker = self._workers.get(profile)
@@ -706,8 +743,6 @@ class BackendController(QObject):
                 return True
             return False
 
-        if operation in ("verify", "repair") and profile in self._paused:
-            return False  # a check must not throw away a paused download's RESUME entry (#855)
         if operation not in BACKGROUND:
             self._paused.pop(profile, None)
         return self._start_or_wait(profile, operation, payload)
@@ -912,10 +947,15 @@ class BackendController(QObject):
             self.cancelled.emit(profile, pending[0])
             return
         worker = self._workers.get(profile)
-        if worker is not None and worker.isRunning():
-            worker.cancel()
-            return
+        running = worker is not None and worker.isRunning()
         entry = self._paused.pop(profile, None)
+        if running:
+            worker.cancel()
+            # A paused download is not a running worker: cancel it too, or pressing Cancel
+            # on its row would only stop the background status/news probe next to it.
+            if entry is not None:
+                self.cancelled.emit(profile, entry[0])
+            return
         if entry is not None:
             self.cancelled.emit(profile, entry[0])
 

@@ -57,12 +57,6 @@ class StoreEntry:
 _VARIANTS: dict[str, tuple[str, str]] = {
     "direct-gfl2": ("Girls' Frontline 2", "Exilium, Darkwinter build"),
     "direct-gfl2-haoplay": ("Girls' Frontline 2", "Haoplay global build"),
-    "launcher-gfl2-haoplay": (
-        "Girls' Frontline 2",
-        "Haoplay global build, through the publisher's launcher",
-    ),
-    "direct-nte": ("Neverness to Everness", "Direct download"),
-    "launcher-nte": ("Neverness to Everness", "Through the publisher's launcher"),
 }
 
 
@@ -96,8 +90,15 @@ def unavailable_games() -> list[tuple[str, str]]:
     if not hoyo_visible():
         unavailable -= HOYO_KINDS
     return [
-        (kind, title) for kind, title, _delivery, _tier in _catalog_rows() if kind in unavailable
+        (kind, title)
+        for kind, title, _delivery, _tier in _catalog_rows()
+        if kind in unavailable or _needs_missing_steam(kind, unavailable)
     ]
+
+
+def _needs_missing_steam(kind: str, unavailable: set[str]) -> bool:
+    """A Steam Store tile (``steam-<appid>``) runs through the ``steam`` backend (#1207 b122)."""
+    return "steam" in unavailable and steamstore.app_id_of(kind) is not None
 
 
 def entries(
@@ -114,7 +115,7 @@ def entries(
     needle = query.strip().casefold()
     result = []
     for kind, title, delivery, game_tier in _catalog_rows():
-        if kind in unavailable:
+        if kind in unavailable or _needs_missing_steam(kind, unavailable):
             continue
         if tier is not None and game_tier != tier:
             continue

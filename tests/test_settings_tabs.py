@@ -84,8 +84,9 @@ def test_loading_a_game_starts_on_the_general_tab(page, tmp_path):
 def test_the_tab_bar_is_styled_for_the_dark_theme(qapp):
     from nadare.gui import theme
 
-    theme.apply_theme(qapp)
-    sheet = qapp.styleSheet()
+    # The sheet's text is what this checks. Applying it to the whole app re-styles every live
+    # widget other tests left behind and once crashed CI inside setStyleSheet (#1024).
+    sheet = theme.stylesheet()
     assert "QTabBar::tab" in sheet and "QTabBar::tab:selected" in sheet
 
 

@@ -17,10 +17,11 @@ import logging
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
-from . import indexfetch
+from . import hosting, indexfetch
 
 if TYPE_CHECKING:
     from .directdl import Plan
@@ -44,6 +45,14 @@ MAX_DOCUMENT_BYTES = 16 << 20
 
 class PinError(ValueError):
     """A pin document is malformed or does not describe a usable pin."""
+
+
+class PinMismatch(Exception):
+    """The publisher's file at a pinned URL is not the file that was pinned (#1158)."""
+
+
+#: The one line shown when an install goes ahead without its published checksums.
+NOT_CHECKED = "Not checked against a published checksum: {why}. Installing anyway."
 
 
 @dataclass(frozen=True)
@@ -114,6 +123,30 @@ def pin_from_bytes(
     """Build a one-part pin for an archive whose bytes are known."""
     part = PinPart(url, len(data), tuple(hash_blocks(data, block_size)))
     return ArchivePin(block_size, (part,), publisher_md5)
+
+
+def verify_file(path: Path, part: PinPart, block_size: int) -> None:
+    """Check ``path`` against ``part`` one block at a time, raising :class:`PinError`."""
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise PinError(f"cannot read {path.name}: {exc}") from exc
+    if size != part.size:
+        raise PinError(
+            f"{path.name} does not match the published checksum list "
+            f"(size {size}, expected {part.size})"
+        )
+    expected = iter(part.blocks)
+    try:
+        with open(path, "rb") as fh:
+            while block := fh.read(block_size):
+                wanted = next(expected, None)
+                if wanted is None or hashlib.sha256(block).digest() != wanted:
+                    raise PinError(f"{path.name} does not match the published checksum list")
+    except OSError as exc:
+        raise PinError(f"cannot read {path.name}: {exc}") from exc
+    if next(expected, None) is not None:
+        raise PinError(f"{path.name} does not match the published checksum list")
 
 
 def document(
@@ -229,6 +262,54 @@ def parse_document(doc: Any) -> dict[str, ArchivePin]:
     return {name: _parse_archive(name, value) for name, value in archives.items()}
 
 
+def _same_location(pin: ArchivePin, parts: Sequence[Any]) -> bool:
+    """The pin names exactly these URLs: it is about this very file, not another version."""
+    return len(parts) == len(pin.parts) and all(
+        pinned.url == getattr(actual, "url", None)
+        for pinned, actual in zip(pin.parts, parts, strict=True)
+    )
+
+
+def _describe(parts: Sequence[Any], md5: str | None) -> str:
+    sizes = ", ".join(str(getattr(part, "size", None)) for part in parts)
+    return f"size {sizes}" + (f", md5 {md5.lower()}" if md5 else "")
+
+
+def check(plan: Plan, loaded: Loaded) -> tuple[Plan, list[str]]:
+    """Attach the matching pins; raise :class:`PinMismatch` for a changed pinned file.
+
+    Returns the plan and at most one note for the user when some archive goes unchecked.
+    A pin naming another URL is for another version (the pin job lags a game update), so
+    that archive is installed unchecked rather than refused.
+    """
+    archives = []
+    why: str | None = None
+    for archive in plan.archives:
+        parts = archive.parts or (archive.source,)
+        md5 = archive.source.md5
+        pin = loaded.pins.get(archive.name)
+        if pin is not None and pin.matches(parts, md5):
+            archive = replace(archive, pin=pin)
+        elif pin is not None and _same_location(pin, parts):
+            pinned = [part.size for part in pin.parts]
+            raise PinMismatch(
+                f"The publisher's file for {archive.name} changed since Nadare last checked it "
+                f"(expected size {', '.join(map(str, pinned))}"
+                + (f", md5 {pin.publisher_md5.lower()}" if pin.publisher_md5 else "")
+                + f"; found {_describe(parts, md5)}). Nothing was installed. Try again later; "
+                "if it keeps happening, report it."
+            )
+        elif pin is not None:
+            why = why or "the published checksums are for another version of this game"
+        elif loaded.available:
+            why = why or f"there is no published checksum for {archive.name} yet"
+        elif loaded.known:
+            why = why or "the published checksums could not be read right now"
+        archives.append(archive)
+    notes = [NOT_CHECKED.format(why=why)] if why else []
+    return replace(plan, archives=tuple(archives)), notes
+
+
 def attach(plan: Plan, pins: Mapping[str, ArchivePin]) -> Plan:
     """A copy of ``plan`` with each matching archive carrying its pin."""
     archives = []
@@ -250,9 +331,23 @@ def _is_valid_document(doc: Any) -> bool:
     return True
 
 
+@dataclass(frozen=True)
+class Loaded:
+    """A game's pins and what is known about them.
+
+    ``available``: a usable document was read now (or a fresh enough saved copy).
+    ``known``: this game has pins: a document was read now, or one was saved on this
+    machine before (any age, even unusable). Games that never had pins stay quiet.
+    """
+
+    pins: dict[str, ArchivePin]
+    available: bool
+    known: bool
+
+
 #: A pin document is read once per operation: check/sync/verify each build a plan.
 PIN_MEMO_SECONDS = 120.0
-_memo: dict[str, tuple[float, dict[str, ArchivePin]]] = {}
+_memo: dict[str, tuple[float, Loaded]] = {}
 
 
 def clear_cache() -> None:
@@ -262,20 +357,37 @@ def clear_cache() -> None:
 
 def load(game_tag: str) -> dict[str, ArchivePin]:
     """Read ``catalog/archive-pins/<game_tag>.json``; never raise."""
+    return load_state(game_tag).pins
+
+
+def load_state(game_tag: str) -> Loaded:
+    """:func:`load` plus whether the pins were readable and whether the game has any."""
     seen = _memo.get(game_tag)
     if seen is not None and time.monotonic() - seen[0] < PIN_MEMO_SECONDS:
         return seen[1]
-    pins = _load(game_tag)
-    _memo[game_tag] = (time.monotonic(), pins)
-    return pins
+    state = _load(game_tag)
+    _memo[game_tag] = (time.monotonic(), state)
+    return state
 
 
-def _load(game_tag: str) -> dict[str, ArchivePin]:
+def _saved_before(rel: str) -> bool:
+    """A copy of this document was saved on this machine once (any age)."""
+    try:
+        return any(
+            indexfetch.cache_path(base, rel).exists()
+            for base in hosting.index_bases()
+            if base.startswith("https://")
+        )
+    except Exception:  # noqa: BLE001 - only decides whether a note is shown
+        return False
+
+
+def _load(game_tag: str) -> Loaded:
     if not game_tag or any(
         char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
         for char in game_tag
     ):
-        return {}
+        return Loaded({}, available=False, known=False)
     rel = f"catalog/archive-pins/{game_tag}.json"
     try:
         result = indexfetch.fetch_json(
@@ -284,9 +396,9 @@ def _load(game_tag: str) -> dict[str, ArchivePin]:
             max_cache_age=PIN_CACHE_SECONDS,
             validate=_is_valid_document,
         )
-        return parse_document(result.data)
+        return Loaded(parse_document(result.data), available=True, known=True)
     except indexfetch.IndexUnavailable:
-        return {}
+        return Loaded({}, available=False, known=_saved_before(rel))
     except Exception as exc:  # noqa: BLE001 - pins are optional, never fail an install
         log.warning("ignoring unusable archive pins %s: %s", rel, exc)
-        return {}
+        return Loaded({}, available=False, known=True)

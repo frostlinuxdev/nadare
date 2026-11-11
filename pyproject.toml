@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nadare-launcher"
-version = "0.1.0b21"
+version = "0.1.0b22"
 description = "An open-source Linux launcher for anime gacha games (Fate/Grand Order, Chaos Zero Nightmare, and more)"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -41,7 +41,10 @@ where = ["src"]
 testpaths = ["tests"]
 addopts = "-q -m 'not network'"
 filterwarnings = ["error::DeprecationWarning:nadare"]
-markers = ["network: requires real network access; run with -m network"]
+markers = [
+    "network: requires real network access; run with -m network",
+    "real_cover_migration: keep the background cover migration (conftest stubs it, #1024)",
+]
 
 [tool.setuptools.package-data]
 nadare = ["assets/*", "assets/fonts/*", "assets/icons/*", "assets/licenses/*", "assets/locales/*.json", "backends/**/*.c", "core/shim_src/*.c", "backends/czn/build_stub.sh"]

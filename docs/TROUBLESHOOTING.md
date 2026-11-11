@@ -43,6 +43,12 @@ that belongs to another game or is not safe to use, and says why.
 
 ## Uninstall
 
+`nadare uninstall-all` removes every profile and, unless you ask otherwise, Nadare's
+runners as well as its settings, logs, cache and data. Run it without `--yes` first to
+see the plan; it deletes nothing until you add `--yes`. Game folders, prefixes and old
+prefix backups are kept unless you also pass `--with-games` or `--with-backups`, and
+`--keep-runtimes` leaves the downloaded Proton/Wine runners in place.
+
 **From source:** delete the checkout and its venv. Then remove Nadare's data
 (its own data lives only under XDG directories; shortcuts are listed below):
 

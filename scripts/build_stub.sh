@@ -4,7 +4,10 @@
 #
 # Build the Chaos Zero Nightmare PCSDK stub (a tiny Windows .exe) with mingw-w64.
 #
-#   scripts/build_stub.sh                # host build -> dist/czn_pcsdk_stub.exe
+# This is the C fallback; the shipped default is the Go build
+# (``scripts/build_stub_go.sh``). It stays for one release.
+#
+#   scripts/build_stub.sh                # host build -> dist/czn_pcsdk_stub_c.exe
 #   scripts/build_stub.sh /path/out.exe  # explicit output
 #   scripts/build_stub.sh --container    # reproducible pinned-Debian build
 #
@@ -21,7 +24,7 @@ real="$root/src/nadare/backends/czn/build_stub.sh"
 
 [[ -f "$real" ]] || { echo "[!] missing $real" >&2; exit 1; }
 
-out="${CZN_STUB_OUT:-$root/dist/czn_pcsdk_stub.exe}"
+out="${CZN_STUB_OUT:-$root/dist/czn_pcsdk_stub_c.exe}"
 
 # --container does not need a host compiler, so only check for a host build.
 if [[ "${1:-}" != "--container" ]]; then

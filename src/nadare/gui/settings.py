@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from PyQt6 import sip
-from PyQt6.QtCore import QObject, Qt, QThreadPool, QUrl, pyqtSignal
+from PyQt6.QtCore import QFile, QObject, Qt, QThreadPool, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -38,7 +38,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import community, monitors
+from ..core import app_uninstall, community, monitors
+from ..core import libraries as core_libraries
 from ..core import process as process_core
 from ..core import relink as relink_core
 from ..core import relocate as relocate_core
@@ -48,7 +49,8 @@ from ..core.backends import create as create_backend
 from ..core.backends import get as backend_get
 from ..core.config import Config
 from . import i18n
-from .library import profile_title
+from .libraries_panel import LibrariesPanel
+from .library import FlowLayout, count_text, profile_title
 from .workers import CallTask
 
 #: Label used for the "no runner" choice.
@@ -161,6 +163,11 @@ def _fill_monitor_combo(combo: QComboBox, saved: Any = None) -> None:
         combo.addItem(f"{name} (not connected)", name)
 
 
+def _is_runner_folder(value: str) -> bool:
+    """Whether ``value`` is a Proton or Wine tree Nadare can start (a custom runner)."""
+    return runners_core.looks_like_runner(value)
+
+
 def _text_to_env(text: str, warnings: list[str] | None = None) -> dict[str, str]:
     """Parse ``KEY=VALUE`` lines into a mapping (blank lines ignored).
 
@@ -219,12 +226,15 @@ class SettingsPage(QWidget):
     """Editable settings for one profile plus the shared language/update options."""
 
     saved = pyqtSignal(str)  # profile name
+    #: A sentence to show after the page closes (the side status): profile, text.
+    notice = pyqtSignal(str, str)
     cancelled = pyqtSignal()
     remove_requested = pyqtSignal(str)  # profile name
     remake_prefix_requested = pyqtSignal(str)  # profile name
     report_requested = pyqtSignal(str)
     logs_requested = pyqtSignal(str)
     system_check_requested = pyqtSignal()
+    games_added = pyqtSignal(list)  # profile names brought back from a library
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -250,7 +260,10 @@ class SettingsPage(QWidget):
         self._move_running = False
         self._game_idle = False  # known idle only after a successful status probe
         self._prefix_lock_generation = 0
-        self._pending_relink: tuple[Config, str, relink_core.Relink, str] | None = None
+        # Relinks waiting for their "is it running?" answer, by ticket: two games can each have
+        # one in flight, and an answer must finish its own plan only (final round).
+        self._pending_relink: dict[int, tuple[Config, str, relink_core.Relink, str]] = {}
+        self._relink_ticket = 0
         self._probed_prefix = ""  # where Nadare says the prefix is (the page may have none set)
         self._fetch_button: QPushButton | None = None
         self._pending_art: dict[str, str] = {}
@@ -477,41 +490,110 @@ class SettingsPage(QWidget):
         self.open_config_button.clicked.connect(self._open_config_file)
         self.open_config_button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         launcher_form.addRow("", self.open_config_button)
+        self.uninstall_nadare_button = QPushButton("Uninstall Nadare…")
+        self.uninstall_nadare_button.setObjectName("GhostButton")
+        self.uninstall_nadare_button.setToolTip(
+            "Remove the application while keeping games and settings."
+        )
+        self.uninstall_nadare_button.clicked.connect(self._uninstall_nadare)
+        self.uninstall_nadare_button.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+        )
+        launcher_form.addRow("", self.uninstall_nadare_button)
         # With a single shipped locale the picker is meaningless: hide the row
         # until a second catalogue makes it actionable.
         multiple_languages = len(i18n.available()) > 1
         self.language_label.setVisible(multiple_languages)
         self.language.setVisible(multiple_languages)
         launcher_tab_layout.addWidget(launcher_card)
+
+        # ---- libraries (Steam-like; Add/Remove act at once, not on Save) ----------------
+        libraries_card, libraries_form = self._section(
+            "Libraries",
+            "Folders Nadare installs games into. A library may be on another drive and may "
+            "hold other files: games go in a Nadare folder inside it. Removing a library "
+            "only forgets it; its games and files stay.",
+        )
+        self.libraries_panel = LibrariesPanel(self)
+        self.libraries_panel.games_added.connect(self.games_added)
+        libraries_form.addRow(self.libraries_panel)
+        launcher_tab_layout.addWidget(libraries_card)
         for layout in (general_layout, game_layout, launcher_tab_layout):
             layout.addStretch(1)
         root.addWidget(self.tabs, 1)
 
         footer = QHBoxLayout()
-        self.remove_button = QPushButton("Remove from library…")
+        # The three secondary buttons wrap onto a second line when the window is narrow; Save
+        # stays whole on the right.
+        actions_box = QWidget()
+        actions = FlowLayout(actions_box, spacing=8)
+        self.remove_button = QPushButton("Uninstall or remove…")
         self.remove_button.setObjectName("GhostButton")
         self.remove_button.setToolTip(
-            "Remove this game from Nadare. Game files are kept by default."
+            "Remove this game from Nadare, or uninstall it by also ticking its game files. "
+            "Game files are kept by default."
         )
         self.remove_button.clicked.connect(self._request_remove)
-        footer.addWidget(self.remove_button)
+        actions.addWidget(self.remove_button)
         self.report_button = QPushButton("Report a problem")
         self.report_button.setObjectName("GhostButton")
         self.report_button.clicked.connect(lambda: self.report_requested.emit(self._profile))
-        footer.addWidget(self.report_button)
+        actions.addWidget(self.report_button)
         self.logs_button = QPushButton("Open logs")
         self.logs_button.setObjectName("GhostButton")
         self.logs_button.clicked.connect(lambda: self.logs_requested.emit(self._profile))
-        footer.addWidget(self.logs_button)
+        actions.addWidget(self.logs_button)
+        # The note ("Saved in <config path>") gets its own line above the buttons: in the row it
+        # squeezed every button below its text at the smallest window (b23-rc4 click-through).
         self.note = QLabel("")
         self.note.setObjectName("Muted")
-        footer.addWidget(self.note, 1)
+        self.note.setWordWrap(True)
+        self.note.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        footer.addWidget(actions_box, 1)
         save = QPushButton("Save changes")
         save.setObjectName("Primary")
         save.setMinimumHeight(44)
         save.clicked.connect(self.save)
-        footer.addWidget(save)
+        self.save_button = save
+        footer.addWidget(save, 0, Qt.AlignmentFlag.AlignBottom)
+        root.addWidget(self.note)
         root.addLayout(footer)
+
+    def _uninstall_nadare(self) -> None:
+        plan = app_uninstall.preview()
+        if plan is None:
+            QMessageBox.information(
+                self, "Uninstall Nadare",
+                "Remove Nadare using the tool that installed it: your software centre for "
+                "Flatpak or packages, or Gear Lever / AppImageLauncher for a managed AppImage. "
+                "For a source install, remove its checkout and virtual environment. "
+                "A portable AppImage can be moved to Trash in your file manager. "
+                "Keep application data to preserve games and settings.",
+            )
+            return
+        answer = QMessageBox.question(
+            self, "Uninstall Nadare",
+            "For a portable AppImage, move this file to Trash?\n\n"
+            f"{plan.path}\n\n"
+            "Your games, saves, accounts, runners and settings will be kept. "
+            "Other AppImage versions and shortcuts will be kept too.\n\n"
+            "If you installed Nadare with Gear Lever or AppImageLauncher, cancel and "
+            "remove it there instead, so its menu entry is also removed.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            app_uninstall.trash(plan, QFile.moveToTrash)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Could not uninstall Nadare", str(exc))
+            return
+        QMessageBox.information(
+            self, "AppImage moved to Trash",
+            "The AppImage is in Trash. Close Nadare when you have finished any running "
+            "games or downloads. You can restore the AppImage from Trash.",
+        )
 
     def _tab_page(self, title: str) -> QVBoxLayout:
         """Add a scrolling tab called ``title`` and return the layout its cards go into."""
@@ -637,6 +719,9 @@ class SettingsPage(QWidget):
         head.addWidget(heading)
         hint = QLabel(subtitle)
         hint.setObjectName("Subtitle")
+        # A long subtitle must wrap, or it sets the whole tab's minimum width (the Libraries
+        # card's pushed its Remove button off-screen at the minimum window width).
+        hint.setWordWrap(True)
         head.addWidget(hint)
         outer.addLayout(head)
 
@@ -722,7 +807,7 @@ class SettingsPage(QWidget):
         self._pending_art = dict(paths)
         cover = paths.get("cover") or next(iter(paths.values()))
         self.background.setText(str(cover))
-        self.note.setText(f"Fetched {len(paths)} image(s) to {Path(cover).parent}")
+        self.note.setText(f"Fetched {count_text(len(paths), 'image')} to {Path(cover).parent}")
 
     def _on_art_failed(self, message: str) -> None:
         if self._fetch_button is not None:
@@ -761,7 +846,11 @@ class SettingsPage(QWidget):
 
         # Judge "in use" by what the form shows now, not only what is saved: an
         # unsaved selection must not make the runner look unused.
-        profiles = copy.deepcopy(self._config.profiles) if self._config is not None else {}
+        # Under the config lock: a worker saving meanwhile must not resize the dict mid-copy.
+        profiles: dict = {}
+        if self._config is not None:
+            with self._config.locked():
+                profiles = copy.deepcopy(self._config.profiles)
         if self._profile in profiles:
             profiles[self._profile]["runner"] = self._runner_value()
         dialog = ManageRunnersDialog(profiles, self)
@@ -785,6 +874,11 @@ class SettingsPage(QWidget):
         elif index < 0 and selected in ("latest", "auto"):
             # resolve_runner() understands these aliases; they are not broken.
             self.runner.insertItem(0, f"{selected.title()} installed runner", selected)
+            index = 0
+            matched = True
+        elif index < 0 and selected and _is_runner_folder(selected):
+            # A Proton tree of the user's own (not in Nadare's list) works: say so (#331 F-10).
+            self.runner.insertItem(0, f"Custom · {Path(selected).expanduser().name}", selected)
             index = 0
             matched = True
         elif index < 0 and selected:
@@ -891,6 +985,10 @@ class SettingsPage(QWidget):
                 )
             elif kind == "env":
                 editor.setPlainText("")
+            elif kind == "monitor":
+                # Back to Auto (the launcher's default monitor), like every other option (b221).
+                index = editor.findData("")
+                editor.setCurrentIndex(index if index >= 0 else 0)
             elif kind in ("text", "args", "path_dir", "path_file"):
                 editor.setText("")
             elif isinstance(editor, QLineEdit):
@@ -1159,22 +1257,25 @@ class SettingsPage(QWidget):
         # The page's idea of "not running" may be minutes old, or the game may have been started
         # outside Nadare since: ask once more, off the GUI thread, and only then save.
         self.relink_button.setEnabled(False)
-        self._pending_relink = (config, name, plan, chosen)
+        self._relink_ticket += 1
+        ticket = self._relink_ticket
+        self._pending_relink[ticket] = (config, name, plan, chosen)
 
         def probe() -> object:
             try:
-                return getattr(create_backend(name, config).status(), "state", "")
+                return ticket, getattr(create_backend(name, config).status(), "state", "")
             except Exception:  # noqa: BLE001 - unknown means do not relink
-                return None
+                return ticket, None
 
         task = CallTask(probe)
         # A bound method, so Qt drops the connection if the page is destroyed meanwhile.
         task.signals.done.connect(self._on_relink_probe)
         QThreadPool.globalInstance().start(task)
 
-    def _on_relink_probe(self, state: object) -> None:
+    def _on_relink_probe(self, answer: object) -> None:
         """Finish a relink once the game's state is known right now."""
-        pending, self._pending_relink = self._pending_relink, None
+        ticket, state = answer if isinstance(answer, tuple) else (None, answer)
+        pending = self._pending_relink.pop(ticket, None)
         if pending is None:
             return
         config, name, plan, chosen = pending
@@ -1187,9 +1288,11 @@ class SettingsPage(QWidget):
                 "its Wine prefix is.",
             )
             return
+        on_page = config is self._config and name == self._profile
         if state == "running":
-            self._game_idle = False
-            self._set_prefix_locked(True)  # the buttons follow: both stay off while it runs
+            if on_page:
+                self._game_idle = False
+                self._set_prefix_locked(True)  # the buttons follow: both stay off while it runs
             QMessageBox.warning(self, "Wine prefix", "The game is running. Close it first.")
             return
         self.relink_button.setEnabled(self._game_idle)
@@ -1216,14 +1319,25 @@ class SettingsPage(QWidget):
         alive = not sip.isdeleted(self)
         data = config.profiles[name]
         backup = copy.deepcopy(data)
+        libraries_backup = copy.deepcopy(config.data.get(core_libraries.CONFIG_KEY))
         try:
             with config.locked():
                 relink_core.apply(data, plan)
+                # The manifest moved with the folder; refresh it and remember the new library,
+                # only when the game's folder itself moved (a library the user removed must not
+                # come back because a prefix was relinked).
+                core_libraries.sync_game(
+                    config, name, remember_library=core_libraries.folder_moved(backup, data)
+                )
                 config.save()
         except OSError as exc:
             with config.locked():
                 data.clear()
                 data.update(backup)
+                if libraries_backup is None:
+                    config.data.pop(core_libraries.CONFIG_KEY, None)
+                else:
+                    config.data[core_libraries.CONFIG_KEY] = libraries_backup
             QMessageBox.critical(
                 self if alive else None, "Settings", f"Could not save config: {exc}"
             )
@@ -1421,6 +1535,14 @@ class SettingsPage(QWidget):
         self._moving = True
         self.move_button.setEnabled(False)
 
+        # The lock outlives the worker: the profile names the old path until done() saves the
+        # new one, and another window or the CLI must not work on it in between (#971).
+        held: list[process_core.OperationLock] = []
+
+        def release_held() -> None:
+            while held:
+                held.pop().release()
+
         def work() -> object:
             lock = process_core.OperationLock(name)
             try:
@@ -1429,6 +1551,7 @@ class SettingsPage(QWidget):
                 raise relocate_core.RelocateError(
                     process_core.OPERATION_BUSY.format(name=name)
                 ) from None
+            moved = False
             try:
                 # The page's idea of "not running" may be minutes old: ask again right now.
                 try:
@@ -1441,11 +1564,15 @@ class SettingsPage(QWidget):
                     raise relocate_core.RelocateError(
                         "The game is running. Close it first."
                     )
-                return relocate_core.move_tree(
+                result = relocate_core.move_tree(
                     old, dst, cancel=cancel, progress=lambda d, t: signals.progress.emit(d, t)
                 )
+                moved = True
+                held.append(lock)
+                return result
             finally:
-                lock.release()
+                if not moved:
+                    lock.release()
 
         task = CallTask(work)
 
@@ -1463,6 +1590,12 @@ class SettingsPage(QWidget):
             return True
 
         def done(result: object) -> None:
+            try:
+                _done(result)
+            finally:
+                release_held()
+
+        def _done(result: object) -> None:
             alive = finish()
             parent = self if alive else None
             if name not in config.profiles:
@@ -1505,6 +1638,7 @@ class SettingsPage(QWidget):
             self.note.setText(f"Moved to {dst}")
 
         def failed(message: str) -> None:
+            release_held()  # normally already released by the worker
             if not finish():
                 return
             if cancel.cancelled:
@@ -1604,22 +1738,74 @@ class SettingsPage(QWidget):
             if editor is not None:
                 self._set_editor(option, editor, self._option_value(data, option.key))
 
+    def _refuse_broken_values(self, backend: str, runner_text: str, index: int) -> bool:
+        """Say what would stop the game from starting, before anything is written.
+
+        These used to be saved and then reported in a "saved, but please check" box, leaving
+        the broken value in the config. Returns True (and focuses the field) when refusing.
+        """
+        problems: list[tuple[str, QWidget]] = []
+        # Only text the user typed is checked: a saved runner that has since gone missing shows
+        # as its bare value next to a "Missing · ..." item, and refusing it would block every
+        # other change on this page.
+        kept = index >= 0 and runner_text in (
+            self.runner.itemText(index),
+            str(self.runner.itemData(index) or ""),
+        )
+        if not kept and runner_text:
+            try:
+                runners_core.resolve_runner(runner_text)
+            except runners_core.RunnerError:
+                problems.append(
+                    (
+                        "Runner: that runner is not installed. Pick one from the list, or "
+                        "leave the box empty to use the default.",
+                        self.runner,
+                    )
+                )
+        for option in self._backend_options(backend):
+            editor = self._option_widgets.get(option.key)
+            if option.key == "steam_app_id" and isinstance(editor, QLineEdit):
+                # Steam app ids are numbers; anything else only fails later, at launch (#331).
+                value = editor.text().strip()
+                if value and not value.isdigit():
+                    problems.append(
+                        (f"{option.label}: must be a number, e.g. 4813850.", editor)
+                    )
+                continue
+            if option.kind != "args" or not isinstance(editor, QLineEdit):
+                continue
+            value = editor.text().strip()
+            try:
+                shlex.split(value)
+            except ValueError:
+                problems.append(
+                    (
+                        f"{option.label}: has an opening quote with no closing quote, so "
+                        "the game would fail to start.",
+                        editor,
+                    )
+                )
+        if not problems:
+            return False
+        QMessageBox.warning(
+            self,
+            "Settings not saved",
+            "Your settings were not saved. Fix this first:\n\n- "
+            + "\n- ".join(text for text, _widget in problems),
+        )
+        problems[0][1].setFocus()
+        return True
+
     def _read_editor(self, option: Option, editor: QWidget, warnings: list[str]) -> Any:
         kind = option.kind
         if kind in ("text", "args"):
             value = editor.text().strip()
             if kind == "args" and value:
-                try:
-                    shlex.split(value)
-                except ValueError:
-                    warnings.append(
-                        f"{option.label}: has an opening quote with no closing quote, so the "
-                        "game will fail to start. Fix it and save again."
-                    )
-                else:
-                    message = args_env_warning(value)
-                    if message:
-                        warnings.append(message)
+                # Unbalanced quotes were refused before saving (_refuse_broken_values).
+                message = args_env_warning(value)
+                if message:
+                    warnings.append(message)
             return value
         if kind == "env":
             return _text_to_env(editor.toPlainText(), warnings)
@@ -1716,6 +1902,7 @@ class SettingsPage(QWidget):
         self._loaded_state = self._form_state()
 
     def _load_app_values(self, config: Config) -> None:
+        self.libraries_panel.load(config)
         """Fill the controls that belong to Nadare itself, not to one game."""
         language = str(config.data.get("language") or i18n.DEFAULT_LANGUAGE)
         lang_index = self.language.findData(language)
@@ -1871,10 +2058,13 @@ class SettingsPage(QWidget):
 
         if not self._confirm_environment(data):
             return
+        if self._refuse_broken_values(backend, runner_text, index):
+            return
 
         # The mutation and the write are taken under the config lock (as the
         # worker-side ``BackendContext.set`` does); otherwise a worker save can
         # serialise this profile dict while it is being changed.
+        old_quality = self._option_value(data, "wuwa_quality")
         import copy as _copy
 
         with config.locked():
@@ -1888,17 +2078,6 @@ class SettingsPage(QWidget):
                 config.data.get("default_monitor"),
             )
         warnings: list[str] = []
-        custom_runner = not (
-            index >= 0 and runner_text == self.runner.itemText(index)
-        )
-        if custom_runner and runner_text:
-            try:
-                runners_core.resolve_runner(runner_text)
-            except runners_core.RunnerError:
-                warnings.append(
-                    "Runner: that runner is not installed. Pick one from the list, or "
-                    "leave the box empty to use the default."
-                )
         install_dir_option = any(
             option.key == "install_dir" for option in self._backend_options(backend)
         )
@@ -1976,9 +2155,22 @@ class SettingsPage(QWidget):
         self._pending_art = {}
         i18n.set_language(config.data["language"])
         self.note.setText(f"Saved to {config.path}")
+        from ..core.sources import wuwa
+
+        new_quality = self._option_value(data, "wuwa_quality")
+        old_tier = wuwa.quality_of(old_quality)
+        new_tier = wuwa.quality_of(new_quality)
+        quality_note = ""
+        if old_tier != new_tier:
+            quality_note = (
+                f"The next Update downloads the {new_tier.upper()} files; "
+                f"Nadare offers to remove the {old_tier.upper()} files once that is done."
+            )
         self._loaded_state = self._form_state()
         self.saved.emit(self._profile)
         if warnings:
+            if quality_note:
+                warnings.append(quality_note)
             # The page closes on ``saved``, so the inline note is never seen: say it here.
             box = QMessageBox(
                 QMessageBox.Icon.Warning,
@@ -1989,6 +2181,9 @@ class SettingsPage(QWidget):
             )
             box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             box.open()  # non-blocking
+        elif quality_note:
+            # The page has already closed, so the side status is where this can be read.
+            self.notice.emit(self._profile, quality_note)
 
 
 __all__ = [

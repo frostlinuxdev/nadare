@@ -67,12 +67,6 @@ def test_launcher_path():
     assert nl.launcher_path(Path("/g/NTE")) == Path("/g/NTE/NTEGlobal/NTEGlobalLauncher.exe")
 
 
-def test_nte_backend_reuses_the_core_installer_url():
-    from nadare.backends import launcher
-
-    assert launcher.NteBackend.default_installer_url == nl.INSTALLER_URL
-
-
 def test_installed_launcher_is_left_alone(tmp_path):
     root = tmp_path / "NTE"
     exe = nl.launcher_path(root)

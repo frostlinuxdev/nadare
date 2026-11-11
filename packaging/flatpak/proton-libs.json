@@ -1,0 +1,92 @@
+[
+  {
+    "url": "https://deb.debian.org/debian/pool/main/b/bzip2/libbz2-1.0_1.0.8-6_amd64.deb",
+    "sha256": "cba4cda04244b5e481bb15524bc3c983a7d1b6f330013b9b381706a2fcb65310",
+    "arch": "amd64"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/b/bzip2/libbz2-1.0_1.0.8-6_i386.deb",
+    "sha256": "c23dee450dcee574135cbe004d463be3f413cdc017b22d8273c5ce0a18a7de10",
+    "arch": "i386"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/e/e2fsprogs/libcom-err2_1.47.2-3+b12_amd64.deb",
+    "sha256": "bd43e020b8fed399db3eebf098111f10fba4c436fff99ccad72cc7e27c9764ec",
+    "arch": "amd64"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/e/e2fsprogs/libcom-err2_1.47.2-3+b12_i386.deb",
+    "sha256": "0a1ed6fc09b01df4a567b66aa9c84b190f9da2e1c0d1df70b3cd8b4865743fc5",
+    "arch": "i386"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/k/krb5/libgssapi-krb5-2_1.21.3-5+deb13u1_amd64.deb",
+    "sha256": "30847c1fde4240567d7ed3aeab4f655dd591203758b857e85e824045aae70299",
+    "arch": "amd64"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/k/krb5/libgssapi-krb5-2_1.21.3-5+deb13u1_i386.deb",
+    "sha256": "d211e7815c8c7343936ad32920fab5eb476b606d868451f978fc995e305751db",
+    "arch": "i386"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/k/krb5/libk5crypto3_1.21.3-5+deb13u1_amd64.deb",
+    "sha256": "7da07ee674b47f1f0be7cc89317c25310086a1f1761217d0f72e6ae2c5a69b84",
+    "arch": "amd64"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/k/krb5/libk5crypto3_1.21.3-5+deb13u1_i386.deb",
+    "sha256": "2b7baf4667e5e090eadf8bb039973ab553989b464d1dba04c0c2b2c78d988c1c",
+    "arch": "i386"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/k/keyutils/libkeyutils1_1.6.3-6_amd64.deb",
+    "sha256": "0b11ad17be0300b63ad4eeb4c6450fed24d34b7b740f23e5363dcb29ee6d5eba",
+    "arch": "amd64"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/k/keyutils/libkeyutils1_1.6.3-6_i386.deb",
+    "sha256": "ee25840a728d2cca5c3d7efe0db9f4c26ef1df88fc2265705164fb4db0576f0c",
+    "arch": "i386"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/k/krb5/libkrb5-3_1.21.3-5+deb13u1_amd64.deb",
+    "sha256": "47d71d6a7f2e59b9bae5f89602397594805113b95889ad18fa703cd53abafc97",
+    "arch": "amd64"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/k/krb5/libkrb5-3_1.21.3-5+deb13u1_i386.deb",
+    "sha256": "baae87f24ca36525bd20ae079d5de349ab2df1cce066e4c952cfd50934f6e179",
+    "arch": "i386"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/k/krb5/libkrb5support0_1.21.3-5+deb13u1_amd64.deb",
+    "sha256": "3a0acd8b37955c0e102c756b52c97df2a31f67b96453c35dab70df218d309117",
+    "arch": "amd64"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/k/krb5/libkrb5support0_1.21.3-5+deb13u1_i386.deb",
+    "sha256": "d48c9a178c6d123f30cb8721913553a755ceb8d0b30e280115aa14c35e300772",
+    "arch": "i386"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/libt/libtheora/libtheora0_1.1.1+dfsg.1-16.1+deb12u1_amd64.deb",
+    "sha256": "72739e29f804cbe10a207f546dfec44a340d31bb03f6a503ab6df0cdaf8a148e",
+    "arch": "amd64"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/libt/libtheora/libtheora0_1.1.1+dfsg.1-16.1+deb12u1_i386.deb",
+    "sha256": "7205448469c6c38d61d6d1d8bb53f2788dab93924627ca735511fda09908d63f",
+    "arch": "i386"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/libv/libvpx/libvpx9_1.15.0-2.1+deb13u1_amd64.deb",
+    "sha256": "5c2baac5c97a1fe01c4f0a2216743b901dc72437351e7451725a394c08037bcc",
+    "arch": "amd64"
+  },
+  {
+    "url": "https://deb.debian.org/debian/pool/main/libv/libvpx/libvpx9_1.15.0-2.1+deb13u1_i386.deb",
+    "sha256": "b0f42380ace6733fe787a7fe41d768db43bc866e816f2b623edfaf821a57af8c",
+    "arch": "i386"
+  }
+]

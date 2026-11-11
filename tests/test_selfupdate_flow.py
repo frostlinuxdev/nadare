@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 import time
@@ -24,6 +25,9 @@ from nadare.core.download import IntegrityError
 from nadare.core.events import Cancelled, Event
 from nadare.core.updatecheck import UpdateInfo
 from nadare.gui.selfupdate_flow import SelfUpdateFlow
+
+#: The fakes below "download" these bytes; the install step checks their hash again (#811).
+NEW_SHA = hashlib.sha256(b"new-bytes").hexdigest()
 
 INFO = UpdateInfo(
     version="0.1.0b20",
@@ -61,15 +65,19 @@ def _steps(tmp_path: Path, **overrides):
             data = {"stage": "download", "done": 5, "total": 10}
             emit(Event("progress", "x", progress=0.5, data=data))
 
-    def install_update(new, target_, filename):
+    def verify_signature(urls, path, **kw):
+        calls.append("verify")
+
+    def install_update(new, target_, filename, **kw):
         calls.append("install")
-        return selfupdate.install_update(new, target_, filename)
+        return selfupdate.install_update(new, target_, filename, **kw)
 
     steps = SimpleNamespace(
         asset_urls=selfupdate.asset_urls,
         appimage_target=lambda: target,
-        expected_sha256=lambda info: SimpleNamespace(sha256="a" * 64, source="index"),
+        expected_sha256=lambda info: SimpleNamespace(sha256=NEW_SHA, source="index"),
         download_verified=download_verified,
+        verify_signature=verify_signature,
         install_update=install_update,
         SelfUpdateError=selfupdate.SelfUpdateError,
     )
@@ -119,7 +127,7 @@ def test_a_successful_update_installs_off_the_gui_thread(tmp_path, qapp):
     assert not list(tmp_path.glob(".*.download"))
     assert (5, 10) in seen["progress"]
     assert _wait(qapp, lambda: not flow.running)
-    assert steps.calls == ["download", "install"]
+    assert steps.calls == ["download", "verify", "install"]
 
 
 def test_a_failed_download_installs_nothing_and_leaves_no_temp_file(tmp_path, qapp):
@@ -219,3 +227,39 @@ def test_an_unexpected_error_is_reported_not_lost(tmp_path, qapp):
 
 def teardown_module(module):
     QThreadPool.globalInstance().waitForDone(2000)
+
+
+
+def test_a_task_whose_signals_were_deleted_ends_quietly(qapp):
+    """Quitting during an update deletes the signals object; the worker thread must not raise.
+
+    The guard sat inside ``_emit``, but ``self._signals.finished`` already raised while the
+    argument was evaluated (a CI teardown error, 2026-11-08).
+    """
+    from PyQt6 import sip
+
+    from nadare.core.events import Cancel
+    from nadare.gui import selfupdate_flow as mod
+
+    signals = mod._Signals()
+    task = mod._Task(INFO, object(), Cancel(), signals)
+    sip.delete(signals)
+    task._emit("finished")
+    task._emit("failed", "boom")
+
+
+def test_a_refused_signature_installs_nothing_and_leaves_no_temp_file(tmp_path, qapp):
+    """#1209 P0-1: the release signature is checked after the download and before the swap."""
+
+    def refuse(urls, path, **kw):
+        raise selfupdate.SelfUpdateError("not signed with Nadare's release key")
+
+    steps = _steps(tmp_path, verify_signature=refuse)
+    flow = SelfUpdateFlow(steps=steps)
+    seen = _collect(flow)
+    assert flow.start(INFO)
+    assert _wait(qapp, lambda: seen["failed"])
+    assert "release key" in seen["failed"][0]
+    assert steps.calls == ["download"]
+    assert steps.target.read_bytes() == b"old"
+    assert not list(tmp_path.glob(".*.download*"))

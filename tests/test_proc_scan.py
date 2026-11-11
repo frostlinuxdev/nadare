@@ -11,8 +11,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from nadare.backends.wine import ProcessQuery, scan_pids
 from nadare.core.process import ProcessScanRound, use_process_scan_round
+
+
+@pytest.fixture(autouse=True)
+def _scanner_is_not_a_fake_pid(monkeypatch):
+    """The scan skips its own PID. CI workers have small PIDs (700 collided once): use none."""
+    from nadare.backends import wine
+
+    monkeypatch.setattr(wine, "_own_pid", lambda: -1)
 
 
 def _pid(root: Path, pid: int, argv: list[str], env: dict[str, str] | None = None) -> None:

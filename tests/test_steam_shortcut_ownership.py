@@ -78,7 +78,7 @@ def test_a_shortcut_nadare_just_added_is_removed_again(tmp_path):
 def test_refresh_never_drops_a_foreign_entry(tmp_path, monkeypatch):
     vdf = _write(tmp_path / "shortcuts.vdf", [FOREIGN, NADARES["appimage"]])
     monkeypatch.setattr(shortcuts, "find_steam_shortcut_files", lambda: [vdf])
-    result = shortcuts.refresh_steam_shortcuts({})
+    result = shortcuts.refresh_steam_shortcuts({"other": {"title": "Other"}})
     assert [e["AppName"] for e in _read(vdf)] == ["Work tool"]
     assert any("work" in item for item in result["removed"])
 

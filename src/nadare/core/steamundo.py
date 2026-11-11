@@ -19,6 +19,24 @@ from . import paths, steamtools, steamwayland
 
 FILE = "steam-undo.json"
 UNDOABLE = ("set_runner", "set_wayland")
+#: Undos kept per game, newest last. A second change used to replace the first one's undo, so
+#: after the runner and the Wayland step the runner could no longer be taken back (#1031).
+KEEP = 5
+
+
+def _stack(data: dict[str, Any], app_id: str | int) -> list[dict[str, Any]]:
+    """This game's saved undos, oldest first (a file from before the stack holds one dict)."""
+    value = data.get(str(app_id))
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [entry for entry in value if isinstance(entry, dict)]
+    return []
+
+
+def _top(app_id: str | int, state_dir: Path | None) -> dict[str, Any] | None:
+    stack = _stack(_read(state_dir), app_id)
+    return stack[-1] if stack else None
 
 
 def _path(state_dir: Path | None) -> Path:
@@ -61,7 +79,10 @@ def _encode(action: str, payload: object) -> dict[str, Any] | None:
                 "text": payload.text,
             }
     if action == "set_wayland" and isinstance(payload, steamwayland.LaunchUndo):
-        return {"kind": "launch", "previous": payload.previous}
+        blob: dict[str, Any] = {"kind": "launch", "previous": payload.previous}
+        if payload.written is not steamwayland.UNKNOWN:
+            blob["written"] = payload.written
+        return blob
     return None
 
 
@@ -79,8 +100,11 @@ def _decode(action: str, blob: object) -> tuple[bool, object]:
             return True, steamtools.CompatEntry(app_id, clean, text)
     if action == "set_wayland" and kind == "launch":
         previous = blob.get("previous")
-        if previous is None or isinstance(previous, str):
-            return True, steamwayland.LaunchUndo(previous)
+        written = blob.get("written", steamwayland.UNKNOWN)
+        if (previous is None or isinstance(previous, str)) and (
+            written is None or isinstance(written, str) or written is steamwayland.UNKNOWN
+        ):
+            return True, steamwayland.LaunchUndo(previous, written)
     return False, None
 
 
@@ -92,7 +116,7 @@ def save(
     where: str = "",
     state_dir: Path | None = None,
 ) -> None:
-    """Remember how to undo this game's last change (replacing any earlier one).
+    """Remember how to undo this game's change, on top of its earlier undos (``KEEP`` at most).
 
     ``where`` names the file the change was made in (the Steam account's ``localconfig.vdf``
     for launch options): an undo only fits the account it was made for (#894)."""
@@ -100,14 +124,16 @@ def save(
     if encoded is None:
         return
     data = _read(state_dir)
-    data[str(app_id)] = {"action": action, "payload": encoded, "where": str(where or "")}
+    stack = _stack(data, app_id)
+    stack.append({"action": action, "payload": encoded, "where": str(where or "")})
+    data[str(app_id)] = stack[-KEEP:]
     _write(data, state_dir)
 
 
 def where(app_id: str | int, *, state_dir: Path | None = None) -> str:
-    """The file this game's saved undo was made in (empty for an older undo or none)."""
-    entry = _read(state_dir).get(str(app_id))
-    return str(entry.get("where") or "") if isinstance(entry, dict) else ""
+    """The file this game's newest saved undo was made in (empty for an older undo or none)."""
+    entry = _top(app_id, state_dir)
+    return str(entry.get("where") or "") if entry is not None else ""
 
 
 def fits(app_id: str | int, current: str, *, state_dir: Path | None = None) -> bool:
@@ -125,16 +151,22 @@ def fits(app_id: str | int, current: str, *, state_dir: Path | None = None) -> b
 
 
 def load(app_id: str | int, *, state_dir: Path | None = None) -> tuple[str, object] | None:
-    """``(action, what the undo needs)`` for this game, or ``None``."""
-    entry = _read(state_dir).get(str(app_id))
-    if not isinstance(entry, dict) or entry.get("action") not in UNDOABLE:
+    """``(action, what the undo needs)`` of this game's newest undo, or ``None``."""
+    entry = _top(app_id, state_dir)
+    if entry is None or entry.get("action") not in UNDOABLE:
         return None
     ok, payload = _decode(str(entry["action"]), entry.get("payload"))
     return (str(entry["action"]), payload) if ok else None
 
 
 def clear(app_id: str | int, *, state_dir: Path | None = None) -> None:
+    """Drop this game's newest undo (it was used or no longer fits); the one before is next."""
     data = _read(state_dir)
-    if str(app_id) in data:
+    if str(app_id) not in data:
+        return
+    stack = _stack(data, app_id)[:-1]
+    if stack:
+        data[str(app_id)] = stack
+    else:
         del data[str(app_id)]
-        _write(data, state_dir)
+    _write(data, state_dir)

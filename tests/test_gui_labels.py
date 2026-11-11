@@ -55,3 +55,22 @@ def test_saving_remember_me_reads_as_words(tmp_path, qapp):
     window._on_busy("czn", "verify", True)
     assert window.side_status.text() == "Verify · CZN"
     window.close()
+
+
+def test_an_available_update_is_named_next_to_the_version(qapp):
+    """The page said only UPDATE; it now names the version an update brings."""
+    view = GameView()
+    try:
+        view.set_profile("sample", {"title": "Sample"})
+        view.set_status(
+            Status(
+                "installed",
+                version="1.0.0",
+                data={"update_available": True, "latest_version": "1.1.0"},
+            )
+        )
+        assert view.version_label.text() == "v1.0.0 · v1.1.0 available"
+        view.set_status(Status("installed", version="1.1.0", data={"update_available": False}))
+        assert view.version_label.text() == "v1.1.0"
+    finally:
+        view.deleteLater()

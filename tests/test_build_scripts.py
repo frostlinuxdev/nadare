@@ -23,8 +23,7 @@ def _text(rel: str) -> str:
 
 
 def _maintainer_doc(rel: str) -> str:
-    """A maintainer-only doc that the public snapshot does not ship (see
-    ``scripts/make_public_snapshot.sh``): skip, rather than fail, without it."""
+    """A doc that only some checkouts carry: skip, rather than fail, without it."""
     path = _REPO_ROOT / rel
     if not path.is_file():
         pytest.skip(f"{rel} is not shipped in the public snapshot")
@@ -138,6 +137,7 @@ class TestAppImageReleaseHardening:
             "APPIMAGE_RUNTIME_RELEASE",
             "APPIMAGE_RUNTIME_SHA256",
             "APPIMAGE_RUNTIME_FILE",
+            "NADARE_UPDATE_INFO",
             "NADARE_RELEASE",
             "NADARE_ALLOW_NO_KEYRING",
         ):
@@ -195,6 +195,42 @@ class TestAppImageReleaseHardening:
         result = self._run(env)
         assert "runtime verified" in result.stdout
         assert "integrity check FAILED" not in result.stderr
+
+    @pytest.mark.parametrize(
+        "info",
+        [
+            "https://example.org/x.zsync",
+            "gh-releases-zsync|frostlinuxdev|nadare|latest",  # four fields, not five
+            "gh-releases-zsync|a|b|latest|x.zsync|extra",
+            "zsync|" + "x" * 1100,  # longer than the 1024-byte .upd_info section
+        ],
+    )
+    def test_bad_update_information_fails_before_the_build(self, tmp_path, info):
+        env = self._env(tmp_path, NADARE_UPDATE_INFO=info, PYTHON="/bin/false")
+        result = self._run(env)
+        assert result.returncode != 0
+        assert "NADARE_UPDATE_INFO" in result.stderr
+        assert "appimagetool verified" not in result.stdout
+
+    def test_update_information_is_announced_and_passed_to_appimagetool(self, tmp_path):
+        info = "gh-releases-zsync|frostlinuxdev|nadare|latest|Nadare-*-x86_64.AppImage.zsync"
+        env = self._env(tmp_path, NADARE_UPDATE_INFO=info, PYTHON="/bin/false")
+        result = self._run(env)
+        assert f"[*] update information: {info}" in result.stdout
+        assert "NADARE_UPDATE_INFO" not in result.stderr
+        script = _text("scripts/build_appimage.sh")
+        call = next(line for line in script.splitlines() if '"$appimagetool"' in line
+                    and "AppDir" in line)
+        assert '"${update_args[@]}"' in call
+
+    def test_the_zsync_appimagetool_writes_in_the_tree_moves_next_to_the_image(self):
+        script = _text("scripts/build_appimage.sh")
+        after = script.split('"${update_args[@]}" AppDir "$image"', 1)[1]
+        assert 'mv -f "$stray_zsync" "$image.zsync"' in after
+
+    def test_no_update_information_by_default(self, tmp_path):
+        result = self._run(self._env(tmp_path, PYTHON="/bin/false"))
+        assert "update information:" not in result.stdout
 
     def test_unreadable_version_fails_the_build(self, tmp_path):
         """No silent '0.1.0' fallback: it would mislabel the artifact (#107)."""

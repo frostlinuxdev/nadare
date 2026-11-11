@@ -83,6 +83,8 @@ def format_eta(seconds: float | None) -> str | None:
 
 #: Seconds of recent bytes the speed is measured over.
 SPEED_WINDOW = 5.0
+#: Shortest span a speed is reported for; anything shorter is timer noise.
+MIN_SPEED_SPAN = 0.2
 
 
 class SpeedMeter:
@@ -104,11 +106,15 @@ class SpeedMeter:
             if done < last_done or now - last_time > GAP_RESET:
                 self.reset()
         self._points.append((now, done))
-        while len(self._points) > 2 and now - self._points[0][0] > SPEED_WINDOW:
+        # Keep the newest sample at or past the window's edge. Events queued while the GUI
+        # was busy arrive microseconds apart; measuring them against each other alone turned
+        # a 70 MiB/s download into "6 GiB/s" (#1133). The sample from before the pause keeps
+        # the span honest.
+        while len(self._points) > 2 and now - self._points[1][0] >= SPEED_WINDOW:
             self._points.pop(0)
         first_time, first_done = self._points[0]
         span = now - first_time
-        if len(self._points) < 2 or span <= 0:
+        if len(self._points) < 2 or span < MIN_SPEED_SPAN:
             return None
         return (done - first_done) / span
 

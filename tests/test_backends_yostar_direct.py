@@ -7,6 +7,7 @@ fakes; the manifest is a local file and the only salt used is ``"test-salt"``.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -236,7 +237,7 @@ class TestStellaSora:
         """The audit's blocker 1: this override replaced the base install()."""
         manifest = _manifest_file(tmp_path, "StellaSora_EN", exe="StellaSora.exe")
         backend = _stella(tmp_path, {"manifest_file": str(manifest)})
-        monkeypatch.setattr(wg.shutil, "which", lambda name: None)
+        monkeypatch.setattr(wg.shutil, "which", lambda name, *_a, **_k: None)
         calls: list = []
         monkeypatch.setattr(
             wg.runners, "ensure_pinned", lambda *a, **k: calls.append(1) or tmp_path
@@ -254,7 +255,7 @@ class TestStellaSora:
     def test_launch_sets_up_the_runner_only_for_an_installed_game(self, tmp_path, monkeypatch):
         manifest = _manifest_file(tmp_path, "StellaSora_EN", exe="StellaSora.exe")
         backend = _stella(tmp_path, {"manifest_file": str(manifest)})
-        monkeypatch.setattr(wg.shutil, "which", lambda name: None)
+        monkeypatch.setattr(wg.shutil, "which", lambda name, *_a, **_k: None)
         monkeypatch.setattr(wg.runners, "ensure_pinned", lambda *a, **k: pytest.fail("downloaded"))
         with pytest.raises(BackendError, match="not found"):
             backend.launch()  # not installed: no 320 MB download first
@@ -306,7 +307,7 @@ class TestDisplayDefault:
 
         monkeypatch.delenv("PROTON_ENABLE_WAYLAND", raising=False)
         monkeypatch.setattr(backend, "resolve_runner", lambda: (tmp_path / "proton", "proton"))
-        monkeypatch.setattr(wg.shutil, "which", lambda name: "/usr/bin/umu-run")
+        monkeypatch.setattr(wg.shutil, "which", lambda name, *_a, **_k: "/usr/bin/umu-run")
         return backend._prefix_command(["game.exe"])[1]["PROTON_ENABLE_WAYLAND"]
 
     @pytest.mark.parametrize(
@@ -328,6 +329,24 @@ class TestDisplayDefault:
         backend = ArknightsBackend(make_context(tmp_path, ArknightsBackend.kind, profile, "ak"))
         assert self._env(backend, monkeypatch, tmp_path) == expected
 
+
+    @pytest.mark.parametrize(
+        ("inherited", "display", "expected"),
+        [("1", "x11", "0"), ("0", "wayland", "1"), ("1", "auto", "1"), ("0", None, "0")],
+    )
+    def test_an_explicit_choice_beats_an_inherited_variable(
+        self, tmp_path, monkeypatch, inherited, display, expected
+    ):
+        """display: x11 is the NVIDIA escape hatch; an exported PROTON_ENABLE_WAYLAND hid it."""
+        from nadare.backends.arknights import ArknightsBackend
+
+        profile = {"display": display} if display else {}
+        backend = ArknightsBackend(make_context(tmp_path, ArknightsBackend.kind, profile, "ak"))
+        monkeypatch.setattr(backend, "resolve_runner", lambda: (tmp_path / "proton", "proton"))
+        monkeypatch.setattr(wg.shutil, "which", lambda name, *_a, **_k: "/usr/bin/umu-run")
+        monkeypatch.setenv("PROTON_ENABLE_WAYLAND", inherited)
+        env = backend._prefix_command(["game.exe"])[1]
+        assert env["PROTON_ENABLE_WAYLAND"] == expected
 
 # ---------------------------------------------------------------------------
 # direct install completion / status / verify
@@ -488,3 +507,98 @@ class TestLegacyDirectInstall:
         report = backend.verify()
         assert report["verified"] is True
         assert "could not compare" in report["message"]
+
+
+class TestLaunchExplainsRuntimeFailures:
+    """A launch whose runtime failed says why (it used to return a bare code, even 0)."""
+
+    def _launch_with_output(self, tmp_path, monkeypatch, line: str, code: int):
+        manifest = _manifest_file(tmp_path, "StellaSora_EN")
+        backend = _stella(
+            tmp_path, {"manifest_file": str(manifest), "wine_binary": "/usr/bin/wine"}
+        )
+        write_exe(backend.install_dir() / "StellaSora.exe", "MZ")
+
+        def fake_stream(argv, env, on_line=None, cancel=None):
+            on_line(line)
+            return code
+
+        monkeypatch.setattr(wg, "stream", fake_stream)
+        return backend
+
+    def test_a_runtime_mismatch_is_explained_even_with_exit_0(self, tmp_path, monkeypatch):
+        from nadare.core import umu
+
+        backend = self._launch_with_output(
+            tmp_path, monkeypatch, "Failed to match Proton with a container runtime", 0
+        )
+        with pytest.raises(BackendError) as caught:
+            backend.launch()
+        assert umu.RUNTIME_MISMATCH_HINT in str(caught.value)
+
+    def test_ordinary_output_returns_the_code_as_before(self, tmp_path, monkeypatch):
+        backend = self._launch_with_output(tmp_path, monkeypatch, "wine: starting", 0)
+        assert backend.launch() == 0
+
+
+def test_an_update_refused_before_any_download_leaves_the_game_playable(tmp_path, monkeypatch):
+    """Sweep round 4: the marker went down before yostar.sync validated the manifest (host,
+    lock), so "Nothing was changed" left a complete install reported as incomplete."""
+    files = {"Arknights.exe": b"MZ", "data.bin": b"1234"}
+    manifest = _multi_manifest(tmp_path, "Arknights_EN", files)
+    backend = _ak(tmp_path, {"manifest_file": str(manifest)})
+    monkeypatch.setattr(
+        ak.yostar, "sync", lambda man, d, **kw: _write_files(Path(d), files) or {"downloaded": 2}
+    )
+    backend.install()
+    assert backend.status().state == "installed"
+
+    def refused(man, d, **kw):
+        raise yostar.ManifestRefused("refusing to download from untrusted host 'evil'")
+
+    monkeypatch.setattr(ak.yostar, "sync", refused)
+    with pytest.raises(BackendError, match="Nothing was changed"):
+        backend.update()
+    assert not backend._install_marker_path().exists()
+    assert backend.status().state == "installed"
+
+
+def test_a_refused_first_install_stays_not_installed(tmp_path, monkeypatch):
+    files = {"Arknights.exe": b"MZ"}
+    manifest = _multi_manifest(tmp_path, "Arknights_EN", files)
+    backend = _ak(tmp_path, {"manifest_file": str(manifest)})
+
+    def refused(man, d, **kw):
+        raise yostar.ManifestRefused("lock busy")
+
+    monkeypatch.setattr(ak.yostar, "sync", refused)
+    with pytest.raises(BackendError):
+        backend.install()
+    assert backend.status().state == "not_installed"
+    assert not backend._install_marker_path().exists()
+
+
+def test_a_download_that_fails_after_writing_keeps_the_marker(tmp_path, monkeypatch):
+    """Round 6: ManifestError also comes from a failed download after files were replaced."""
+    files = {"Arknights.exe": b"MZ", "data.bin": b"1234"}
+    manifest = _multi_manifest(tmp_path, "Arknights_EN", files)
+    backend = _ak(tmp_path, {"manifest_file": str(manifest)})
+
+    def half(man, d, **kw):
+        _write_files(Path(d), {"Arknights.exe": b"MZ"})  # the first file is in place
+        raise yostar.ManifestError("crc64 mismatch for data.bin")
+
+    monkeypatch.setattr(ak.yostar, "sync", half)
+    with pytest.raises(BackendError):
+        backend.install()
+    assert backend._install_marker_path().exists()
+    assert backend.status().state == "not_installed"
+
+
+def test_the_real_sync_refuses_an_untrusted_host_with_manifest_refused(tmp_path):
+    files = {"Arknights.exe": b"MZ"}
+    source = str(_multi_manifest(tmp_path, "Arknights_EN", files))
+    man = yostar.load_manifest(source, game_tag="Arknights_EN")
+    man = dataclasses.replace(man, base_url="https://evil.example/assets")
+    with pytest.raises(yostar.ManifestRefused):
+        yostar.sync(man, tmp_path / "game")

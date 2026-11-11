@@ -402,3 +402,98 @@ def test_the_launcher_never_sees_steam_variables_so_its_update_and_repair_stay_e
 def test_the_nikke_umu_game_id_is_still_set(tmp_path):
     _argv, env = _backend(tmp_path)._prefix_command(["x.exe"])
     assert env["GAMEID"] == "umu-nikke" and env["UMU_ID"] == "umu-nikke"
+
+
+# ---- #1000: say what happened, and show real progress ---------------------------------------
+def _events(backend):
+    seen = []
+    backend.ctx.emit = seen.append
+    return seen
+
+
+def test_a_silent_install_ends_by_saying_what_to_do_next(tmp_path, rig):
+    backend = _backend(tmp_path)
+    seen = _events(backend)
+    backend.install()
+    done = [e.message for e in seen if e.kind == "done"]
+    assert done and "launcher installed" in done[-1] and "Play" in done[-1]
+
+
+def test_a_fallback_to_the_installer_window_is_said_before_it_opens(tmp_path, rig):
+    _calls, state, _installer = rig
+    state["extract_ok"] = False
+    backend = _backend(tmp_path)
+    seen = _events(backend)
+    backend.install()
+    steps = [e.message for e in seen if e.kind == "step"]
+    assert any("without a window did not work" in m for m in steps)
+    done = [e.message for e in seen if e.kind == "done"]
+    assert done and "launcher installed" not in done[-1]  # the generic line, nothing promised
+
+
+def _growth_rig(tmp_path, rig, monkeypatch):
+    """A downloader that writes half the launcher, then waits until progress was reported."""
+    import threading
+
+    calls, _state, _installer = rig
+    monkeypatch.setattr(launcher, "_SILENT_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(launcher, "_SILENT_LAUNCHER_BYTES", 1000)
+    prefix = tmp_path / "prefix"
+    reported = threading.Event()
+
+    def slow_stream(argv, env, on_line=None, cancel=None):
+        calls.append(list(argv))
+        part = prefix / "drive_c" / "NIKKE" / "Launcher" / "data.bin"
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_bytes(b"x" * 500)  # half of the (patched) expected size
+        reported.wait(3)  # no fixed sleep: a loaded CI machine is slow
+        _install_launcher(prefix)
+        return 0
+
+    monkeypatch.setattr(ak, "stream", slow_stream)
+    backend = _backend(tmp_path)
+    seen: list = []
+
+    def collect(event):
+        seen.append(event)
+        if event.kind == "progress" and event.progress is not None:
+            reported.set()
+
+    backend.ctx.emit = collect
+    return backend, seen
+
+
+def test_the_launcher_folder_growth_is_shown_as_progress(tmp_path, rig, monkeypatch):
+    backend, seen = _growth_rig(tmp_path, rig, monkeypatch)
+    backend.install()
+    fractions = [e.progress for e in seen if e.kind == "progress" and e.progress is not None]
+    assert fractions and 0.4 <= max(fractions) < 1.0
+
+
+def test_a_late_watcher_still_sees_the_growth(tmp_path, rig, monkeypatch):
+    """CI flake: the size before the download was measured in the (late) thread."""
+    import threading
+    import time
+
+    class LateThread(threading.Thread):
+        def run(self):
+            time.sleep(0.2)  # a busy machine starts the watcher after the first writes
+            super().run()
+
+    monkeypatch.setattr(launcher.threading, "Thread", LateThread)
+    backend, seen = _growth_rig(tmp_path, rig, monkeypatch)
+    backend.install()
+    fractions = [e.progress for e in seen if e.kind == "progress" and e.progress is not None]
+    assert fractions and max(fractions) >= 0.4
+
+
+def test_folder_bytes_never_follows_links(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "big").write_bytes(b"x" * 5000)
+    inside = tmp_path / "inside"
+    inside.mkdir()
+    (inside / "small").write_bytes(b"x" * 10)
+    (inside / "link").symlink_to(outside, target_is_directory=True)
+    (inside / "filelink").symlink_to(outside / "big")
+    assert launcher._folder_bytes(inside) == 10

@@ -20,8 +20,7 @@ from nadare.gui.store import StorePage
 from nadare.gui.store_detail import StoreDetail
 from nadare.gui.store_flow import StoreFlow
 
-GFL2 = {"direct-gfl2", "direct-gfl2-haoplay", "launcher-gfl2-haoplay"}
-NTE = {"direct-nte", "launcher-nte"}
+GFL2 = {"direct-gfl2", "direct-gfl2-haoplay"}
 
 
 @pytest.fixture(scope="module")
@@ -42,19 +41,20 @@ def _by_kind():
 def test_the_builds_of_one_game_share_a_group_and_say_what_they_are():
     by_kind = _by_kind()
     assert {by_kind[k].group for k in GFL2} == {"Girls' Frontline 2"}
-    assert {by_kind[k].group for k in NTE} == {"Neverness to Everness"}
-    assert all(by_kind[k].variant for k in GFL2 | NTE)
-    assert len({by_kind[k].variant for k in GFL2}) == 3
+    assert all(by_kind[k].variant for k in GFL2)
+    assert len({by_kind[k].variant for k in GFL2}) == 2
 
 
 def test_a_game_with_one_build_has_no_group_and_no_variant_label():
     by_kind = _by_kind()
     assert by_kind["direct-pgr"].group == "" and by_kind["direct-pgr"].variant == ""
+    # NTE has one build since its launcher kind was retired (2026-11-10).
+    assert by_kind["direct-nte"].group == "" and by_kind["direct-nte"].variant == ""
 
 
 def test_store_games_has_one_game_per_title():
     games = store_games()
-    assert len(games) == len(entries()) - 2 - 1  # GFL2: 3 -> 1, NTE: 2 -> 1
+    assert len(games) == len(entries()) - 1  # GFL2: 2 -> 1
     titles = [game.title for game in games]
     assert titles.count("Girls' Frontline 2") == 1
     assert titles.count("Neverness to Everness") == 1
@@ -80,7 +80,7 @@ def test_search_finds_a_game_by_its_group_name_and_by_a_build_name():
     assert {e.kind for e in by_group[0].entries} == GFL2
     by_build = store_games(query="haoplay")
     assert [g.title for g in by_build] == ["Girls' Frontline 2"]
-    assert {e.kind for e in by_build[0].entries} == {"direct-gfl2-haoplay", "launcher-gfl2-haoplay"}
+    assert {e.kind for e in by_build[0].entries} == {"direct-gfl2-haoplay"}
 
 
 def test_the_tier_filter_keeps_only_matching_builds_inside_a_game():
@@ -92,8 +92,8 @@ def test_the_tier_filter_keeps_only_matching_builds_inside_a_game():
 def test_a_game_is_installed_when_any_of_its_builds_is():
     game = next(
         g
-        for g in store_games(installed_kinds=frozenset({"launcher-nte"}))
-        if g.title == "Neverness to Everness"
+        for g in store_games(installed_kinds=frozenset({"direct-gfl2-haoplay"}))
+        if g.title == "Girls' Frontline 2"
     )
     assert game.installed is True
 
@@ -120,7 +120,6 @@ def test_the_grid_has_one_card_per_game(qapp):
         assert len(page.visible_kinds()) == len(store_games())
         assert "direct-gfl2" in page.visible_kinds()
         assert "direct-gfl2-haoplay" not in page.visible_kinds()
-        assert "launcher-nte" not in page.visible_kinds()
     finally:
         page.close()
 
@@ -130,7 +129,7 @@ def test_a_grouped_card_shows_the_game_name_and_how_many_versions(qapp):
     try:
         card = page._cards["direct-gfl2"]
         assert card.title_label.text() == "Girls' Frontline 2"
-        assert "3 versions" in card.delivery_label.text()
+        assert "2 versions" in card.delivery_label.text()
         assert card.activated is not None
         seen = []
         card.activated.connect(seen.append)
@@ -143,7 +142,7 @@ def test_a_grouped_card_shows_the_game_name_and_how_many_versions(qapp):
 def test_focus_returns_to_the_card_of_the_game_even_for_another_build(qapp):
     page = _shown_page(qapp)
     try:
-        page.focus_card("launcher-gfl2-haoplay")
+        page.focus_card("direct-gfl2-haoplay")
         assert page.focusWidget() is page._cards["direct-gfl2"]
     finally:
         page.close()
@@ -171,7 +170,7 @@ def test_the_detail_page_offers_a_version_picker_for_a_game_with_several_builds(
     detail.set_entry(game.primary, game.entries)
     try:
         assert not detail.variant_box.isHidden()
-        assert detail.variant_box.count() == 3
+        assert detail.variant_box.count() == 2
         seen = []
         detail.variant_requested.connect(seen.append)
         detail.variant_box.setCurrentIndex(1)
@@ -193,11 +192,11 @@ def test_the_flow_shows_the_chosen_build_and_keeps_the_picker_on_it(qapp):
     flow = StoreFlow()
     try:
         flow.show_detail("direct-gfl2")
-        flow.detail.variant_box.setCurrentIndex(2)
+        flow.detail.variant_box.setCurrentIndex(1)
         qapp.processEvents()
-        chosen = game_of("direct-gfl2").entries[2]
+        chosen = game_of("direct-gfl2").entries[1]
         assert flow.detail.entry.kind == chosen.kind
-        assert flow.detail.variant_box.currentIndex() == 2
+        assert flow.detail.variant_box.currentIndex() == 1
         assert flow.detail.install_button.isEnabled()
         got = []
         flow.install_requested.connect(got.append)

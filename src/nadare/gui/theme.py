@@ -64,6 +64,9 @@ ACCENT_INK = "#08131f"
 
 OK = ACCENT
 WARN = "#f5c86a"
+#: A game that is running right now (sidebar dot and "Playing"). The palette is blue and
+#: black with no green (test_theme), so "live" is the bright accent plus the word itself.
+LIVE = ACCENT_HI
 BAD = "#ff8a8a"
 INFO = "#8ab4ff"
 
@@ -74,6 +77,10 @@ CARD_RADIUS = 14
 #: box still shows as accent-filled, just without the mark.
 _CHECK_ICON = Path(__file__).resolve().parent.parent / "assets" / "icons" / "check.svg"
 _CHECK_IMAGE = f"image: url({_CHECK_ICON.as_posix()});" if _CHECK_ICON.is_file() else ""
+# Qt draws the CSS zero-size border triangle as a small bar ("="), so the arrow is an icon.
+# Its stroke is MUTED; keep the two in step.
+_ARROW_ICON = _CHECK_ICON.with_name("chevron-down.svg")
+_ARROW_IMAGE = f"image: url({_ARROW_ICON.as_posix()});" if _ARROW_ICON.is_file() else "image: none;"
 
 STYLESHEET = f"""
 * {{
@@ -190,6 +197,8 @@ QFrame#GameRow:hover QLabel#GameRowTitle {{ color: {TEXT}; }}
 QLabel#GameRowIcon {{ background: {PANEL_3}; border-radius: 8px; }}
 QLabel#GameRowDot {{ background: {ACCENT}; border-radius: 4px; }}
 QLabel#GameRowDot[kind="update"] {{ background: {WARN}; }}
+QLabel#GameRowDot[kind="running"] {{ background: {LIVE}; }}
+QLabel#GameRowPlaying {{ color: {LIVE}; font-size: 10px; font-weight: 600; }}
 
 /* ---- top bar / breadcrumbs ------------------------------------------- */
 QWidget#TopBar {{
@@ -236,6 +245,18 @@ QFrame#AddGameCard:hover {{
 }}
 QLabel#CardTitle {{ font-weight: 700; font-size: 14px; }}
 QLabel#CardMeta {{ color: {MUTED}; font-size: 11px; }}
+QPushButton#CardPlay {{
+    background: {ACCENT};
+    color: #ffffff;
+    border: 1px solid {ACCENT};
+    border-radius: 7px;
+    padding: 3px 10px;
+    font-size: 10px;
+    font-weight: 700;
+}}
+QPushButton#CardPlay:hover {{ background: {ACCENT_HI}; border-color: {ACCENT_HI}; }}
+QPushButton#CardPlay:pressed {{ background: {ACCENT_DEEP}; border-color: {ACCENT_DEEP}; }}
+QPushButton#CardPlay:focus {{ border: 1px solid {TEXT}; }}
 QFrame#AddPlus {{
     background: rgba(61, 139, 253, 0.10);
     border: 1px solid rgba(61, 139, 253, 0.30);
@@ -363,6 +384,12 @@ QPushButton#Danger {{
     font-weight: 800;
     letter-spacing: 1px;
 }}
+/* Keyboard focus. "QPushButton:focus" above loses to these #id rules, so without the lines
+   below Tab moved through Launch, the sidebar and every ghost button with nothing to see.
+   Only the border colour changes (same width), so nothing moves. */
+QPushButton#GhostButton:focus, QPushButton#NavItem:focus {{ border: 1px solid {ACCENT}; }}
+QPushButton#Primary:focus {{ border: 1px solid {TEXT}; }}
+QPushButton#Danger:focus {{ border: 1px solid #ffb3b3; }}
 /* A running game: a state, not an action. Not greyed out when disabled. */
 QPushButton#Playing, QPushButton#Playing:disabled {{
     background: rgba(61, 139, 253, 0.14);
@@ -415,12 +442,9 @@ QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border: 1px solid {ACCENT}; 
 QLineEdit:read-only, QLineEdit:disabled {{ color: {MUTED}; background: {PANEL}; }}
 QComboBox::drop-down {{ border: none; width: 26px; }}
 QComboBox::down-arrow {{
-    image: none;
-    width: 0; height: 0;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid {MUTED};
-    margin-right: 9px;
+    {_ARROW_IMAGE}
+    width: 12px; height: 12px;
+    margin-right: 8px;
 }}
 QComboBox QAbstractItemView {{
     background: {PANEL_2};
@@ -433,6 +457,9 @@ QComboBox QAbstractItemView {{
 }}
 QListWidget {{
     background: {PANEL_2};
+    /* Alternating rows: without this Qt takes the platform palette, which in the Flatpak (no
+       KDE colour scheme) is its light default: every other row near-white (2026-11-11). */
+    alternate-background-color: {PANEL};
     border: 1px solid {LINE};
     border-radius: 10px;
     padding: 6px;
@@ -460,6 +487,8 @@ QCheckBox::indicator {{
     background: {FIELD_BG};
 }}
 QCheckBox::indicator:hover {{ border-color: {BORDER_HI}; }}
+/* Focus is the light text colour, so accent keeps meaning "ticked". */
+QCheckBox::indicator:focus, QCheckBox::indicator:checked:focus {{ border-color: {TEXT}; }}
 QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; {_CHECK_IMAGE} }}
 QTableWidget {{
     background: {FIELD_BG}; color: {TEXT}; gridline-color: {BORDER};
@@ -599,13 +628,28 @@ def register_fonts() -> None:
         QFontDatabase.addApplicationFont(str(path))
 
 
+def _set_sheet(app, sheet: str) -> None:
+    """Set ``sheet`` unless it is already set.
+
+    setStyleSheet re-polishes every live widget even for identical text; on the shared test
+    application that walked widgets left from earlier tests and crashed Qt in CI (#1024).
+    """
+    current = getattr(app, "styleSheet", None)
+    try:
+        if callable(current) and current() == sheet:
+            return
+    except RuntimeError:  # a deleted Qt object: let setStyleSheet report it as before
+        pass
+    app.setStyleSheet(sheet)
+
+
 def apply_theme(app) -> None:
     """Apply the stylesheet to a ``QApplication`` (or any object with setStyleSheet)."""
     try:
         register_fonts()
     except Exception:  # noqa: BLE001 - a missing font must never block startup
         pass
-    app.setStyleSheet(stylesheet())
+    _set_sheet(app, stylesheet())
     try:
         from .wheelguard import install_for
 
@@ -623,7 +667,16 @@ def apply_theme(app) -> None:
 
             def refresh() -> None:
                 app._nadare_font_pending = False
-                app.setStyleSheet(stylesheet())
+                old, new = app.styleSheet(), stylesheet()
+                app.setStyleSheet(new)
+                # Windows themed with their own copy (the main window) would keep the old size
+                # and win over the application's sheet (#1207 b246).
+                for widget in app.topLevelWidgets():
+                    try:
+                        if old and widget.styleSheet() == old:
+                            widget.setStyleSheet(new)
+                    except RuntimeError:
+                        pass  # a widget deleted meanwhile
 
             def on_font_changed(_font) -> None:
                 # Setting the style sheet inside the font-change signal re-enters Qt's font

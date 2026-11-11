@@ -2,20 +2,16 @@
  * Copyright (C) 2026 czn-linux contributors
  */
 /*
- * czn_pcsdk_stub.c — STOVE PCSDK launcher-handshake server.
+ * czn_pcsdk_stub.c — the STOVE PCSDK handshake server for Chaos Zero Nightmare.
  *
- * The game's BaseSDK.dll is a named-pipe CLIENT and refuses to start unless a
- * launcher answers on \\.\pipe\15BADE76-0E87-422B-A75B-B2049FE5F5F5\STOVE_CHAOSZERO.
- * This program is that server, so the game runs without STOVE:
+ * The game talks to its launcher over a named pipe and will not start until the
+ * launcher answers. This program is that server: it answers the handshake, starts
+ * the game, follows its process tree and reports the result over the same pipe.
+ * The session it serves (launcher data, including the access token) comes from a
+ * JSON file written by czn_auth.py. The anti-cheat is not touched.
  *
- *   game -> 1000  {"value":{"publicKey":<b64 SPKI>,"processId":...}}
- *   srv  -> 2000  value = b64(RSA-PKCS1(publicKey, {"aesKey":"<32 ASCII>"}))
- *   srv  -> 2001  value = HEXUPPER(AES-256-CBC(aesKey, iv=aesKey[:16], session))
- *   game -> 1001  heartbeat (no reply)
- *
- * The session (launcher data, incl. access_token) is read from a JSON file
- * written by czn_auth.py. The anti-cheat is not touched.
- * Protocol details: docs/czn-pcsdk-ipc.md.
+ * The wire protocol is in the handlers below; see docs/SECURE-MODE.md for what
+ * the running game is isolated from.
  *
  * Build:
  *   x86_64-w64-mingw32-gcc -O2 -mwindows -o czn_pcsdk_stub.exe czn_pcsdk_stub.c -lbcrypt -lcrypt32
@@ -637,9 +633,8 @@ int main(int argc, char **argv) {
     logf_("czn_pcsdk_stub %s starting", STUB_VERSION);
     if (g_launch) logf_("launch command: %ls", g_launch_cmd);
 
-    /* The endpoint is \\.\pipe\<namespace>\<name> (NamedPipeImpl::virtual_0,
-     * 0x1801b1cf0) with namespace = PIPE_GUID and name = the game id; confirmed
-     * by a +file trace of the client's CreateFileW and matching Lite. */
+    /* The endpoint is \\.\pipe\<namespace>\<name> with namespace = PIPE_GUID and
+     * name = the game id. */
 #ifndef GAME_ID
 #define GAME_ID L"STOVE_CHAOSZERO"
 #endif

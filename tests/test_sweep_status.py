@@ -37,7 +37,7 @@ def test_wine_status_without_a_runtime_is_not_installed(tmp_path, monkeypatch):
         raise BackendError("wine not found on PATH")
 
     monkeypatch.setattr(wine_mod, "first_wine", _no_wine)
-    monkeypatch.setattr(wine_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(wine_mod.shutil, "which", lambda name, *_a, **_k: None)
 
     status = WineBackend(ctx).status()
     assert status.state != "installed"

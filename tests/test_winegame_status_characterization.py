@@ -83,7 +83,7 @@ def _write_latest(backend, version: str, checked_at: int | str | None = None) ->
         path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _expected_data(backend, *, direct: bool, exe: str, pids=(), version=None):
+def _expected_data(backend, *, direct: bool, exe: str, pids=(), version=None, installed=True):
     data = {
         "prefix": str(backend.prefix()),
         "exe": exe,
@@ -97,6 +97,13 @@ def _expected_data(backend, *, direct: bool, exe: str, pids=(), version=None):
         if version is not None:
             data["version"] = version
         data["update_available"] = False
+    if isinstance(backend, NikkeBackend):
+        # NIKKE has a Log in step (the INTL service's own Google sign-in); no saved session here.
+        data["logged_in"] = False
+        # Its Log in runs the game's own INTL service, so it waits for the install.
+        data["can_login"] = installed
+        # Its Log in is the Google sign-in only, and the button says so (2026-11-11).
+        data["login_label"] = "Log in with Google"
     return data
 
 
@@ -115,7 +122,7 @@ class TestStatusNotInstalled:
         # exists; official mode reports the failed launcher search as "".
         assert status.data["exe"] == (str(target) if direct else "")
         assert status.data == _expected_data(
-            backend, direct=direct, exe=status.data["exe"]
+            backend, direct=direct, exe=status.data["exe"], installed=False
         )
 
     @pytest.mark.parametrize(("name", "cls", "direct"), DIRECT_BACKENDS)
@@ -128,15 +135,15 @@ class TestStatusNotInstalled:
 
         assert status.state == "not_installed"
         assert status.running is False
-        assert status.message == (
-            "installation incomplete — click RESUME to finish; what is already downloaded is kept"
-        )
+        assert status.message.startswith("installation incomplete — ")
+        assert "click RESUME to finish" in status.message  # and the size on disk (#991)
         assert status.data["exe"] == str(exe)
         assert status.data["can_repair"] is True
         assert status.data["incomplete"] is True
         assert status.data == {
             **_expected_data(backend, direct=True, exe=str(exe)),
             "incomplete": True,
+            "partial_bytes": status.data["partial_bytes"],
         }
 
 
@@ -200,6 +207,8 @@ class TestStatusInstalled:
         assert status.data["update_available"] is available
         expected = _expected_data(backend, direct=True, exe=str(exe), version=recorded)
         expected["update_available"] = available
+        if available:
+            expected["latest_version"] = latest  # named on the game page next to the version
         assert status.data == expected
 
     @pytest.mark.parametrize(("name", "cls", "direct"), DIRECT_BACKENDS)

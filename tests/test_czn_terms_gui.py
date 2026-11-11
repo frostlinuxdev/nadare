@@ -301,3 +301,133 @@ def test_nothing_starts_after_the_window_is_closing(tmp_path, qapp, monkeypatch)
         window.close()
         window.deleteLater()
         qapp.processEvents()
+
+
+@pytest.mark.parametrize("operation", ["login", "launch"])
+def test_a_terms_failure_on_the_open_page_shows_no_failure_box_first(
+    tmp_path, qapp, monkeypatch, operation
+):
+    """A Retry box before the terms sent people round a login that could only fail again."""
+    window = _czn_window(tmp_path, monkeypatch)
+    offered: list[tuple[str, str]] = []
+    boxes: list[str] = []
+    monkeypatch.setattr(window, "_offer_terms", lambda p, op: offered.append((p, op)))
+    monkeypatch.setattr(window.controller, "start", lambda *a, **k: True)
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
+    monkeypatch.setattr(
+        window.game, "_failure_choice", lambda title, message, can_retry: boxes.append(title)
+    )
+    try:
+        window.open_game("czn")
+        window.game.set_busy(operation)
+        window._on_failed("czn", operation, CznBackend.TERMS_MESSAGE)
+        assert boxes == []
+        assert offered == [("czn", operation)]
+        assert window.game._busy_op is None  # the page is not left looking busy
+    finally:
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()
+
+
+# ---- #799 points 2 and 3 ------------------------------------------------------------------------
+class _FakeTerms:
+    """Stands in for TermsDialog: records what the window passed and finishes on demand."""
+
+    made: list[_FakeTerms] = []
+
+    def __init__(self, title, terms, accept, url, parent=None):
+        from PyQt6.QtCore import QObject, pyqtSignal
+
+        class Signals(QObject):
+            agreed = pyqtSignal()
+            finished = pyqtSignal(int)
+
+        self._signals = Signals()
+        self.agreed = self._signals.agreed
+        self.finished = self._signals.finished
+        self.title, self.terms, self.accept = title, terms, accept
+        _FakeTerms.made.append(self)
+
+    def open(self):
+        pass
+
+    def start(self):
+        pass
+
+    def finish(self):
+        self.finished.emit(0)
+
+
+def _two_czn_window(tmp_path, monkeypatch):
+    import nadare.gui.main_window as mw
+
+    monkeypatch.setattr(BackendController, "start", lambda *a, **k: True)
+    monkeypatch.setattr(mw, "TermsDialog", _FakeTerms)
+    _FakeTerms.made = []
+    config = Config.load(tmp_path / "config.json")
+    config.add_profile("czn", backend="stove-czn", title="Chaos Zero Nightmare")
+    config.add_profile("czn2", backend="stove-czn", title="Chaos Zero Nightmare 2")
+    return MainWindow(config)
+
+
+def test_a_second_profiles_terms_wait_for_the_first_dialog(tmp_path, qapp, monkeypatch):
+    window = _two_czn_window(tmp_path, monkeypatch)
+    try:
+        window._offer_terms("czn", "login")
+        window._offer_terms("czn2", "launch")
+        window._offer_terms("czn2", "launch")  # the same request twice is shown once
+        assert [d.title for d in _FakeTerms.made] == ["Chaos Zero Nightmare"]
+        _FakeTerms.made[0].finish()
+        qapp.processEvents()
+        assert [d.title for d in _FakeTerms.made] == [
+            "Chaos Zero Nightmare", "Chaos Zero Nightmare 2"
+        ]
+        _FakeTerms.made[1].finish()
+        qapp.processEvents()
+        assert len(_FakeTerms.made) == 2
+    finally:
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_queued_offer_for_a_removed_profile_is_dropped(tmp_path, qapp, monkeypatch):
+    window = _two_czn_window(tmp_path, monkeypatch)
+    try:
+        window._offer_terms("czn", "login")
+        window._offer_terms("czn2", "login")
+        del window.config.profiles["czn2"]
+        _FakeTerms.made[0].finish()
+        qapp.processEvents()
+        assert len(_FakeTerms.made) == 1
+    finally:
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_agree_uses_the_settings_as_they_are_when_it_is_pressed(tmp_path, qapp, monkeypatch):
+    import nadare.gui.main_window as mw
+
+    window = _two_czn_window(tmp_path, monkeypatch)
+    seen: list[object] = []
+
+    class FakeBackend:
+        def __init__(self, config):
+            self.config = config
+
+        def accept_terms(self, member):
+            seen.append(self.config.profiles["czn"].get("remember_me"))
+
+    monkeypatch.setattr(mw.core_backends, "create", lambda p, cfg: FakeBackend(cfg))
+    try:
+        window.config.profiles["czn"]["remember_me"] = True
+        window._offer_terms("czn", "login")
+        window.config.profiles["czn"]["remember_me"] = False  # turned off while the box is open
+        _FakeTerms.made[0].accept()
+        assert seen == [False]
+    finally:
+        window.close()
+        window.deleteLater()
+        qapp.processEvents()

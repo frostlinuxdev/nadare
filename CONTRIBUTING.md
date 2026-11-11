@@ -41,8 +41,9 @@ Run the CLI directly while developing:
 .venv/bin/python -m nadare status -p czn
 ```
 
-`./scripts/dev.sh stub` builds the CZN PCSDK stub with mingw-w64 (see
-`scripts/build_stub.sh`).
+`./scripts/dev.sh stub` builds the CZN PCSDK stub's C fallback with mingw-w64
+(see `scripts/build_stub.sh`); the shipped default is the Go build
+(`scripts/build_stub_go.sh`).
 
 ## Repository layout
 
@@ -168,7 +169,8 @@ with the backend excluded, and tests must not assume it is present — see
   `scripts/build_deb.sh` builds the `.deb`.
 - `packaging/flatpak/` and `scripts/build_flatpak.sh` build a Flatpak bundle,
   but Flatpak is deferred and would ship without FGO.
-- `scripts/build_stub.sh` builds the CZN PCSDK stub with mingw-w64.
+- `scripts/build_stub.sh` builds the C fallback of the CZN PCSDK stub with
+  mingw-w64; `scripts/build_stub_go.sh` builds the shipped Go stub.
 
 If your change affects what is bundled (a new data file, a new hidden import),
 update the spec **and** the `.deb` staging in the same PR.

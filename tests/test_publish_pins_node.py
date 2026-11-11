@@ -318,3 +318,14 @@ def test_the_unit_budget_exceeds_the_publisher_deadline():
     )
 
     assert minutes * 60 > module.DEFAULT_DEADLINE
+
+
+def test_a_down_ping_names_the_node(env):
+    """#1209 P0-4: sw1 and sw2 share one pin heartbeat; the message says which node failed."""
+    import socket
+
+    env.set_publisher(1, write=False)
+    result = env.run(NADARE_PIN_HEARTBEAT_URL=HEARTBEAT)
+    assert result.returncode == 1
+    assert "status=down" in env.pings()[-1]
+    assert socket.gethostname().split(".")[0] in env.pings()[-1]

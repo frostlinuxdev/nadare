@@ -124,7 +124,9 @@ def test_importing_an_existing_install_finds_the_catalog_layout(tmp_path):
     info = add_game.detect_import("direct-bd2", tmp_path / "pfx", None)
     assert info["install_dir"] == str(install) and info["prefix"] == str(tmp_path / "pfx")
     nikke = tmp_path / "p2/drive_c/NIKKE"
-    nikke.mkdir(parents=True)
+    # An empty NIKKE folder is not an install (#1207 b148): the launcher must be there.
+    (nikke / "Launcher").mkdir(parents=True)
+    (nikke / "Launcher" / "nikke_launcher.exe").write_bytes(b"MZ")
     assert add_game.detect_import("launcher-nikke", tmp_path / "p2", None)["install_dir"] == str(
         nikke
     )
@@ -254,13 +256,15 @@ def test_a_failed_repeat_install_of_an_unfinished_install_stays_incomplete(game)
 
 
 def _launcher(tmp_path, cls_name):
+    from _backend_helpers import fake_launcher_backend
+
     from nadare.backends import launcher
 
-    cls = getattr(launcher, cls_name)
+    cls = fake_launcher_backend() if cls_name == "Fake" else getattr(launcher, cls_name)
     return cls(make_context(tmp_path, cls.kind, {"prefix": str(tmp_path / "pfx")}))
 
 
-@pytest.mark.parametrize("cls_name", ["NikkeBackend", "NteBackend"])
+@pytest.mark.parametrize("cls_name", ["NikkeBackend", "Fake"])
 def test_launcher_games_trust_only_their_publisher_hosts(tmp_path, cls_name):
     b = _launcher(tmp_path, cls_name)
     assert b.direct_mode() is False
@@ -272,26 +276,28 @@ def test_launcher_games_trust_only_their_publisher_hosts(tmp_path, cls_name):
 
 
 def test_launcher_refuses_an_untrusted_installer_url_unless_pinned(tmp_path):
-    from nadare.backends import launcher
 
+    from _backend_helpers import fake_launcher_backend
+
+    launcher_cls = fake_launcher_backend()
     ctx = make_context(
         tmp_path,
-        "launcher-nte",
+        launcher_cls.kind,
         {"prefix": str(tmp_path / "pfx"), "installer_url": "https://evil.example/x.exe"},
     )
-    b = launcher.NteBackend(ctx)
+    b = launcher_cls(ctx)
     with pytest.raises(BackendError, match="installer URL"):
         b.require_installer_url()
     ctx2 = make_context(
         tmp_path,
-        "launcher-nte",
+        launcher_cls.kind,
         {
             "prefix": str(tmp_path / "pfx2"),
             "installer_url": "https://evil.example/x.exe",
             "installer_sha256": "a" * 64,
         },
     )
-    assert launcher.NteBackend(ctx2).require_installer_url() == "https://evil.example/x.exe"
+    assert launcher_cls(ctx2).require_installer_url() == "https://evil.example/x.exe"
 
 
 def test_launcher_status_finds_the_installed_launcher(tmp_path):
@@ -473,7 +479,7 @@ def test_nikke_game_id_can_be_overridden_by_the_profile(tmp_path, monkeypatch):
 
 
 def test_other_launcher_games_keep_the_default_game_id(tmp_path, monkeypatch):
-    b = _launcher(tmp_path, "NteBackend")
+    b = _launcher(tmp_path, "Fake")
     monkeypatch.setattr(b, "resolve_runner", lambda: ("/opt/proton", "proton"))
     monkeypatch.setattr("nadare.core.umu.system", lambda configured="umu-run": "/usr/bin/umu-run")
     _argv, env = b._prefix_command(["x.exe"])
@@ -484,13 +490,14 @@ def test_tiers_mark_only_the_launched_games_as_verified():
     from nadare.core import directkinds as dk
 
     assert dk.VERIFIED_KINDS <= dk.CATALOG_KINDS
-    assert {dk.tier_of(k) for k in dk.CATALOG_KINDS} == {dk.TIER_VERIFIED, dk.TIER_EXPERIMENTAL}
+    # Every tier is a known one (all catalog games are Verified since the launcher duplicates
+    # were retired, 2026-11-10; a new game starts Experimental).
+    not_verified = sorted(k for k in dk.CATALOG_KINDS if dk.tier_of(k) != dk.TIER_VERIFIED)
+    assert not_verified == []  # a new Experimental game: list it here on purpose
     assert dk.tier_of("direct-bd2") == "Verified"
     assert dk.tier_of("direct-endfield") == "Verified"
     assert dk.tier_of("direct-nte") == "Verified"
     assert dk.tier_of("direct-mongil") == "Verified"  # b13 end to end, 2026-10-27
-    assert dk.tier_of("launcher-nte") == "Experimental"
-    assert dk.tier_of("launcher-gfl2-haoplay") == "Experimental"
     assert dk.tier_of("not-a-kind") == "Experimental"
 
 
@@ -560,18 +567,6 @@ def test_hoyo_kinds_still_load_for_existing_profiles():
     assert dk.tier_of("direct-zzz") == "Verified"
 
 
-def test_gfl2_haoplay_is_a_launcher_kind_with_a_trusted_installer():
-    from nadare.backends import launcher
-    from nadare.core import directkinds as dk
-
-    assert "launcher-gfl2-haoplay" in dk.CATALOG_KINDS
-    assert dk.tier_of("launcher-gfl2-haoplay") == "Experimental"
-    cls = launcher.Gfl2HaoplayBackend
-    assert cls.kind == "launcher-gfl2-haoplay" and cls.launcher_names == ("PCLauncher.exe",)
-    assert cls.default_installer_url.startswith("https://gf2-dl.haoplay.com/")
-    assert any(cls.default_installer_url.split("/")[2].endswith(h) for h in cls.trusted_hosts)
-
-
 def test_gfl2_haoplay_direct_kind_is_registered_and_verified():
     from nadare.backends import direct
     from nadare.core import directkinds as dk
@@ -603,14 +598,14 @@ def test_gfl2_haoplay_pins_umu_id_zero_unless_the_profile_overrides_it(tmp_path,
     assert custom["UMU_ID"] == "umu-7" and custom["GAMEID"] == "umu-7"
 
 
-GFL2_KINDS = ("direct-gfl2", "direct-gfl2-haoplay", "launcher-gfl2-haoplay")
+GFL2_KINDS = ("direct-gfl2", "direct-gfl2-haoplay")
 
 
 def test_the_gfl2_builds_have_names_that_tell_them_apart():
     from nadare.core import directkinds as dk
 
     titles = {
-        kind: (dk._DIRECT.get(kind) or dk._LAUNCHER[kind])[1] for kind in GFL2_KINDS
+        kind: (dk._DIRECT[kind])[1] for kind in GFL2_KINDS
     }
     assert "Darkwinter" in titles["direct-gfl2"] and "Haoplay" not in titles["direct-gfl2"]
     assert all("Haoplay" in titles[k] and "Darkwinter" not in titles[k] for k in GFL2_KINDS[1:])
@@ -621,7 +616,7 @@ def test_the_backend_display_names_match_the_catalog_titles():
     from nadare.core import directkinds as dk
 
     for kind in GFL2_KINDS:
-        row = dk._DIRECT.get(kind) or dk._LAUNCHER[kind]
+        row = dk._DIRECT[kind]
         assert get(kind).display_name == row[1], kind
 
 

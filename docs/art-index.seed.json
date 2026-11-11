@@ -206,22 +206,6 @@
         }
       ]
     },
-    "launcher-gfl2-haoplay": {
-      "cover": [
-        {
-          "url": "https://cdn.cloudflare.steamstatic.com/steam/apps/3308670/library_hero.jpg",
-          "orientation": "wide",
-          "width": 1920,
-          "height": 620
-        },
-        {
-          "url": "https://cdn.cloudflare.steamstatic.com/steam/apps/3308670/library_600x900_2x.jpg",
-          "orientation": "portrait",
-          "width": 600,
-          "height": 900
-        }
-      ]
-    },
     "launcher-nikke": {
       "cover": [
         {
@@ -235,22 +219,6 @@
           "orientation": "portrait",
           "width": 750,
           "height": 1334
-        }
-      ]
-    },
-    "launcher-nte": {
-      "cover": [
-        {
-          "url": "https://nte.perfectworld.com/public/images/cover260930/box3-slide1.jpg",
-          "orientation": "wide",
-          "width": 1920,
-          "height": 1080
-        },
-        {
-          "url": "https://nte.perfectworld.com/public/images/cover260930/box1.jpg",
-          "orientation": "wide",
-          "width": 2559,
-          "height": 1564
         }
       ]
     },

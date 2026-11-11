@@ -49,6 +49,10 @@ def test_the_download_swap_is_one_replace_and_the_old_file_is_untouched_until_th
     real_replace = os.replace
 
     def watching_replace(src, dst):
+        # os.replace is process-wide: a thread another test left behind may rename its own
+        # files meanwhile (#1024). Only the swap onto ``dest`` is this test's business.
+        if Path(dst) != dest:
+            return real_replace(src, dst)
         seen.append(Path(dest).read_bytes())  # what a reader sees right up to the swap
         assert Path(src).read_bytes() == body  # the staged file is already complete
         return real_replace(src, dst)
@@ -68,7 +72,11 @@ def test_a_failed_swap_leaves_the_old_download_in_place(
     dest.write_bytes(b"old complete file")
     monkeypatch.setattr(dl, "http_open", lambda *a, **k: _Resp(body))
 
+    real_replace = os.replace
+
     def broken(src, dst):
+        if Path(dst) != dest:  # another test's thread: not this test's swap (#1024)
+            return real_replace(src, dst)
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(dl.os, "replace", broken)

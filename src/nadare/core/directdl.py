@@ -33,28 +33,32 @@ import threading
 import time
 import zipfile
 import zlib
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import CancelledError as FutureCancelled
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
-from . import diskspace, paths, sevenz, sophon
+from . import archivepins, diskspace, paths, sevenz, sophon
 from . import download as download_module
 from .download import DownloadError, download, remote_size
 from .events import Cancel, Cancelled, Emitter, Event, emitter
 from .rangefile import BlockMismatch, RangeError, RangePart, RangeReader
 
 if TYPE_CHECKING:
-    from .archivepins import ArchivePin
+    from .archivepins import ArchivePin, PinPart
 
 #: Cache directory (under the install dir) for in-flight archive downloads.
 #: Most files fetched in parallel. A game with tens of thousands of small files is latency-bound
 #: per connection, so one install needs well over 16 connections to fill a fast line.
 MAX_WORKERS = 64
 _PLAN_CHECK_MAX_WORKERS = 16
+#: Fewest seconds between two "checked N of M files" reports (#831: ~47,000 files took a
+#: minute with nothing on screen). Each report is a logged step line, so not too often.
+_CHECK_PROGRESS_INTERVAL = 2.0
 DL_DIR = ".nadare-dl"
 #: Directory (under the install dir) holding one ``<name>.done`` per unwrapped archive.
 STATE_DIR = ".nadare"
@@ -133,6 +137,10 @@ class Archive:
     stream: bool = False
     #: Published per-block checksums for a streamed install, when the index has one.
     pin: ArchivePin | None = None
+    #: The role this archive plays across versions ("client"), for a publisher that renames the
+    #: archive every version (Aether Gazer, Brown Dust 2): a record with the same slot and
+    #: another name is an earlier version of it, so its dropped files are pruned (#967).
+    slot: str = ""
 
 
 @dataclass(frozen=True)
@@ -483,7 +491,13 @@ def _done_record(
     verified_hashes: bool = True,
     pin: ArchivePin | None = None,
 ) -> dict[str, Any]:
-    record: dict[str, Any] = {"version": plan.version, "url": archive.source.url}
+    record: dict[str, Any] = {
+        "game": plan.game_tag,
+        "version": plan.version,
+        "url": archive.source.url,
+    }
+    if archive.slot:
+        record["slot"] = archive.slot
     for name in ("md5", "sha256", "crc32"):
         value = getattr(archive.source, name)
         if value:
@@ -491,12 +505,10 @@ def _done_record(
     if not verified_hashes:
         # A streamed install read only the ranges it needed, so the index's
         # whole-archive hash was never computed. Say what was checked instead.
-        if pin is not None:
-            record["verified"] = "pin"
-            record["pin_block_size"] = pin.block_size
-            record["pin_fingerprint"] = pin.fingerprint()
-        else:
-            record["verified"] = "members"
+        record["verified"] = "pin" if pin is not None else "members"
+    if pin is not None:
+        record["pin_block_size"] = pin.block_size
+        record["pin_fingerprint"] = pin.fingerprint()
     if members is not None:
         sorted_members = sorted(set(members))
         recorded_members = sorted_members[:_MAX_RECORDED_MEMBERS]
@@ -534,9 +546,10 @@ def _archive_done(plan: Plan, archive: Archive, dest: Path, *, hashes: bool = Fa
         return False
     if record.get("members_truncated") and not _all_members_present(record_path, dest):
         return False  # the record lists only part of the archive (#906)
-    pin = _pin_for(archive)
-    if pin is not None and record.get("pin_fingerprint") != pin.fingerprint():
-        return False  # installed under another (or no) pin: verify again against this one
+    if archive.stream:
+        pin = _pin_for(archive)
+        if pin is not None and record.get("pin_fingerprint") != pin.fingerprint():
+            return False  # installed under another (or no) pin: verify again against this one
     streamed = record.get("verified") in ("members", "pin")
     if streamed and not isinstance(record.get("member_crc32"), dict):
         return False  # a streamed record is only worth as much as its member CRCs
@@ -855,9 +868,19 @@ def _write_member_list(record_path: Path, members: Sequence[str] | None) -> None
     if members is None:
         sidecar.unlink(missing_ok=True)
         return
-    temporary = sidecar.with_name(sidecar.name + ".tmp")
-    temporary.write_text("".join(f"{name}\n" for name in sorted(set(members))), encoding="utf-8")
-    os.replace(temporary, sidecar)
+    data = "".join(f"{name}\n" for name in sorted(set(members)))
+    fd, temporary_name = tempfile.mkstemp(
+        dir=str(sidecar.parent), prefix=f".{sidecar.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, sidecar)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _all_members_present(record_path: Path, dest: Path) -> bool:
@@ -894,6 +917,20 @@ def _pin_for(archive: Archive) -> ArchivePin | None:
         return None
     parts = archive.parts or (archive.source,)
     return pin if pin.matches(parts, archive.source.md5) else None
+
+
+def _verify_pinned_file(
+    archive: Archive, part: PinPart, path: Path, pin: ArchivePin
+) -> None:
+    """Check a whole downloaded part against its pin, before it is unpacked."""
+    try:
+        archivepins.verify_file(path, part, pin.block_size)
+    except archivepins.PinError as exc:
+        raise DirectError(
+            f"{archive.name}: the download does not match the published checksum list "
+            f"({exc}). Nothing was installed: try again in a few minutes, and report it "
+            "if it keeps happening."
+        ) from exc
 
 
 def _pin_mismatch_error(archive: Archive, exc: BlockMismatch) -> DirectError:
@@ -1408,7 +1445,7 @@ def _sync_archive(
     # install must not record the index hash as if it had checked it. Fall through
     # to the normal download-then-unpack path, which verifies the whole archive.
     whole_sha256 = bool(archive.source.sha256) or any(p.sha256 for p in archive.parts)
-    pin = _pin_for(archive) if archive.stream else None
+    pin = _pin_for(archive)
     if (
         archive.stream
         and not whole_sha256
@@ -1443,10 +1480,14 @@ def _sync_archive(
 
     try:
         if archive.parts:
-            for part, part_path in zip(archive.parts, part_paths, strict=False):
+            for index, (part, part_path) in enumerate(
+                zip(archive.parts, part_paths, strict=False)
+            ):
                 if cancel is not None:
                     cancel.raise_if_cancelled()
                 _download_remote(part, part_path, emit=emit, cancel=cancel)
+                if pin is not None:
+                    _verify_pinned_file(archive, pin.parts[index], part_path, pin)
             _hash_parts(part_paths, archive.source, archive.name)
             if changed is not None:
                 changed.set()
@@ -1457,13 +1498,15 @@ def _sync_archive(
                 joined.close()
         else:
             _download_remote(archive.source, source_path, emit=emit, cancel=cancel)
+            if pin is not None:
+                _verify_pinned_file(archive, pin.parts[0], source_path, pin)
             if changed is not None:
                 changed.set()
             members = _unwrap(archive, source_path, dest, dl_dir, cancel)
 
         for path in cache_paths + part_paths:
             _remove_file(path)
-        _write_done(plan, archive, dest, members)
+        _write_done(plan, archive, dest, members, pin=pin)
     except (DirectError, zipfile.BadZipFile, ValueError) as exc:
         # The extractors wrap a local write error (a full disk) in DirectError; that
         # leaves the verified archive intact, so keep it for the next sync.
@@ -1581,12 +1624,15 @@ def plan_missing(
     verify: bool = True,
     check_workers: int | None = None,
     cancel: Cancel | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> tuple[list[RemoteFile], list[Archive]]:
     """What :func:`sync` would still fetch: files that are absent or whose size/hash
     differ, and archives with no ``.done`` record for this plan's version.
 
     ``verify=False`` compares sizes only: right after a sync that already hashed every file.
     File checks run in bounded batches; the returned missing-file list keeps plan order.
+    ``progress(checked, total)`` is called now and then while files are checked, and once
+    at the end.
     """
     root = Path(dest)
     workers = min(
@@ -1600,9 +1646,24 @@ def plan_missing(
             root / safe_relative_path(rf.path), rf, hashes=verify, cancel=cancel
         )
 
+    total = len(plan.files)
+    last_report = float("-inf")
+
+    def report(checked: int) -> None:
+        nonlocal last_report
+        if progress is None:
+            return
+        now = time.monotonic()
+        if checked >= total or now - last_report >= _CHECK_PROGRESS_INTERVAL:
+            last_report = now
+            progress(checked, total)
+
     files: list[RemoteFile] = []
     if workers == 1:
-        files.extend(rf for rf in plan.files if needs_download(rf))
+        for index, rf in enumerate(plan.files, 1):
+            if needs_download(rf):
+                files.append(rf)
+            report(index)
     else:
         # Executor.map preserves input order but eagerly submits its inputs in
         # Python 3.12. Submit only one capped batch at a time to bound queued
@@ -1614,6 +1675,7 @@ def plan_missing(
                 batch = plan.files[offset : offset + workers]
                 results = pool.map(needs_download, batch)
                 files.extend(rf for rf, missing in zip(batch, results, strict=False) if missing)
+                report(offset + len(batch))
     archives = [
         archive
         for archive in plan.archives
@@ -1681,13 +1743,77 @@ def _read_done(record_path: Path) -> dict[str, Any] | None:
     return record if isinstance(record, dict) else None
 
 
+def _record_host(url: object) -> str | None:
+    """The lowercased host of a URL, or None when it is missing or cannot be parsed."""
+    if not isinstance(url, str):
+        return None
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return None
+    return host.lower() if host else None
+
+
+def _plan_archive_hosts(plan: Plan) -> set[str]:
+    hosts: set[str] = set()
+    for archive in plan.archives:
+        for remote in (archive.source, *archive.parts):
+            host = _record_host(remote.url)
+            if host:
+                hosts.add(host)
+    return hosts
+
+
+def _superseded_records(plan: Plan, root: Path) -> list[Path]:
+    """Records of earlier versions of a slotted archive of ``plan`` (renamed every version).
+
+    A record with the same slot and another name is one. A record whose ``game`` names another
+    game is never one. A record written before records named their game has no ``game``; it
+    counts only when ``plan`` has a single archive (so every other archive record in that
+    game's folder can only be an older version of it, while beside several archives it may be
+    DLC) and its URL is from a host the plan downloads from.
+    """
+    slots = {archive.slot for archive in plan.archives if archive.slot}
+    if not slots:
+        return []
+    current = {safe_relative_path(archive.name) + ".done" for archive in plan.archives}
+    state = root / STATE_DIR
+    try:
+        candidates = sorted(state.rglob("*.done"))
+    except OSError:
+        return []
+    legacy_hosts = _plan_archive_hosts(plan)
+    old: list[Path] = []
+    for record_path in candidates:
+        if record_path.relative_to(state).as_posix() in current:
+            continue
+        record = _read_done(record_path)
+        if record is None:
+            continue
+        game = record.get("game")
+        if game is not None and game != plan.game_tag:
+            continue
+        slot = record.get("slot")
+        if not (
+            (isinstance(slot, str) and slot in slots)
+            or (slot is None and len(plan.archives) == 1)
+        ):
+            continue
+        if game is None and _record_host(record.get("url")) not in legacy_hosts:
+            continue
+        old.append(record_path)
+    return old
+
+
 def _recorded_members(plan: Plan, root: Path) -> dict[str, dict[str, Any]]:
     """What the archives of ``plan`` owned before this sync: ``{path: {"size", "crc32"}}``.
 
-    Only a complete inventory counts (a truncated or partial one cannot say what is gone)."""
+    Earlier versions of a renamed archive count too (``_superseded_records``). Only a complete
+    inventory counts (a truncated or partial one cannot say what is gone)."""
     owned: dict[str, dict[str, Any]] = {}
-    for archive in plan.archives:
-        record = _read_done(root / STATE_DIR / f"{safe_relative_path(archive.name)}.done")
+    paths = [root / STATE_DIR / f"{safe_relative_path(a.name)}.done" for a in plan.archives]
+    for record_path in [*_superseded_records(plan, root), *paths]:
+        record = _read_done(record_path)
         if record is None or record.get("members_truncated"):
             continue
         members, sizes, crcs = (
@@ -1703,23 +1829,35 @@ def _recorded_members(plan: Plan, root: Path) -> dict[str, dict[str, Any]]:
     return owned
 
 
-def _prune_dropped_members(plan: Plan, root: Path, before: Mapping[str, Mapping[str, Any]]) -> int:
+def _prune_dropped_members(
+    plan: Plan,
+    root: Path,
+    before: Mapping[str, Mapping[str, Any]],
+    superseded: Sequence[Path] = (),
+) -> int:
     """Delete files a previous version of an archive installed that no version now owns.
 
     Runs only after a whole sync succeeded. A file goes only when it is a plain file (never a
     link), still the size and CRC-32 the old record gave (the user did not change it), and
     nothing owns it any more: not a loose file of ``plan``, not any ``.done`` record
-    (another archive or DLC), not a Sophon ledger. Folders are never removed.
+    (another archive or DLC), not a Sophon ledger. Folders are never removed. ``superseded``
+    records (earlier versions of an archive that was just replaced) own nothing any more; they
+    are removed after the prune.
     """
     if not before:
         return 0
     owned = {safe_relative_path(rf.path) for rf in plan.files}
     state = root / STATE_DIR
     try:
-        records = sorted(state.glob("*.done"))
+        # An archive name may hold folders (its record is then in a sub-folder): the glob must
+        # reach it, or that archive's own files look unowned and are deleted.
+        records = sorted(state.rglob("*.done"))
     except OSError:
         return 0
+    gone = {Path(p) for p in superseded}
     for record_path in records:
+        if record_path in gone:
+            continue
         record = _read_done(record_path)
         if record is None or record.get("members_truncated"):
             return 0  # cannot tell what is owned: remove nothing
@@ -1746,6 +1884,12 @@ def _prune_dropped_members(plan: Plan, root: Path, before: Mapping[str, Mapping[
             removed += 1
         except (OSError, DirectError):
             continue
+    for record_path in gone:
+        for stale in (record_path, _member_list_path(record_path)):
+            try:
+                stale.unlink(missing_ok=True)
+            except OSError:
+                pass
     return removed
 
 
@@ -1795,10 +1939,15 @@ def _sync(
     if cancel is not None:
         cancel.raise_if_cancelled()
     _sweep_stale_staging(root)
+    superseded = _superseded_records(plan, root)
     owned_before = _recorded_members(plan, root)
 
+    def checking(done: int, total: int) -> None:
+        # A step, not "progress": the bar and its consumers mean download progress.
+        say(Event("step", f"Checking the files already on disk: {done:,} of {total:,}"))
+
     missing_files, missing_archives = plan_missing(
-        plan, root, check_workers=check_workers, cancel=cancel
+        plan, root, check_workers=check_workers, cancel=cancel, progress=checking
     )
     downloaded = 0
     stop = Cancel()
@@ -1890,7 +2039,7 @@ def _sync(
     except OSError:
         pass
 
-    _prune_dropped_members(plan, root, owned_before)
+    _prune_dropped_members(plan, root, owned_before, superseded)
     skipped = (
         len(plan.files) + len(plan.archives) + len(plan.sophon) - downloaded
     )

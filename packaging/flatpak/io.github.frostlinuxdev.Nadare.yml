@@ -4,9 +4,9 @@
 # 22.04), so no Python stack is rebuilt here. Build with
 # scripts/build_flatpak.sh, which stages dist/nadare next to this file.
 #
-# This is a *permissive* bundle, not a real sandbox: games live anywhere on
-# disk (host filesystem), and Lepton (FGO) and gamescope run on the
-# host through flatpak-spawn --host. Proton runs inside the sandbox with the
+# This is a *permissive* bundle, not a real sandbox: it sees the home folder,
+# /mnt, /media and /run/media (games can live on any of them), and Lepton (FGO)
+# and gamescope run on the host through flatpak-spawn --host. Proton runs inside the sandbox with the
 # 32-bit compat extensions.
 #
 # The app id is provisional until the project's public home is decided;
@@ -26,10 +26,22 @@ finish-args:
   - --share=network
   - --share=ipc
   - --socket=wayland
-  - --socket=fallback-x11
+  # X11 too, not only as a fallback: on a Wayland desktop the fallback means no X11 at all,
+  # and games need XWayland when their Display backend is set to X11.
+  - --socket=x11
   - --socket=pulseaudio
   - --device=all
-  - --filesystem=host
+  # Not the whole host (#1211): the places games and their tools live, the way Lutris, Heroic and
+  # other game launchers on Flathub do it. A folder elsewhere is refused with the one command that
+  # allows it (core/flatpakfs.py); /.flatpak-info tells Nadare what it really got.
+  - --filesystem=home
+  - --filesystem=/mnt
+  - --filesystem=/media
+  - --filesystem=/run/media
+  # Steam's Flatpak keeps its libraries here, which "home" does not reach.
+  - --filesystem=~/.var/app/com.valvesoftware.Steam
+  - --filesystem=xdg-run/gamescope-0:rw
+  - --filesystem=/run/udev:ro
   - --allow=multiarch
   - --allow=per-app-dev-shm
   - --talk-name=org.freedesktop.secrets

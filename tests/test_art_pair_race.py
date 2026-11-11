@@ -8,6 +8,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from _timing import scaled
 
 from nadare.core import artwork
 
@@ -50,8 +51,11 @@ def test_overlapping_official_downloads_keep_image_and_sidecar_together(rig, mon
     a.start()
     assert a_replaced.wait(5)
     b.start()
-    a.join(10)
-    b.join(10)
+    a.join(scaled(30))
+    b.join(scaled(30))
+    # Reading while a thread is still between "image replaced" and "sidecar written" is what
+    # failed under CI load (#1024): a thread that did not finish is a hang, say so.
+    assert not a.is_alive() and not b.is_alive(), "a download thread did not finish"
     image = rig / "slug-cover.jpg"
     sidecar = artwork.src_sidecar(image).read_text(encoding="utf-8")
     assert BODIES[sidecar] == image.read_bytes(), "the sidecar names a different image's URL"

@@ -46,10 +46,11 @@ def test_an_idle_installed_game_shows_no_empty_panels(view):
     assert view.kicker.isHidden()
 
 
-def test_output_appears_with_the_first_line(view):
+def test_output_appears_with_the_first_line_folded(view):
+    """#993: the "Show output" header appears; the lines stay folded until asked for."""
     view.append_event(Event("log", "hello"))
     assert not view.output_head.isHidden()
-    assert not view.console.isHidden()
+    assert view.console.isHidden()
 
 
 def test_clearing_the_output_hides_the_panel_again(view):
@@ -64,6 +65,9 @@ def test_a_running_operation_shows_progress_and_output(view):
     assert not view.progress_frame.isHidden()
     assert not view.output_head.isHidden()
     view.finish("install", 0)
+    # The strip now says it worked (OUTPUT is folded, #993) until the page moves on.
+    assert view.step_label.text().startswith("✓ ")
+    view.set_profile("sample", {"backend": "stove-czn"})
     assert view.progress_frame.isHidden()
 
 
@@ -135,9 +139,12 @@ def test_an_error_during_a_download_opens_the_output(view):
     assert not view.console.isHidden()
 
 
-def test_a_launch_still_shows_its_output(view):
+def test_a_launch_folds_its_output_too(view):
+    """#993: Play no longer opens the console; an error does (test_console_collapsed)."""
     view.set_busy("launch")
-    assert not view.console.isHidden()
+    view.append_event(Event("log", "starting"))
+    assert view.console.isHidden()
+    assert not view.output_head.isHidden()
 
 
 def test_resuming_a_paused_download_says_so(view):

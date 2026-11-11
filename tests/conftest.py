@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -94,6 +96,20 @@ def _isolated_environment(
 
 
 @pytest.fixture(autouse=True)
+def _sandbox_default_off(monkeypatch):
+    """Older tests expect no bubblewrap; tests of the default turn it back on.
+
+    The once-per-run ``ready()`` answer is cleared too, so no test sees another's.
+    """
+    from nadare.core import gamesandbox
+
+    monkeypatch.setattr(gamesandbox, "DEFAULT_ON", False)
+    gamesandbox._READY_CACHE.clear()
+    yield
+    gamesandbox._READY_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
 def _http_open_follows_patched_urlopen(monkeypatch):
     """Tests that fake ``urllib.request.urlopen`` also fake ``download.http_open``.
 
@@ -108,10 +124,16 @@ def _http_open_follows_patched_urlopen(monkeypatch):
     real_http_open = download.http_open
     real_urlopen = urllib.request.urlopen
 
-    def http_open(url, *, headers=None, timeout=download.DEFAULT_TIMEOUT, redirect_allowed=None):
+    def http_open(
+        url, *, headers=None, timeout=download.DEFAULT_TIMEOUT, redirect_allowed=None, data=None
+    ):
         if urllib.request.urlopen is real_urlopen:
             return real_http_open(
-                url, headers=headers, timeout=timeout, redirect_allowed=redirect_allowed
+                url,
+                headers=headers,
+                timeout=timeout,
+                redirect_allowed=redirect_allowed,
+                data=data,
             )
         try:
             return urllib.request.urlopen(url, timeout=timeout)
@@ -136,13 +158,168 @@ def _no_live_hoyo_art_feed(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _nikke_launcher_api_offline(monkeypatch):
+    """Install tests that do not fake the launcher CDN take the old path, as without a network."""
+    from nadare.core import railrepo
+    from nadare.core.sources import nikke
+
+    real_launcher_info = nikke.launcher_info
+    real_client_info = nikke.client_info
+
+    def offline(post=None, **kwargs):
+        # A test that supplies its own POST is already hermetic and may run the real parser;
+        # only the default network path is refused.
+        if post is not None:
+            return real_launcher_info(post=post, **kwargs)
+        raise railrepo.RailError("offline in tests")
+
+    def client_offline(post=None, **kwargs):
+        # The game-client record too: a launcherless Play checks it before starting, and a test
+        # that did not fake it once downloaded the whole 1.1 GB client (2026-11-10).
+        if post is not None:
+            return real_client_info(post=post, **kwargs)
+        raise railrepo.RailError("offline in tests")
+
+    monkeypatch.setattr(nikke, "launcher_info", offline)
+    monkeypatch.setattr(nikke, "client_info", client_offline)
+
+
+@pytest.fixture(autouse=True)
+def _no_background_cover_migration(request, monkeypatch):
+    """A cover lookup never starts the background WebP migration in a test (#1024).
+
+    The daemon thread converted a test's own cached PNG and deleted it and its ``.src`` sidecar
+    while the test still read them. Tests of the migration call ``migrate_cached_covers()``
+    themselves, restore ``artwork._real_schedule_cover_migration``, or carry the
+    ``real_cover_migration`` marker.
+    """
+    if request.node.get_closest_marker("real_cover_migration"):
+        return
+    from nadare.core import artwork
+
+    monkeypatch.setattr(
+        artwork, "_real_schedule_cover_migration", artwork._schedule_cover_migration,
+        raising=False,
+    )
+    monkeypatch.setattr(artwork, "_schedule_cover_migration", lambda root: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_automatic_update_checks(monkeypatch):
+    """Window tests never start the background version check (#1024).
+
+    Opening a direct game started ``check_update`` on a worker, which asked the publisher's real
+    API from the test run and could outlive the test: Qt then aborted the whole xdist worker
+    ("Fatal Python error: Aborted", seen on CI 2026-11-08 in ``kuro.resolve_game``). Tests of the
+    check call ``backend.check_update()`` themselves.
+    """
+    try:
+        from nadare.gui.main_window import MainWindow
+    except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
+        return
+    # A test of the throttling itself (with a recording _start) restores the real method.
+    monkeypatch.setattr(
+        MainWindow, "_real_maybe_start_check_update", MainWindow._maybe_start_check_update,
+        raising=False,
+    )
+    monkeypatch.setattr(MainWindow, "_maybe_start_check_update", lambda self, profile: False)
+
+
+#: Plain daemon threads that do image work in Qt (news images, the cover-cache sweep).
+_BACKGROUND_THREAD_NAMES = frozenset(
+    {"nadare-news-fetch", "nadare-news-image", "cover-cache-migration"}
+)
+
+
+@pytest.fixture(autouse=True)
+def _background_work_ends_with_its_test():
+    """Wait (bounded) for Qt's shared thread pool after each test (#1024).
+
+    A cover fetch or image decode started by one GUI test kept running into the next test,
+    which had patched ``artwork.cache_dir`` or ``os.replace`` process-wide: it wrote into that
+    test's folder or was counted by its fakes. Waiting here keeps each test's work its own.
+    """
+    yield
+    # News images and the cover-cache sweep run on plain daemon threads that outlive the
+    # loader's deadline; one was still recoding WebP inside Qt when the next test's event loop
+    # ran, and the xdist worker aborted (CI 2026-11-10, test_single_instance).
+    deadline = time.monotonic() + 3.0
+    for thread in threading.enumerate():
+        if thread.name in _BACKGROUND_THREAD_NAMES and thread is not threading.current_thread():
+            thread.join(max(0.0, deadline - time.monotonic()))
+    try:
+        from PyQt6.QtCore import QCoreApplication, QThreadPool
+    except Exception:  # noqa: BLE001 - PyQt6 may be missing; nothing to wait for
+        return
+    if QCoreApplication.instance() is not None:
+        QThreadPool.globalInstance().waitForDone(3000)
+        # Status/news workers are QThreads, not pool tasks: a closed window detaches them, and
+        # one still fetching hero art wrote it into the next test's XDG folder (CI 2026-11-08,
+        # test_sevenz_parallel saw a stray ``covers/a-official-hero.webp``).
+        try:
+            from nadare.gui import workers
+
+            workers.wait_detached(3000)
+        except Exception:  # noqa: BLE001 - best effort, like the pool wait
+            pass
+
+
+class RealModalBox(AssertionError):
+    """A test reached a real, unstubbed message box: offscreen it would wait forever."""
+
+
+@pytest.fixture(autouse=True)
+def _message_boxes_fail_instead_of_hanging(monkeypatch):
+    """An unstubbed QMessageBox fails the test at once instead of hanging the CI run.
+
+    Offscreen, nobody can click a modal box: one new box in a path an old test runs kept the
+    single runner at 99 % until the run was cancelled (2026-11-08). A test that expects a box
+    stubs it itself (its monkeypatch runs after this one).
+    """
+    try:
+        from PyQt6.QtWidgets import QMessageBox
+    except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
+        return
+
+    def refuse(*args, **kwargs):
+        text = next((a for a in args if isinstance(a, str) and len(a) > 20), "")
+        raise RealModalBox(f"a real message box would block this test: {text[:200]!r}")
+
+    for name in ("warning", "critical", "information", "question", "about"):
+        monkeypatch.setattr(QMessageBox, name, staticmethod(refuse))
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: refuse(self.text()))
+
+
+@pytest.fixture(autouse=True)
+def _stop_download_question_never_blocks(monkeypatch):
+    """Stopping a download asks first (#991); tests that do not care stop and keep the files."""
+    try:
+        from nadare.gui.main_window import MainWindow
+    except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
+        return
+    monkeypatch.setattr(MainWindow, "_ask_cancel_choice", lambda self, *a, **k: "keep")
+
+
+@pytest.fixture(autouse=True)
 def _failure_dialog_never_blocks(monkeypatch):
     """The Retry / Open logs / Close box is modal: tests must never wait on it."""
     try:
         from nadare.gui.game_view import GameView
     except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
         return
+    # A test that drives the real box (with its own exec) reaches it here.
+    monkeypatch.setattr(GameView, "_real_failure_choice", GameView._failure_choice, raising=False)
     monkeypatch.setattr(GameView, "_failure_choice", lambda self, *a, **k: "close")
+
+
+@pytest.fixture(autouse=True)
+def _quality_cleanup_question_never_blocks(monkeypatch):
+    """Removing old resource qualities asks first: tests that do not care keep the files."""
+    try:
+        from nadare.gui.main_window import MainWindow
+    except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
+        return
+    monkeypatch.setattr(MainWindow, "_ask_remove_qualities", lambda self, *a, **k: False)
 
 
 @pytest.fixture(autouse=True)
@@ -180,6 +357,22 @@ def _one_qapplication():
         yield None
         return
     app = QApplication.instance() or QApplication([])
+    yield app
+
+
+@pytest.fixture
+def restyle_safe():
+    """For tests that restyle the whole app: end earlier tests' windows first (#1024).
+
+    ``QApplication.setStyleSheet`` and an app font change repolish every live widget; after the
+    GUI files a worker holds about 30,000 of them, and that restyle segfaulted twice on CI 3.12.
+    Not autouse: ending windows after every test would cut off workers still winding down.
+    """
+    from _qt_leftovers import end_leftover_windows
+    from PyQt6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication([])
+    end_leftover_windows()
     yield app
 
 

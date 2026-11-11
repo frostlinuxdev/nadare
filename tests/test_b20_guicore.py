@@ -430,3 +430,53 @@ def test_a_free_space_read_does_not_cancel_an_import_check(tmp_path, qapp, monke
     finally:
         dialog.deleteLater()
         qapp.processEvents()
+
+
+# ---- #951: uninstalling is easy to find, and the button says what it will do ---------------
+def test_ticking_game_files_turns_remove_into_uninstall(tmp_path, qapp, monkeypatch):
+    from types import SimpleNamespace
+
+    from PyQt6.QtWidgets import QCheckBox, QMessageBox
+
+    from nadare.core import removal
+    from nadare.gui import main_window as mw
+
+    config = Config.load(tmp_path / "config.json")
+    config.add_profile("p", backend="wine", title="P")
+    window = mw.MainWindow(config)
+    tree = SimpleNamespace(key="install_dir", path=tmp_path / "game", safe=True, reason="")
+    monkeypatch.setattr(removal, "removable_trees", lambda cfg, profile: [tree])
+    seen: dict[str, object] = {}
+
+    def fake_exec(box):
+        yes = box.button(QMessageBox.StandardButton.Yes)
+        seen["title"] = box.windowTitle()
+        seen["before"] = yes.text()
+        game_box = next(c for c in box.findChildren(QCheckBox) if "game install folder" in c.text())
+        game_box.setChecked(True)
+        seen["ticked"] = yes.text()
+        game_box.setChecked(False)
+        seen["unticked"] = yes.text()
+        return QMessageBox.StandardButton.Cancel
+
+    monkeypatch.setattr(mw.QMessageBox, "exec", fake_exec)
+    try:
+        window._on_remove_requested("p")
+        assert seen == {"title": "Uninstall or remove game", "before": "Remove",
+                        "ticked": "Uninstall", "unticked": "Remove"}
+    finally:
+        window.close()
+        for widget in qapp.topLevelWidgets():
+            if isinstance(widget, QMessageBox):
+                widget.deleteLater()
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_every_entry_point_says_uninstall():
+    from pathlib import Path
+
+    for name in ("game_view.py", "library.py", "settings.py"):
+        text = Path("src/nadare/gui", name).read_text(encoding="utf-8")
+        assert "Remove from library…" not in text
+        assert "Uninstall or remove…" in text

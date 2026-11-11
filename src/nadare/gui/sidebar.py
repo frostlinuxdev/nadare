@@ -125,7 +125,19 @@ class GameRow(QFrame):
         # Profile titles are user-controlled: never render them as rich text.
         self.title_label.setTextFormat(Qt.TextFormat.PlainText)
         self.title_label.setToolTip(Qt.convertFromPlainText(title))
-        layout.addWidget(self.title_label, 1)
+        # A second, small line says "Playing" while the game runs (#1136): words as well as
+        # the green dot, so the state never rests on colour alone. No animation.
+        self.playing_label = QLabel("Playing")
+        self.playing_label.setObjectName("GameRowPlaying")
+        self.playing_label.hide()
+        text = QVBoxLayout()
+        text.setContentsMargins(0, 0, 0, 0)
+        text.setSpacing(0)
+        text.addStretch(1)
+        text.addWidget(self.title_label)
+        text.addWidget(self.playing_label)
+        text.addStretch(1)
+        layout.addLayout(text, 1)
 
         self.dot = QLabel("")
         self.dot.setObjectName("GameRowDot")
@@ -156,7 +168,7 @@ class GameRow(QFrame):
         self.icon.setPixmap(cover_pixmap(art, ICON_SIZE, ICON_SIZE, title, radius=8))
 
     def set_state(self, status: Status | None) -> None:
-        """Show the running dot (blue) or the update dot (amber)."""
+        """Show the running dot (green) with "Playing", or the update dot (amber)."""
         if _running(status):
             kind = "running"
         elif _updatable(status):
@@ -169,6 +181,8 @@ class GameRow(QFrame):
         label = {"running": "Playing", "update": "Update available"}.get(kind, "")
         self.dot.setAccessibleName(label)
         self.dot.setToolTip(label)
+        self.playing_label.setVisible(kind == "running")
+        self.setAccessibleDescription(label)
         # Steam dims what is in the library but not on disk. Only a reported "not installed"
         # dims: no status yet (the first probe is running) or an error keeps the normal look.
         state = (status.state or "").strip().lower() if status is not None else ""
@@ -307,6 +321,9 @@ class SidebarGames(QWidget):
             and status is not None
             and (status.state or "").strip().lower() == "not_installed"
             and not _updatable(status)
+            # A running game is never hidden, whatever its state word says (FGO's adapter can
+            # report not_installed while its process runs; #1207 b231).
+            and not _running(status)
         )
 
     def _ordered(self) -> list[str]:

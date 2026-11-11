@@ -111,11 +111,15 @@ class DownloadResult:
 # ---------------------------------------------------------------------------
 # low-level HTTP
 # ---------------------------------------------------------------------------
-def _request(url: str, headers: Mapping[str, str] | None = None) -> urllib.request.Request:
+def _request(
+    url: str,
+    headers: Mapping[str, str] | None = None,
+    data: bytes | None = None,
+) -> urllib.request.Request:
     hdrs = {"User-Agent": USER_AGENT, "Accept": "*/*"}
     if headers:
         hdrs.update({str(k): str(v) for k, v in headers.items()})
-    return urllib.request.Request(url, headers=hdrs)
+    return urllib.request.Request(url, data=data, headers=hdrs)
 
 
 def _parse_retry_after(value: str | None) -> float | None:
@@ -206,16 +210,18 @@ def http_open(
     headers: Mapping[str, str] | None = None,
     timeout: int = DEFAULT_TIMEOUT,
     redirect_allowed: Callable[[str], bool] | None = None,
+    data: bytes | None = None,
 ) -> Any:
     """Open a URL, translating HTTP/URL errors into :class:`DownloadError`.
 
+    Without ``data`` the request is a GET; with it, a POST carrying that body.
     Redirects go through :class:`_SafeRedirectHandler`, so credentials never
     follow a cross-origin hop, ``https``→``http`` is refused, and a supplied
     ``redirect_allowed`` allow-list is enforced per hop.
     """
     opener = _build_opener(redirect_allowed)
     try:
-        return opener.open(_request(url, headers), timeout=timeout)  # noqa: S310
+        return opener.open(_request(url, headers, data), timeout=timeout)  # noqa: S310
     except DownloadError:
         raise
     except urllib.error.HTTPError as exc:

@@ -49,8 +49,20 @@ unverified block is cached or installed. The `.done` record of a pin-verified
 install says `"verified": "pin"` and records `pin_block_size` instead of claiming
 the archive's own member CRCs were the only check.
 
-Pins are optional: an unavailable or malformed pin document is ignored with a
-warning, and the install falls back to the normal streamed path.
+### When the pin and the publisher disagree (#1158)
+
+Before anything is downloaded, each archive of the plan is compared with its pin:
+
+| Situation | What happens |
+|---|---|
+| The pin matches (URL, size, publisher MD5) | The install is checked block by block, as above. |
+| The pin names the **same URL** but the size or publisher MD5 differs | **Refused before any file is written.** The file at a known address changed since the index last checked it: "The publisher's file for … changed since Nadare last checked it (expected …; found …). Nothing was installed. Try again later; if it keeps happening, report it." The pin job runs every few hours, so a genuine re-upload by the publisher clears itself; a refusal that persists is worth a report. |
+| The pin names a **different URL** (another version) | Installed unchecked, with one visible line: "Not checked against a published checksum: the published checksums are for another version of this game." Pins lag a game update by up to a few hours. |
+| The game has pins, but none for this archive | Installed unchecked, with the same kind of line. |
+| The game has had pins on this machine, but the document cannot be read now (offline, expired, unusable) | Installed unchecked, with the same kind of line. Refusing would break every offline install. |
+| The game never had pins | As before: no check, no line. |
+
+The line appears in the page's status and in the operation log.
 
 ## Behaviour notes
 
@@ -97,19 +109,19 @@ publishes, commits only `catalog/archive-pins/`, pushes, writes a status file an
 heartbeat. Unit files are in `packaging/systemd/nadare-pin-publisher.{service,timer}`.
 
 - **Its own checkout.** Do not share the index checkout of `refresh_index.sh`: that job stages
-  all of `catalog/` and would commit the pins under its own message. A node needs only
+  all of `catalog/` and would commit the pins under its own message. The pin job needs only
   `scripts/` and `src/` of this repo plus a clone of the index (`~/nadare-pins/`).
-- **Settings** go in `/etc/nadare-pin-publisher.env` (mode 600): `NADARE_PIN_GAMES`,
-  `NADARE_PIN_DEADLINE`, `NADARE_PIN_PUSH=0` (commit but do not push), and
-  `NADARE_PIN_HEARTBEAT_URL`, an Uptime Kuma push URL. The URL is a secret and is never
-  printed or written to the status file.
+- **Settings** come from an environment file outside the repository (mode 600):
+  `NADARE_PIN_GAMES`, `NADARE_PIN_DEADLINE`, `NADARE_PIN_PUSH=0` (commit but do not push),
+  and `NADARE_PIN_HEARTBEAT_URL`, the monitoring heartbeat URL. The URL is a secret and is
+  never printed or written to the status file.
 - **Status file** (`~/nadare-pins/status.json`): `ok`, `result` (`published`, `committed`,
   `unchanged` or `failed`), `message`, `games`, `commit`, `host`, `time`.
-- **Heartbeat.** One ping per run, `down` with the reason when the run failed. Make the Kuma
-  monitor expect a ping about every hour plus slack, so a stopped timer alerts too.
+- **Heartbeat.** One ping per run, `down` with the reason when the run failed. Configure the
+  monitor to expect a ping about every hour plus slack, so a stopped timer alerts too.
 - **Partial failures.** Each game's file is written atomically, so pins published before a
   failure are still committed and pushed; the run then reports `failed`.
-- **Fallback node.** Run the same unit on a second node with a different boot offset. The job
+- **Fallback host.** Run the same unit on a second machine with a different boot offset. The job
   is idempotent: the second node pulls the pushed document, finds the pin current and does not
   stream anything.
 - **Switching it off for everyone.** Publish the empty document

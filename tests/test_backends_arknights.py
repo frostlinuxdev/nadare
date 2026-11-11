@@ -199,7 +199,8 @@ class TestBuildLaunch:
         proton = tmp_path / "Proton-CachyOS"
         monkeypatch.setattr(wg.runners, "resolve_runner", lambda value: proton)
         monkeypatch.setattr(
-            wg.shutil, "which", lambda name: "/opt/umu-run" if name == "umu-run" else None
+            wg.shutil, "which",
+            lambda name, *_a, **_k: "/opt/umu-run" if name == "umu-run" else None,
         )
         backend = _backend(tmp_path, {"prefix": str(prefix), "runner": "MyProton"})
         argv, env, target = backend.build_launch()
@@ -217,7 +218,7 @@ class TestBuildLaunch:
         proton.mkdir()
         (proton / "proton").write_text("")
         monkeypatch.setattr(wg.runners, "resolve_runner", lambda value: proton)
-        monkeypatch.setattr(wg.shutil, "which", lambda name: None)
+        monkeypatch.setattr(wg.shutil, "which", lambda name, *_a, **_k: None)
         monkeypatch.setattr(wg.sandbox, "in_flatpak", lambda: True)
         backend = _backend(tmp_path, {"prefix": str(prefix), "runner": "MyProton"})
         argv, env, target = backend.build_launch()
@@ -233,7 +234,7 @@ class TestBuildLaunch:
         proton.mkdir()
         (proton / "proton").write_text("")
         monkeypatch.setattr(wg.runners, "resolve_runner", lambda value: proton)
-        monkeypatch.setattr(wg.shutil, "which", lambda name: None)
+        monkeypatch.setattr(wg.shutil, "which", lambda name, *_a, **_k: None)
         monkeypatch.setattr(wg.sandbox, "in_flatpak", lambda: False)
         return _backend(tmp_path, {"prefix": str(prefix), "runner": "MyProton"}), proton
 

@@ -32,7 +32,7 @@ def test_the_game_page_has_a_more_menu_with_move_and_remove(qapp):
     view = GameView()
     view.set_profile("p", {"title": "P"})
     assert view.more_button.accessibleName() == "More"
-    assert _texts(view.more_menu) == ["Move game…", "Remove from library…"]
+    assert _texts(view.more_menu) == ["Move game…", "Uninstall or remove…"]
     view.deleteLater()
 
 
@@ -81,7 +81,7 @@ def test_a_library_card_has_a_remove_item_in_its_right_click_menu(qapp):
     card = page._cards["a"]
     assert isinstance(card, GameCard)
     menu = page.card_menu("a")
-    assert _texts(menu) == ["Open", "Remove from library…"]
+    assert _texts(menu) == ["Open", "Uninstall or remove…"]
     menu.actions()[1].trigger()
     assert removed == ["a"]
     page.deleteLater()

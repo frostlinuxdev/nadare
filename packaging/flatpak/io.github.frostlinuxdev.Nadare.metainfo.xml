@@ -11,15 +11,34 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-only</project_license>
   <description>
-    <p>Nadare installs, updates and launches anime gacha games on Linux:
-    Arknights, Stella Sora, Chaos Zero Nightmare and Fate/Grand Order (via Lepton),
-    with official news and art from each publisher.</p>
+    <p>Nadare installs and runs anime games on Linux. Open the Store, pick a game,
+    press Install, then press Play. Nadare downloads the game from its publisher,
+    sets up Wine/Proton for you and keeps the game updated.</p>
+    <p>Games include Chaos Zero Nightmare, Arknights, Arknights: Endfield, Stella Sora,
+    Punishing: Gray Raven, Wuthering Waves, Genshin Impact, Honkai: Star Rail,
+    Zenless Zone Zero, Honkai Impact 3rd, Brown Dust 2, Aether Gazer, Girls' Frontline 2,
+    Neverness to Everness, Mongil: Star Dive, NIKKE and more.</p>
     <p>Beta: expect bugs.</p>
   </description>
+  <screenshots>
+    <screenshot type="default">
+      <caption>The Store: every supported game with its tier and install size</caption>
+      <image>https://frostlinuxdev.github.io/images/nadare/appstream/store.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>A game's Store page: how it installs and how big it is</caption>
+      <image>https://frostlinuxdev.github.io/images/nadare/appstream/store-detail.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>An installed game's page: Play, login and the game's news</caption>
+      <image>https://frostlinuxdev.github.io/images/nadare/appstream/game-page.png</image>
+    </screenshot>
+  </screenshots>
   <launchable type="desktop-id">io.github.frostlinuxdev.Nadare.desktop</launchable>
   <content_rating type="oars-1.1"/>
   <releases>
     <!-- Keep in sync with pyproject.toml [project].version. -->
+    <release version="0.1.0b22" date="2026-11-11"/>
     <release version="0.1.0b21" date="2026-11-07"/>
     <release version="0.1.0b20" date="2026-11-03"/>
     <release version="0.1.0b19" date="2026-10-30"/>

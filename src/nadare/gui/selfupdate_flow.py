@@ -43,12 +43,13 @@ class _Task(QRunnable):
     def _on_event(self, event: Event) -> None:
         data = event.data or {}
         if event.kind == "progress" and "done" in data:
-            self._emit(self._signals.progress, int(data["done"]), int(data.get("total") or 0))
+            self._emit("progress", int(data["done"]), int(data.get("total") or 0))
 
-    def _emit(self, signal: Any, *args: object) -> None:
-        # The receiver may be gone when the app quits during an update.
+    def _emit(self, name: str, *args: object) -> None:
+        # The receiver may be gone when the app quits during an update. The signal is looked up
+        # inside the guard: reading ``self._signals.<name>`` itself raises once it is deleted.
         with contextlib.suppress(RuntimeError):
-            signal.emit(*args)
+            getattr(self._signals, name).emit(*args)
 
     def run(self) -> None:  # noqa: D102 - QRunnable entry point
         steps = self._steps
@@ -69,18 +70,22 @@ class _Task(QRunnable):
             )
             if self._token.cancelled:
                 raise Cancelled("cancelled")
-            new = steps.install_update(tmp, target, urls.filename)
+            # The index's hash is not signed: the release key's signature must match too.
+            steps.verify_signature(urls, tmp)
+            if self._token.cancelled:
+                raise Cancelled("cancelled")
+            new = steps.install_update(tmp, target, urls.filename, sha256=expected.sha256)
         except Cancelled:
             self._cleanup(tmp)
-            self._emit(self._signals.cancelled)
+            self._emit("cancelled")
         except Exception as exc:  # noqa: BLE001 - always shown to the user, never lost
             log.debug("self-update failed", exc_info=True)
             self._cleanup(tmp)
-            self._emit(self._signals.failed, str(exc) or exc.__class__.__name__)
+            self._emit("failed", str(exc) or exc.__class__.__name__)
         else:
-            self._emit(self._signals.installed, new)
+            self._emit("installed", new)
         finally:
-            self._emit(self._signals.finished)
+            self._emit("finished")
 
     @staticmethod
     def _cleanup(tmp: Path | None) -> None:

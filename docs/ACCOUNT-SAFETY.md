@@ -59,8 +59,7 @@ returns `44010`, stop and explain instead of retrying.
 ## 2. FGO (lepton-fgo)
 
 FGO's game data on disk is sensitive: treat the whole FGO app-data area like a
-credential. Implementation details and the threat analysis are kept in
-private developer notes, not in this repository.
+credential.
 
 Rules for Nadare:
 

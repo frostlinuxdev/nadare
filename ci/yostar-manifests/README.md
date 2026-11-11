@@ -47,17 +47,10 @@ Base: `https://api-launcher-en.yo-star.com`.
 2. `GET /api/launcher/game/config/json?version=..&file_path=..` → `data.url`.
 3. `GET <data.url>` (public CDN, unsigned) → `{"source", "file": [...]}`.
 
-Calls 1 and 2 are signed:
-
-```
-head = {"game_tag": tag, "time": unix_seconds, "version": launcher_version}
-sign = md5(json.dumps(head, separators=(",", ":")) + data_str + salt)
-Authorization = json.dumps({"head": head, "sign": sign}, separators=(",", ":"))
-Accept: application/json, text/plain, */*
-```
-
-`data_str` is empty for these GETs. Errors come back as HTTP **200** with
-`{"code": 403, "msg": "..."}`; any response without `data` is treated as a
+Calls 1 and 2 carry a signed `Authorization` header, built by the publishing job from
+per-game signing material that is **not in this repository**. The exact construction
+lives with that job; this file documents only what a manifest consumer needs. Errors come
+back as HTTP **200** with `{"code": 403, "msg": "..."}`; any response without `data` is treated as a
 failure and the code/message is surfaced.
 
 ## Configuration (environment)
@@ -112,8 +105,10 @@ propagate so CI fails instead of silently absorbing it.
 
 ## Secrets to set in CI
 
-- `SALT_STELLASORA_EN` — Stella Sora signing salt.
-- `SALT_ARKNIGHTS_EN` — Arknights signing salt.
+The values live only in the job's CI secrets; nothing here is committed.
+
+- `SALT_STELLASORA_EN` — per-game signing material.
+- `SALT_ARKNIGHTS_EN` — per-game signing material.
 - `MANIFESTS_REPO` — git URL of the repository that hosts the published JSON.
 - `MANIFESTS_TOKEN` — an HTTPS token allowed to clone/push `MANIFESTS_REPO`
   (optional). When set it is handed to git as a credential helper via the

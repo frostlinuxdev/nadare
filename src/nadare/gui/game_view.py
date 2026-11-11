@@ -25,6 +25,7 @@ from PyQt6.QtGui import (
     QPixmap,
 )
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QFrame,
     QGridLayout,
@@ -42,14 +43,22 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import steamsetup, userns
-from ..core.backends import Status, page_notice, supports_news, supports_update
+from ..core import friendly, hostlibs, steamsetup, userns
+from ..core.backends import (
+    Status,
+    install_choice_label,
+    page_notice,
+    page_summary,
+    supports_news,
+    supports_update,
+)
 from ..core.eta import EtaEstimator, SpeedMeter, format_eta, format_speed
 from ..core.events import Event
-from ..core.gamefacts import InstallFacts, SandboxFacts
+from ..core.exitcode import STOPPED_EXIT_CODES, crash_signal, play_time
+from ..core.gamefacts import InstallFacts, SandboxFacts, primary_operation
 from ..core.news import CREDIT
 from .images import ImageLoader
-from .library import backend_label, profile_art_candidates, profile_title
+from .library import FlowLayout, backend_label, profile_art_candidates, profile_title
 from .logs_dialog import LogsDialog
 from .theme import ACCENT, badge_style, cover_pixmap, set_state_property
 from .userns_dialog import UsernsDialog
@@ -77,6 +86,7 @@ PRIMARY_LABELS = {
     "stop": "PLAYING",
     "settings": "SET GAME FILE IN SETTINGS",
     "retry": "RETRY",
+    "remove": "REMOVE THIS GAME…",
 }
 
 #: User-facing operation names used in dialogs (never the raw operation id).
@@ -98,9 +108,6 @@ def operation_title(operation: str) -> str:
     return OPERATION_TITLES.get(operation, operation.capitalize())
 
 
-#: Operations that log a line per file (tens of thousands in a big install): their output starts
-#: folded away behind "Show output"; an error still opens it.
-_QUIET_OUTPUT_OPERATIONS = frozenset({"install", "update", "repair"})
 
 #: Busy operation -> pill state shown while it runs.
 _BUSY_STATES = {
@@ -141,12 +148,15 @@ _CANCEL_GRACE_S = 0.5
 #: non-zero exit is a failed launch. Stop-requested signal codes are always normal.
 _LAUNCH_EXIT_GRACE_S = 30.0
 
-#: Exit codes from being stopped by a signal (SIGINT, SIGKILL, SIGTERM), shell and raw form.
-#: A crash signal (SIGSEGV, SIGABRT...) is not in here: that is a failed launch.
-_STOPPED_EXIT_CODES = frozenset({130, 137, 143, -2, -9, -15})
-
 #: Operations whose success makes the status shown before them out of date.
 _STATE_CHANGING = frozenset({"install", "update", "repair", "remake_prefix", "uninstall"})
+
+#: Operations whose success is said on the progress line afterwards: OUTPUT is folded (#993),
+#: so its "done" line alone would leave no sign that an install or update worked.
+_ANNOUNCED_ON_SUCCESS = frozenset({"install", "update", "repair", "verify", "remake_prefix"})
+
+#: A backend's own last line for a launch (CZN); the page then adds no second one.
+_GAME_END_LINES = frozenset({"game exited normally", "game stopped"})
 
 #: Operations the failure dialog and the RETRY button can run again as they were.
 _RETRYABLE = frozenset(
@@ -644,6 +654,8 @@ class GameView(QWidget):
     """The single-game launch page."""
 
     action_requested = pyqtSignal(str)  # operation name
+    notice_preference_changed = pyqtSignal(bool)  # "How this game runs" opened or closed
+    console_preference_changed = pyqtSignal(bool)  # the user pressed Show/Hide output
     cancel_requested = pyqtSignal()
     skip_step_requested = pyqtSignal()
     pause_requested = pyqtSignal()
@@ -677,6 +689,7 @@ class GameView(QWidget):
         self._busy_op: str | None = None
         self._sandbox_supported = False
         self._sandbox_blocked = ""
+        self._sandbox_ready = True
         #: Whether the running launch was started sandboxed (None when not running or unknown).
         self._sandbox_active: bool | None = None
         self._paused_op: str | None = None
@@ -689,7 +702,15 @@ class GameView(QWidget):
         self._news_shown = False  # intended news visibility (hidden while busy)
         self._started_at = 0.0
         self._last_step_at = 0.0  # last phase step; play time is counted from it
-        self._console_expanded = True
+        # OUTPUT starts folded (#993): it is noise unless something fails. The user's own
+        # Show/Hide choice is kept for every game and operation (the window saves it).
+        self._console_preference = False
+        self._console_expanded = False
+        self._last_done = ""  # the running operation's "done" line, said again when it ends
+        self._last_line = ""  # the console's newest line, so a repeated check error shows once
+        # Something the user asked for (a RETRY of a check) may fail with the same words again:
+        # that failure is news and is shown (round 5).
+        self.action_requested.connect(self._forget_last_line)
         self.news_columns = 1
         self._profile_seq = 0
         self._media_seq = 0
@@ -740,7 +761,7 @@ class GameView(QWidget):
         self.more_menu.addAction("Move game…").triggered.connect(
             lambda: self.move_requested.emit(self._profile)
         )
-        self.more_menu.addAction("Remove from library…").triggered.connect(
+        self.more_menu.addAction("Uninstall or remove…").triggered.connect(
             lambda: self.remove_requested.emit(self._profile)
         )
         self.more_button.setMenu(self.more_menu)
@@ -766,8 +787,7 @@ class GameView(QWidget):
         self.title.setWordWrap(True)
         copy.addWidget(self.title)
 
-        meta_row = QHBoxLayout()
-        meta_row.setSpacing(9)
+        meta_row = FlowLayout(spacing=9)  # wraps in a narrow window, like the buttons below
         self.badge = QLabel("")
         self.badge.setObjectName("Pill")
         meta_row.addWidget(self.badge)
@@ -783,11 +803,16 @@ class GameView(QWidget):
         self.version_label = QLabel("")
         self.version_label.setObjectName("Dim")
         meta_row.addWidget(self.version_label)
+        # The resource quality a game was installed with (WuWa SD/HD/UHD, #990).
+        self.choice_label = QLabel("")
+        self.choice_label.setObjectName("Dim")
+        self.choice_label.setToolTip("Change it in Settings → Game options.")
+        self.choice_label.setVisible(False)
+        meta_row.addWidget(self.choice_label)
         self.account_label = QLabel("")
         self.account_label.setObjectName("Muted")
         self.account_label.setVisible(False)
         meta_row.addWidget(self.account_label)
-        meta_row.addStretch(1)
         copy.addLayout(meta_row)
 
         self.detail_label = QLabel("")
@@ -800,8 +825,12 @@ class GameView(QWidget):
         self.notice_label.setObjectName("Hint")
         self.notice_label.setWordWrap(True)
         self.notice_label.setTextFormat(Qt.TextFormat.RichText)
-        self.notice_label.setOpenExternalLinks(True)
+        # Internal links fold the notice (#992); outside ones go through _open_external.
+        self.notice_label.setOpenExternalLinks(False)
+        self.notice_label.linkActivated.connect(self._on_notice_link)
         self.notice_label.setVisible(False)
+        self._notice_kind = ""
+        self._notice_open: bool | None = None  # None: whole before install, short after
         copy.addWidget(self.notice_label)
         copy.addStretch(1)
 
@@ -874,8 +903,10 @@ class GameView(QWidget):
         self.queue_row.setVisible(False)
         copy.addWidget(self.queue_row)
 
-        secondary = QHBoxLayout()
-        secondary.setSpacing(8)
+        # Wraps onto a second line in a narrow window: a single row (up to eight buttons) beside
+        # the cover made the page wider than the smallest window, and the header's Settings and
+        # More buttons (Remove, Move) fell off the right edge (b23-rc2 click-through).
+        secondary = FlowLayout(spacing=8)
         self.login = QPushButton("Log in")
         self.login.setObjectName("GhostButton")
         self.login.clicked.connect(lambda: self.action_requested.emit("login"))
@@ -927,7 +958,6 @@ class GameView(QWidget):
             self.report,
         ):
             secondary.addWidget(button)
-        secondary.addStretch(1)
         copy.addLayout(secondary)
 
         self.remember = QCheckBox(_REMEMBER_TEXT)
@@ -936,7 +966,7 @@ class GameView(QWidget):
         self.remember.clicked.connect(self._on_remember_clicked)
         copy.addWidget(self.remember)
 
-        self.sandbox = QCheckBox("Sandbox: hide my home folder from the game")
+        self.sandbox = QCheckBox("Sandbox: hide my home folder")
         self.sandbox.setToolTip(_SANDBOX_TIP)
         self.sandbox.setVisible(False)
         self.sandbox.clicked.connect(self._on_sandbox_clicked)
@@ -1072,21 +1102,51 @@ class GameView(QWidget):
         self.console.setPlaceholderText("Nadare's progress messages will appear here…")
         root.addWidget(self.console, 1)
 
-        self._set_console_expanded(True)
+        self._set_console_expanded(self._console_preference)
         self._refresh_actions()
 
     def _set_page_notice(self, kind: str) -> None:
-        notice = page_notice(kind)
+        self._notice_kind = kind
+        self._render_notice()
+
+    def _render_notice(self) -> None:
+        """The backend's notice: whole before the game is installed, one line after (#992)."""
+        notice = page_notice(self._notice_kind)
         if not notice:
             self.notice_label.clear()
             self.notice_label.setVisible(False)
             return
         text, url = notice[0], notice[1]
         label = notice[2] if len(notice) > 2 else "Learn more"
-        self.notice_label.setText(
-            f'{html.escape(text)} <a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>'
+        summary = page_summary(self._notice_kind)
+        foldable = bool(summary) and summary != text.strip()
+        status = getattr(self, "_status", None)
+        installed = status is not None and status.state != "not_installed"
+        whole = not foldable or (
+            self._notice_open if self._notice_open is not None else not installed
         )
+        link = f'<a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>'
+        if not foldable:
+            body = f"{html.escape(text)} {link}"
+        elif whole:
+            body = f'{html.escape(text)} <a href="nadare:less">Show less</a> · {link}'
+        else:
+            body = f'{html.escape(summary)} <a href="nadare:more">How this game runs</a> · {link}'
+        self.notice_label.setText(body)
         self.notice_label.setVisible(True)
+
+    def _on_notice_link(self, href: str) -> None:
+        if href in ("nadare:more", "nadare:less"):
+            self._notice_open = href == "nadare:more"
+            self.notice_preference_changed.emit(self._notice_open)
+            self._render_notice()
+            return
+        self._open_external(href)
+
+    def set_notice_preference(self, expanded: bool | None) -> None:
+        """The saved "How this game runs" choice; ``None`` lets the install state decide."""
+        self._notice_open = expanded
+        self._render_notice()
 
     # ---- profile -----------------------------------------------------------
     def set_profile(
@@ -1128,18 +1188,25 @@ class GameView(QWidget):
         self.backend_label.setVisible(kind.strip().lower() not in _SELF_EVIDENT_BACKENDS)
         self._set_page_notice(str(profile.get("backend") or ""))
         self.version_label.setText("")
+        choice = install_choice_label(kind, profile)
+        self.choice_label.setText(choice)
+        self.choice_label.setVisible(bool(choice))
         self.hero.set_source(None)
         self.banners.set_banners([])
         self.console.clear()
+        self._last_line = ""
         self.step_label.setText("")
         self.elapsed_label.setText("")
         self.progress.setVisible(False)
         self.progress.setValue(0)
         self._set_badge("checking", "")
         self._set_detail("")
+        # Until this game's status lands, the previous game's "Logged in as …" must not show.
+        self.account_label.setText("")
+        self.account_label.setVisible(False)
         self._hide_qr()
         self._clear_news()
-        self._set_console_expanded(True)
+        self._set_console_expanded(self._console_preference)
 
         self._news_fallback = list(profile_art_candidates(profile))
         self._load_profile_art(self._news_fallback, title)
@@ -1206,6 +1273,8 @@ class GameView(QWidget):
         self._awaiting_status = False
         self._apply_status(status)
         self._refresh_actions()
+        self._apply_sandbox()  # the switch locks while the game runs
+        self._render_notice()  # installed or not decides how much of it shows
 
     def _apply_status(self, status: Status) -> None:
         self._status = status
@@ -1219,9 +1288,17 @@ class GameView(QWidget):
         # Only "now playing" says something; the other two just repeat the page.
         self.kicker.setVisible(playing)
         self._set_badge(status.state, status.message)
-        self.version_label.setText(_version_text(status.version))
+        version = _version_text(status.version)
+        data = status.data or {}
+        latest = _version_text(data.get("latest_version")) if data.get("update_available") else ""
+        if version and latest:
+            version = f"{version} · {latest} available"
+        self.version_label.setText(version)
         self._set_account(status)
         self._set_detail(status.message or "")
+        # The notice folds to one line once the game is installed; the snapshot status
+        # arrives after set_profile has already rendered the whole notice.
+        self._render_notice()
 
     def _set_account(self, status: Status) -> None:
         """Say whether the account is logged in, for backends that track it."""
@@ -1251,23 +1328,7 @@ class GameView(QWidget):
     def _primary_op(self) -> str | None:
         if self._busy_op is not None or self._awaiting_status:
             return None
-        status = self._status
-        if status is None:
-            return None
-        if status.running or status.state == "running":
-            return "stop"
-        if status.state == "error":
-            return "retry"
-        if status.state == "not_installed":
-            if (status.data or {}).get("can_install") is False:
-                return "settings"
-            return "install"
-        data = status.data or {}
-        if data.get("update_available"):
-            return "update"
-        if data.get("login_required") and not data.get("logged_in"):
-            return "login"
-        return "launch"
+        return primary_operation(self._status)
 
     def _refresh_actions(self) -> None:
         self._refresh_steam_setup()
@@ -1330,16 +1391,38 @@ class GameView(QWidget):
         running = bool(status and (status.running or status.state == "running"))
         # Signing in does not need the game files: STOVE and the login page are
         # remote, and an install started later keeps the saved login.
-        self.login.setEnabled(bool(status) and not running)
+        facts = (status.data if status else {}) or {}
+        # A backend whose sign-in runs the game's own service (NIKKE) says it needs the install.
+        can_login = facts.get("can_login") is not False
+        paused = self._paused_op is not None
+        self.login.setEnabled(bool(status) and not running and can_login and not paused)
+        label = facts.get("login_label")
+        self.login.setText(label if isinstance(label, str) and label else "Log in")
+        self.login.setToolTip(
+            "Resume or cancel the paused download first."
+            if paused
+            else ""
+            if can_login
+            else "Install the game first, then log in."
+        )
         # Log out only needs an idle account: it must be reachable even when the
-        # game is not installed (e.g. to drop a saved login).
-        self.logout.setEnabled(bool(status) and not running)
+        # game is not installed (e.g. to drop a saved login), unless the backend
+        # knows there is no sign-in to drop.
+        # An expired saved login is still a saved login: Log out clears it.
+        signed_out = facts.get("logged_in") is False and not facts.get("login_expired")
+        self.logout.setEnabled(bool(status) and not running and not signed_out and not paused)
+        self.logout.setToolTip("Resume or cancel the paused download first." if paused else "")
         can_update = supports_update(str(self._profile_data.get("backend") or ""))
         if ((status.data if status else {}) or {}).get("can_update") is False:
             can_update = False
-        self.update_btn.setEnabled(installed and not running and can_update)
+        # Update starts its own download, which would drop the paused one's RESUME entry.
+        self.update_btn.setEnabled(
+            installed and not running and can_update and self._paused_op is None
+        )
         self.update_btn.setToolTip(
-            ""
+            "Resume or cancel the paused download first."
+            if can_update and self._paused_op
+            else ""
             if can_update
             else "Nadare cannot update this game; update it in Steam or its own launcher."
         )
@@ -1398,13 +1481,20 @@ class GameView(QWidget):
             box.blockSignals(False)
         self.remember_toggled.emit(bool(checked))
 
-    def set_sandbox(self, supported: bool, checked: bool, blocked: str = "") -> None:
-        """Show the Sandbox switch for games that offer it; ``blocked`` greys it out with why."""
+    def set_sandbox(
+        self, supported: bool, checked: bool, blocked: str = "", *, ready: bool = True
+    ) -> None:
+        """Show the Sandbox switch for games that offer it; ``blocked`` greys it out with why.
+
+        ``ready`` is False when no bubblewrap exists here: the switch keeps the choice, the pill
+        does not claim protection the next launch cannot give.
+        """
         self.sandbox.blockSignals(True)
         self.sandbox.setVisible(bool(supported))
         self.sandbox.setChecked(bool(checked))
         self._sandbox_supported = bool(supported)
         self._sandbox_blocked = blocked
+        self._sandbox_ready = bool(ready)
         self.sandbox.blockSignals(False)
         self._apply_sandbox()
 
@@ -1412,9 +1502,12 @@ class GameView(QWidget):
         return SandboxFacts(
             supported=self._sandbox_supported,
             chosen=self.sandbox.isChecked(),
-            running=self._busy_op == "launch",
+            # A game already running when the page opened counts too (final round).
+            running=self._busy_op == "launch"
+            or bool(self._status and (self._status.running or self._status.state == "running")),
             active=self._sandbox_active,
             blocked=self._sandbox_blocked,
+            ready=self._sandbox_ready,
         )
 
     def _apply_sandbox(self) -> None:
@@ -1462,6 +1555,8 @@ class GameView(QWidget):
             self.action_requested.emit("status")
         elif op == "settings":
             self.settings_requested.emit()
+        elif op == "remove":
+            self.remove_requested.emit(self._profile)
         elif op:
             self.action_requested.emit(op)
 
@@ -1485,11 +1580,18 @@ class GameView(QWidget):
         resumed = self._paused_op is not None
         self._paused_op = None
         self._failed_op = None
+        self._last_done = ""
         self._queue_waiting = False
         self._busy_op = operation
         if operation == "launch":
             # What this launch has is fixed now; the switch can change later, the process cannot.
-            self._sandbox_active = bool(self._sandbox_supported and self.sandbox.isChecked())
+            # Only a guess until the backend reports: never one the machine cannot keep.
+            self._sandbox_active = bool(
+                self._sandbox_supported
+                and self.sandbox.isChecked()
+                and self._sandbox_ready
+                and not self._sandbox_blocked
+            )
         self._primary_grace_until = time.monotonic() + _CANCEL_GRACE_S
         self.news_frame.setVisible(False)
         self._started_at = time.time()
@@ -1515,7 +1617,7 @@ class GameView(QWidget):
         )
         self._hide_qr()
         self._timer.start()
-        self._set_console_expanded(operation not in _QUIET_OUTPUT_OPERATIONS)
+        self._set_console_expanded(self._console_preference)
         self._refresh_actions()
 
     def set_waiting(self, operation: str, ahead: int = 0, can_now: bool = False) -> None:
@@ -1590,17 +1692,32 @@ class GameView(QWidget):
         self._refresh_actions()
         if operation == "launch":
             if exit_code == 0:
-                self._append_line("game exited normally", "done")
+                if self._last_done.lower() not in _GAME_END_LINES:  # CZN says it itself
+                    self._append_line("game exited normally", "done")
+                return
+            crash = "" if stop_requested else crash_signal(exit_code)
+            if crash and elapsed >= _LAUNCH_EXIT_GRACE_S:
+                # A real session that ended in a crash signal is not a normal quit (#1031).
+                self.show_error(
+                    "The game crashed",
+                    f"The game crashed ({crash}, exit code {exit_code}) after "
+                    f"{play_time(elapsed)}. Open the logs for details.",
+                    retry_op=retry_op,
+                    failed=True,
+                )
                 return
             # Many Wine/Proton games and launchers exit non-zero on quit, and
             # STOP ends them with a signal code. Neither is a failed launch.
             if (
                 stop_requested
-                or exit_code in _STOPPED_EXIT_CODES
+                or exit_code in STOPPED_EXIT_CODES
                 or elapsed >= _LAUNCH_EXIT_GRACE_S
             ):
                 self._append_line(f"Game closed (exit code {exit_code})", "status")
                 return
+        if exit_code == 0 and operation in _ANNOUNCED_ON_SUCCESS:
+            done = self._last_done or f"{operation_title(operation)} finished"
+            self.step_label.setText(f"✓ {done}")  # cleared by the next operation
         if exit_code != 0:
             self.show_error(
                 "Operation failed",
@@ -1610,7 +1727,11 @@ class GameView(QWidget):
                 failed=True,
             )
 
-    def fail(self, message: str) -> None:
+    def fail(self, message: str, *, quiet: bool = False) -> None:
+        """End the busy state after a failure; ``quiet`` writes it to OUTPUT without a box.
+
+        Quiet is for a failure another dialog explains next (the game's terms).
+        """
         retry_op = self._busy_op if self._busy_op in _RETRYABLE else None
         self._paused_op = None
         self._busy_op = None
@@ -1620,6 +1741,9 @@ class GameView(QWidget):
         self._hide_qr()
         self._restore_badge()
         self._refresh_actions()
+        if quiet:
+            self._append_line(message, "error")
+            return
         self.show_error("Nadare could not finish", message, retry_op=retry_op, failed=True)
 
     def cancelled(self) -> None:
@@ -1674,6 +1798,10 @@ class GameView(QWidget):
     # ---- events ------------------------------------------------------------
     def append_event(self, event: Event) -> None:
         kind = event.kind
+        data = event.data or {}
+        if self._busy_op == "launch" and "sandbox" in data:
+            self._sandbox_active = bool(data["sandbox"])
+            self._apply_sandbox()
         if kind in ("step", "status", "done", "error"):
             # Only a step that says so can be skipped, and only until the next step or the end.
             self.skip_button.setHidden(not (kind == "step" and (event.data or {}).get("skippable")))
@@ -1703,9 +1831,14 @@ class GameView(QWidget):
                 self._set_detail(event.message)
         elif kind == "done":
             self._hide_qr()
+            self._last_done = event.message or ""
             self._append_line(event.message or "done", "done")
         elif kind == "error":
             self._hide_qr()
+            if self._busy_op is None and event.message == self._last_line:
+                # A background check (status, news) that fails again with the same words
+                # every time would fill OUTPUT with one line per check (b23-rc4 click-through).
+                return
             self._set_console_expanded(True)
             self._append_line(event.message, "error")
         else:
@@ -1834,8 +1967,17 @@ class GameView(QWidget):
         key = (
             self._profile,
             available,
+            # Every field a card shows, or a re-dated or re-categorised article keeps its old
+            # values after a silent refresh (#975).
             tuple(
-                (item.get("id"), item.get("title"), item.get("image_path"), item.get("url"))
+                (
+                    item.get("id"),
+                    item.get("title"),
+                    item.get("image_path"),
+                    item.get("url"),
+                    item.get("category"),
+                    item.get("published_at"),
+                )
                 for item in items
             ),
         )
@@ -1853,8 +1995,6 @@ class GameView(QWidget):
             self.news_retry.setVisible(False)
             self._set_news_visible(True)
             self._relayout_news()
-            if self._busy_op is None:
-                self._set_console_expanded(False)
         else:
             has_feed = supports_news(str(self._profile_data.get("backend") or ""))
             self.news_hint.setText("News unavailable")
@@ -1870,7 +2010,6 @@ class GameView(QWidget):
             # Nothing to show: hide the section entirely only when the backend
             # has no feed at all; otherwise keep the reason and Retry, plus the log.
             self._set_news_visible(available or has_feed)
-            self._set_console_expanded(True)
 
     def _set_news_visible(self, shown: bool) -> None:
         """Remember the wanted visibility; the section stays hidden during an
@@ -1911,10 +2050,19 @@ class GameView(QWidget):
 
     def _clear_console(self) -> None:
         self.console.clear()
+        self._last_line = ""
         self._set_console_expanded(self._console_expanded)
 
     def _toggle_console(self) -> None:
         self._set_console_expanded(not self._console_expanded)
+        self._console_preference = self._console_expanded
+        self.console_preference_changed.emit(self._console_expanded)
+
+    def set_console_preference(self, expanded: bool) -> None:
+        """The saved Show/Hide output choice; an error still opens the output either way."""
+        self._console_preference = bool(expanded)
+        if self._busy_op is None:
+            self._set_console_expanded(self._console_preference)
 
     def _open_external(self, url: str) -> None:
         if not url:
@@ -1924,9 +2072,17 @@ class GameView(QWidget):
             return
         QDesktopServices.openUrl(qurl)
 
+    def append_line(self, message: str, kind: str = "log") -> None:
+        """Add one line to the page console (for results that arrive outside an operation)."""
+        self._append_line(message, kind)
+
+    def _forget_last_line(self, *_args: object) -> None:
+        self._last_line = ""
+
     def _append_line(self, message: str, kind: str = "log") -> None:
         if not message:
             return
+        self._last_line = str(message)
         color = _LOG_COLORS.get(kind, _LOG_COLORS["log"])
         safe = html.escape(str(message)).replace("\n", "<br>")
         self.console.appendHtml(f'<span style="color:{color}">{safe}</span>')
@@ -1959,14 +2115,27 @@ class GameView(QWidget):
 
     def _failure_choice(self, title: str, message: str, can_retry: bool) -> str:
         """Ask what to do about a failure: ``"retry"``, ``"logs"`` or ``"close"``."""
-        box = QMessageBox(QMessageBox.Icon.Warning, title, message, parent=self)
+        plain, details = friendly.split(message)
+        box = QMessageBox(QMessageBox.Icon.Warning, title, plain, parent=self)
+        if details:
+            box.setDetailedText(details)  # the raw text, behind "Show Details..."
         retry = box.addButton("Retry", QMessageBox.ButtonRole.AcceptRole) if can_retry else None
         logs = box.addButton("Open logs", QMessageBox.ButtonRole.ActionRole)
+        # Missing 32-bit libraries come with a command: copy it instead of retyping (#338 F-08).
+        command = hostlibs.install_command_in(message)
+        copy = (
+            box.addButton("Copy install command", QMessageBox.ButtonRole.ActionRole)
+            if command
+            else None
+        )
         close = box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(retry or close)
         box.setEscapeButton(close)
         box.exec()
         clicked = box.clickedButton()
+        if copy is not None and clicked is copy:
+            QApplication.clipboard().setText(command)
+            return "close"
         if retry is not None and clicked is retry:
             return "retry"
         return "logs" if clicked is logs else "close"

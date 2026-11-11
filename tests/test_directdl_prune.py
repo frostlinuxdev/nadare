@@ -142,3 +142,23 @@ def test_the_second_sync_has_nothing_left_to_do(server, tmp_path):
     plan = dd.Plan("T", "2", archives=(second,))
     dd.sync(plan, tmp_path)
     assert dd.sync(plan, tmp_path) == {"downloaded": 0, "skipped": 1}
+
+
+def test_an_archive_named_with_a_folder_keeps_its_files_on_the_next_sync(server, tmp_path):
+    """Its record lives in a sub-folder of the state dir; the prune must count it as an owner.
+
+    Archive names may hold folders (directdl documents it for Brown Dust 2's relative names).
+    The prune only globbed the top level, so such an archive's own files looked unowned and a
+    second sync of the same version deleted them.
+    """
+    blob = make_zip({"game.exe": b"MZ", "data/x.bin": b"123"})
+    srv = server({"/sub/g.zip": blob})
+    archive = dd.Archive(
+        "sub/g.zip", dd.RemoteFile("sub/g.zip", srv.url + "/sub/g.zip", len(blob), md5=md5(blob))
+    )
+    plan = dd.Plan("T", "1", archives=(archive,))
+    dd.sync(plan, tmp_path)
+    assert (tmp_path / "game.exe").is_file()
+    dd.sync(plan, tmp_path)
+    assert (tmp_path / "game.exe").is_file()
+    assert (tmp_path / "data" / "x.bin").read_bytes() == b"123"
