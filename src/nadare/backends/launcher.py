@@ -591,20 +591,27 @@ class NikkeBackend(LauncherBackend):
             self._fetch_client_latest()
         except (railrepo.RailError, OSError, ValueError) as exc:
             log.debug("NIKKE: update check failed: %s", exc)
+        if self._launcher_dir() is not None:
+            try:
+                self._fetch_launcher_latest()
+            except (railrepo.RailError, OSError, ValueError) as exc:
+                log.debug("NIKKE: launcher check failed: %s", exc)
 
     def _client_update_status(self, result: Status) -> None:
         """Purely local: compare nikke.exe with the cached published client."""
         if not self._launcherless_wanted():
             return
         latest = self._read_client_latest()
-        outdated = self._client_outdated(latest)
+        outdated = self._client_outdated(latest) or self._launcher_outdated(
+            self._read_launcher_latest()
+        )
         result.data["update_available"] = outdated
         if outdated and latest is not None and latest.get("version"):
             result.data["latest_version"] = latest["version"]
 
-    def _mark_update_incomplete(self) -> Path:
-        """Write the "client unfinished" marker; raises BackendError when it cannot."""
-        marker = self._update_marker()
+    def _mark_update_incomplete(self, marker: Path | None = None) -> Path:
+        """Write the "update unfinished" marker; raises BackendError when it cannot."""
+        marker = marker or self._update_marker()
         try:
             marker.parent.mkdir(parents=True, exist_ok=True)
             # The folder is the game's (writable from the Sandbox): never follow a link there.
@@ -665,6 +672,7 @@ class NikkeBackend(LauncherBackend):
         ):
             raise BackendError("Stop the game before updating NIKKE", 8)
         self._update_client_direct()
+        self._update_launcher_if_needed(fetch=True)
 
     def _update_before_play(self) -> None:
         """A launcherless Play on an outdated client updates it first (a fresh check).
@@ -718,6 +726,11 @@ class NikkeBackend(LauncherBackend):
         return self._launcherless_cache() is not None
 
     def _update_before_play_locked(self) -> None:
+        self._update_client_before_play()
+        checks = bool(self.ctx.config.data.get("check_updates", True))
+        self._update_launcher_if_needed(fetch=checks)
+
+    def _update_client_before_play(self) -> None:
         if not self._client_exe().is_file() and self._client_missing_but_signed_in():
             self._update_client_direct(missing=True)
             return
@@ -734,6 +747,126 @@ class NikkeBackend(LauncherBackend):
             return
         if self._client_outdated(latest):
             self._update_client_direct()
+
+    # ------------------------------------------------------------- launcher (#1245)
+    # Launcher-free play never runs the launcher, so its folder (with the intl_service sign-in
+    # the launcher-free sign-in uses) would never update. Nadare keeps it current the same way
+    # as the client: compare a few key files with the publisher's launcher manifest and, when
+    # they differ, install_launcher over the folder (only changed files are fetched).
+
+    def _launcher_dir(self) -> Path | None:
+        """The launcher folder Nadare manages (``<root>/Launcher``); ``None`` if elsewhere."""
+        launcher = self.find_launcher()
+        if launcher is None:
+            return None
+        folder = launcher.parent
+        try:
+            if folder.resolve() != (self._launcher_root() / "Launcher").resolve():
+                return None
+        except OSError:
+            return None
+        return folder
+
+    def _launcher_update_marker(self) -> Path:
+        return self._launcher_root() / ".nadare-launcher-update-incomplete"
+
+    def _launcher_latest_path(self) -> Path:
+        return paths.cache_dir() / "nikke-latest" / f"{self.game_tag}-launcher.json"
+
+    def _read_launcher_latest(self) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(self._launcher_latest_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        files = payload.get("files") if isinstance(payload, dict) else None
+        if not isinstance(files, dict) or not files:
+            return None
+        return payload
+
+    def _fetch_launcher_latest(self) -> dict[str, Any]:
+        """Ask the publisher for the current launcher's key files and cache them; raises."""
+        info = nikke_source.launcher_info()
+        entries = nikke_source.launcher_key_entries(info)
+        latest = {
+            "files": {
+                rel: {"size": int(e.size), "md5": bytes(e.md5).hex()} for rel, e in entries.items()
+            },
+            "version": str(info.get("version_name") or ""),
+            "checked_at": int(time.time()),
+        }
+        try:
+            path = self._launcher_latest_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(latest), encoding="utf-8")
+        except OSError as exc:
+            log.debug("NIKKE: could not cache the launcher version: %s", exc)
+        return latest
+
+    def _launcher_outdated(self, latest: dict[str, Any] | None) -> bool:
+        """Whether the launcher folder differs from the published launcher (or is unfinished)."""
+        if not self._launcherless_wanted():
+            return False
+        if self._launcher_update_marker().exists():
+            return True
+        folder = self._launcher_dir()
+        if folder is None or latest is None:
+            return False
+        for rel, expected in latest["files"].items():
+            path = folder / rel
+            try:
+                if path.stat().st_size != int(expected["size"]):
+                    return True
+                digest = hashlib.md5()
+                with open(path, "rb") as handle:
+                    for block in iter(lambda: handle.read(1 << 20), b""):
+                        digest.update(block)
+            except (OSError, KeyError, TypeError, ValueError):
+                return True  # a key file is missing or unreadable: bring the folder current
+            if digest.hexdigest() != str(expected["md5"]):
+                return True
+        return False
+
+    def _update_launcher_direct(self, folder: Path) -> None:
+        """Fetch what changed in the launcher folder; nothing of the publisher's runs."""
+        self.ctx.emit(
+            Event("step", f"{self.display_name}: updating the launcher's sign-in files "
+                  "(the launcher itself is not started)")
+        )
+        marker = self._mark_update_incomplete(self._launcher_update_marker())
+        try:
+            nikke_source.install_launcher(folder, emit=self.ctx.emit, cancel=self.ctx.cancel)
+        except (railrepo.RailError, OSError) as exc:
+            raise BackendError(
+                f"the NIKKE launcher could not be updated ({exc}). Try again later, or turn off "
+                '"Start the game without the NIKKE launcher" and press Play to let the launcher '
+                "update itself."
+            ) from exc
+        marker.unlink(missing_ok=True)
+        try:
+            self._fetch_launcher_latest()
+        except (railrepo.RailError, OSError, ValueError) as exc:
+            log.debug("NIKKE: could not refresh the launcher version: %s", exc)
+
+    def _update_launcher_if_needed(self, *, fetch: bool) -> None:
+        """Bring the launcher folder current (launcher-free only; the caller holds the guards)."""
+        if not self._launcherless_wanted():
+            return
+        folder = self._launcher_dir()
+        if folder is None:
+            return
+        if self._launcher_update_marker().exists():
+            self.info("finishing the interrupted NIKKE launcher update first")
+            self._update_launcher_direct(folder)
+            return
+        if not fetch:
+            return
+        try:
+            latest = self._fetch_launcher_latest()
+        except (railrepo.RailError, OSError, ValueError) as exc:
+            self.info(f"could not check the NIKKE launcher ({exc}); using it as it is")
+            return
+        if self._launcher_outdated(latest):
+            self._update_launcher_direct(folder)
 
     # ------------------------------------------------------------- launcherless
 

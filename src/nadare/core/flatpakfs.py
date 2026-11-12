@@ -93,9 +93,10 @@ def unreachable_reason(folder: str | os.PathLike[str]) -> str | None:
             return None
     shown = path if not portal else "that folder"
     return (
-        f"The Flatpak version of Nadare cannot use {shown}: it may only use your home folder, "
-        "/mnt, /media and /run/media (and folders you allowed). Pick a folder there, or allow "
-        "this one once in a terminal and restart Nadare:\n"
+        f"The Flatpak version of Nadare cannot use {shown}: it may only use ~/Games, /mnt, "
+        "/media and /run/media (and folders you allowed), so your personal files stay out of "
+        "its reach. Pick a folder there, or allow this one once in a terminal and restart "
+        "Nadare:\n"
         f"flatpak override --user --filesystem={path if not portal else '<the real folder>'} "
         f"{APP_ID}"
     )

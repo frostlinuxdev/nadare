@@ -1567,6 +1567,7 @@ def fetch_all(
 
 
 __all__ = [
+    "keep_custom_image",
     "ART_KEYS",
     "SOURCE_USER",
     "SOURCE_OFFICIAL",
@@ -1594,3 +1595,41 @@ __all__ = [
     "source_of",
     "src_sidecar",
 ]
+
+
+def keep_custom_image(path: str, profile: str) -> str:
+    """A picked custom image, copied into Nadare's own folder; the path to store (#1244).
+
+    The Flatpak sees only its own folders and ~/Games, and a document-portal path is fragile, so
+    an image from anywhere else is copied to ``<data>/custom-art/<profile>/`` under a name from its
+    content (the same image twice is one copy). An image already in Nadare's folders, an empty
+    path, or one that cannot be read or copied is returned unchanged.
+    """
+    import hashlib
+    import shutil
+
+    text = str(path or "").strip()
+    if not text:
+        return text
+    source = Path(os.path.expanduser(text))
+    try:
+        resolved = source.resolve()
+        if not resolved.is_file():
+            return text
+        for own in (paths.data_dir(), paths.cache_dir(), paths.config_dir()):
+            own_real = own.resolve()
+            if own_real in resolved.parents:
+                return text
+        data = resolved.read_bytes()
+        name = hashlib.sha256(data).hexdigest()[:16] + resolved.suffix.lower()
+        folder = paths.data_dir() / "custom-art" / profile
+        folder.mkdir(parents=True, exist_ok=True)
+        target = folder / name
+        if not target.is_file():
+            tmp = folder / f".{name}.tmp"
+            tmp.write_bytes(data)
+            os.replace(tmp, target)
+            shutil.copystat(resolved, target, follow_symlinks=True)
+        return str(target)
+    except (OSError, ValueError):
+        return text

@@ -44,19 +44,47 @@ def _is_empty(path: Path) -> bool:
         return False
 
 
-def broad_reason(path: str | os.PathLike[str], home: str | os.PathLike[str] | None = None) -> str:
-    """Why binding ``path`` into the Sandbox would undo hiding ``home``, or ``""``."""
+#: Hidden folders of the home that hold other programs' settings, keys and data.
+PRIVATE_FOLDERS = frozenset(
+    {".ssh", ".gnupg", ".config", ".local", ".cache", ".mozilla", ".pki", ".var", ".password-store"}
+)
+
+
+def place_reason(
+    path: str | os.PathLike[str],
+    *,
+    home: str | os.PathLike[str] | None = None,
+    allow_drive_top: bool = False,
+) -> str:
+    """The one rule for where Nadare may keep games (#1229), or ``""`` when the place is fine.
+
+    Libraries, game folders and the Sandbox all use it. Refused: the filesystem root, the home
+    folder, a folder holding it, a personal or private home folder itself (a folder inside one is
+    fine), the folder where programs keep their data, and the top of a drive, which only a
+    library may be (``allow_drive_top``): its games still go in ``<drive>/Nadare/<Game>``.
+    """
     resolved = _real(path)
     real_home = _real(home if home is not None else Path.home())
     if resolved == Path("/"):
         return "the top of the filesystem"
+    if not allow_drive_top and os.path.ismount(resolved):
+        return "the top of a drive or partition (put the game in a folder inside it)"
     if resolved == real_home:
         return "your home folder"
     if resolved in real_home.parents:
         return "a folder that contains your home folder"
-    if os.path.ismount(resolved):
-        return "the top of a drive or partition"
+    if resolved.parent == real_home and resolved.name in PERSONAL_FOLDERS:
+        return "one of your personal folders"
+    if resolved.parent == real_home and resolved.name in PRIVATE_FOLDERS:
+        return "a private folder of your home (other programs' settings and keys)"
+    if resolved == real_home / ".local" / "share":
+        return "the folder where your programs keep their data"
     return ""
+
+
+def broad_reason(path: str | os.PathLike[str], home: str | os.PathLike[str] | None = None) -> str:
+    """Why binding ``path`` into the Sandbox would undo hiding ``home``, or ``""``."""
+    return place_reason(path, home=home)
 
 
 def too_broad_to_bind(
@@ -82,16 +110,9 @@ def unsafe_reason(
         return ""
     resolved = _real(path)
     home = _real(Path.home())
-    if resolved == Path("/"):
-        return "the top of the filesystem"
-    if os.path.ismount(resolved):
-        return "the top of a drive or partition (put the game in a folder inside it)"
-    if resolved == home:
-        return "your home folder"
-    if resolved in home.parents:
-        return "a folder that contains your home folder"
-    if resolved.parent == home and resolved.name in PERSONAL_FOLDERS:
-        return "one of your personal folders"
+    reason = place_reason(resolved, home=home)
+    if reason:
+        return reason
     for name, profile in (profiles or {}).items():
         if name == own or not isinstance(profile, Mapping):
             continue
@@ -108,12 +129,15 @@ def unsafe_reason(
             if resolved == other or resolved in other.parents or other in resolved.parents:
                 title = str(profile.get("title") or name)
                 return f"{_USED_BY}{title}"
+    if as_prefix and resolved.exists() and not resolved.is_dir():
+        return _IS_A_FILE  # a regular file can never be a Wine prefix (#1207 b078)
     if as_prefix and resolved.is_dir() and not is_wine_prefix(resolved) and not _is_empty(resolved):
         return _HOLDS_OTHER_FILES
     return ""
 
 
 _HOLDS_OTHER_FILES = "a folder that holds other files and is not a Wine prefix"
+_IS_A_FILE = "a file, not a folder"
 _USED_BY = "already used by "
 
 
@@ -122,6 +146,8 @@ def explain(path: str | os.PathLike[str], reason: str) -> str:
     if reason.startswith(_USED_BY):
         # A folder inside another game's folder is refused as well, so do not suggest one.
         return f"{path} is {reason}. Each game needs its own folder: pick a different one."
+    if reason == _IS_A_FILE:
+        return f"{path} is {reason}. Pick a folder for the Wine prefix instead."
     if reason == _HOLDS_OTHER_FILES:
         return (
             f"{path} is {reason}. Pick an empty folder (or a new one), or the game's "

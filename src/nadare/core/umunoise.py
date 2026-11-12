@@ -28,6 +28,9 @@ def _is_frame(line: str) -> bool:
     return line.startswith("  ")
 
 
+_UMU_HANDLER_FRAME = re.compile(r'^\s*File "[^"]*umu_run\.py", line \d+, in signal_handler\s*$')
+
+
 class StopNoiseFilter:
     """Feed it lines; it returns the lines to log (usually the same line)."""
 
@@ -61,8 +64,9 @@ class StopNoiseFilter:
         if _END.match(line):
             block = self._held + [line]
             self._held, self._in_traceback = [], False
-            frames = "\n".join(block)
-            if "umu_run.py" in frames and "in signal_handler" in frames:
+            # Only a real frame line of umu's handler counts, not a line that merely names it
+            # (#1207 b123).
+            if any(_UMU_HANDLER_FRAME.match(item) for item in block):
                 return [NOTE]
             return block
         # The traceback ended some other way: give everything back, then this line.

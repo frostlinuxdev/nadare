@@ -147,6 +147,7 @@ _CANCEL_GRACE_S = 0.5
 #: A game that exits non-zero after at least this long had a real session; a quicker
 #: non-zero exit is a failed launch. Stop-requested signal codes are always normal.
 _LAUNCH_EXIT_GRACE_S = 30.0
+_PAUSED_TEXT = "Paused. Everything downloaded so far is kept."
 
 #: Operations whose success makes the status shown before them out of date.
 _STATE_CHANGING = frozenset({"install", "update", "repair", "remake_prefix", "uninstall"})
@@ -1690,6 +1691,9 @@ class GameView(QWidget):
         self._awaiting_status = exit_code == 0 and operation in _STATE_CHANGING
         self._restore_badge()
         self._refresh_actions()
+        if operation in BACKGROUND and self._paused_op is not None:
+            # The pause survives a background refresh, and so does its message (#1207 b160).
+            self.step_label.setText(_PAUSED_TEXT)
         if operation == "launch":
             if exit_code == 0:
                 if self._last_done.lower() not in _GAME_END_LINES:  # CZN says it itself
@@ -1777,7 +1781,7 @@ class GameView(QWidget):
         self._hide_qr()
         self._restore_badge()
         self._paused_op = operation
-        self.step_label.setText("Paused. Everything downloaded so far is kept.")
+        self.step_label.setText(_PAUSED_TEXT)
         self._refresh_actions()
         self._append_line("paused", "status")
 

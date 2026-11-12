@@ -13,7 +13,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from . import paths
+from . import flatpakfs, paths, prefixguard
+from .libraries import game_folder_name
 
 
 class RelinkError(ValueError):
@@ -279,8 +280,9 @@ def home_name(profile: Mapping[str, Any], home: Path) -> str:
     """
     if home.parent.name == "Nadare" or not _is_profile_dir(home):
         return home.name
-    title = str(profile.get("title") or "").replace("/", " ").replace("\\", " ").strip(" .")
-    return " ".join(title.split()) or home.name
+    title = str(profile.get("title") or "")
+    name = game_folder_name(title)
+    return home.name if name == "game" and not title.strip(" ./\\:*?\"<>|") else name
 
 
 def prefix_destination(profile: Mapping[str, Any], old: Path, parent: str | Path) -> Path:
@@ -318,6 +320,20 @@ def free_home(library: str | Path, name: str, profiles: Mapping[str, Any]) -> Pa
     return candidate
 
 
+def check_place(path: str | Path, *, library: bool = False) -> None:
+    """Refuse a place the shared rule or the Flatpak forbids (#1229); every path-taking flow.
+
+    ``library``: ``path`` is a library (the top of a drive is fine there).
+    """
+    target = _absolute(path)
+    reason = prefixguard.place_reason(target, allow_drive_top=library)
+    if reason:
+        raise RelinkError(f"{target} is {reason}. Pick another folder.")
+    out_of_reach = flatpakfs.unreachable_reason(target)
+    if out_of_reach:
+        raise RelinkError(out_of_reach)
+
+
 def check_home_target(
     profile: dict[str, Any],
     library: str | Path,
@@ -332,6 +348,7 @@ def check_home_target(
     if home is None:
         raise RelinkError("This game's folders were not laid out by Nadare.")
     chosen = _absolute(library)
+    check_place(chosen, library=True)
     if _same(chosen / "Nadare" / home_name(profile, home), home):
         raise RelinkError("The game is already there. Pick a different folder.")
     if _under(chosen, home) is not None:
@@ -435,6 +452,7 @@ def plan_relink(
     another game already uses.
     """
     new = _absolute(new_prefix)
+    check_place(new)
     if not new.is_dir() or not _has_drive_c(new):
         raise RelinkError(
             f"{new} does not look like a Wine prefix (no drive_c folder). "

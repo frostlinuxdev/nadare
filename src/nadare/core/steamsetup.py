@@ -89,7 +89,7 @@ GAMES: tuple[SteamGame, ...] = (
     SteamGame(
         "3347400",
         "Girls' Frontline 2: Exilium (Darkwinter)",
-        note="the Darkwinter build is region-locked on the test account, so it is untested; "
+        note="the Darkwinter build was region-locked for the tester, so it is untested; "
         "its sign-in does not use WebView2 (reported by a player)",
     ),
 )

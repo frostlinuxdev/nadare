@@ -176,6 +176,8 @@ def _safe_relative_path(path: str) -> str:
             message = "path must not be empty"
         elif exc.code == "backslash":
             message = f"path must not contain a backslash: {path!r}"
+        elif exc.code == "nul":
+            message = f"path must not contain a NUL: {path!r}"  # #1207 b104
         elif exc.code == "absolute":
             message = f"path must be relative: {path!r}"
         elif exc.code == "component":

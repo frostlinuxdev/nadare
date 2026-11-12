@@ -53,7 +53,7 @@ def _channel(value: Any, default: int) -> int:
     """The sign-in channel from the service's reply; a missing or odd value is the default."""
     try:
         return int(value) if value is not None else default
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # inf from a 1e400 in the JSON (#1207 b036)
         return default
 
 

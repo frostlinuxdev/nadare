@@ -18,7 +18,7 @@
 #   NADARE_PIN_DEADLINE       seconds for the whole run (default: publish_pins.py's own)
 #   NADARE_PIN_PUSH           0 = commit but do not push
 #   NADARE_PIN_STATUS         status file (default ~/nadare-pins/status.json)
-#   NADARE_PIN_HEARTBEAT_URL  Uptime Kuma push URL, pinged after every run: "down" with the
+#   NADARE_PIN_HEARTBEAT_URL  a heartbeat push URL, pinged after every run: "down" with the
 #                             reason when the run failed. The URL is a secret: it is never
 #                             printed or written to the status file.
 #   NADARE_PIN_PUBLISHER      publisher command (default: python3 scripts/publish_pins.py)

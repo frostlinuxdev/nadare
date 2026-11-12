@@ -89,16 +89,18 @@ def library_roots(config) -> list[Path]:
 
 
 def _unsafe_reason(root: Path) -> str:
-    home = _real(Path.home())
-    if root == Path("/"):
-        return "the top of the filesystem"
-    if root == home:
-        return "your home folder"
-    if root in home.parents:
-        return "a folder that contains your home folder"
-    if root.parent == home and root.name in prefixguard.PERSONAL_FOLDERS:
-        return "one of your personal folders"
-    return ""
+    """The shared place rule (#1229); a library may be the top of a drive."""
+    return prefixguard.place_reason(root, allow_drive_top=True)
+
+
+def game_folder_name(title: str) -> str:
+    """A game's folder name from its title, the same for Install and Move (#1229).
+
+    Path and shell-hostile characters (``/ \\ : * ? " < > |``) become spaces, runs of spaces
+    collapse, and leading/trailing spaces and dots go; an empty result is ``"game"``.
+    """
+    cleaned = "".join(" " if c in '/\\:*?"<>|' else c for c in str(title or ""))
+    return " ".join(cleaned.split()).strip(" .") or "game"
 
 
 def display_path(root: str | os.PathLike[str]) -> str:
@@ -150,6 +152,12 @@ def add_library(config, path: str | os.PathLike[str]) -> Path:
         raise LibraryError(f"{root} is a file, not a folder.")
     if root in library_roots(config):
         raise LibraryError(f"{root} is already a library.")
+    for other in library_roots(config):
+        games = other if other == default_root() else other / NADARE_DIR
+        if root == games or games in root.parents:
+            raise LibraryError(
+                f"{root} is inside the library {other}: its games are already there."
+            )
     config.data[CONFIG_KEY] = [*_stored(config), {"path": str(root)}]
     return root
 

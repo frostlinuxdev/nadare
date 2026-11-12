@@ -62,6 +62,16 @@ class _Search:
     notes: list[str]
 
 
+def _nothing_new(notes: list[str]) -> str:
+    """"Nothing new", naming why folders were skipped when the scan knew (#1207 b167)."""
+    skipped = [n for n in notes if ": skipped, " in n and "already in your Library" not in n]
+    if not skipped:
+        return "No new games were found in your libraries."
+    first = skipped[0]
+    more = f" (and {len(skipped) - 1} more; see the log)" if len(skipped) > 1 else ""
+    return f"No new games were found in your libraries. One folder was skipped: {first}{more}"
+
+
 def _look_for_games(config: Config, roots: list[Path] | None) -> _Search:
     """Scan ``roots`` (all libraries by default). Disk work only: safe off the GUI thread."""
     found: list[libraries.Candidate] = []
@@ -299,14 +309,24 @@ class LibrariesPanel(QWidget):
             log.info("library scan: %s", note)
         # Profiles may have changed while a worker scanned a copy: offer only games that
         # still have no profile.
+        # A library removed while the worker scanned is no longer the user's: its games are
+        # not offered (#1207 b168).
+        current = set(libraries.library_roots(config))
+
+        def in_a_library(c: libraries.Candidate) -> bool:
+            try:
+                return libraries._real(c.game_dir).parent.parent in current
+            except OSError:
+                return False
+
         def new(c: libraries.Candidate) -> bool:
-            return backends.existing_profile(c.kind, config.profiles) is None
+            return in_a_library(c) and backends.existing_profile(c.kind, config.profiles) is None
 
         found = [c for c in search.found if new(c)]
         guessed = [c for c in search.guessed if new(c)]
         if not found and not guessed:
             if not quiet:
-                self._say("No new games were found in your libraries.")
+                self._say(_nothing_new(search.notes))
             return []
         # A game with its manifest starts ticked; a guess (manifest gone, recognised by its
         # program) starts unticked and is never added unless the user ticks it.

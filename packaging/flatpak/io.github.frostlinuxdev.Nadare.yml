@@ -4,8 +4,8 @@
 # 22.04), so no Python stack is rebuilt here. Build with
 # scripts/build_flatpak.sh, which stages dist/nadare next to this file.
 #
-# This is a *permissive* bundle, not a real sandbox: it sees the home folder,
-# /mnt, /media and /run/media (games can live on any of them), and Lepton (FGO)
+# Not a full sandbox: it sees ~/Games, /mnt, /media and /run/media (games can live
+# there) but not the rest of the home folder (#1244), and Lepton (FGO)
 # and gamescope run on the host through flatpak-spawn --host. Proton runs inside the sandbox with the
 # 32-bit compat extensions.
 #
@@ -31,10 +31,14 @@ finish-args:
   - --socket=x11
   - --socket=pulseaudio
   - --device=all
-  # Not the whole host (#1211): the places games and their tools live, the way Lutris, Heroic and
-  # other game launchers on Flathub do it. A folder elsewhere is refused with the one command that
-  # allows it (core/flatpakfs.py); /.flatpak-info tells Nadare what it really got.
-  - --filesystem=home
+  # Not the host and not the home folder (#1211, #1244): ~/Games (made if missing), the other
+  # drives, and the two shortcut folders. Personal files (~/.ssh, browser profiles, password
+  # stores) stay out of reach, as with Steam's Flatpak. Nadare's default library is its own
+  # ~/.var/app folder. A folder elsewhere is refused with the one command that allows it
+  # (core/flatpakfs.py); /.flatpak-info tells Nadare what it really got.
+  - --filesystem=~/Games:create
+  - --filesystem=xdg-data/applications
+  - --filesystem=xdg-desktop
   - --filesystem=/mnt
   - --filesystem=/media
   - --filesystem=/run/media

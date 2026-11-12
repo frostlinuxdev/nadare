@@ -298,13 +298,14 @@ def http_get(
     headers: Mapping[str, str] | None = None,
     timeout: int = DEFAULT_TIMEOUT,
     redirect_allowed: Callable[[str], bool] | None = None,
+    max_bytes: int = MAX_TEXT_BYTES,
 ) -> bytes:
     with http_open(
         url, headers=headers, timeout=timeout, redirect_allowed=redirect_allowed
     ) as resp:
-        data = resp.read(MAX_TEXT_BYTES + 1)
-    if len(data) > MAX_TEXT_BYTES:
-        raise DownloadError(f"response too large (over {MAX_TEXT_BYTES} bytes) for {url}")
+        data = resp.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise DownloadError(f"response too large (over {max_bytes} bytes) for {url}")
     return data
 
 

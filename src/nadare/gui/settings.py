@@ -38,7 +38,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import app_uninstall, community, monitors
+from ..core import app_uninstall, community, flatpakfs, gamefolders, importmove, monitors
+from ..core import artwork as artwork_core
 from ..core import libraries as core_libraries
 from ..core import process as process_core
 from ..core import relink as relink_core
@@ -222,6 +223,14 @@ class _MoveSignals(QObject):
     progress = pyqtSignal(object, object)  # bytes done, bytes total
 
 
+#: Plain names of the folder settings, for the "points outside the game folder" note.
+_FOLDER_KEY_NAMES = {"install_dir": "Game folder", "prefix": "Wine prefix"}
+
+
+def libraries_display(path: Path) -> str:
+    return core_libraries.display_path(path)
+
+
 class SettingsPage(QWidget):
     """Editable settings for one profile plus the shared language/update options."""
 
@@ -341,12 +350,46 @@ class SettingsPage(QWidget):
         self.runner = QComboBox()
         self.runner.setEditable(True)
         self.runner.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        files_form.addRow("Game folder", self._with_browse(self.install_dir, "dir"))
+        install_row = self._with_browse(self.install_dir, "dir")
+        self._install_dir_browse = install_row.findChildren(QPushButton)[0]
+        files_form.addRow("Game folder", install_row)
         self._files_form = files_form
         self._install_dir_row = files_form.rowCount() - 1
         self.install_dir_free = QLabel("")
         self.install_dir_free.setObjectName("Muted")
         files_form.addRow("", self.install_dir_free)
+        # Where the game is, the Steam way (#1229): its library, or "Outside your libraries".
+        self.place_label = QLabel("")
+        self.place_label.setObjectName("Muted")
+        self.place_label.setWordWrap(True)
+        self.place_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.place_label.setVisible(False)
+        self.reset_stray_button = QPushButton("Use the game folder's own paths")
+        self.reset_stray_button.setObjectName("GhostButton")
+        self.reset_stray_button.setToolTip(
+            "Point the settings back at the game's own folder. Nothing on disk is moved or deleted."
+        )
+        self.reset_stray_button.clicked.connect(self._reset_stray)
+        self.reset_stray_button.setVisible(False)
+        place_box = QWidget()
+        place_layout = QVBoxLayout(place_box)
+        place_layout.setContentsMargins(0, 0, 0, 0)
+        place_layout.setSpacing(4)
+        place_layout.addWidget(self.place_label)
+        reset_row = QHBoxLayout()
+        self.import_move_button = QPushButton("Move into a library…")
+        self.import_move_button.setObjectName("GhostButton")
+        self.import_move_button.setToolTip(
+            "Move this game's folder and Wine prefix into one of your libraries, where Nadare "
+            "manages it like a game it installed."
+        )
+        self.import_move_button.clicked.connect(self._move_import)
+        self.import_move_button.setVisible(False)
+        reset_row.addWidget(self.import_move_button)
+        reset_row.addWidget(self.reset_stray_button)
+        reset_row.addStretch(1)
+        place_layout.addLayout(reset_row)
+        files_form.addRow("", place_box)
         runner_row = QWidget()
         runner_layout = QHBoxLayout(runner_row)
         runner_layout.setContentsMargins(0, 0, 0, 0)
@@ -1141,6 +1184,11 @@ class SettingsPage(QWidget):
         editor = self._option_widgets.get("prefix")
         if isinstance(editor, QLineEdit):
             editor.setReadOnly(locked)
+        # A catalog game's folder changes only by Move or "I moved it myself" once installed,
+        # like its prefix (#1229); a custom Wine game keeps its free path.
+        lock_folder = locked and self._in_folder_model()
+        self.install_dir.setReadOnly(lock_folder)
+        self._install_dir_browse.setEnabled(not lock_folder)
         browse = self._option_browse.get("prefix")
         if browse is not None:
             browse.setEnabled(not locked)
@@ -1446,6 +1494,11 @@ class SettingsPage(QWidget):
             )
             return False
         dst = relink_core.prefix_destination(data, old, parent)
+        try:
+            relink_core.check_place(dst)
+        except relink_core.RelinkError as exc:
+            QMessageBox.warning(self, "Wine prefix", str(exc))
+            return False
         message = (
             f"Move {old} to {dst}?\n\nOn the same disk this is instant. On another disk "
             "Nadare copies it, checks the copy, and keeps your original, so you can delete "
@@ -1503,6 +1556,7 @@ class SettingsPage(QWidget):
         *,
         managed: bool = False,
         install_existed: bool = True,
+        import_move: importmove.ImportMove | None = None,
     ) -> None:
         from PyQt6.QtWidgets import QProgressDialog
 
@@ -1564,9 +1618,17 @@ class SettingsPage(QWidget):
                     raise relocate_core.RelocateError(
                         "The game is running. Close it first."
                     )
-                result = relocate_core.move_tree(
-                    old, dst, cancel=cancel, progress=lambda d, t: signals.progress.emit(d, t)
-                )
+                if import_move is not None:
+                    results = importmove.run(
+                        import_move, cancel=cancel,
+                        progress=lambda d, t: signals.progress.emit(d, t),
+                    )
+                    result = next((r for r in results if r.kept_old is not None), results[-1])
+                else:
+                    result = relocate_core.move_tree(
+                        old, dst, cancel=cancel,
+                        progress=lambda d, t: signals.progress.emit(d, t),
+                    )
                 moved = True
                 held.append(lock)
                 return result
@@ -1608,10 +1670,12 @@ class SettingsPage(QWidget):
             stuck = (
                 f"Nadare moved the folder to {dst} but could not update the game. Use "
                 "\"I moved it myself\" in the game's Settings and pick "
-                f"{dst / 'prefix' if managed else dst}."
+                f"{dst / 'prefix' if managed or import_move is not None else dst}."
             )
             try:
-                if managed:
+                if import_move is not None:
+                    plan = importmove.relink_plan(config.profiles[name], import_move)
+                elif managed:
                     plan = relink_core.plan_home_move(
                         config.profiles[name], dst, install_existed=install_existed
                     )
@@ -1627,6 +1691,8 @@ class SettingsPage(QWidget):
                 return
             if not alive:
                 return
+            if config is self._config and name == self._profile:
+                self._show_placement()
             kept = getattr(result, "kept_old", None)
             if kept is not None:
                 QMessageBox.information(
@@ -1892,6 +1958,7 @@ class SettingsPage(QWidget):
             for option in self._backend_options(kind)
         )
         self._refresh_prefix_lock(has_wine_prefix)
+        self._show_placement()
 
         supported = supports_remember_me(str(data.get("backend") or ""))
         self.account_card.setVisible(supported)
@@ -1995,6 +2062,98 @@ class SettingsPage(QWidget):
         )
         return answer == QMessageBox.StandardButton.Yes
 
+    def _in_folder_model(self) -> bool:
+        if self._config is None or not self._profile:
+            return False
+        data = self._config.profiles.get(self._profile)
+        return isinstance(data, dict) and gamefolders.in_model(data)
+
+    def _show_placement(self) -> None:
+        """Say where the game is (#1229): its library, or outside them, and any stray path."""
+        place = (
+            gamefolders.placement(self._config, self._profile)
+            if self._config is not None and self._profile
+            else None
+        )
+        self.import_move_button.setVisible(False)
+        if place is None or place.folder is None:
+            self.place_label.setVisible(False)
+            self.reset_stray_button.setVisible(False)
+            return
+        folder = str(place.folder)
+        if place.library is not None and place.made_by_nadare:
+            text = f"Game folder: {folder}\nIn your library {libraries_display(place.library)}."
+        elif place.library is not None:
+            text = (
+                f"Game folder: {folder}\nIn your library {libraries_display(place.library)}. "
+                "You added it as an existing install, so Nadare never deletes this folder."
+            )
+        elif place.made_by_nadare:
+            text = (
+                f"Game folder: {folder}\nOutside your libraries (its library is no longer "
+                "listed). Add the library again, or use Move to put the game into one."
+            )
+        else:
+            # No "Move into a library" yet: for an import, Move only moves the Wine prefix.
+            text = (
+                f"Game folder: {folder}\nOutside your libraries: Nadare uses the game where it "
+                "is and never deletes this folder."
+            )
+        resettable = [key for key, value in place.stray.items() if value is None or value]
+        if place.stray:
+            names = ", ".join(_FOLDER_KEY_NAMES.get(key, key) for key in place.stray)
+            text += f"\nThese settings point outside the game folder: {names}."
+        self.place_label.setText(text)
+        self.place_label.setVisible(True)
+        self.reset_stray_button.setVisible(bool(resettable))
+        self.import_move_button.setVisible(not place.made_by_nadare)
+
+    def _move_import(self) -> None:
+        """Move an import into a library (#1229): pick, check, ask, then run the move."""
+        config, name = self._config, self._profile
+        if config is None or not name or name not in config.profiles:
+            return
+        if not self._game_idle or self._moving:
+            return
+        roots = core_libraries.library_roots(config)
+        start = str(roots[1] if len(roots) > 1 else Path.home())
+        library = QFileDialog.getExistingDirectory(self, "Move into which library?", start)
+        if not library:
+            return
+        library = str(core_libraries.library_of(library))
+        try:
+            move = importmove.plan(config, name, library)
+        except relink_core.RelinkError as exc:
+            QMessageBox.warning(self, "Move into a library", str(exc))
+            return
+        sources = "\n".join(f"  {source}" for _, source, _ in move.trees)
+        answer = QMessageBox.question(
+            self,
+            "Move into a library?",
+            f"Move\n{sources}\ninto {move.home}?\n\nOn the same disk this is instant. On "
+            "another disk Nadare copies, checks the copy, and keeps your original.\n\n"
+            "Afterwards Nadare manages the game like one it installed: Uninstall can delete it.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._run_move(config, name, move.trees[0][1], move.home, import_move=move)
+
+    def _reset_stray(self) -> None:
+        """Point stray folder settings back at the game folder and save (nothing on disk moves)."""
+        config, name = self._config, self._profile
+        if config is None or not name:
+            return
+        try:
+            with config.locked():
+                changed = gamefolders.reset_stray(config, name)
+                if changed:
+                    config.save()
+        except OSError as exc:
+            QMessageBox.warning(self, "Settings", f"Could not save the settings: {exc}")
+            return
+        if changed:
+            self.load(config, name)
+
     def _unsafe_folder_message(self, data: dict[str, Any]) -> str:
         """Why a changed Wine prefix or game folder cannot be saved, or ``""`` (#851).
 
@@ -2017,6 +2176,10 @@ class SettingsPage(QWidget):
             )
             if reason:
                 return prefixguard.explain(value, reason)
+            # The Flatpak must be able to reach a game folder in every flow, not only Add Game.
+            out_of_reach = flatpakfs.unreachable_reason(value)
+            if out_of_reach:
+                return out_of_reach
         return ""
 
     def save(self) -> None:
@@ -2088,7 +2251,11 @@ class SettingsPage(QWidget):
                 if install_dir_option:
                     self._store(data, "install_dir", self.install_dir.text().strip())
                 self._store(data, "runner", str(runner_value or ""))
-                data["custom_background"] = self.background.text().strip()
+                # A picked image is copied into Nadare's own folder (#1244): the Flatpak cannot
+                # read most of the home folder, and a document-portal path is fragile.
+                data["custom_background"] = artwork_core.keep_custom_image(
+                    self.background.text().strip(), self._profile
+                )
 
                 for option in self._backend_options(data["backend"]):
                     if option.key in ("install_dir", "runner"):

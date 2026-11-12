@@ -30,6 +30,18 @@ def default_fetch(url: str, headers: Mapping[str, str] | None = None) -> bytes:
         raise directdl.DirectError(str(exc)) from exc
 
 
+#: Kuro's patch lists for a game of many small files are big (PGR 4.8.0 -> 4.9.0: ~20 MB).
+MAX_PATCH_LIST_BYTES = 64 << 20
+
+
+def patch_list_fetch(url: str, headers: Mapping[str, str] | None = None) -> bytes:
+    """Like :func:`default_fetch`, with room for a publisher's patch list (#1252)."""
+    try:
+        return download.http_get(url, headers=headers, max_bytes=MAX_PATCH_LIST_BYTES)
+    except download.DownloadError as exc:
+        raise directdl.DirectError(str(exc)) from exc
+
+
 def ungzip(data: bytes, *, limit: int = MAX_UNZIP_BYTES) -> bytes:
     """Return ``data`` decompressed when it starts with the gzip magic.
 

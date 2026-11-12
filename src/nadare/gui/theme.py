@@ -76,11 +76,19 @@ CARD_RADIUS = 14
 #: Tick drawn inside a checked box (dark ink on the accent). Without the file the
 #: box still shows as accent-filled, just without the mark.
 _CHECK_ICON = Path(__file__).resolve().parent.parent / "assets" / "icons" / "check.svg"
-_CHECK_IMAGE = f"image: url({_CHECK_ICON.as_posix()});" if _CHECK_ICON.is_file() else ""
+
+
+def _qss_url(path: Path) -> str:
+    """A quoted ``url(...)``: an unquoted one breaks on a path with a space (#1207 b245)."""
+    text = path.as_posix().replace("\\", "\\\\").replace('"', '\\"')
+    return f'url("{text}")'
+
+
+_CHECK_IMAGE = f"image: {_qss_url(_CHECK_ICON)};" if _CHECK_ICON.is_file() else ""
 # Qt draws the CSS zero-size border triangle as a small bar ("="), so the arrow is an icon.
 # Its stroke is MUTED; keep the two in step.
 _ARROW_ICON = _CHECK_ICON.with_name("chevron-down.svg")
-_ARROW_IMAGE = f"image: url({_ARROW_ICON.as_posix()});" if _ARROW_ICON.is_file() else "image: none;"
+_ARROW_IMAGE = f"image: {_qss_url(_ARROW_ICON)};" if _ARROW_ICON.is_file() else "image: none;"
 
 STYLESHEET = f"""
 * {{

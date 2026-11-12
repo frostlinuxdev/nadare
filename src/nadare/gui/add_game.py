@@ -258,9 +258,8 @@ def game_specs() -> list[libraries.GameSpec]:
 
 
 def _folder_name(title: str) -> str:
-    """``title`` as a folder name: path and shell-hostile characters become spaces."""
-    cleaned = "".join(" " if c in '/\\:*?"<>|' else c for c in title)
-    return " ".join(cleaned.split()) or "game"
+    """``title`` as a folder name: the one rule Install and Move share (#1229)."""
+    return libraries.game_folder_name(title)
 
 
 def _new_or_empty(path: Path) -> bool:

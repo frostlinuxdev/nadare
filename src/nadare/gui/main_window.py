@@ -17,6 +17,7 @@ import textwrap
 import threading
 import time
 from collections import deque
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -233,6 +234,17 @@ _OPERATION_LABELS = {"set_remember": "Saving"}
 def capitalised(text: str) -> str:
     """``text`` with its first letter in upper case (reasons are written to follow a sentence)."""
     return text[:1].upper() + text[1:]
+
+
+def download_folder(kind: str, data: Mapping[str, Any]) -> str:
+    """The folder a fresh install's files go to, for the free-space question (#1229).
+
+    Prefix games (CZN, FGO, launcher games such as NIKKE) keep their files in the prefix;
+    the others in their game folder; without either, Nadare's own folder.
+    """
+    in_prefix = kind in PREFIX_ONLY_KINDS or kind.startswith("launcher-")
+    key = "prefix" if in_prefix else "install_dir"
+    return str(data.get(key) or paths.profiles_dir())
 
 
 class MainWindow(QMainWindow):
@@ -1832,7 +1844,7 @@ class MainWindow(QMainWindow):
         if status is not None and (getattr(status, "data", None) or {}).get("incomplete"):
             return True  # RESUME: only what is missing is fetched, nothing to confirm
         data = self.config.profiles.get(profile) or {}
-        where = str(data.get("install_dir") or paths.profiles_dir())
+        where = download_folder(self._backend_kind(profile), data)
         try:
             free = f"{diskspace.human_size(diskspace.free_bytes(where))} free"
         except (OSError, core_backends.BackendError):
@@ -2414,26 +2426,39 @@ class MainWindow(QMainWindow):
             usable = secrets.SecretStore(allow_fallback=False).secure
             if data and data.get("remember_me") and not usable:
                 # Nothing can be saved, so a ticked box would only mislead.
-                self._undo_remember(profile)
-                notice += (
-                    "\n\nRemember me has been turned off; "
-                    "you will need to log in again each time."
-                )
+                if self._undo_remember(profile):
+                    notice += (
+                        "\n\nRemember me has been turned off; "
+                        "you will need to log in again each time."
+                    )
+                else:
+                    notice += (
+                        "\n\nNadare could not turn Remember me off (the settings could not be "
+                        "saved); untick it on the game's page."
+                    )
             QMessageBox.information(self, "Remember me", notice)
 
-    def _undo_remember(self, profile: str) -> None:
-        """Clear the Remember me flag (and the boxes) when it cannot work."""
+    def _undo_remember(self, profile: str) -> bool:
+        """Clear the Remember me flag (and the boxes) when it cannot work; False if not saved.
+
+        A failed save puts the flag back in memory too, so the page, the config and the
+        message agree (#1207 b193).
+        """
         data = self.config.profiles.get(profile)
         if not data:
-            return
+            return False
+        before = data.get("remember_me")
         try:
             with self.config.locked():
                 data["remember_me"] = False
                 self.config.save()
         except OSError:
             log.debug("could not save Remember me off", exc_info=True)
+            data["remember_me"] = before
+            return False
         if profile == self._current_profile:
             self.game.set_remember(True, False)
+        return True
 
     def _apply_pending_remember(self, profile: str) -> None:
         """Apply a Remember-me change that was requested while the profile was busy."""
@@ -2829,11 +2854,33 @@ class MainWindow(QMainWindow):
         self.update_button.setVisible(True)
         self._update_version = str(info.version)
         if self.config.data.get("dismissed_update") != self._update_version:
-            action = "Update" if self._self_update.can_update(info) else "Download"
+            updatable = self._self_update.can_update(info)
+            short, detail = ("", "") if updatable else self._download_only_reason(info)
+            message = f"Nadare v{info.version} is available (you have v{__version__})."
             self.update_banner.show_message(
-                f"Nadare v{info.version} is available (you have v{__version__}).",
-                action,
+                f"{message} {short}" if short else message,
+                "Update" if updatable else "Download",
             )
+            self._set_update_tip(detail)
+
+    def _download_only_reason(self, info: Any) -> tuple[str, str]:
+        """Why the banner can only offer Download, and what to do about it (#1247)."""
+        from ..core import selfupdate
+
+        try:
+            if selfupdate.asset_urls(info) is None:
+                code = selfupdate.NO_ASSET
+            else:
+                code = selfupdate.why_not_replaceable()
+            raw = os.environ.get("APPIMAGE")
+            return selfupdate.download_only_reason(code, Path(raw) if raw else None)
+        except Exception:  # noqa: BLE001 - only the explanation is lost, never the banner
+            log.debug("could not work out why the update is download-only", exc_info=True)
+            return "", ""
+
+    def _set_update_tip(self, detail: str) -> None:
+        self.update_banner.message_label.setToolTip(detail)
+        self.update_banner.action_button.setToolTip(detail)
 
     def _dismiss_update(self) -> None:
         """Hide the banner for this release; the sidebar button stays."""
@@ -2913,9 +2960,11 @@ class MainWindow(QMainWindow):
         # Not again this run: the release page is the way to get this version.
         self._update_info = None
         self.update_banner.show_message(
-            f"Nadare v{self._update_version} is available (you have v{__version__}).",
+            f"Nadare v{self._update_version} is available (you have v{__version__}). "
+            "Nadare could not update itself; download it from the release page.",
             "Download",
         )
+        self._set_update_tip("")
         self._show_update_failure(message)
 
     def _on_update_cancelled(self) -> None:

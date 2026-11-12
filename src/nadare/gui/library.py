@@ -462,6 +462,14 @@ class LibraryPage(QWidget):
         )
         return menu
 
+    def _show_card_menu(self, profile: str, card: QWidget, pos: Any) -> None:
+        """Show a card's menu, then let Qt delete it (one QMenu per right-click leaked; b175)."""
+        menu = self.card_menu(profile)
+        try:
+            menu.exec(card.mapToGlobal(pos))
+        finally:
+            menu.deleteLater()
+
     # ---- population --------------------------------------------------------
     def refresh(self, profiles: dict[str, dict[str, Any]]) -> None:
         """Rebuild the grid from the config's profiles.
@@ -471,7 +479,8 @@ class LibraryPage(QWidget):
         shown = self._signature(profiles)
         if shown == self._shown:
             return  # nothing a card shows changed: keep the cards and their decoded covers (#624)
-        self._shown = shown
+        # Remembered only once the rebuild finished: a failed one must run again (#1207 b176).
+        self._shown = None
         focused = QApplication.focusWidget()
         focused_name = next((n for n, c in self._cards.items() if c is focused), None)
         add_focused = isinstance(focused, AddGameCard)
@@ -490,7 +499,7 @@ class LibraryPage(QWidget):
             card.play_clicked.connect(self.play_game.emit)
             card.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             card.customContextMenuRequested.connect(
-                lambda pos, n=name, c=card: self.card_menu(n).exec(c.mapToGlobal(pos))
+                lambda pos, n=name, c=card: self._show_card_menu(n, c, pos)
             )
             self._flow.addWidget(card)
             self._cards[name] = card
@@ -510,6 +519,7 @@ class LibraryPage(QWidget):
         # Not adjustSize(): while the page is hidden (a removal runs from the game
         # page) that shrinks the container to one card wide, and nothing re-flows it.
         self._flow.invalidate()
+        self._shown = shown
         if focused_name in self._cards:
             self._cards[focused_name].setFocus()
         elif add_focused:

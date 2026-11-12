@@ -17,7 +17,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from . import events, paths, process, runlog
+from . import events, paths, process, runlog, sessionfiles
 
 MAX_REPORT_BYTES = 300_000
 STUB_SHIPPED_SHA256 = (
@@ -155,9 +155,11 @@ def build_report(
     name = profile_name or str(config.get("active_profile") or "")
     profs = config.get("profiles") if isinstance(config.get("profiles"), dict) else {}
     profile = profs.get(name) if name else None
+    session_note = _session_note(profs, profiles)
     lines = [
         "# Nadare support report",
         f"Generated: {date.today().isoformat()}",
+        *session_note,
         "",
         "## Environment",
     ]
@@ -287,8 +289,32 @@ def build_report(
         suffix = encoded[-(min(max_bytes, MAX_REPORT_BYTES) - 80) :].decode(
             "utf-8", errors="replace"
         )
-        result = "# Nadare support report (truncated; newest content kept)\n\n" + suffix
+        note = "\n".join(session_note).strip()
+        head = "# Nadare support report (truncated; newest content kept)\n\n"
+        result = head + (note + "\n\n" if note else "") + suffix
     return result
+
+
+def _session_note(profiles: dict[str, Any], profiles_root: Path) -> list[str]:
+    """A warning when a sign-in session file is still on disk (#1231); never its content.
+
+    Counted, not located: the paths would name the games.
+    """
+    try:
+        count = len(sessionfiles.find_leftovers(profiles, profiles_root))
+    except Exception:  # noqa: BLE001 - the report must still be built
+        return []
+    if not count:
+        return []
+    files = "session file" if count == 1 else "session files"
+    return [
+        "",
+        "## Session files",
+        f"Warning: {count} sign-in {files} from an interrupted game run "
+        f"{'is' if count == 1 else 'are'} still on disk. Not part of this report. "
+        "Before you share Nadare's data folder or a game's folder, delete the files named "
+        "session.json, session.enc.json or session.json.expired-bak in it.",
+    ]
 
 
 #: ``lspci`` classes that are graphics cards; everything else in the machine stays out.

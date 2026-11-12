@@ -96,24 +96,81 @@ def download_host_allowed(url: str) -> bool:
     return parsed.scheme == "https" and (parsed.hostname or "").lower() in _DOWNLOAD_HOSTS
 
 
+#: Why Nadare can only offer Download (#1247); "" means it can replace itself.
+MANAGED = "managed"
+NOT_APPIMAGE = "not-appimage"
+NOT_WRITABLE = "not-writable"
+SHARED_FOLDER = "shared-folder"
+NO_ASSET = "no-asset"
+
+
+def why_not_replaceable(env: Mapping[str, str] | None = None) -> str:
+    """Why the running AppImage cannot be replaced by Nadare ("" when it can)."""
+    env = os.environ if env is None else env
+    if env.get("NADARE_MANAGED_UPDATES") == "1" or sandbox.in_flatpak():
+        return MANAGED
+    if platform.machine() != "x86_64":
+        return NOT_APPIMAGE
+    raw = env.get("APPIMAGE")
+    if not raw:
+        return NOT_APPIMAGE
+    path = Path(raw)
+    if not path.name.endswith(".AppImage") or not path.is_file():
+        return NOT_APPIMAGE
+    if not os.access(path.parent, os.W_OK | os.X_OK):
+        return NOT_WRITABLE
+    if not _only_this_user_controls(path):
+        return SHARED_FOLDER
+    return ""
+
+
 def appimage_target(env: Mapping[str, str] | None = None) -> Path | None:
     """The AppImage file this process runs from, if Nadare may replace it; else ``None``."""
     env = os.environ if env is None else env
-    if env.get("NADARE_MANAGED_UPDATES") == "1" or sandbox.in_flatpak():
+    if why_not_replaceable(env):
         return None
-    if platform.machine() != "x86_64":
-        return None
-    raw = env.get("APPIMAGE")
-    if not raw:
-        return None
-    path = Path(raw)
-    if not path.name.endswith(".AppImage") or not path.is_file():
-        return None
-    if not os.access(path.parent, os.W_OK | os.X_OK):
-        return None
-    if not _only_this_user_controls(path):
-        return None
-    return path
+    return Path(env["APPIMAGE"])
+
+
+_MOVE_OR_TOOL = (
+    "Move the AppImage to a folder you own (for example ~/Applications) and Nadare can update "
+    "itself there, or let Gear Lever or AppImageUpdate keep it up to date "
+    "(the AppImage carries their update information)."
+)
+
+
+def download_only_reason(code: str, path: Path | None) -> tuple[str, str]:
+    """``(short, detail)`` telling the user why Update is Download, and what to do (#1247)."""
+    if not code:
+        return "", ""
+    folder = str(path.parent) if path is not None else "its folder"
+    if code == NOT_WRITABLE:
+        return (
+            "Nadare cannot replace itself in this folder.",
+            f"You cannot write to {folder}, so Nadare cannot put the new version there. "
+            + _MOVE_OR_TOOL,
+        )
+    if code == SHARED_FOLDER:
+        return (
+            "Nadare will not replace itself in a folder others can change.",
+            f"{folder} (or the AppImage) can be changed by another user, so a self-update there "
+            "would not be safe. " + _MOVE_OR_TOOL,
+        )
+    if code == MANAGED:
+        return (
+            "Your package manager updates this copy of Nadare.",
+            "Update Nadare the way you installed it (Flatpak, AUR or your distribution's "
+            "package manager).",
+        )
+    if code == NO_ASSET:
+        return (
+            "This release has no AppImage Nadare can install by itself.",
+            "Download the new version from the release page.",
+        )
+    return (
+        "This copy of Nadare is not running as an AppImage, so it cannot update itself.",
+        "Download the new version from the release page.",
+    )
 
 
 def _only_this_user_controls(path: Path) -> bool:
@@ -391,13 +448,20 @@ __all__ = [
     "AssetUrls",
     "Expected",
     "SelfUpdateError",
+    "MANAGED",
+    "NOT_APPIMAGE",
+    "NOT_WRITABLE",
+    "NO_ASSET",
+    "SHARED_FOLDER",
     "appimage_target",
     "asset_urls",
     "cleanup_previous",
     "download_host_allowed",
+    "download_only_reason",
     "download_verified",
     "expected_sha256",
     "verify_signature",
+    "why_not_replaceable",
     "install_update",
     "restart",
     "restart_command",

@@ -281,9 +281,11 @@ def _default_qr_png() -> Path:
 
 def _load_state() -> dict:
     try:
-        return json.loads(STATE_FILE.read_text())
+        state = json.loads(STATE_FILE.read_text())
     except Exception:
         return {}
+    # A hand-edited or foreign file can be valid JSON but not an object.
+    return state if isinstance(state, dict) else {}
 
 
 def _save_state(state: dict) -> None:
@@ -453,6 +455,9 @@ class StoveAuth:
         self.state.pop("member_no", None)
         self.state.pop("guid", None)
         self._apply_signin(data)
+        if not (self._signin_flat or {}).get("refresh_token"):
+            # A "successful" sign-in that handed over no credential is not a login (#1207 b005).
+            raise RuntimeError("STOVE sign-in returned no launcher credential")
         return data
 
     def login_qr(self, timeout_s: int = 180, png_path: Path | None = None) -> None:

@@ -3,6 +3,11 @@
 Start with the log:
 `~/.local/state/nadare/logs/nadare.log` (rotated, secrets masked).
 
+Share logs or the Support report (both leave sign-ins out), not whole folders. If you must share
+Nadare's data folder or a game's folder, delete any `session.json`, `session.enc.json` or
+`session.json.expired-bak` in it first: a run that was killed can leave a live sign-in there, and
+the Support report warns when one is on disk.
+
 | Symptom | What to do |
 |---|---|
 | `nadare: command not found` | Use `.venv/bin/nadare`, or run `.venv/bin/python -m nadare`. |

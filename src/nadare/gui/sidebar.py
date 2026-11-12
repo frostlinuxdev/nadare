@@ -39,7 +39,7 @@ def is_installed(status: Status | None) -> bool:
     if status is None:
         return False
     state = (status.state or "").strip().lower()
-    if state in ("installed", "running"):
+    if state in ("installed", "running") or status.running:  # running is on disk (#1207 b232)
         return True
     return bool((status.data or {}).get("update_available"))
 
@@ -103,7 +103,7 @@ class GameRow(QFrame):
         self.setAccessibleName(str(title))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(ROW_HEIGHT)
-        self.setToolTip(title)
+        self.setToolTip(Qt.convertFromPlainText(str(title)))
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 4, 8, 4)
@@ -158,8 +158,10 @@ class GameRow(QFrame):
         self.title_label.setText(
             metrics.elidedText(str(title), Qt.TextElideMode.ElideRight, 150)
         )
-        self.title_label.setToolTip(title)
-        self.setToolTip(title)
+        # Plain text, like the constructor: a title must never render as rich text (#1207 b234).
+        tip = Qt.convertFromPlainText(str(title))
+        self.title_label.setToolTip(tip)
+        self.setToolTip(tip)
         self.setAccessibleName(str(title))
         self.set_icon_art(None, title)
 
@@ -279,6 +281,8 @@ class SidebarGames(QWidget):
 
     def set_status(self, profile: str, status: Status) -> None:
         """Record one backend status result and refresh the list live."""
+        if profile not in self._profiles:
+            return  # a late result for a removed game must not outlive it (#1207 b233)
         previous_order = list(self._rows)
         self._statuses[profile] = status
         if self._ordered() != previous_order:

@@ -219,13 +219,18 @@ class Config:
     def load(cls, path: Path | None = None) -> Config:
         p = Path(path) if path else paths.config_file()
         notice = None
-        if p.exists():
+        present = p.exists()
+        text: str | None = None
+        if present:
             try:
                 text = p.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 text = None
+            except FileNotFoundError:
+                present = False  # removed between exists() and the read: missing (#1207 b055)
             except OSError as exc:
                 raise ConfigReadError(f"cannot read {p}: {exc.strerror or exc}") from exc
+        if present:
             try:
                 if text is None:
                     raise ValueError("config is not valid UTF-8")
@@ -288,6 +293,9 @@ class Config:
             held = cls._normalise(before_migration)
             cfg._snapshot = held["profiles"]
             cfg._top_snapshot = {k: v for k, v in held.items() if k != "profiles"}
+            # A profile the migration dropped is a local removal, not someone else's new entry:
+            # the next save must not adopt it back from the file (#1207 b054).
+            cfg._removed |= set(cfg._snapshot) - set(cfg.profiles)
         if renames and isinstance(raw_active, str) and raw_active in renames:
             cfg._top_snapshot["active_profile"] = raw_active
         return cfg
@@ -450,7 +458,7 @@ class Config:
         ``renames`` is filled with every unsafe-key migration so :meth:`load`
         can move the matching default data folder before the user sees it.
         """
-        data = dict(TOP_DEFAULTS)
+        data = copy.deepcopy(TOP_DEFAULTS)  # list/dict defaults are per config (#1207 b052)
         data.update(raw)
         # A hand-edited ``"false"`` is a truthy string; coerce known booleans so
         # the setting means what the file says.

@@ -62,7 +62,18 @@ class QuickInstallDialog(QDialog):
         self.notice_text = notice
         self.chosen_folder = ""
         self.import_requested = False
-        self.folder_text, self._free, self.summary_text = describe(None)
+        # An unreadable default library must not escape the constructor (#1207 b212): say so
+        # and keep Install off until a usable folder is picked.
+        self._default_unreadable = ""
+        try:
+            self.folder_text, self._free, self.summary_text = describe(None)
+        except OSError as exc:
+            reason = exc.strerror or str(exc)
+            self._default_unreadable = reason
+            self.folder_text, self._free = "", ""
+            self.summary_text = (
+                f"Nadare cannot use the default install folder ({reason}). Pick another folder."
+            )
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(22, 20, 22, 18)
@@ -120,6 +131,7 @@ class QuickInstallDialog(QDialog):
         )
         self.cancel_button = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
         self.install_button.setDefault(True)
+        self.install_button.setEnabled(not self._default_unreadable)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -137,6 +149,7 @@ class QuickInstallDialog(QDialog):
         combo.setAccessibleName(option.label)
         index = combo.findData(option.default)
         combo.setCurrentIndex(index if index >= 0 else 0)
+        self._applied_choice = combo.currentData()
         combo.currentIndexChanged.connect(self._choice_changed)
         row.addWidget(combo)
         row.addStretch(1)
@@ -156,9 +169,28 @@ class QuickInstallDialog(QDialog):
             self.folder_text, self._free, self.summary_text = self._describe(
                 self.chosen_folder or None
             )
-        except OSError:
+        except OSError as exc:
+            # The shown numbers belong to the previous choice: put it back rather than show a
+            # size that is not the one picked (#1207 b213).
+            self._restore_choice(exc)
             return
+        self._applied_choice = self.choice_value
         self._show_folder()
+
+    def _restore_choice(self, exc: OSError) -> None:
+        combo = self.choice_combo
+        previous = getattr(self, "_applied_choice", None)
+        if combo is not None:
+            index = combo.findData(previous)
+            if index >= 0 and index != combo.currentIndex():
+                combo.blockSignals(True)
+                combo.setCurrentIndex(index)
+                combo.blockSignals(False)
+                if self._on_choice is not None and previous is not None:
+                    self._on_choice(previous)
+        reason = exc.strerror or str(exc)
+        self.summary_label.setText(f"Nadare cannot work out that choice's size ({reason}).")
+        self.summary_label.setVisible(True)
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().showEvent(event)
@@ -250,5 +282,8 @@ class QuickInstallDialog(QDialog):
             return False
         self.chosen_folder = chosen or ""
         self.folder_text, self._free, self.summary_text = folder_text, free, summary
+        self._default_unreadable = ""
+        if hasattr(self, "install_button"):
+            self.install_button.setEnabled(True)
         self._show_folder()
         return True

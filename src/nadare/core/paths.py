@@ -121,7 +121,7 @@ DIRECT_PATHS = RelativePolicy(
 SOPHON_PATHS = RelativePolicy(
     backslash="reject",
     strip=False,
-    reject_nul=False,
+    reject_nul=True,  # a NUL escaped as a raw ValueError from stat() (#1207 b104)
     reject_drive=False,
     dots="reject",
 )

@@ -158,8 +158,9 @@ def test_the_manifest_no_longer_grants_the_whole_host():
     )
     args = yaml.safe_load(manifest.read_text())["finish-args"]
     assert "--filesystem=host" not in args
+    assert "--filesystem=home" not in args  # #1244: not the home folder either
     for needed in (
-        "--filesystem=home",
+        "--filesystem=~/Games:create",
         "--filesystem=/mnt",
         "--filesystem=/media",
         "--filesystem=/run/media",

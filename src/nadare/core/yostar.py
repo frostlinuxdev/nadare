@@ -386,7 +386,7 @@ def _as_int(value: Any, what: str) -> int:
         raise ManifestError(f"invalid {what}: {value!r}")
     try:
         number = int(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:  # inf from 1e400 (#1207 b139)
         raise ManifestError(f"invalid {what}: {value!r}") from exc
     if number < 0:
         raise ManifestError(f"negative {what}: {value!r}")
@@ -682,10 +682,14 @@ def media_url_allowed(url: str) -> bool:
     """True for an https URL on a ``*.yo-star.com`` host (no port/userinfo)."""
     if not isinstance(url, str) or not url:
         return False
-    parsed = urllib.parse.urlparse(url)
+    try:
+        parsed = urllib.parse.urlparse(url)
+        port = parsed.port  # a malformed port raises ValueError (#1207 b138)
+    except ValueError:
+        return False
     if parsed.scheme != "https":
         return False
-    if parsed.username or parsed.password or parsed.port is not None:
+    if parsed.username or parsed.password or port is not None:
         return False
     host = (parsed.hostname or "").lower()
     from .artwork import _is_local_host

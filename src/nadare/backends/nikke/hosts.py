@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import stat
 import tempfile
 from dataclasses import dataclass
@@ -405,11 +406,15 @@ def restore_cache(
         dst.mkdir(parents=True, exist_ok=True)
     for rel in CACHE_FILES:
         source_file = src / rel
-        if not source_file.is_file():
+        if source_file.is_symlink() or not source_file.is_file():
+            continue  # a link in the cache is never followed into the prefix (#1207 b029)
+        try:
+            data = _read_plain(source_file)
+        except OSError:
             continue
         target_dir = _plain_dirs(dst, Path(rel).parent.parts)
         target = target_dir / Path(rel).name
-        _write_plain(target, source_file.read_bytes(), 0o600)
+        _write_plain(target, data, 0o600)
         _keep_mtime(source_file, target)
 
 
@@ -495,11 +500,31 @@ def make_session_file(
     """Write the Sail session JSON with 0600 permissions and return it."""
     target = Path(path)
     session = build_session(auth, game_resource_path=game_resource_path)
-    target.write_text(json.dumps(session, ensure_ascii=False), encoding="utf-8")
-    os.chmod(target, 0o600)
+    # Never through a link planted at the target (#1207 b028).
+    _write_plain(target, json.dumps(session, ensure_ascii=False).encode("utf-8"), 0o600)
     return target
 
 
 def private_workdir(parent: str | Path) -> Path:
-    """A fresh 0700 directory for one run's session files."""
-    return Path(tempfile.mkdtemp(prefix="session-", dir=str(parent)))
+    """A fresh 0700 directory for one run's session files.
+
+    A run removes its own folder when it ends, but a hard kill or power loss leaves it, with a
+    live session inside: the next run (the profile lock keeps runs one at a time) clears every
+    such folder first (#1231). Links are removed, never followed.
+    """
+    folder = Path(parent)
+    try:
+        children = list(folder.iterdir())
+    except OSError:
+        children = []
+    for child in children:
+        if not child.name.startswith("session-"):
+            continue
+        try:
+            if stat.S_ISDIR(child.lstat().st_mode):
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink()
+        except OSError:
+            pass
+    return Path(tempfile.mkdtemp(prefix="session-", dir=str(folder)))

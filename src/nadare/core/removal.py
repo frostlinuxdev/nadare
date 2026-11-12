@@ -396,6 +396,39 @@ def default_prefix(name: str) -> Path | None:
     return None
 
 
+def _outside_game_folder(config, name: str, path: Path) -> str:
+    """Why a catalog game's folder lies outside its own game folder, or "" (#1229).
+
+    Only ever narrows what may be deleted: on top of the ownership records, a catalog game's
+    deletable folders must sit inside the game folder of the Steam-like model. Custom Wine
+    games, scripts and Steam games are outside that model and keep the ownership rule alone.
+    """
+    from . import gamefolders
+
+    dirs = (config.profiles.get(name) or {}).get("owned_dirs")
+    if not isinstance(dirs, list) or not dirs:
+        # Older profiles never recorded their game folder (a launcher game's prefix may be the
+        # game folder itself): only a recorded one is strong enough to narrow by.
+        return ""
+    try:
+        place = gamefolders.placement(config, name)
+    except Exception:  # noqa: BLE001 - an unknown layout means "keep it"
+        return "its game folder could not be worked out, so it is kept"
+    if place is None or place.folder is None or not place.made_by_nadare:
+        return ""
+    try:
+        resolved = path.resolve()
+        folder = place.folder.resolve()
+    except OSError:
+        return "it could not be resolved, so it is kept"
+    if resolved == folder or folder in resolved.parents:
+        return ""
+    return (
+        "it is outside the game's own folder, so it is kept (remove it yourself if you want "
+        "it gone)"
+    )
+
+
 def removable_trees(config, name: str) -> list[RemovableTree]:
     """List the install/prefix trees configured for ``name`` and whether each is safe to delete."""
     profile = config.profiles.get(name, {})
@@ -417,6 +450,10 @@ def removable_trees(config, name: str) -> list[RemovableTree]:
             # The default prefix is inside this profile's own folder, so ``_not_owned_reason``
             # already counts it as Nadare's.
             reason = _not_owned_reason(profile, key, expanded, name)
+            if reason:
+                safe = False
+        if safe:
+            reason = _outside_game_folder(config, name, expanded)
             if reason:
                 safe = False
         if expanded.is_symlink():

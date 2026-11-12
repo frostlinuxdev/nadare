@@ -67,7 +67,7 @@ FIXES: tuple[FixRow, ...] = (
         "Girls' Frontline 2: Exilium (Darkwinter)",
         (KEY_WEBVIEW2,),
         verified=False,
-        note="region-locked on the test account; to verify on the Steam build",
+        note="region-locked for the tester; to verify on the Steam build",
     ),
 )
 

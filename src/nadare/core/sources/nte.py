@@ -2,11 +2,9 @@
 # Copyright (C) 2026 Nadare contributors
 """Direct-download source for Neverness to Everness (global).
 
-Perfect World's patcher publishes a ``ResList.bin`` per version: the magic
-``PatcherXML0``, a little-endian u32 with the XML's length, then AES-128-CBC of the
-zlib-compressed XML. The key is ``"<appId>@Patcher"`` and the IV is ``"PatcherSDK"``,
-both right-padded with ``"0"`` to 16 bytes (the app id is in the public entry config).
-Nothing in it is a secret: the launcher derives it from public values.
+Perfect World's patcher publishes a ``ResList.bin`` per version: an XML file list in a
+small container (see :func:`decode_container`). Everything needed to read it
+comes from the public entry config; nothing in it is a secret.
 """
 
 from __future__ import annotations

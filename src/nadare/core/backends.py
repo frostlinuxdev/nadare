@@ -512,8 +512,11 @@ def install_choice_label(kind: str, profile: Mapping[str, Any]) -> str:
     if value in (None, ""):
         extra = profile.get("extra")
         value = extra.get(option.key) if isinstance(extra, Mapping) else None
-    labels = {str(v): str(label) for label, v in (option.choices or ())}
-    shown = labels.get(str(value)) or labels.get(str(option.default), str(option.default))
+    # Matched trimmed and case-blind, as the backends read it ("UHD" is the uhd tier; #1207 b047).
+    labels = {str(v).strip().lower(): str(label) for label, v in (option.choices or ())}
+    shown = labels.get(str(value).strip().lower()) or labels.get(
+        str(option.default).strip().lower(), str(option.default)
+    )
     return f"{option.label}: {shown}"
 
 
@@ -535,7 +538,7 @@ def supports_sandbox(kind: str) -> bool:
 
 def one_per_game(kind: str) -> bool:
     """Whether ``kind`` is a catalog game with only one profile (safe for unknown kinds)."""
-    if not kind or kind in UNLIMITED_KINDS:
+    if not isinstance(kind, str) or not kind or kind in UNLIMITED_KINDS:  # #1207 b046
         return False
     try:
         get(kind)

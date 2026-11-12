@@ -41,7 +41,18 @@ def test_the_runtime_provided_libraries_are_removed(stage):
     assert all("/" not in name for name in names)
 
 
-def test_staging_keeps_symlinks_and_never_mirrors_flathub(stage, tmp_path):
+@pytest.fixture()
+def no_icon_tools(stage, monkeypatch):
+    """The icon is not what these tests check: CI runners lack rsvg-convert and ImageMagick."""
+
+    def fake_render(svg, size, target):
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_bytes(b"\x89PNG fake")
+
+    monkeypatch.setattr(stage, "render_icon", fake_render)
+
+
+def test_staging_keeps_symlinks_and_never_mirrors_flathub(stage, tmp_path, no_icon_tools):
     appdir = tmp_path / "AppDir" / "usr" / "bin"
     internal = appdir / "_internal"
     (internal / "PyQt6" / "Qt6" / "lib").mkdir(parents=True)
@@ -60,7 +71,7 @@ def test_staging_keeps_symlinks_and_never_mirrors_flathub(stage, tmp_path):
     assert not (out / "files" / "lib" / "i386-linux-gnu" / "libc.so.6").exists()
 
 
-def test_the_desktop_entry_has_each_key_once(stage, tmp_path):
+def test_the_desktop_entry_has_each_key_once(stage, tmp_path, no_icon_tools):
     # desktop-file-validate (run by flatpak build-finish/export) rejects a repeated key.
     appdir = tmp_path / "AppDir" / "usr" / "bin"
     (appdir / "_internal").mkdir(parents=True)

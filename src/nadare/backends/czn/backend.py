@@ -1373,6 +1373,11 @@ class CznBackend(GameBackend):
             return
         # Only a tree this call creates is cleaned up on failure: an existing prefix (even a
         # half-built one the user pointed us at) is never deleted.
+        if prefix.exists() and not prefix.is_dir():
+            # A file where the prefix goes is a clear error, not a raw FileExistsError (#1207 b011).
+            raise BackendError(
+                f"{prefix} is a file, not a folder: move it away or choose another place", 1
+            )
         created = not prefix.exists()
         try:
             # An existing empty folder is as good as a new one; one holding anything else is
@@ -2402,7 +2407,11 @@ class CznBackend(GameBackend):
         prefix = self.prefix()
         left: list[str] = []
         failed: list[str] = []
-        if (prefix / "drive_c").is_dir():
+        # A prefix Nadare stamped but whose wineboot never finished has no drive_c: still ours
+        # to remove (#1207 b019). The deletability check below stays the gate.
+        if prefix.is_dir() and (
+            (prefix / "drive_c").is_dir() or (prefix / PREFIX_MARKER).is_file()
+        ):
             why = self._prefix_not_deletable(prefix)
             if why:
                 left.append(f"{prefix} ({why})")

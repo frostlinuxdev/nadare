@@ -324,28 +324,9 @@ def _inside(path: Path, parent: Path) -> bool:
     return path == parent or parent in path.parents
 
 
-#: Folders of the home a game folder must never be: binding one would hand the game the user's
-#: files or every other program's settings, keys and data.
-_PRIVATE = prefixguard.PERSONAL_FOLDERS | frozenset(
-    {".ssh", ".gnupg", ".config", ".local", ".cache", ".mozilla", ".pki", ".var", ".password-store"}
-)
-
-
-def _private_reason(folder: Path, home: Path) -> str:
-    try:
-        resolved = folder.expanduser().resolve()
-    except (OSError, RuntimeError):
-        return ""
-    if resolved.parent == home and resolved.name in _PRIVATE:
-        return "one of your personal or private folders"
-    if resolved == home / ".local" / "share":
-        return "the folder where your programs keep their data"
-    return ""
-
-
 def _broad_reason(folder: Path, home: Path) -> str:
     """Why binding ``folder`` would give the hidden home folder back, or an empty string."""
-    return prefixguard.broad_reason(folder, home) or _private_reason(Path(folder), home)
+    return prefixguard.place_reason(folder, home=home)  # the shared rule (#1229)
 
 
 def wrap(

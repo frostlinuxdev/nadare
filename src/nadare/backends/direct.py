@@ -16,6 +16,8 @@ installer keys.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import logging
 import threading
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -28,14 +30,29 @@ from ..core import (
     diskspace,
     endfield_shim,
     graphics,
+    kuropatch,
     monitors,
     nte_launcher,
     paths,
+    process,
     removal,
     webview2,
 )
 from ..core.backends import PREFIX_HELP, BackendError, Option
-from ..core.sources import Fetch, aethergazer, bd2, endfield, gfl2, hoyo, mongil, nte, pgr, wuwa
+from ..core.events import Cancelled
+from ..core.sources import (
+    Fetch,
+    aethergazer,
+    bd2,
+    endfield,
+    gfl2,
+    hoyo,
+    mongil,
+    nte,
+    patch_list_fetch,
+    pgr,
+    wuwa,
+)
 from . import (
     bd2_news,
     endfield_news,
@@ -48,15 +65,25 @@ from . import (
 )
 from .arknights import INSTALLED_PREFIX_KEY
 from .nmlogin import NetmarbleLoginMixin
-from .wine import profile_setting, stream
+from .wine import profile_setting, scan_pids, stream
 from .winegame import WineGameBackend
 
 #: Sizes below are decimal gigabytes, as the publishers and archive tables report them.
 GB = 10**9
 
+log = logging.getLogger(__name__)
+
 
 class DirectBackend(WineGameBackend):
     """Base for the per-game classes below; never registered on its own."""
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        # Settings must name the real default: an X11-default game is not "Auto (Wayland)".
+        if getattr(cls, "default_display", "wayland") == "x11":
+            cls.options = tuple(
+                _x11_display_option(o) if o.key == "display" else o for o in cls.options
+            )
 
     kind = "direct"
     supports_secure_mode = True
@@ -210,12 +237,32 @@ class DirectBackend(WineGameBackend):
 
         changed = threading.Event()
 
-        self.ctx.emit(Event("step", f"{self.display_name}: syncing {plan.version} directly"))
+        retired: tuple[str, ...] = ()
+        self._patch_numbers: dict[str, int] = {}
         try:
+            # Kuro's update patches first (#1252): a speed-up only. The whole-file sync below
+            # always runs and fetches whatever a patch did not produce, exactly as before.
+            if update is not None and update[0] and update[0] != update[1]:
+                try:
+                    retired = self._apply_update_patches(plan, update[0], changed)
+                except Cancelled:
+                    raise  # the user's Cancel stops the update; it is not a patch problem
+                except Exception as exc:  # noqa: BLE001 - a patch problem never fails an update
+                    self.info(f"{self.display_name}: update patches not used ({exc})")
+            self.ctx.emit(Event("step", f"{self.display_name}: syncing {plan.version} directly"))
+            fetched = [0]
+
+            def counted(event: Event) -> None:
+                # The sync's overall download counter, for the update receipt (#1252).
+                data = event.data if isinstance(event.data, dict) else {}
+                if event.kind == "progress" and data.get("stage") == "download":
+                    fetched[0] = max(fetched[0], int(data.get("done") or 0))
+                self.ctx.emit(event)
+
             summary = directdl.sync(
                 plan,
                 self.install_dir(),
-                emit=self.ctx.emit,
+                emit=counted,
                 cancel=self.ctx.cancel,
                 workers=workers,
                 changed=changed,
@@ -236,11 +283,131 @@ class DirectBackend(WineGameBackend):
             raise
         marker.unlink(missing_ok=True)
         self._record_synced_version(plan)
+        self._remove_retired(plan, retired)
+        if update is not None and update[0] and update[0] != update[1]:
+            text, too_big = update_receipt(
+                update[0], str(plan.version),
+                patch_bytes=int(self._patch_numbers.get("patch_bytes", 0)),
+                whole_bytes=fetched[0],
+                publisher_bytes=int(self._patch_numbers.get("publisher", 0)),
+            )
+            self.info(f"{self.display_name}: {text}")
+            if too_big:
+                self.ctx.emit(Event("step", f"{self.display_name}: {too_big}"))
         self.info(
             f"{self.display_name}: synced {summary.get('downloaded', 0)} item(s), "
             f"{summary.get('skipped', 0)} already up to date"
         )
         return summary
+
+    def _apply_update_patches(
+        self, plan: directdl.Plan, installed: str, changed: threading.Event
+    ) -> tuple[str, ...]:
+        """Apply the publisher's update patches from ``installed``; return the files it retired.
+
+        Any problem only means "no patch": the whole-file sync that follows covers it.
+        """
+        from ..core.events import Event
+
+        if not isinstance(plan.extra, dict) or kuropatch.EXTRA_KEY not in plan.extra:
+            return ()
+        try:
+            patches = kuropatch.prepare(plan, installed, patch_list_fetch)
+        except directdl.DirectError as exc:
+            self.info(f"{self.display_name}: no update patch ({exc}); downloading whole files")
+            return ()
+        self._patch_numbers["publisher"] = patches.publisher_bytes
+        if patches.groups:
+            self.ctx.emit(
+                Event(
+                    "step",
+                    f"{self.display_name}: updating {installed} -> {plan.version} with patches "
+                    f"({diskspace.human_size(patches.download_bytes)} to download)",
+                )
+            )
+            outcome = kuropatch.apply(
+                patches, plan, self.install_dir(),
+                emit=self.ctx.emit, cancel=self.ctx.cancel, changed=changed,
+            )
+            self._patch_numbers["patch_bytes"] = outcome.downloaded_bytes
+            self.info(
+                f"{self.display_name}: patched {outcome.applied} group(s); "
+                f"{outcome.skipped} left to the full download"
+            )
+        return patches.deletes
+
+    #: Kuro games: remove files an older Nadare left after an update, once per version (#1252).
+    tidies_retired = False
+    _TIDY_MARK = "tidied-{version}"
+
+    def check_update(self) -> None:
+        super().check_update()
+        try:
+            self._tidy_retired_once()
+        except Cancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a background check must never fail on this
+            log.debug("%s: tidy-up skipped: %s", self.display_name, exc)
+
+    def _game_running(self) -> bool:
+        return bool(scan_pids(self._patterns()) or self._running_elsewhere())
+
+    def _tidy_retired_once(self) -> None:
+        """Remove retired files once per installed version, with no click needed (#1252).
+
+        Players who updated with Nadare 0.1.0b22 or older keep the files Kuro retired (26 GB
+        after WuWa 3.8.0). Only a complete install whose version is the published one is
+        tidied, never while the game runs or another operation holds it.
+        """
+        if not self.tidies_retired:
+            return
+        record = self._read_version_file()
+        if record is None or self._install_incomplete():
+            return
+        version = str(record.get("version") or "")
+        state = self.install_dir() / directdl.STATE_DIR
+        mark = state / self._TIDY_MARK.format(version=version.replace("/", "_"))
+        if not version or mark.exists():
+            return
+        plan = self._load_manifest()
+        if str(plan.version) != version or self._game_running():
+            return  # an update is waiting (it tidies itself), or the game is open
+        lock = process.OperationLock(self.ctx.name)
+        try:
+            lock.acquire()
+        except process.ProfileLockError:
+            return  # another operation has the game; try at the next check
+        try:
+            names = kuropatch.retired_on_disk(plan, self.install_dir(), patch_list_fetch)
+            if names:
+                removed = kuropatch.delete_retired(self.install_dir(), names)
+                if removed:
+                    self.info(
+                        f"{self.display_name}: removed {removed} file(s) an earlier update "
+                        "left behind"
+                    )
+            state.mkdir(parents=True, exist_ok=True)
+            mark.write_text("", encoding="utf-8")
+        finally:
+            lock.release()
+
+    def _remove_retired(self, plan: directdl.Plan, retired: tuple[str, ...]) -> None:
+        """Remove files the publisher retired: from this update's patch list, and any an
+        earlier update left behind that Kuro's older lists name (#1252). Never fails the sync."""
+        names = set(retired)
+        try:
+            names.update(kuropatch.retired_on_disk(plan, self.install_dir(), patch_list_fetch))
+        except Cancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a cleanup problem is only logged
+            self.info(f"{self.display_name}: could not check for left-over files ({exc})")
+        if not names:
+            return
+        removed = kuropatch.delete_retired(self.install_dir(), tuple(sorted(names)))
+        if removed:
+            self.info(
+                f"{self.display_name}: removed {removed} file(s) the publisher no longer uses"
+            )
 
     # ---- lifecycle (same shape as Stella Sora's) --------------------------
     def install(self) -> None:
@@ -264,6 +431,42 @@ class DirectBackend(WineGameBackend):
             raise BackendError(f"game executable not found: {target}")
         self._ensure_default_runner(strict=True)
         return self._launch_direct()
+
+
+#: An update this many times the publisher's own size (plus 1 GiB) is reported (#1252).
+RECEIPT_LIMIT = 2
+
+
+def update_receipt(
+    old: str, new: str, *, patch_bytes: int, whole_bytes: int, publisher_bytes: int
+) -> tuple[str, str]:
+    """``(log line, warning or "")`` for an update: what it downloaded vs the publisher's size."""
+    total = patch_bytes + whole_bytes
+    text = (
+        f"update {old} -> {new}: downloaded {diskspace.human_size(total)} "
+        f"(patches {diskspace.human_size(patch_bytes)}, whole files "
+        f"{diskspace.human_size(whole_bytes)})"
+    )
+    if publisher_bytes <= 0:
+        return text, ""
+    text += f"; the publisher's own update is about {diskspace.human_size(publisher_bytes)}"
+    if total > RECEIPT_LIMIT * publisher_bytes + 2**30:
+        return text, (
+            f"this update downloaded {diskspace.human_size(total)}, far more than the "
+            f"publisher's own {diskspace.human_size(publisher_bytes)}. Please send a Support "
+            "report so we can fix it."
+        )
+    return text, ""
+
+
+def _x11_display_option(option: Option) -> Option:
+    return dataclasses.replace(
+        option,
+        help="X11 (XWayland) is the default for this game: on native Wayland its windows "
+        "misbehave (a sign-in window on another screen, or a blank window). Wayland is there "
+        "to try.",
+        choices=(("Auto (X11)", "auto"), ("Wayland", "wayland"), ("X11 (XWayland)", "x11")),
+    )
 
 
 def _subdir(name: str) -> Path:
@@ -325,6 +528,10 @@ class WutheringWavesBackend(DirectBackend):
     official_image_hosts = kuro_news.IMAGE_HOSTS
     game_tag = "wuwa"
     display_name = "Wuthering Waves"
+    tidies_retired = True
+    #: On native Wayland a player's sign-in window opened on another screen; XWayland keeps the
+    #: game's windows together (2026-11-12). ``display: wayland`` still wins.
+    default_display = "x11"
     install_subdir = _subdir("WutheringWaves")
     direct_exe = "Wuthering Waves.exe"
     launcher_names = (direct_exe,)
@@ -707,6 +914,7 @@ class PgrBackend(DirectBackend):
     official_image_hosts = kuro_news.IMAGE_HOSTS
     game_tag = "pgr"
     display_name = "Punishing: Gray Raven"
+    tidies_retired = True
     install_subdir = _subdir("PunishingGrayRaven")
     direct_exe = "PGR.exe"
     launcher_names = (direct_exe,)

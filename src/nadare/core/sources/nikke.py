@@ -44,7 +44,12 @@ def _retry_sleep(seconds: float) -> None:
 def _url_allowed(url: str, host: str) -> bool:
     try:
         parsed = urllib.parse.urlparse(url)
-        return parsed.scheme == "https" and parsed.hostname == host
+        # An explicit port other than HTTPS's own is not the publisher's service (#1207 b114).
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == host
+            and parsed.port in (None, 443)
+        )
     except ValueError:
         return False
 
@@ -142,7 +147,7 @@ def client_info(post: Post | None = None) -> dict[str, Any]:
     """
     document = _document(post, 1)
     info = document.get("version_info")
-    if not isinstance(info, dict):
+    if not isinstance(info, dict) or not info:  # an empty record retries too (#1207 b115)
         document = _document(post, 0)
         info = document.get("version_info")
     if not isinstance(info, dict):
@@ -225,6 +230,36 @@ def install_launcher(
         emit=emit,
         cancel=cancel,
     )
+
+
+#: Launcher files that say whether its sign-in service is current (#1245): the launcher, and the
+#: ``intl_service`` program and its two core libraries the launcher-free sign-in runs.
+LAUNCHER_KEY_FILES = (
+    "nikke_launcher.exe",
+    "intl_service/intl_service.exe",
+    "intl_service/INTLCore.dll",
+    "intl_service/intl_service_core.dll",
+)
+
+
+def launcher_key_entries(
+    info: dict[str, Any], *, fetch: Fetch | None = None
+) -> dict[str, railrepo.Entry]:
+    """The launcher manifest's entries (size, MD5) for :data:`LAUNCHER_KEY_FILES`."""
+    wanted = {key.lower(): key for key in LAUNCHER_KEY_FILES}
+    found: dict[str, railrepo.Entry] = {}
+    for repo in launcher_repositories(info):
+        data = railrepo._fetch_verified(
+            fetch or fetch_object, repo.manifest_url, repo.manifest_size, repo.manifest_md5
+        )
+        for entry in railrepo.parse_manifest(data, repo):
+            key = wanted.get(entry.path.replace("\\", "/").lower())
+            if key and not entry.is_dir:
+                found[key] = entry
+    missing = [key for key in LAUNCHER_KEY_FILES if key not in found]
+    if missing:
+        raise railrepo.RailError(f"the launcher manifest has no {', '.join(missing)}")
+    return found
 
 
 #: The game program, as the client manifest names it (``\\`` separators there).

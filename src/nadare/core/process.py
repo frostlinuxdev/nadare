@@ -735,6 +735,19 @@ def run(
             # The leader already exited, but its descendants (a game, wineserver) may still be
             # in its group and would keep running while the caller releases the profile (#896).
             _stop_orphaned_group(pgid)
+        if reader.is_alive():
+            # The reader may be blocked on a put into the full queue; nobody reads it any more.
+            # Discard the rest in the background so the thread can reach EOF and end (#1207 b083).
+            def _discard_rest() -> None:
+                while reader.is_alive() or not line_q.empty():
+                    try:
+                        line_q.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+
+            threading.Thread(
+                target=_discard_rest, name="nadare-run-drain", daemon=True
+            ).start()
         raise
 
 

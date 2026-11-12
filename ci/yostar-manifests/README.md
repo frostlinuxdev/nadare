@@ -1,11 +1,9 @@
 # Yostar manifest generator
 
 `generate.py` publishes **plain, normalized Yostar manifests** so the Nadare
-client can install/update Arknights and Stella Sora directly, without shipping
-Yostar's per-game signing salt in a GPL binary.
-
-A scheduled CI job holds the salt, performs the
-signed launcher calls, and commits JSON that anyone can consume.
+client can install/update Arknights and Stella Sora directly. Yostar's launcher
+calls need a per-game value that is not shipped in the client: a scheduled job
+makes those calls and commits plain JSON that anyone can use.
 
 ## What it produces
 
@@ -57,7 +55,7 @@ failure and the code/message is surfaced.
 
 | Variable | Meaning |
 |---|---|
-| `SALT_<TAG>` | per-game signing salt (required) |
+| `SALT_<TAG>` | the per-game value Yostar's launcher calls need (required) |
 | `VERSION_<TAG>` | launcher version string used in the signed `head` |
 
 `<TAG>` is the game tag upper-cased with non-alphanumerics replaced by `_`, so

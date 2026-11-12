@@ -30,6 +30,15 @@ def _json(data: bytes, what: str) -> dict[str, Any]:
     return value
 
 
+def _patch_extra(root: str, configs: dict[str, Any]) -> dict[str, Any]:
+    """What :mod:`kuropatch` needs later: the CDN root and each pack's patch list (#1252)."""
+    from ..kuropatch import EXTRA_KEY
+
+    packs = {name: [c for c in value if isinstance(c, dict)]
+             for name, value in configs.items() if isinstance(value, list)}
+    return {EXTRA_KEY: {"root": root, "packs": packs}} if packs else {}
+
+
 def _https(url: str) -> str:
     if urlparse(url).scheme != "https":
         raise directdl.DirectError(f"refusing a non-https URL: {url!r}")
@@ -176,6 +185,7 @@ def resolve_game(
         version=version,
         files=tuple(files),
         exe=exe,
+        extra=_patch_extra(root, {"": config.get("patchConfig")}),
     )
 
 
@@ -223,6 +233,7 @@ def resolve_bundle(
     files: list[directdl.RemoteFile] = []
     seen: set[str] = set()
     pack_versions: list[tuple[str, str]] = []
+    patch_configs: dict[str, Any] = {}
     for name in names:
         pack = packs.get(name)
         if not isinstance(pack, dict):
@@ -233,6 +244,7 @@ def resolve_bundle(
         except KeyError as exc:
             raise directdl.DirectError(f"pack {name!r} is missing {exc.args[0]!r}") from exc
         pack_versions.append((str(name), str(pack.get("version") or "")))
+        patch_configs[str(name)] = pack.get("patchConfig")
         manifest = _json(fetch(_https(root + quote(index_file, safe="/")), None), "indexFile")
         resources = manifest.get("resource")
         if not isinstance(resources, list):
@@ -260,4 +272,7 @@ def resolve_bundle(
     moved = [f"{n}-{v}" for n, v in pack_versions[1:] if v != version]
     if moved:
         version += "+" + "+".join(moved)
-    return directdl.Plan(game_tag=game_tag, version=version, files=tuple(files), exe=exe)
+    return directdl.Plan(
+        game_tag=game_tag, version=version, files=tuple(files), exe=exe,
+        extra=_patch_extra(root, patch_configs),
+    )

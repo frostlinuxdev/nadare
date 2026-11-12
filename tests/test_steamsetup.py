@@ -344,7 +344,7 @@ def test_the_old_vulkan_warning_names_the_older_vulkan_build_dw_proton_switches_
 
 def test_blue_archives_note_says_what_was_actually_tested():
     note = steamsetup.game_for(BLUE).note.lower()
-    assert "h.264" in note  # the unlock was already on in the test account
+    assert "h.264" in note  # the unlock was already on in the test
     assert "no changes" not in note
 
 
