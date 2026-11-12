@@ -207,9 +207,11 @@ def test_logout_forgets_both_copies_of_the_session(tmp_path):
 # ---- the broken path is gone -------------------------------------------------------------------
 def test_the_own_listener_google_path_is_removed():
     assert importlib.util.find_spec("nadare.backends.nikke.oauth") is None
-    script = (ROOT / "scripts" / "nikke_launcherless" / "launcherless.py").read_text()
-    assert "--login-google" not in script
     assert not (ROOT / "tests" / "test_nikke_oauth.py").exists()
+    script = ROOT / "scripts" / "nikke_launcherless" / "launcherless.py"
+    if not script.exists():
+        pytest.skip("the research notebook is not in the public tree")
+    assert "--login-google" not in script.read_text()
 
 
 @pytest.mark.parametrize(
@@ -221,7 +223,10 @@ def test_the_own_listener_google_path_is_removed():
 )
 def test_the_host_never_prints_reply_bytes(source):
     """The reply starts with the account id: printing its first bytes leaked part of it."""
-    text = (ROOT / source).read_text()
+    path = ROOT / source
+    if source.startswith("scripts/nikke_launcherless/") and not path.exists():
+        pytest.skip("the research notebook is not in the public tree")
+    text = path.read_text()
     assert "head:" not in text
 
 

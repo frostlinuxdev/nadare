@@ -89,22 +89,29 @@ jobs:
         run: python -m pytest tests -q
 
   stub:
-    # #257: the committed czn_pcsdk_stub.exe must match a fresh reproducible
-    # build. The --container path pins the Debian image and package snapshot.
-    # Needs a container engine and network, so it runs weekly or on request.
+    # #257: both committed stubs (the Go default and the C fallback) must match
+    # fresh reproducible builds. --container pins the Debian image and package
+    # snapshot; the Go build pins its Go image by digest. Needs a container
+    # engine and network, so it runs weekly or on request.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Check out the source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Build the PCSDK stub
-        run: scripts/build_stub.sh --container dist/czn_pcsdk_stub.exe
+      - name: Build the PCSDK stub (C)
+        run: scripts/build_stub.sh --container dist/czn_pcsdk_stub_c.exe
 
-      - name: Compare with the committed stub
+      - name: Test and build the PCSDK stub (Go)
         run: |
-          sha256sum src/nadare/assets/czn_pcsdk_stub.exe dist/czn_pcsdk_stub.exe
+          scripts/build_stub_go.sh --test
+          scripts/build_stub_go.sh dist/czn_pcsdk_stub.exe
+
+      - name: Compare with the committed stubs
+        run: |
+          sha256sum src/nadare/assets/czn_pcsdk_stub*.exe dist/czn_pcsdk_stub*.exe
           cmp src/nadare/assets/czn_pcsdk_stub.exe dist/czn_pcsdk_stub.exe
+          cmp src/nadare/assets/czn_pcsdk_stub_c.exe dist/czn_pcsdk_stub_c.exe
 
   audit:
     # #588: the lock is the single dependency input; still watch it for advisories.
