@@ -58,9 +58,10 @@ Source code and the issue tracker are at
 You need a Linux x86_64 desktop (Wayland or X11) with `glibc` 2.35 or newer (Ubuntu 22.04+,
 Debian 12+, Fedora 36+, current Arch) and a working Vulkan driver (NVIDIA, or Mesa for
 AMD/Intel) **including its 32-bit Vulkan support**. Nothing else is needed on most systems:
-Nadare downloads its own Proton runner, and the runtime it uses brings the other 32-bit
-libraries (FreeType, udev and so on) with it. If your system cannot use that runtime,
-`doctor` prints a `32-bit libs:` line and the command that fixes it. The AppImage
+Nadare downloads its own Proton runner and runs every game in the Steam Runtime, which
+brings the other 32-bit libraries (FreeType, udev and so on) with it. The first game you
+start downloads that runtime once (a few hundred MB). On Ubuntu 24.04 and newer, Nadare
+asks once for a permission the runtime needs (one password prompt). The AppImage
 bundles the GL loader and the Qt X11 platform libraries it needs. A Secret Service
 keyring (GNOME Keyring or KWallet) is optional and only used for *Remember me*.
 
