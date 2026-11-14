@@ -74,7 +74,8 @@ def _folder_values(profile: Mapping[str, Any]) -> dict[str, Path]:
     out: dict[str, Path] = {}
     for key in FOLDER_KEYS:
         value = profile.get(key)
-        if isinstance(value, str) and value.strip():
+        # A hand-edited NUL cannot name a folder; realpath() would raise on it.
+        if isinstance(value, str) and value.strip() and "\x00" not in value:
             out[key] = _real(value)
     return out
 

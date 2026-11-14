@@ -17,9 +17,15 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import json
 import logging
+import os
+import re
+import shutil
+import stat
 import threading
-from collections.abc import Callable, Iterable
+import time
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -38,8 +44,9 @@ from ..core import (
     removal,
     webview2,
 )
-from ..core.backends import PREFIX_HELP, BackendError, Option
+from ..core.backends import PREFIX_HELP, BackendError, Option, Status
 from ..core.events import Cancelled
+from ..core.gameversion import versions_equal
 from ..core.sources import (
     Fetch,
     aethergazer,
@@ -66,16 +73,68 @@ from . import (
 from .arknights import INSTALLED_PREFIX_KEY
 from .nmlogin import NetmarbleLoginMixin
 from .wine import profile_setting, scan_pids, stream
-from .winegame import WineGameBackend
+from .winegame import UPDATE_CHECK_INTERVAL, WineGameBackend, atomic_write_json
+
+#: A version that may name a predownload cache folder ("3.4.0", "3.8.0+pack-3.8.1"):
+#: no separators or leading dot. ``+`` is a valid filename character and keeps the name
+#: exactly as the version record stores it, so a Kuro tier plan and its cache agree (#W10-F5).
+_SAFE_VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]{0,31}")
 
 #: Sizes below are decimal gigabytes, as the publishers and archive tables report them.
 GB = 10**9
 
+#: Written into a Kuro cleanup mark only when this release completed the cleanup. b23 wrote an
+#: empty mark even when it gave up, so an empty (or older) mark must not mean "done" (#1252).
+TIDY_MARK_GENERATION = "2\n"
+
 log = logging.getLogger(__name__)
+
+
+def _base_version_key(version: str) -> tuple[int, ...]:
+    """Numbers of a version's base ("3.8.0+hd-3.8.1" -> (3, 8, 0)); text parts count as 0."""
+    base = str(version).split("+", 1)[0]
+    return tuple(int(part) if part.isdigit() else 0 for part in base.split("."))
 
 
 class DirectBackend(WineGameBackend):
     """Base for the per-game classes below; never registered on its own."""
+
+    def _before_sync(self) -> None:
+        """Hook run first in every Install/Update/Repair sync (WuWa records its tiers)."""
+
+    def _tidy_allowed(self) -> bool:
+        """Whether the retired-files tidy may run now (WuWa: not while a tier is pending)."""
+        return True
+
+    def _tidy_names(self, names: Iterable[str]) -> list[str]:
+        """The retired files the tidy may delete (WuWa keeps other tiers' folders out)."""
+        return list(names)
+
+    #: umu game id (``GAMEID``/``UMU_ID``) for the runner's per-game fixes; ``None`` sends none
+    #: (umu's default). A profile ``extra_env`` GAMEID/UMU_ID always wins (#1334).
+    umu_id: str | None = None
+
+    def _prefix_command(
+        self,
+        args: list[str],
+        extra_env: dict[str, str] | None = None,
+        *,
+        sandboxed: bool = False,
+    ) -> tuple[list[str], dict[str, str]]:
+        argv, env = super()._prefix_command(args, extra_env, sandboxed=sandboxed)
+        if self.umu_id is None:
+            return argv, env  # umu's default, as before: no id is sent
+        profile_env = profile_setting(self.ctx.profile, "extra_env")
+        explicit = {**(profile_env if isinstance(profile_env, dict) else {}), **(extra_env or {})}
+
+        def given(key: str) -> str:
+            # By presence, not truthiness: a hand-edited JSON 0 is a real id (stress F2).
+            value = explicit.get(key)
+            return "" if value is None else str(value).strip()
+
+        env["GAMEID"] = given("GAMEID") or self.umu_id
+        env["UMU_ID"] = given("UMU_ID") or env["GAMEID"]
+        return argv, env
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -148,6 +207,8 @@ class DirectBackend(WineGameBackend):
 
     #: ``Plan`` factory for this game: ``(fetch) -> Plan``.
     plan_factory: Callable[[Fetch | None], directdl.Plan]
+    #: The next-version plan when the publisher offers a predownload window, else ``None``.
+    predownload_factory: Callable[..., directdl.Plan | None] | None = None
 
     def plan_kwargs(self) -> dict[str, Any]:
         """Extra keyword arguments for ``plan_factory`` (default: none)."""
@@ -206,10 +267,336 @@ class DirectBackend(WineGameBackend):
             ),
         ]
 
+    # ---- leftover cleanup state -------------------------------------------
+    def _leftover_state_path(self) -> Path:
+        return self.install_dir() / directdl.STATE_DIR / "leftovers.json"
+
+    def _read_leftover_state(self) -> list[str]:
+        """Retired names this install still owes, or ``[]`` when absent, stale or unsafe."""
+        try:
+            fd = os.open(self._leftover_state_path(), os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            return []
+        try:
+            with os.fdopen(fd, "rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    return []
+                raw = handle.read(64 * 1024)
+        except OSError:
+            return []
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(payload, dict):
+            return []
+        version = payload.get("version")
+        names = payload.get("names")
+        if not isinstance(version, str) or not version or not isinstance(names, list):
+            return []
+        if not all(isinstance(name, str) and name for name in names):
+            return []
+        record = self._read_version_file()
+        installed = str(record.get("version") or "") if record else ""
+        return names if version == installed else []
+
+    def _write_leftover_state(self, version: str, names: Iterable[str]) -> None:
+        atomic_write_json(
+            self._leftover_state_path(),
+            {"version": str(version), "names": sorted(set(names))},
+        )
+
+    def _clear_leftover_state(self) -> None:
+        try:
+            self._leftover_state_path().unlink(missing_ok=True)
+        except OSError as exc:
+            log.debug("%s: could not remove leftover state: %s", self.display_name, exc)
+
+    def _leftovers_on_disk(self, names: Iterable[str]) -> list[str]:
+        """The names still present; a link counts, since deleting one never follows it."""
+        root = self.install_dir()
+        found: list[str] = []
+        for name in names:
+            try:
+                path = root / directdl.safe_relative_path(name)
+            except directdl.DirectError:
+                continue
+            if os.path.lexists(path):
+                found.append(name)
+        return found
+
+    # ---- predownload state and cache --------------------------------------
+    def _predownload_state_path(self) -> Path:
+        return self.install_dir() / directdl.STATE_DIR / "predownload.json"
+
+    def _predownload_cache_root(self) -> Path:
+        return self.install_dir() / directdl.STATE_DIR / "predownload"
+
+    def _predownload_cache(self, version: str) -> Path:
+        """The cache folder for ``version``; a path-like version is refused, never mapped."""
+        name = str(version)
+        if not _SAFE_VERSION.fullmatch(name):
+            raise BackendError(f"{self.display_name}: unusable version name {name!r}")
+        return self._predownload_cache_root() / name
+
+    def _read_predownload_state(self) -> dict[str, Any] | None:
+        """The last predownload check, or ``None`` when absent or malformed."""
+        try:
+            fd = os.open(self._predownload_state_path(), os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            return None
+        try:
+            with os.fdopen(fd, "rb") as handle:
+                raw = handle.read(64 * 1024)
+        except OSError:
+            return None
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        version = payload.get("version")
+        if version is not None and (not isinstance(version, str) or not version):
+            return None
+        checked = payload.get("checked_at", 0)
+        if not isinstance(checked, (int, float)):
+            checked = 0
+        return {
+            "version": version,
+            "checked_at": int(checked),
+            # Only JSON true means ready: a hand-edited string "false" is truthy to bool().
+            "ready": payload.get("ready") is True,
+        }
+
+    def _write_predownload_state(
+        self, version: str | None, ready: bool, checked_at: int | None = None
+    ) -> None:
+        atomic_write_json(
+            self._predownload_state_path(),
+            {
+                "version": version,
+                "checked_at": int(time.time()) if checked_at is None else checked_at,
+                "ready": bool(ready),
+            },
+        )
+
+    def _refresh_predownload_state(self) -> None:
+        """Refresh the next-version notice; a background check only ever logs."""
+        if self.predownload_factory is None:
+            return
+        record = self._read_version_file()
+        target = self.direct_target()
+        if record is None or target is None or not target.is_file():
+            return
+        try:
+            if not self.ctx.config.data.get("check_updates", True):
+                return
+        except AttributeError:
+            pass
+        old = self._read_predownload_state()
+        if old is not None:
+            try:
+                age = time.time() - float(old.get("checked_at", 0))
+            except (TypeError, ValueError):
+                age = UPDATE_CHECK_INTERVAL
+            if 0 <= age < UPDATE_CHECK_INTERVAL:
+                return
+        try:
+            plan = type(self).predownload_factory(None, **self.plan_kwargs())
+        except Cancelled:
+            raise
+        except (directdl.DirectError, BackendError, OSError) as exc:
+            log.debug("%s: predownload check failed: %s", self.display_name, exc)
+            return
+        try:
+            if plan is None:
+                self._write_predownload_state(None, False)
+            else:
+                same = old is not None and old.get("version") == str(plan.version)
+                self._write_predownload_state(
+                    str(plan.version), bool(same and old and old.get("ready"))
+                )
+        except OSError as exc:
+            log.debug("%s: could not cache the predownload state: %s", self.display_name, exc)
+
+    def _usable_predownload_cache(self, version: str) -> Path | None:
+        """The real cache folder for ``version``, never a symlink or a path outside its root."""
+        root = self._predownload_cache_root()
+        try:
+            root_info = os.lstat(root)
+        except OSError:
+            return None
+        if not stat.S_ISDIR(root_info.st_mode):
+            return None
+        try:
+            cache = self._predownload_cache(version)
+        except BackendError:
+            return None
+        try:
+            info = os.lstat(cache)
+        except OSError:
+            return None
+        return cache if stat.S_ISDIR(info.st_mode) else None
+
+    def _predownload_cache_for(self, plan: directdl.Plan) -> Path | None:
+        """The predownload cache a sync of ``plan`` may use (and remove when it succeeds).
+
+        Its own version first. A file plan (Kuro) may also take an older predownload: its files
+        are kept by md5, so a hotfix released before the player updated still uses every cached
+        file that did not change, and the old cache does not stay behind. A predownload for a
+        version newer than ``plan`` (a repair before the release) is never touched.
+        """
+        exact = self._usable_predownload_cache(plan.version)
+        if exact is not None or plan.sophon:
+            return exact
+        target = _base_version_key(plan.version)
+        root = self._predownload_cache_root()
+        try:
+            names = sorted(entry.name for entry in root.iterdir())
+        except OSError:
+            return None
+        older = [n for n in names if _base_version_key(n) <= target]
+        for name in sorted(older, key=_base_version_key, reverse=True):
+            cache = self._usable_predownload_cache(name)
+            if cache is not None:
+                return cache
+        return None
+
+    def _remove_other_predownload_caches(self, keep: Path) -> None:
+        """Drop caches of other versions; never follow a planted link."""
+        root = self._predownload_cache_root()
+        try:
+            root_info = os.lstat(root)
+        except OSError:
+            return
+        if stat.S_ISLNK(root_info.st_mode):
+            try:
+                root.unlink()
+            except OSError:
+                pass
+            return
+        if not stat.S_ISDIR(root_info.st_mode):
+            return
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            try:
+                info = os.lstat(entry)
+            except OSError:
+                continue
+            if entry.name == keep.name and not stat.S_ISLNK(info.st_mode):
+                continue  # this version's own cache; a link planted at its name goes below
+            try:
+                if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+                    entry.unlink()
+                elif stat.S_ISDIR(info.st_mode):
+                    shutil.rmtree(entry)
+            except OSError:
+                log.debug("%s: could not remove %s", self.display_name, entry, exc_info=True)
+
+    def _clear_predownload_cache(self) -> None:
+        """Remove the whole predownload cache and its state after a successful update."""
+        root = self._predownload_cache_root()
+        try:
+            info = os.lstat(root)
+        except OSError:
+            pass
+        else:
+            try:
+                if stat.S_ISLNK(info.st_mode):
+                    root.unlink()  # only the link, never what it points at
+                elif stat.S_ISDIR(info.st_mode):
+                    shutil.rmtree(root)
+            except OSError:
+                log.debug("%s: could not remove %s", self.display_name, root, exc_info=True)
+        try:
+            self._predownload_state_path().unlink(missing_ok=True)
+        except OSError:
+            log.debug("%s: could not remove predownload state", self.display_name, exc_info=True)
+
+    def predownload(self) -> dict[str, Any]:
+        """Fetch the next version into its cache while the game stays playable."""
+        self.ctx.cancel.raise_if_cancelled()
+        if self.predownload_factory is None:
+            raise BackendError(f"{self.display_name} has no predownload")
+        target = self.direct_target()
+        record = self._read_version_file()
+        if target is None or not target.is_file() or record is None:
+            raise BackendError(f"{self.display_name} is not installed")
+        try:
+            plan = type(self).predownload_factory(None, **self.plan_kwargs())
+        except directdl.DirectError as exc:
+            raise BackendError(f"{self.display_name}: {exc}") from exc
+        if plan is None or str(plan.version) == str(record["version"]):
+            raise BackendError(
+                f"{self.display_name}: no predownload is offered right now"
+            )
+        cache = self._predownload_cache(plan.version)
+        self._remove_other_predownload_caches(cache)
+        workers = int(
+            self.ctx.profile.get("download_workers") or directdl.plan_workers(plan)
+        )
+        files = None
+        if (
+            not plan.sophon
+            and isinstance(plan.extra, Mapping)
+            and kuropatch.EXTRA_KEY in plan.extra
+        ):
+            try:
+                patches = kuropatch.prepare(plan, str(record["version"]), patch_list_fetch)
+            except directdl.DirectError:
+                patches = None
+            if patches is not None and patches.found:
+                files = kuropatch.predownload_files(patches, plan)
+        try:
+            kwargs = {} if plan.sophon else {"files": files}
+            result = directdl.predownload(
+                plan,
+                self.install_dir(),
+                cache,
+                emit=self.ctx.emit,
+                cancel=self.ctx.cancel,
+                workers=workers,
+                **kwargs,
+            )
+        except directdl.DirectError as exc:
+            raise BackendError(f"{self.display_name}: {exc}") from exc
+        self._write_predownload_state(str(plan.version), True)
+        self.info(
+            f"{self.display_name}: downloaded {diskspace.human_size(result.get('bytes', 0))} "
+            f"for {plan.version} ahead of its release"
+        )
+        return result
+
+    def _direct_status_parts(
+        self, target: Path | None, incomplete: bool
+    ) -> tuple[dict[str, Any], str | None, Status | None]:
+        additions, version, early = super()._direct_status_parts(target, incomplete)
+        leftovers = self._leftovers_on_disk(self._read_leftover_state())
+        if leftovers:
+            additions["leftover_files"] = len(leftovers)
+        if target is None or not target.is_file() or not version:
+            return additions, version, early
+        state = self._read_predownload_state()
+        predownload = state.get("version") if state else None
+        if not predownload or predownload == version:
+            return additions, version, early
+        latest = self._read_latest()
+        published = str(latest["version"]) if latest else None
+        if predownload != published:
+            additions["predownload_version"] = predownload
+            additions["predownload_ready"] = bool(state and state.get("ready"))
+        return additions, version, early
+
     def _sync_direct(self) -> dict[str, Any]:
         self._refuse_if_running("installing, updating or repairing it")
+        self._before_sync()
         self._pin_notes: list[str] = []
         plan = self._load_manifest()
+        chunk_cache = self._predownload_cache_for(plan)
         from ..core.events import Event  # local: threading.Event is used below too
 
         for note in self._pin_notes:
@@ -244,7 +631,9 @@ class DirectBackend(WineGameBackend):
             # always runs and fetches whatever a patch did not produce, exactly as before.
             if update is not None and update[0] and update[0] != update[1]:
                 try:
-                    retired = self._apply_update_patches(plan, update[0], changed)
+                    retired = self._apply_update_patches(
+                        plan, update[0], changed, cache=chunk_cache
+                    )
                 except Cancelled:
                     raise  # the user's Cancel stops the update; it is not a patch problem
                 except Exception as exc:  # noqa: BLE001 - a patch problem never fails an update
@@ -259,14 +648,25 @@ class DirectBackend(WineGameBackend):
                     fetched[0] = max(fetched[0], int(data.get("done") or 0))
                 self.ctx.emit(event)
 
-            summary = directdl.sync(
-                plan,
-                self.install_dir(),
-                emit=counted,
-                cancel=self.ctx.cancel,
-                workers=workers,
-                changed=changed,
-            )
+            if chunk_cache is not None:
+                summary = directdl.sync(
+                    plan,
+                    self.install_dir(),
+                    emit=counted,
+                    cancel=self.ctx.cancel,
+                    workers=workers,
+                    changed=changed,
+                    chunk_cache=chunk_cache,
+                )
+            else:
+                summary = directdl.sync(
+                    plan,
+                    self.install_dir(),
+                    emit=counted,
+                    cancel=self.ctx.cancel,
+                    workers=workers,
+                    changed=changed,
+                )
         except directdl.DirectError as exc:
             if was_complete and not changed.is_set():
                 marker.unlink(missing_ok=True)
@@ -283,6 +683,8 @@ class DirectBackend(WineGameBackend):
             raise
         marker.unlink(missing_ok=True)
         self._record_synced_version(plan)
+        if chunk_cache is not None:
+            self._clear_predownload_cache()
         self._remove_retired(plan, retired)
         if update is not None and update[0] and update[0] != update[1]:
             text, too_big = update_receipt(
@@ -301,7 +703,11 @@ class DirectBackend(WineGameBackend):
         return summary
 
     def _apply_update_patches(
-        self, plan: directdl.Plan, installed: str, changed: threading.Event
+        self,
+        plan: directdl.Plan,
+        installed: str,
+        changed: threading.Event,
+        cache: Path | None = None,
     ) -> tuple[str, ...]:
         """Apply the publisher's update patches from ``installed``; return the files it retired.
 
@@ -327,7 +733,7 @@ class DirectBackend(WineGameBackend):
             )
             outcome = kuropatch.apply(
                 patches, plan, self.install_dir(),
-                emit=self.ctx.emit, cancel=self.ctx.cancel, changed=changed,
+                emit=self.ctx.emit, cancel=self.ctx.cancel, changed=changed, cache=cache,
             )
             self._patch_numbers["patch_bytes"] = outcome.downloaded_bytes
             self.info(
@@ -340,8 +746,20 @@ class DirectBackend(WineGameBackend):
     tidies_retired = False
     _TIDY_MARK = "tidied-{version}"
 
+    def _tidy_mark_is_current(self, mark: Path) -> bool:
+        try:
+            return mark.read_text(encoding="utf-8") == TIDY_MARK_GENERATION
+        except OSError:
+            return False
+
     def check_update(self) -> None:
         super().check_update()
+        try:
+            self._refresh_predownload_state()
+        except Cancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a background check must never fail on this
+            log.debug("%s: predownload check skipped: %s", self.display_name, exc)
         try:
             self._tidy_retired_once()
         except Cancelled:
@@ -359,7 +777,7 @@ class DirectBackend(WineGameBackend):
         after WuWa 3.8.0). Only a complete install whose version is the published one is
         tidied, never while the game runs or another operation holds it.
         """
-        if not self.tidies_retired:
+        if not self.tidies_retired or not self._tidy_allowed():
             return
         record = self._read_version_file()
         if record is None or self._install_incomplete():
@@ -367,7 +785,7 @@ class DirectBackend(WineGameBackend):
         version = str(record.get("version") or "")
         state = self.install_dir() / directdl.STATE_DIR
         mark = state / self._TIDY_MARK.format(version=version.replace("/", "_"))
-        if not version or mark.exists():
+        if not version or self._tidy_mark_is_current(mark):
             return
         plan = self._load_manifest()
         if str(plan.version) != version or self._game_running():
@@ -376,9 +794,22 @@ class DirectBackend(WineGameBackend):
         try:
             lock.acquire()
         except process.ProfileLockError:
-            return  # another operation has the game; try at the next check
+            # Another operation has the game: say what it will need to tidy, without deleting.
+            scan = kuropatch.retired_scan(plan, self.install_dir(), patch_list_fetch)
+            postponed = self._tidy_names(scan.names)
+            if postponed:
+                self._write_leftover_state(version, postponed)
+                self.info(
+                    f"{self.display_name}: {len(postponed)} file(s) an earlier update left "
+                    "behind; cleanup postponed while another operation has the game"
+                )
+            return
         try:
-            names = kuropatch.retired_on_disk(plan, self.install_dir(), patch_list_fetch)
+            # The game may start between the cheap pre-check above and the lock.
+            if self._game_running():
+                return
+            scan = kuropatch.retired_scan(plan, self.install_dir(), patch_list_fetch)
+            names = self._tidy_names(scan.names)
             if names:
                 removed = kuropatch.delete_retired(self.install_dir(), names)
                 if removed:
@@ -386,8 +817,25 @@ class DirectBackend(WineGameBackend):
                         f"{self.display_name}: removed {removed} file(s) an earlier update "
                         "left behind"
                     )
-            state.mkdir(parents=True, exist_ok=True)
-            mark.write_text("", encoding="utf-8")
+            remaining = self._leftovers_on_disk(names)
+            if scan.unreadable:
+                versions = ", ".join(scan.unreadable)
+                self.info(
+                    f"{self.display_name}: could not read Kuro patch list(s) for {versions}; "
+                    "the cleanup will try again at the next update check"
+                )
+            if remaining:
+                self.info(
+                    f"{self.display_name}: {len(remaining)} file(s) from an older version are "
+                    "still in the game folder. Press Repair files to remove them."
+                )
+            if remaining:
+                self._write_leftover_state(version, remaining)
+            else:
+                self._clear_leftover_state()
+            if scan.complete and not remaining:
+                state.mkdir(parents=True, exist_ok=True)
+                mark.write_text(TIDY_MARK_GENERATION, encoding="utf-8")
         finally:
             lock.release()
 
@@ -396,18 +844,27 @@ class DirectBackend(WineGameBackend):
         earlier update left behind that Kuro's older lists name (#1252). Never fails the sync."""
         names = set(retired)
         try:
-            names.update(kuropatch.retired_on_disk(plan, self.install_dir(), patch_list_fetch))
+            scan = kuropatch.retired_scan(plan, self.install_dir(), patch_list_fetch)
+            names.update(scan.names)
+            names = set(self._tidy_names(names))
         except Cancelled:
             raise
         except Exception as exc:  # noqa: BLE001 - a cleanup problem is only logged
             self.info(f"{self.display_name}: could not check for left-over files ({exc})")
-        if not names:
-            return
-        removed = kuropatch.delete_retired(self.install_dir(), tuple(sorted(names)))
-        if removed:
-            self.info(
-                f"{self.display_name}: removed {removed} file(s) the publisher no longer uses"
-            )
+        if names:
+            removed = kuropatch.delete_retired(self.install_dir(), tuple(sorted(names)))
+            if removed:
+                self.info(
+                    f"{self.display_name}: removed {removed} file(s) the publisher no longer uses"
+                )
+        remaining = self._leftovers_on_disk(sorted(names))
+        try:
+            if remaining:
+                self._write_leftover_state(str(plan.version), remaining)
+            else:
+                self._clear_leftover_state()
+        except OSError as exc:  # a read-only install must not turn a good sync into a failure
+            log.debug("%s: could not record leftover state: %s", self.display_name, exc)
 
     # ---- lifecycle (same shape as Stella Sora's) --------------------------
     def install(self) -> None:
@@ -524,6 +981,10 @@ class MongilBackend(NetmarbleLoginMixin, DirectBackend):
 
 class WutheringWavesBackend(DirectBackend):
     kind = "direct-wuwa"
+    #: The runner's WuWa fixes (gamefixes-umu/umu-3513350.py: fonts, no SteamOS/SteamDeck,
+    #: the bitmap flag that ends 3.8's white web pages, one ``-krqlv``) only run under this id;
+    #: with ``0`` they never did (#1334). A profile ``extra_env`` GAMEID still wins.
+    umu_id = "umu-3513350"
     news_source = staticmethod(kuro_news.fetch_wuwa_news)
     official_image_hosts = kuro_news.IMAGE_HOSTS
     game_tag = "wuwa"
@@ -537,6 +998,7 @@ class WutheringWavesBackend(DirectBackend):
     launcher_names = (direct_exe,)
     install_size_hint = int(85.9 * GB)
     plan_factory = staticmethod(wuwa.resolve)
+    predownload_factory = staticmethod(wuwa.resolve_predownload)
     # Asked in the install confirm (#990), with the sizes from the option's help.
     install_choice = "wuwa_quality"
     install_choice_sizes = {"sd": 58 * 2**30, "hd": 80 * 2**30, "uhd": 99 * 2**30}
@@ -606,7 +1068,9 @@ class WutheringWavesBackend(DirectBackend):
 
         if not safe(chosen_folder) or not chosen_folder.is_dir():
             return []
-        if diskspace.tree_bytes(chosen_folder) <= 0:
+        if self._install_marker_path().exists() or chosen not in self._complete_tiers():
+            # Empty or partial (a cancelled Update): the other tier is still the one that plays,
+            # so it must never be offered for deletion (#1335).
             return []
         found: list[tuple[str, Path, int]] = []
         for quality in wuwa.QUALITIES:
@@ -615,7 +1079,10 @@ class WutheringWavesBackend(DirectBackend):
             folder = self._quality_folder(quality)
             if not safe(folder) or not folder.is_dir():
                 continue
-            found.append((quality, folder, diskspace.tree_bytes(folder)))
+            size = diskspace.tree_bytes(folder)
+            if size <= 0:
+                continue  # nothing to free; a "0 B no longer needed" prompt helps no one
+            found.append((quality, folder, size))
         return found
 
     def remove_other_qualities(
@@ -630,6 +1097,7 @@ class WutheringWavesBackend(DirectBackend):
         wanted = None if only is None else {str(name).lower() for name in only}
         freed = 0
         warnings: list[str] = []
+        removed: list[str] = []
         for quality, folder, size in self.other_quality_folders():
             if wanted is not None and quality not in wanted:
                 continue
@@ -646,6 +1114,15 @@ class WutheringWavesBackend(DirectBackend):
                 warnings.append(removal._leftover_warning(path, exc))
             if not folder.exists():
                 freed += size
+                removed.append(quality)
+        recorded = self._recorded_tiers()
+        if removed and recorded is not None:
+            try:
+                self._write_recorded_tiers(
+                    {q: v for q, v in recorded.items() if q not in removed}
+                )
+            except OSError as exc:
+                log.debug("%s: could not update the tier record: %s", self.display_name, exc)
         return freed, warnings
 
     #: The game binary. ``Wuthering Waves.exe`` (``direct_exe``) is Kuro's launcher stub: it
@@ -665,8 +1142,198 @@ class WutheringWavesBackend(DirectBackend):
         # The launcher stub passes these; a profile that sets its own launch_args keeps control.
         if self._extra_args("launch_args"):
             return []
-        quality = wuwa.quality_of(profile_setting(self.ctx.profile, "wuwa_quality"))
-        return ["-dx12", f"-krqlv={quality}"]
+        return ["-dx12", f"-krqlv={self._launch_quality()}"]
+
+    def _tier_installed(self, quality: str) -> bool:
+        """Whether ``Client/Content/<TIER>`` holds at least one non-empty file."""
+        folder = self._quality_folder(quality)
+        try:
+            for _dirpath, _dirs, files in os.walk(folder):
+                for name in files:
+                    if name.endswith(".part") or ".nadare-new" in name:
+                        continue  # a download still in progress or cancelled (stress F1)
+                    with contextlib.suppress(OSError):
+                        if (Path(_dirpath) / name).stat().st_size > 0:
+                            return True
+        except OSError:
+            return False
+        return False
+
+    def _recorded_tiers(self) -> dict[str, str] | None:
+        """``{tier: version}`` a finished sync recorded (``qualities``); ``None`` when unusable.
+
+        Each tier keeps the game version it was last synced at: an update downloads only the
+        chosen tier, so the others stay at their own version (stress round 2, r3 F2). A list
+        (the first #1335 build) means every listed tier is at the recorded version. A record
+        with no known tier is treated like an old version file (r1: it switched off both the
+        pending update and the Repair refusal).
+        """
+        record = self._read_version_file()
+        if not isinstance(record, dict):
+            return None
+        listed = record.get("qualities")
+        current = str(record.get("version") or "")
+        found: dict[str, str] = {}
+        if isinstance(listed, list):
+            names = {str(x).strip().lower() for x in listed}
+            found = {q: current for q in wuwa.QUALITIES if q in names}
+        elif isinstance(listed, dict):
+            lowered = {str(k).strip().lower(): str(v) for k, v in listed.items()}
+            found = {q: lowered[q] for q in wuwa.QUALITIES if q in lowered}
+        return found or None
+
+    def _complete_tiers(self) -> list[str]:
+        """Tiers fully installed at the current game version, and still on disk.
+
+        A version file from before #1335 has no record; then every tier with real files counts,
+        as #1333 did, except the chosen one while a sync is unfinished (it may be the partial
+        one). A tier only partly downloaded is never recorded: the record is written from the
+        disk before the first sync starts (:meth:`_before_sync`), and a sync adds only its own
+        tier.
+        """
+        recorded = self._recorded_tiers()
+        if recorded is None:
+            candidates = list(wuwa.QUALITIES)
+            if self._install_marker_path().exists():
+                chosen = wuwa.quality_of(profile_setting(self.ctx.profile, "wuwa_quality"))
+                candidates.remove(chosen)
+        else:
+            record = self._read_version_file() or {}
+            current = str(record.get("version") or "")
+            candidates = [
+                q for q in wuwa.QUALITIES
+                if q in recorded and versions_equal(recorded[q], current)
+            ]
+        return [q for q in candidates if self._tier_installed(q)]
+
+    def _write_recorded_tiers(self, tiers: Mapping[str, str]) -> None:
+        path = self._version_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        data["qualities"] = {q: str(tiers[q]) for q in wuwa.QUALITIES if q in tiers}
+        atomic_write_json(path, data)
+
+    def _before_sync(self) -> None:
+        """Turn an old version file's disk guess into a record before anything downloads.
+
+        Otherwise a tier download cancelled half way would be on disk when the next sync
+        finishes, and the disk guess would record it as complete (stress round 2, r2).
+        """
+        if self._recorded_tiers() is not None:
+            return
+        record = self._read_version_file()
+        version = str(record.get("version") or "") if isinstance(record, dict) else ""
+        if not version:
+            return  # a first install: nothing was complete before it
+        try:
+            self._write_recorded_tiers({q: version for q in self._complete_tiers()})
+        except OSError as exc:
+            log.debug("%s: could not record the tiers: %s", self.display_name, exc)
+
+    def _record_synced_version(self, manifest: Any) -> None:
+        """Record the tier this sync completed at its version; other tiers keep theirs."""
+        before = dict(self._recorded_tiers() or {})  # read before the base class rewrites it
+        super()._record_synced_version(manifest)
+        chosen = wuwa.quality_of(profile_setting(self.ctx.profile, "wuwa_quality"))
+        if self._tier_installed(chosen):  # r1: never a tier the sync left without files
+            before[chosen] = str(manifest.version)
+        try:
+            self._write_recorded_tiers(before)
+        except OSError as exc:
+            log.debug("%s: could not record the tier: %s", self.display_name, exc)
+
+    def _tidy_allowed(self) -> bool:
+        """No Kuro tidy while the chosen tier is pending: its plan would call the tier that
+        plays "retired" (stress round 2, r3 F3)."""
+        complete = self._complete_tiers()
+        chosen = wuwa.quality_of(profile_setting(self.ctx.profile, "wuwa_quality"))
+        return chosen in complete or not complete
+
+    def _tidy_names(self, names: Iterable[str]) -> list[str]:
+        """Never tidy inside another tier's folder; that is the cleanup offer's job (#990)."""
+        chosen = wuwa.quality_of(profile_setting(self.ctx.profile, "wuwa_quality"))
+        others = tuple(
+            f"client/content/{q}/" for q in wuwa.QUALITIES if q != chosen
+        )
+        return [
+            n for n in names
+            if not str(n).replace("\\", "/").lstrip("/").lower().startswith(others)
+        ]
+
+    def _direct_status_parts(
+        self, target: Path | None, incomplete: bool
+    ) -> tuple[dict[str, Any], str | None, Status | None]:
+        additions, version, early = super()._direct_status_parts(target, incomplete)
+        if not version:
+            return additions, version, early
+        chosen = wuwa.quality_of(profile_setting(self.ctx.profile, "wuwa_quality"))
+        if early is not None:
+            interrupted = self._interrupted_update() if incomplete else None
+            if (
+                interrupted is not None
+                and versions_equal(str(interrupted[0]), str(interrupted[1]))
+                and chosen not in self._complete_tiers()
+            ):
+                # Same version before and after: it was a quality download, not a game update
+                # (stress round 2, r2: the page said "update to 3.8.0 was interrupted").
+                additions["pending_quality"] = chosen
+                early = dataclasses.replace(
+                    early,
+                    message=(
+                        f"downloading the {chosen.upper()} files was interrupted — click "
+                        "RESUME to finish it; only what is missing is downloaded"
+                    ),
+                )
+            return additions, version, early
+        complete = self._complete_tiers()
+        if chosen not in complete and (complete or self._recorded_tiers()):
+            # A switched quality is an update: the version is the same for every tier, so the
+            # version check alone said "up to date" and the tier was never downloaded (#1335).
+            # Name the setting: a profile set to SD by the old Settings bug (#1332) can be set
+            # back instead of downloading a tier the player never chose.
+            additions["update_available"] = True
+            additions["pending_quality"] = chosen
+            additions["latest_version"] = (
+                f"{chosen.upper()} files (Resource quality in Settings)"
+            )
+        return additions, version, early
+
+    def _launch_quality(self) -> str:
+        """The tier to start: the chosen one, or an installed one until Update brings it.
+
+        ``-krqlv`` naming a tier whose files were never downloaded crashes the client ("Fatal
+        error", 2026-11-14). The saved choice is left alone, so Update still downloads it.
+        With no tier folder at all there is nothing to compare, so the choice stands.
+        """
+        chosen = wuwa.quality_of(profile_setting(self.ctx.profile, "wuwa_quality"))
+        complete = self._complete_tiers()
+        if chosen in complete:
+            return chosen
+        if not complete:
+            if self._recorded_tiers():
+                # Tiers were installed and are all gone (deleted by hand or a cleanup tool):
+                # starting would crash on files that are not there (stress W2).
+                raise BackendError(
+                    f"The {chosen.upper()} resource files are missing from the game folder. "
+                    "Press Repair to download them again."
+                )
+            return chosen  # an older record with no tier folders: nothing to compare
+        # HD first (the default and the usual install), then the others in list order.
+        order = [wuwa.DEFAULT_QUALITY] + [q for q in wuwa.QUALITIES if q != wuwa.DEFAULT_QUALITY]
+        installed = next(q for q in order if q in complete)
+        from ..core.events import Event
+
+        note = (
+            f"{chosen.upper()} files are not downloaded yet, so the game starts with "
+            f"{installed.upper()}. Press Update to download {chosen.upper()}."
+        )
+        log.info("WuWa: %s", note)
+        self.ctx.emit(Event("step", f"{self.display_name}: {note}"))
+        return installed
 
 
 class Gfl2Backend(DirectBackend):
@@ -716,7 +1383,7 @@ class Gfl2HaoplayBackend(Gfl2Backend):
         constant = czn_backend.WEBVIEW2_SHA256
 
         def run_in_prefix(args: list[str]) -> int:
-            cmd, env = self._prefix_command(args, {"PROTON_ENABLE_WAYLAND": "0"})
+            cmd, env = self._prefix_command(args, process.installer_env())
             return stream(
                 cmd, env, on_line=self._on_line, cancel=self.ctx.cancel, cwd=prefix
             )
@@ -783,20 +1450,6 @@ class Gfl2HaoplayBackend(Gfl2Backend):
             else None
         )
         return {"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS": str(browser_args or "--no-sandbox")}
-
-    def _prefix_command(
-        self,
-        args: list[str],
-        extra_env: dict[str, str] | None = None,
-        *,
-        sandboxed: bool = False,
-    ) -> tuple[list[str], dict[str, str]]:
-        argv, env = super()._prefix_command(args, extra_env, sandboxed=sandboxed)
-        profile_env = profile_setting(self.ctx.profile, "extra_env")
-        explicit = {**(profile_env if isinstance(profile_env, dict) else {}), **(extra_env or {})}
-        env["GAMEID"] = str(explicit.get("GAMEID") or self.umu_id)
-        env["UMU_ID"] = str(explicit.get("UMU_ID") or env["GAMEID"])
-        return argv, env
 
     page_summary = (
         "The game downloads and updates itself on first start (about 90 GB). If the sign-in "
@@ -906,6 +1559,9 @@ class GenshinBackend(DirectBackend):
     art_source = staticmethod(hoyo_art.fetch_genshin_art)
     art_image_hosts = hoyo_art.IMAGE_HOSTS
     plan_factory = staticmethod(lambda fetch=None: hoyo.resolve("hk4e_global", fetch))
+    predownload_factory = staticmethod(
+        lambda fetch=None: hoyo.resolve_predownload("hk4e_global", fetch)
+    )
 
 
 class PgrBackend(DirectBackend):
@@ -920,6 +1576,7 @@ class PgrBackend(DirectBackend):
     launcher_names = (direct_exe,)
     install_size_hint = int(71.7 * GB)
     plan_factory = staticmethod(pgr.resolve)
+    predownload_factory = staticmethod(pgr.resolve_predownload)
     #: Native Wayland gave a white window in testing; the X11 path reached the game's own
     #: agreement screen. Not yet re-confirmed through Nadare with display set to x11.
     default_display = "x11"
@@ -958,6 +1615,9 @@ class StarRailBackend(DirectBackend):
     art_source = staticmethod(hoyo_art.fetch_hsr_art)
     art_image_hosts = hoyo_art.IMAGE_HOSTS
     plan_factory = staticmethod(lambda fetch=None: hoyo.resolve("hkrpg_global", fetch))
+    predownload_factory = staticmethod(
+        lambda fetch=None: hoyo.resolve_predownload("hkrpg_global", fetch)
+    )
 
 
 class Hi3Backend(DirectBackend):
@@ -973,6 +1633,9 @@ class Hi3Backend(DirectBackend):
     art_source = staticmethod(hoyo_art.fetch_hi3_art)
     art_image_hosts = hoyo_art.IMAGE_HOSTS
     plan_factory = staticmethod(lambda fetch=None: hoyo.resolve("bh3_global", fetch))
+    predownload_factory = staticmethod(
+        lambda fetch=None, **kw: hoyo.resolve_predownload("bh3_global", fetch)
+    )
 
 
 class ZenlessBackend(DirectBackend):
@@ -988,6 +1651,9 @@ class ZenlessBackend(DirectBackend):
     art_source = staticmethod(hoyo_art.fetch_zzz_art)
     art_image_hosts = hoyo_art.IMAGE_HOSTS
     plan_factory = staticmethod(lambda fetch=None: hoyo.resolve("nap_global", fetch))
+    predownload_factory = staticmethod(
+        lambda fetch=None: hoyo.resolve_predownload("nap_global", fetch)
+    )
 
 
 __all__ = ["DirectBackend"]

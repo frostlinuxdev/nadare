@@ -62,6 +62,10 @@ class PatchPlan:
     deletes: tuple[str, ...] = ()
     #: The publisher's own update size from the installed version (0 when it gives none).
     publisher_bytes: int = 0
+    #: Whole files in the patch lists that are not a group's patch file, in list order.
+    wholes: tuple[str, ...] = ()
+    #: True only when every pack had a patch entry for its installed version.
+    found: bool = False
 
     @property
     def download_bytes(self) -> int:
@@ -129,7 +133,10 @@ def prepare(
     current = {rf.path for rf in plan.files}
     groups: list[Group] = []
     deletes: list[str] = []
+    wholes: list[str] = []
+    seen_wholes: set[str] = set()
     publisher = 0
+    found = bool(packs)
     for name, configs in packs.items():
         entry = next(
             (c for c in configs or () if isinstance(c, Mapping)
@@ -137,6 +144,7 @@ def prepare(
             None,
         )
         if entry is None:
+            found = False
             continue
         try:
             publisher += int(entry.get("size") or 0)
@@ -148,10 +156,11 @@ def prepare(
         except KeyError as exc:
             raise directdl.DirectError(f"patch entry is missing {exc.args[0]!r}") from exc
         listing = _json(fetch(_https(root + quote(index_file, safe="/")), None), "patch list")
-        resources = {}
+        resources: dict[str, FileRef] = {}
         for item in listing.get("resource") or ():
             ref = _ref(item)
             resources[ref.path] = ref
+        patch_dests: set[str] = set()
         for info_group in listing.get("groupInfos") or ():
             if not isinstance(info_group, Mapping):
                 raise directdl.DirectError("a patch group is not an object")
@@ -159,6 +168,7 @@ def prepare(
             patch = resources.get(dest)
             if patch is None:
                 raise directdl.DirectError(f"patch {dest} is not in the patch's file list")
+            patch_dests.add(dest)
             groups.append(
                 Group(
                     directdl.RemoteFile(
@@ -169,11 +179,35 @@ def prepare(
                     tuple(_ref(i) for i in info_group.get("dstFiles") or ()),
                 )
             )
+        for path in resources:
+            if path not in patch_dests and path not in seen_wholes:
+                seen_wholes.add(path)
+                wholes.append(path)
         for item in listing.get("deleteFiles") or ():
             path = directdl.safe_relative_path(str(item))
             if path not in current:  # never a file the new version still lists
                 deletes.append(path)
-    return PatchPlan(tuple(groups), tuple(dict.fromkeys(deletes)), publisher)
+    return PatchPlan(
+        tuple(groups), tuple(dict.fromkeys(deletes)), publisher,
+        tuple(wholes), found,
+    )
+
+
+def predownload_files(patches: PatchPlan, plan: directdl.Plan) -> list[directdl.RemoteFile]:
+    """The patch files and whole files an update from this install will need."""
+    by_path = {rf.path: rf for rf in plan.files}
+    files: list[directdl.RemoteFile] = []
+    seen: set[str] = set()
+    for group in patches.groups:
+        if group.patch.path not in seen:
+            seen.add(group.patch.path)
+            files.append(group.patch)
+    for path in patches.wholes:
+        rf = by_path.get(path)
+        if rf is not None and path not in seen:
+            seen.add(path)
+            files.append(rf)
+    return files
 
 
 # ---- applying ---------------------------------------------------------------------------------
@@ -215,6 +249,7 @@ def apply(
     emit=None,
     cancel: Cancel | None = None,
     changed=None,
+    cache: Path | str | None = None,
 ) -> Outcome:
     """Apply every group that fits; skip the rest (the whole-file sync picks them up)."""
     say = emitter(emit)
@@ -229,7 +264,9 @@ def apply(
             if cancel is not None:
                 cancel.raise_if_cancelled()
             say(Event("step", f"Applying update patch {number} of {total}"))
-            reason = _apply_group(group, root, staging, expected, emit, cancel, changed, outcome)
+            reason = _apply_group(
+                group, root, staging, expected, emit, cancel, changed, outcome, cache
+            )
             if reason:
                 outcome.skipped += 1
                 outcome.notes.append(f"{group.patch.path}: {reason}")
@@ -244,7 +281,9 @@ def apply(
     return outcome
 
 
-def _apply_group(group, root, staging, expected, emit, cancel, changed, counter=None) -> str:
+def _apply_group(
+    group, root, staging, expected, emit, cancel, changed, counter=None, cache=None
+) -> str:
     """Apply one group; return why it was skipped, or ``""`` when it was applied."""
     outputs = [o for o in group.outputs if expected.get(o.path) == o.md5]
     if len(outputs) != len(group.outputs):
@@ -264,11 +303,25 @@ def _apply_group(group, root, staging, expected, emit, cancel, changed, counter=
     work = staging / "group"
     shutil.rmtree(work, ignore_errors=True)
     try:
-        patch_file = work / "patch.krpdiff"
-        work.mkdir(parents=True)
-        directdl._download_remote(group.patch, patch_file, emit=emit, cancel=cancel)
-        if counter is not None:
-            counter.downloaded_bytes += int(group.patch.size or 0)
+        patch_file = None
+        if cache is not None:
+            try:
+                cached = directdl.cached_file(cache, group.patch)
+                info = os.lstat(cached)
+            except (OSError, directdl.DirectError):
+                cached = None
+            if (
+                cached is not None
+                and stat.S_ISREG(info.st_mode)
+                and directdl._verify_remote(cached, group.patch, cancel=cancel)
+            ):
+                patch_file = cached
+        if patch_file is None:
+            patch_file = work / "patch.krpdiff"
+            work.mkdir(parents=True)
+            directdl._download_remote(group.patch, patch_file, emit=emit, cancel=cancel)
+            if counter is not None:
+                counter.downloaded_bytes += int(group.patch.size or 0)
         # Reads the game's files in place (never writes there); builds into the staging folder.
         built = krdiff.apply(patch_file, root, work / "new", cancel=cancel)
         if {e for e in built} - {o.path for o in outputs}:
@@ -279,7 +332,7 @@ def _apply_group(group, root, staging, expected, emit, cancel, changed, counter=
         if set(built) != {o.path for o in outputs}:
             return "the patch did not build every file its list names"
         for output in outputs:
-            destination = root / output.path
+            destination = directdl._safe_destination_path(root, output.path, directory=False)
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(work / "new" / output.path, destination)
             if changed is not None:
@@ -315,37 +368,54 @@ def _leftovers(plan: directdl.Plan, root: Path) -> set[str]:
         # Nadare's state and anything under a "~" folder (where mods go) are never candidates.
         dirs[:] = [
             d for d in dirs
-            if not d.startswith("~") and not (relative_folder == "." and d == directdl.STATE_DIR)
+            if not d.startswith("~") and not (relative_folder == "." and d.startswith(".nadare"))
         ]
         for name in files:
             relative = name if relative_folder == "." else f"{relative_folder}/{name}"
             if relative in listed or relative.startswith(_KEEP_PREFIXES):
                 continue
+            if relative_folder == "." and name.startswith(".nadare"):
+                continue  # Nadare's own records (.nadare-version.json, ...): never a game file
             if stat.S_ISREG(os.lstat(os.path.join(folder, name)).st_mode):
                 found.add(relative)
     return found
 
 
-def retired_on_disk(
+@dataclass(frozen=True)
+class RetiredScan:
+    """Retired files found on disk, and the list versions that could not be read."""
+
+    names: tuple[str, ...]
+    unreadable: tuple[str, ...]
+
+    @property
+    def complete(self) -> bool:
+        """True when every list that still mattered could be read."""
+        return not self.unreadable
+
+
+def retired_scan(
     plan: directdl.Plan,
     root: Path | str,
     fetch: Callable[[str, Mapping[str, str] | None], bytes],
-) -> tuple[str, ...]:
+) -> RetiredScan:
     """Leftover files Kuro's own patch lists say no current version has (#1252).
 
     Covers installs that updated before Nadare read those lists. Only files on disk that the
     current plan does not list are candidates, and only the ones a Kuro ``deleteFiles`` list
     names are returned; the lists are read newest first, at most :data:`MAX_CLEANUP_LISTS`.
+    A broken list does not hide later ones, and its version is remembered so the cleanup can
+    try again instead of marking the install done.
     """
     from .sources.kuro import _json
 
     info = plan.extra.get(EXTRA_KEY) if isinstance(plan.extra, Mapping) else None
     if not isinstance(info, Mapping) or not isinstance(info.get("packs"), Mapping):
-        return ()
+        return RetiredScan((), ())
     root = Path(root)
     candidates = _leftovers(plan, root)
     if not candidates:
-        return ()
+        return RetiredScan((), ())
     base = _https(str(info.get("root") or ""))
     entries = [
         entry for configs in info["packs"].values() for entry in configs or ()
@@ -354,19 +424,34 @@ def retired_on_disk(
     ]
     entries.sort(key=lambda e: _version_key(str(e.get("version") or "")), reverse=True)
     retired: set[str] = set()
+    unreadable: list[str] = []
     for entry in entries[:MAX_CLEANUP_LISTS]:
         try:
             listing = _json(fetch(_https(base + quote(str(entry["indexFile"]), safe="/")), None),
                             "patch list")
         except directdl.DirectError as exc:
             log.info("cleanup: patch list %s unreadable: %s", entry.get("version"), exc)
+            version = str(entry.get("version") or "")
+            if version:
+                unreadable.append(version)
             continue
         for item in listing.get("deleteFiles") or ():
             if isinstance(item, str) and item in candidates:
                 retired.add(item)
         if retired >= candidates:
+            # Every leftover is explained: an earlier broken list no longer matters.
+            unreadable.clear()
             break
-    return tuple(sorted(retired))
+    return RetiredScan(tuple(sorted(retired)), tuple(sorted(set(unreadable), key=_version_key)))
+
+
+def retired_on_disk(
+    plan: directdl.Plan,
+    root: Path | str,
+    fetch: Callable[[str, Mapping[str, str] | None], bytes],
+) -> tuple[str, ...]:
+    """The names from :func:`retired_scan` (kept for callers that only need those)."""
+    return retired_scan(plan, root, fetch).names
 
 
 def delete_retired(root: Path | str, deletes: tuple[str, ...]) -> int:
@@ -393,9 +478,12 @@ __all__ = [
     "Group",
     "Outcome",
     "PatchPlan",
+    "RetiredScan",
     "apply",
     "delete_retired",
     "installed_versions",
+    "predownload_files",
     "prepare",
     "retired_on_disk",
+    "retired_scan",
 ]

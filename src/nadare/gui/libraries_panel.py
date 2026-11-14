@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import backends, diskspace, libraries
+from ..core import backends, diskspace, gamefinder, libraries, relink
 from ..core.config import Config
 from .add_game import game_specs
 from .workers import CallTask
@@ -60,6 +60,8 @@ class _Search:
     found: list[libraries.Candidate]
     guessed: list[libraries.Candidate]
     notes: list[str]
+    #: Broken profiles whose game files exist in another folder, best copy first (#1293).
+    repairs: dict[str, list[gamefinder.Copy]]
 
 
 def _nothing_new(notes: list[str]) -> str:
@@ -87,7 +89,7 @@ def _look_for_games(config: Config, roots: list[Path] | None) -> _Search:
         for guess in libraries.find_unmarked(config, root, specs):
             if not any(c.kind == guess.kind for c in found + guessed):
                 guessed.append(guess)
-    return _Search(found, guessed, notes)
+    return _Search(found, guessed, notes, gamefinder.repairs(config, specs))
 
 
 class LibrariesPanel(QWidget):
@@ -95,6 +97,8 @@ class LibrariesPanel(QWidget):
 
     #: Names of the games brought back from a library (their config keys).
     games_added = pyqtSignal(list)
+    #: Names of the games whose profile was pointed at a folder found elsewhere (#1293).
+    games_repaired = pyqtSignal(list)
 
     def __init__(
         self,
@@ -315,7 +319,7 @@ class LibrariesPanel(QWidget):
 
         def in_a_library(c: libraries.Candidate) -> bool:
             try:
-                return libraries._real(c.game_dir).parent.parent in current
+                return libraries.library_of_game_dir(c.game_dir) in current
             except OSError:
                 return False
 
@@ -324,13 +328,27 @@ class LibrariesPanel(QWidget):
 
         found = [c for c in search.found if new(c)]
         guessed = [c for c in search.guessed if new(c)]
-        if not found and not guessed:
+        # A profile may have changed while a worker scanned a copy: keep only repairs that are
+        # still broken. gamefinder.repairs never offers the profile's own folder back.
+        repairs: dict[str, gamefinder.Copy] = {}
+        for name, copies in search.repairs.items():
+            profile = config.profiles.get(name)
+            if (
+                isinstance(profile, dict)
+                and gamefinder.folders_missing(profile)
+                and copies
+                and (found_copy := gamefinder.best(copies)) is not None
+            ):
+                repairs[str(name)] = found_copy
+        if not found and not guessed and not repairs:
             if not quiet:
                 self._say(_nothing_new(search.notes))
             return []
         # A game with its manifest starts ticked; a guess (manifest gone, recognised by its
-        # program) starts unticked and is never added unless the user ticks it.
+        # program) starts unticked and is never added unless the user ticks it. A repair of an
+        # existing game starts ticked too: its profile points at files that are gone.
         offered = found + guessed
+        repair_names = list(repairs)
         items = [(f"{c.title}  ({libraries.display_path(c.game_dir)})", True) for c in found] + [
             (
                 f"{c.title}  ({libraries.display_path(c.game_dir)})  · guessed, no Nadare file",
@@ -338,29 +356,84 @@ class LibrariesPanel(QWidget):
             )
             for c in guessed
         ]
+        items += [
+            (
+                f"{config.profiles[name].get('title') or name}  "
+                f"({libraries.display_path(repairs[name].game_dir)})  · already in your "
+                "Library: use this folder",
+                True,
+            )
+            for name in repair_names
+        ]
         picked = self._choose(items)
         if not picked:
             return []
         chosen = [c for c, keep in zip(offered, picked, strict=False) if keep]
-        if not chosen:
+        chosen_repairs = [
+            (name, repairs[name])
+            for name, keep in zip(repair_names, picked[len(offered):], strict=False)
+            if keep
+        ]
+        if not chosen and not chosen_repairs:
             return []
         names: list[str] = []
+        repaired: list[str] = []
+        skipped: list[str] = []
         with config.locked():
+            # A repair can add the folder's library; undo that too if the save fails.
+            libraries_before = copy.deepcopy(config.data.get(libraries.CONFIG_KEY))
+            profiles_before = {
+                name: copy.deepcopy(config.profiles[name]) for name, _copy in chosen_repairs
+            }
             for candidate in chosen:
                 # One profile per game: two libraries may hold the same game, or one may have
                 # been added while the question was open. The first one wins.
                 if backends.existing_profile(candidate.kind, config.profiles) is None:
                     names.append(libraries.adopt(config, candidate))
+            for name, found_copy in chosen_repairs:
+                try:
+                    gamefinder.use(config, name, found_copy)
+                except relink.RelinkError as exc:
+                    skipped.append(f"{name}: {exc}")
+                    continue
+                repaired.append(name)
             try:
                 config.save()
             except OSError as exc:
                 for name in names:
                     config.remove_profile(name)
+                for name, before in profiles_before.items():
+                    current = config.profiles.get(name)
+                    if isinstance(current, dict):
+                        current.clear()
+                        current.update(before)
+                    else:
+                        config.profiles[name] = before
+                if libraries_before is None:
+                    config.data.pop(libraries.CONFIG_KEY, None)
+                else:
+                    config.data[libraries.CONFIG_KEY] = libraries_before
                 self._say(f"Could not save the settings: {exc}")
                 return []
-        self._say(f"Added {len(names)} {'game' if len(names) == 1 else 'games'} to your Library.")
-        self.games_added.emit(names)
-        return names
+        parts = []
+        if names:
+            parts.append(
+                f"Added {len(names)} {'game' if len(names) == 1 else 'games'} to your Library."
+            )
+        if repaired:
+            parts.append(
+                f"Now using the folder found for {len(repaired)} "
+                f"{'game' if len(repaired) == 1 else 'games'}."
+            )
+        if parts:
+            self._say(" ".join(parts))
+        if skipped:
+            self._say("\n".join([self.message.text(), *skipped]).strip())
+        if names:
+            self.games_added.emit(names)
+        if repaired:
+            self.games_repaired.emit(repaired)
+        return names + repaired
 
     def _choose_box(self, items: list[tuple[str, bool]]) -> list[bool] | None:
         """A list of found games with a checkbox each; ``None`` when cancelled."""

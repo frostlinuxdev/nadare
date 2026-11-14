@@ -40,7 +40,7 @@ def _no_api(monkeypatch: pytest.MonkeyPatch) -> None:
         (
             "dwproton",
             "https://github.com/dawn-winery/dwproton-mirror/releases/download/"
-            "dwproton-11.0-15/dwproton-11.0-15-x86_64.tar.xz",
+            "dwproton-11.0-17/dwproton-11.0-17-x86_64.tar.xz",
         ),
         (
             "ge",

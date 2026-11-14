@@ -220,14 +220,25 @@ def test_endfield_plan():
 HOYO_URL = "https://sg-hyp-api.hoyoverse.com/hyp/hyp-connect/api/getGamePackages?launcher_id=VYTpXlbWo8"
 
 
-def test_hoyo_honkai_impact_is_a_single_7z_without_audio():
-    f = FakeFetch({HOYO_URL: fx("hoyo_getGamePackages.json")})
+def test_hoyo_honkai_impact_uses_its_game_and_asset_sophon_manifests():
+    branches = (
+        "https://sg-hyp-api.hoyoverse.com/hyp/hyp-connect/api/getGameBranches"
+        "?launcher_id=VYTpXlbWo8&game_ids%5B%5D=5TIVvvcwtM"
+    )
+    build = (
+        "https://sg-public-api.hoyoverse.com/downloader/sophon_chunk/api/getBuild"
+        "?branch=main&package_id=19XDCbNucU&password=ag43v1QVxlUH"
+    )
+    f = FakeFetch(
+        {
+            branches: fx("hoyo_getGameBranches_hi3.json"),
+            build: fx("hoyo_getBuild_hi3.json"),
+        }
+    )
     plan = hoyo.resolve("bh3_global", f)
     assert plan.game_tag == "hi3" and plan.exe == "BH3.exe" and plan.version == "9.1.0"
-    (arc,) = plan.archives
-    assert arc.unwrap == ("7z",) and not arc.parts
-    assert arc.source.url.endswith("BH3_v9.1.0_af4349d71387.7z") and arc.source.md5
-    assert arc.source.size == 27772773070
+    assert not plan.archives and not plan.files
+    assert [p.name for p in plan.sophon] == ["hi3-9.1.0", "hi3-9.1.0-asb"]
     all_paths_safe(plan)
 
 
@@ -255,9 +266,6 @@ def test_zip_sources_stream_and_the_nested_one_does_not():
     assert all(
         a.stream for a in endfield.resolve(FakeFetch({ef: fx("endfield_get_latest.json")})).archives
     )
-    hy = FakeFetch({HOYO_URL: fx("hoyo_getGamePackages.json")})
-    # The other HoYo titles now use Sophon chunk manifests (see test_sophon.py).
-    assert all(a.stream for a in hoyo.resolve("bh3_global", hy).archives)
 
 
 # ------------------------------------------------------------------ Punishing: Gray Raven

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Render the S4 store review screens using local fake artwork."""
 from __future__ import annotations
 

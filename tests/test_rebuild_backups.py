@@ -9,6 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from _backend_helpers import make_context
+from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
 from nadare.backends import winegame as wg
@@ -53,7 +54,7 @@ def _arknights(tmp_path, **profile) -> ArknightsBackend:
 def test_arknights_remake_records_the_backup(tmp_path, monkeypatch):
     backend = _arknights(tmp_path)
     (backend.prefix() / "drive_c").mkdir(parents=True)
-    monkeypatch.setattr(wg, "scan_pids", lambda patterns: [])
+    patch_everywhere(monkeypatch, wg, "scan_pids", lambda patterns: [])
     monkeypatch.setattr(WineGameBackend, "_ensure_default_runner", lambda self, strict=True: None)
     monkeypatch.setattr(backend, "_ensure_prefix", lambda: True)
     monkeypatch.setattr(backend, "_run_vcredist", lambda created=True: None)

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
 from nadare.backends import launcher
@@ -62,7 +63,7 @@ def rig(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ak, "stream", fake_stream)
 
-    monkeypatch.setattr(wg, "stream", fake_stream)
+    patch_everywhere(monkeypatch, wg, "stream", fake_stream)
     monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
     monkeypatch.setattr(WineGameBackend, "_run_vcredist", lambda self, created=False: None)
     monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer)
@@ -157,7 +158,7 @@ def test_cancelling_during_the_silent_run_is_not_turned_into_a_fallback(tmp_path
 
     monkeypatch.setattr(ak, "stream", cancelled)
 
-    monkeypatch.setattr(wg, "stream", cancelled)
+    patch_everywhere(monkeypatch, wg, "stream", cancelled)
     with pytest.raises(Cancelled):
         _backend(tmp_path).install()
     assert len(calls) == 1
@@ -174,7 +175,7 @@ def test_when_nothing_installs_the_launcher_the_install_still_fails_plainly(
 
     monkeypatch.setattr(ak, "stream", nothing)
 
-    monkeypatch.setattr(wg, "stream", nothing)
+    patch_everywhere(monkeypatch, wg, "stream", nothing)
     with pytest.raises(BackendError):
         _backend(tmp_path).install()
 
@@ -260,7 +261,7 @@ def test_failing_to_start_the_downloader_falls_back(tmp_path, rig, monkeypatch):
 
     monkeypatch.setattr(ak, "stream", flaky)
 
-    monkeypatch.setattr(wg, "stream", flaky)
+    patch_everywhere(monkeypatch, wg, "stream", flaky)
     _backend(tmp_path).install()
     assert len(calls) == 2 and str(installer) in calls[1]
 

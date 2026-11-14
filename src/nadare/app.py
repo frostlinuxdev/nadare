@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .core import i18n, paths, process, tls, vkprobe
+from .core import channel, i18n, paths, process, tls, vcredist, vkprobe
 from .core import logging as nadare_logging
 from .core.backends import BackendError, BackendUnsupported
 from .core.backends import create as create_backend
@@ -81,6 +81,7 @@ COMMANDS = (
     "status",
     "install",
     "update",
+    "predownload",
     "repair",
     "remake-prefix",
     "login",
@@ -144,7 +145,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="nadare",
         description="Nadare — open-source Linux launcher for anime gacha games",
     )
-    parser.add_argument("--version", action="version", version=f"nadare {__version__}")
+    parser.add_argument(
+        "--version", action="version", version=channel.title(f"nadare {__version__}")
+    )
     parser.add_argument(
         "-c", "--config", type=Path, default=None, help="path to config.json (default: XDG config)"
     )
@@ -162,6 +165,9 @@ def build_parser() -> argparse.ArgumentParser:
         "status": "show a profile's status",
         "install": "install the game for a profile",
         "update": "update the game for a profile",
+        "predownload": (
+            "download the next version ahead of its release, when the publisher offers it"
+        ),
         "repair": "re-check every game file and re-download damaged or missing ones",
         "remake-prefix": "move the Wine prefix aside and rebuild it, keeping game files",
         "login": "run the profile's login step",
@@ -492,7 +498,9 @@ def _print_sandbox_status() -> None:
         else:
             print("Sandbox: available (Flatpak sandbox, flatpak-spawn --sandbox)")
         return
-    located = gamesandbox.locate()
+    # Only look (#965): recording here would pin, and then run, whatever a game left in the
+    # runtime folder before the Sandbox's first real start.
+    located = gamesandbox.locate(record=False)
     if located.binary is not None:
         kind = "the game runtime's copy" if located.source == "runtime" else "the system's copy"
         print(f"Sandbox: bubblewrap found ({kind}: {located.binary})")
@@ -634,8 +642,8 @@ def _doctor_report(
                 )
             else:
                 print(
-                    "umu-run: not found (Nadare can set up its own copy at launch "
-                    "if 32-bit libraries are missing)"
+                    "umu-run: not found on the system (Nadare sets up its own copy at the first "
+                    "launch; games run in the Steam Runtime)"
                 )
             managed = umu.managed()
             if managed is not None:
@@ -646,9 +654,13 @@ def _doctor_report(
         sandbox_works = None
         if userns.restricted() and not userns.profile_installed():
             sandbox_works = userns.probe()
-        runtime_blocked = (
-            userns.restricted() and not userns.profile_installed() and sandbox_works is not True
-        )
+        # The same rule the launch uses (#1338): when it would refuse, the verdict says so.
+        runtime_blocked = userns.blocks_runtime()
+        if runtime_blocked:
+            reasons.append(
+                "Ubuntu's AppArmor blocks the Steam Runtime every Proton game runs in "
+                "(one-time fix below)"
+            )
         if found:
             print("32-bit libs: not needed (umu-run supplies the Steam Linux Runtime)")
         elif missing_libs is None:
@@ -659,8 +671,6 @@ def _doctor_report(
                 "  not needed while Nadare's own runtime works: it downloads one at "
                 "launch and brings its own libraries"
             )
-            if runtime_blocked:
-                reasons.append("32-bit libs missing and the runtime sandbox is blocked")
             fix = hostlibs.install_command(missing_libs, hostlibs.distro_family())
             print(
                 f"  or install them: {fix}" if fix else f"  {hostlibs.hint(missing_libs)}"
@@ -790,15 +800,17 @@ def _doctor_text(config: Config) -> str:
 
 
 #: CLI commands that change an installation; they exclude each other per profile.
-_LOCKED_COMMANDS = frozenset({"install", "update", "repair", "remake-prefix"})
+_LOCKED_COMMANDS = frozenset(
+    {"install", "update", "predownload", "repair", "remake-prefix"}
+)
 
 
 @contextlib.contextmanager
 def _operation_lock(command: str, name: str):
     if command == "launch":
         # A game runs for hours, so launch never holds the lock; it only refuses
-        # to start while an install/update/repair/etc. holds it.
-        if process.operation_in_progress(name):
+        # to start while an install/update/repair/etc. holds it (a predownload does not).
+        if process.launch_blocked(name):
             raise BackendError(process.OPERATION_IN_PROGRESS.format(name=name))
         yield
         return
@@ -810,9 +822,18 @@ def _operation_lock(command: str, name: str):
         lock.acquire()
     except process.ProfileLockError:
         raise BackendError(process.OPERATION_BUSY.format(name=name)) from None
+    predownload = process.PredownloadLock(name) if command == "predownload" else None
+    if predownload is not None:
+        try:
+            predownload.acquire()
+        except process.ProfileLockError:
+            lock.release()
+            raise BackendError(process.OPERATION_BUSY.format(name=name)) from None
     try:
         yield
     finally:
+        if predownload is not None:
+            predownload.release()
         lock.release()
 
 
@@ -850,6 +871,12 @@ def _run_backend_command(
             )
             return 2
     if command == "status":
+        # Refresh a stale published version with the GUI check's own interval, then report the
+        # cached answer (status itself stays offline). Only that refresh: check_update also
+        # tidies files, which a read-only command must not do.
+        refresh = getattr(backend, "refresh_published_version", None)
+        if callable(refresh):
+            refresh()
         status = backend.status()
         if status.state == "not_installed":
             print(f"{name}: not installed")
@@ -877,7 +904,17 @@ def _run_backend_command(
     if command == "update":
         backend.update()
         return 0
+    if command == "predownload":
+        if callable(getattr(backend, "predownload", None)):
+            backend.predownload()
+            return 0
+        raise BackendError(f"{name}: this game has no predownload")
     if command == "repair":
+        try:
+            # The same as the GUI's Repair: the user asked, so a remembered failure is forgotten.
+            vcredist.retry_after_repair(backend)
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError, BackendError):
+            pass  # best effort; never stops the repair itself
         backend.repair()
         return 0
     if command == "remake-prefix":
@@ -991,13 +1028,15 @@ def _shortcut_refresh(config: Config) -> int:
         print(f"updated {path}")
     for path in result["removed"]:
         print(f"removed {path}")
+    for warning in result.get("warnings", []):
+        print(f"[warn] {warning}", file=sys.stderr)
     for path in steam["updated"]:
         print(f"updated {path}")
     for item in steam["removed"]:
         print(f"removed {item}")
-    for warning in steam["warnings"]:
+    for warning in steam.get("warnings", []):
         print(f"[warn] {warning}", file=sys.stderr)
-    return 0
+    return 1 if result.get("warnings") or steam.get("warnings") else 0
 
 
 def _run_shortcut(args: argparse.Namespace, config: Config) -> int:
@@ -1049,7 +1088,11 @@ def _run_shortcut(args: argparse.Namespace, config: Config) -> int:
 
     argv = shortcuts.launcher_argv()
     written = shortcuts.install_desktop_entry(
-        name, title, desktop_dir=_desktop_dir() if args.desktop else None, argv=argv
+        name,
+        title,
+        desktop_dir=_desktop_dir() if args.desktop else None,
+        argv=argv,
+        profiles=config.profiles,
     )
     for path in written:
         print(f"installed {path}")
@@ -1063,7 +1106,9 @@ def _run_shortcut(args: argparse.Namespace, config: Config) -> int:
             )
             return 1
         for path in steam_files:
-            if shortcuts.add_steam_shortcut(path, name, title, argv):
+            if shortcuts.add_steam_shortcut(
+                path, name, title, argv, profiles=config.profiles
+            ):
                 print(f"installed {path}")
             else:
                 print(f"already present {path}")
@@ -1076,29 +1121,9 @@ def _check_install_space(backend: Any) -> None:
     What is already in the folder (a resumed install) counts as written. A backend without a
     size or a folder installs as before.
     """
-    from .core import backends as core_backends
     from .core import diskspace
 
-    size = getattr(backend, "install_size_hint", None)
-    kind = str(getattr(backend, "kind", "") or "")
-    asked = core_backends.install_choice(kind) if kind else None
-    if asked is not None:
-        option, sizes = asked
-        profile = getattr(getattr(backend, "ctx", None), "profile", None)
-        if isinstance(profile, dict):
-            from .backends.wine import profile_setting
-
-            chosen = profile_setting(profile, option.key)
-            if chosen in (None, ""):
-                chosen = option.default
-            choice_size = sizes.get(str(chosen))
-            if choice_size:
-                size = choice_size
-    folder = getattr(backend, "install_dir", None)
-    if not size or not callable(folder):
-        return
-    path = Path(folder())
-    diskspace.check_space(path, max(0, int(size) - diskspace.tree_bytes(path)))
+    diskspace.install_space(backend)
 
 
 def _run_remove(args: argparse.Namespace, config: Config) -> int:
@@ -1263,7 +1288,23 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
             doctor_text=_doctor_text(config),
         )
         if args.stdout:
-            print(report)
+            try:
+                print(report)
+                sys.stdout.flush()
+            except BrokenPipeError:
+                # A reader such as `| head` closed the pipe. Redirect stdout to /dev/null so the
+                # interpreter's final flush does not print an "Exception ignored" either.
+                try:
+                    devnull = os.open(os.devnull, os.O_WRONLY)
+                    try:
+                        os.dup2(devnull, sys.stdout.fileno())
+                    finally:
+                        os.close(devnull)
+                except (OSError, ValueError, AttributeError):
+                    try:
+                        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+                    except OSError:
+                        pass
             return 0
         target = args.output or Path.cwd() / (
             f"nadare-report-{args.profile or config.active or 'system'}-"

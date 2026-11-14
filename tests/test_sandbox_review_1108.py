@@ -8,6 +8,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from _parts_patch import patch_everywhere
 
 from nadare.core import gamesandbox
 
@@ -151,7 +152,7 @@ def test_a_sandboxed_installer_that_left_no_launcher_explains_the_hidden_home(
     monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
     monkeypatch.setattr(WineGameBackend, "_run_vcredist", lambda self, created=False: None)
     monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer)
-    monkeypatch.setattr(wg, "stream", lambda argv, env, on_line=None, cancel=None: 0)
+    patch_everywhere(monkeypatch, wg, "stream", lambda argv, env, on_line=None, cancel=None: 0)
     (tmp_path / "prefix" / "drive_c").mkdir(parents=True)
     launcher_cls = fake_launcher_backend()
     backend = launcher_cls(make_context(tmp_path, launcher_cls.kind, {

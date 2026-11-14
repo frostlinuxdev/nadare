@@ -11,6 +11,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from _main_window_patch import patch_main_window
 from PyQt6.QtCore import QCoreApplication, QThreadPool
 from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtWidgets import QApplication, QDialog
@@ -18,7 +19,6 @@ from PyQt6.QtWidgets import QApplication, QDialog
 from nadare.core import artwork
 from nadare.core.config import Config
 from nadare.gui import add_game
-from nadare.gui import main_window as main_window_mod
 from nadare.gui.add_game import AddGameDialog
 from nadare.gui.main_window import PAGE_GAME, PAGE_LIBRARY, PAGE_SETTINGS, PAGE_STORE, MainWindow
 from nadare.gui.store_flow import StoreFlow
@@ -122,7 +122,7 @@ def test_first_start_with_no_games_opens_the_store(tmp_path, qapp):
 def test_library_add_game_opens_the_store_not_the_dialog(tmp_path, qapp, monkeypatch):
     window = _window(tmp_path)
     built = []
-    monkeypatch.setattr(main_window_mod, "AddGameDialog", lambda *a, **kw: built.append(kw))
+    patch_main_window(monkeypatch, "AddGameDialog", lambda *a, **kw: built.append(kw))
     try:
         window.library.add_game.emit()
         assert window.stack.currentIndex() == PAGE_STORE
@@ -195,7 +195,7 @@ class _FakeDialog:
 def fake_dialog(monkeypatch):
     _FakeDialog.instances = []
     _FakeDialog.outcome = "reject"
-    monkeypatch.setattr(main_window_mod, "AddGameDialog", _FakeDialog)
+    patch_main_window(monkeypatch, "AddGameDialog", _FakeDialog)
     return _FakeDialog
 
 

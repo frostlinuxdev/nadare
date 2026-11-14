@@ -92,7 +92,6 @@ def _wine_backend(tmp_path: Path, monkeypatch) -> tuple[WineBackend, Path]:
     monkeypatch.setattr(backend, "_runner_path", lambda runner: proton)
     monkeypatch.setattr(wine_mod.shutil, "which", lambda name, *a, **k: None)
     monkeypatch.setattr(wine_mod.sandbox, "in_flatpak", lambda: False)
-    monkeypatch.setattr(wine_mod.hostlibs, "missing_32bit", lambda: [])  # complete libraries
     monkeypatch.setattr(umu, "ensure_managed", lambda **k: pytest.fail("must not download"))
     return backend, game / "game.exe"
 
@@ -106,9 +105,16 @@ def test_an_installed_managed_umu_is_used_with_complete_libraries(tmp_path, monk
     assert argv == [str(managed), str(built_target)]
 
 
-def test_without_any_umu_the_message_is_unchanged(tmp_path, monkeypatch):
+def test_without_any_umu_status_is_fine_and_a_failed_setup_explains(tmp_path, monkeypatch):
+    """#1338: no umu yet is not a status error (launch installs Nadare's own); only a setup
+    that really fails stops the launch, with what to do, never a plain `proton run`."""
     backend, _target = _wine_backend(tmp_path, monkeypatch)
     monkeypatch.setattr(umu, "managed", lambda: None)
-    assert "umu-run not found" in (backend._runtime_error() or "")
-    with pytest.raises(Exception, match="umu-run not found"):
+    assert backend._runtime_error() is None
+
+    def offline(**kwargs):
+        raise umu.UmuError("offline")
+
+    monkeypatch.setattr(umu, "ensure_managed", offline)
+    with pytest.raises(Exception, match="umu-launcher"):
         backend.build()

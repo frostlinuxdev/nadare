@@ -60,26 +60,28 @@ def _wait(qapp, predicate, seconds=15.0):
 # ---- picker ------------------------------------------------------------------
 def test_picker_marks_the_recommended_build_and_the_default(root):
     _make(root, "dwproton-11.0-13-x86_64")
-    _make(root, "dwproton-11.0-15-x86_64")
+    _make(root, "dwproton-11.0-17-x86_64")
     _make(root, "MyCustomProton")
     entries = dict(discover_runners("stove-czn"))
     labels = list(entries)
     assert labels[0].startswith("Default · recommended") and entries[labels[0]] == ""
-    assert "dwproton-11.0-15-x86_64 · recommended" in entries
+    assert "dwproton-11.0-17-x86_64 · recommended" in entries
     assert "dwproton-11.0-13-x86_64 · untested" in entries
     assert "MyCustomProton" in entries
     assert SYSTEM_WINE not in entries  # the Proton games no longer offer system Wine
 
 
-def test_generic_backends_keep_system_wine_as_their_empty_default(root):
-    _make(root, "dwproton-11.0-15-x86_64")
+def test_generic_backends_default_to_proton_without_system_wine(root):
+    # Maintainer decision 2026-11-13: generic games run on the Proton default; a custom Wine
+    # goes in wine_binary, and the picker offers no system Wine.
+    _make(root, "dwproton-11.0-17-x86_64")
     entries = discover_runners("wine")
-    assert entries[0][0].startswith("dwproton")
-    assert entries[-1] == (SYSTEM_WINE, "")
+    assert entries[0][0].startswith("Default · recommended")
+    assert all(label != SYSTEM_WINE for label, _value in entries)
 
 
 def test_a_family_id_in_a_profile_is_not_shown_as_missing(root, tmp_path, qapp):
-    _make(root, "dwproton-11.0-15-x86_64")
+    _make(root, "dwproton-11.0-17-x86_64")
     config = Config.load(tmp_path / "config.json")
     config.add_profile("czn", backend="stove-czn", runner="dwproton")
     page = SettingsPage()
@@ -93,7 +95,7 @@ def test_a_family_id_in_a_profile_is_not_shown_as_missing(root, tmp_path, qapp):
 
 # ---- usage ---------------------------------------------------------------------
 def test_usage_by_path_family_default_latest_and_system(root):
-    pinned = _make(root, "dwproton-11.0-15-x86_64")
+    pinned = _make(root, "dwproton-11.0-17-x86_64")
     other = _make(root, "dwproton-11.0-13-x86_64")
     profiles = {
         "by_path": {"backend": "wine", "runner": str(other)},
@@ -103,13 +105,14 @@ def test_usage_by_path_family_default_latest_and_system(root):
         "generic_default": {"backend": "wine"},
     }
     usage = runners.runner_usage(profiles)
-    assert sorted(usage[str(pinned)]) == ["by_default", "by_family"]
+    # "system" (CZN) and an unset generic game both run on the default runner now (#1324).
+    assert sorted(usage[str(pinned)]) == ["by_default", "by_family", "generic_default", "system"]
     assert usage[str(other)] == ["by_path"]
 
 
 def test_usage_by_folder_name_and_latest(root):
     older = _make(root, "dwproton-11.0-13-x86_64")
-    newer = _make(root, "dwproton-11.0-16-x86_64")
+    newer = _make(root, "dwproton-11.0-18-x86_64")
     usage = runners.runner_usage(
         {
             "a": {"backend": "wine", "runner": older.name},
@@ -133,7 +136,7 @@ def test_runner_size_counts_files_and_ignores_symlinks(tmp_path):
 def test_human_size_and_status_text():
     assert human_size(512) == "512 B"
     assert human_size(1536 * 1024 * 1024) == "1.5 GiB"
-    assert status_text(Path("dwproton-11.0-15-x86_64")) == "recommended (tested)"
+    assert status_text(Path("dwproton-11.0-17-x86_64")) == "recommended (tested)"
     assert status_text(Path("dwproton-11.0-13-x86_64")) == "untested"
     assert status_text(Path("Custom")) == "custom"
 
@@ -146,14 +149,14 @@ def _delete_button(dialog, name):
 
 def test_dialog_lists_runners_with_sizes_and_disables_the_ones_in_use(root, qapp):
     _make(root, "dwproton-11.0-13-x86_64", payload=4096)
-    _make(root, "dwproton-11.0-15-x86_64", payload=2048)
+    _make(root, "dwproton-11.0-17-x86_64", payload=2048)
     profiles = {"czn": {"backend": "stove-czn"}}
     dialog = ManageRunnersDialog(profiles)
     try:
         assert dialog.table.rowCount() == 2
         assert _wait(qapp, lambda: "…" not in {dialog.table.item(i, 2).text() for i in range(2)})
-        assert not _delete_button(dialog, "dwproton-11.0-15-x86_64").isEnabled()
-        assert "czn" in _delete_button(dialog, "dwproton-11.0-15-x86_64").toolTip()
+        assert not _delete_button(dialog, "dwproton-11.0-17-x86_64").isEnabled()
+        assert "czn" in _delete_button(dialog, "dwproton-11.0-17-x86_64").toolTip()
         assert _delete_button(dialog, "dwproton-11.0-13-x86_64").isEnabled()
         assert dialog.total_label.text().startswith("Total:")
     finally:
@@ -161,7 +164,7 @@ def test_dialog_lists_runners_with_sizes_and_disables_the_ones_in_use(root, qapp
 
 
 def test_dialog_deletes_an_unused_runner_in_the_background(root, qapp):
-    keep = _make(root, "dwproton-11.0-15-x86_64")
+    keep = _make(root, "dwproton-11.0-17-x86_64")
     gone = _make(root, "dwproton-11.0-13-x86_64")
     dialog = ManageRunnersDialog({"czn": {"backend": "stove-czn"}})
     try:
@@ -175,7 +178,7 @@ def test_dialog_deletes_an_unused_runner_in_the_background(root, qapp):
 
 
 def test_dialog_refuses_to_delete_a_runner_a_profile_uses(root, qapp, monkeypatch):
-    used = _make(root, "dwproton-11.0-15-x86_64")
+    used = _make(root, "dwproton-11.0-17-x86_64")
     shown: list = []
     monkeypatch.setattr(
         "nadare.gui.runners_dialog.QMessageBox.information", lambda *a, **k: shown.append(a[2])
@@ -213,8 +216,8 @@ def test_settings_has_a_manage_runners_button(tmp_path, qapp):
 
 # ---- cleanup of unused old runners ---------------------------------------------------
 def test_unused_old_runners_keeps_the_recommended_and_anything_in_use(root):
-    keep = _make(root, "dwproton-11.0-15-x86_64")  # recommended
-    used = _make(root, "dwproton-11.0-16-x86_64")
+    keep = _make(root, "dwproton-11.0-17-x86_64")  # recommended
+    used = _make(root, "dwproton-11.0-18-x86_64")
     old = _make(root, "dwproton-11.0-13-x86_64")
     older = _make(root, "dwproton-11.0-12-x86_64")
     profiles = {"ark": {"backend": "wine", "runner": str(used)}}
@@ -224,8 +227,8 @@ def test_unused_old_runners_keeps_the_recommended_and_anything_in_use(root):
 
 
 def test_dialog_button_deletes_all_unused_old_runners(root, qapp, monkeypatch):
-    keep = _make(root, "dwproton-11.0-15-x86_64")
-    used = _make(root, "dwproton-11.0-16-x86_64")
+    keep = _make(root, "dwproton-11.0-17-x86_64")
+    used = _make(root, "dwproton-11.0-18-x86_64")
     old = _make(root, "dwproton-11.0-13-x86_64")
     older = _make(root, "dwproton-11.0-12-x86_64")
     profiles = {"ark": {"backend": "wine", "runner": str(used)}}
@@ -251,7 +254,7 @@ def test_dialog_button_deletes_all_unused_old_runners(root, qapp, monkeypatch):
 
 
 def test_dialog_button_is_disabled_when_nothing_is_unused(root, qapp):
-    _make(root, "dwproton-11.0-15-x86_64")
+    _make(root, "dwproton-11.0-17-x86_64")
     dialog = ManageRunnersDialog({"czn": {"backend": "stove-czn"}})
     try:
         assert not dialog.cleanup_button.isEnabled()
@@ -283,14 +286,14 @@ def test_a_new_download_triggers_one_cleanup_offer_and_deleting_works(
     )
     try:
         window._start("czn", "install")  # records what is installed
-        _make(root, "dwproton-11.0-15-x86_64")  # the operation downloaded the pin
+        _make(root, "dwproton-11.0-17-x86_64")  # the operation downloaded the pin
         window._on_succeeded("czn", "install", 0)
         assert _wait(qapp, lambda: bool(asked))
         assert "dwproton-11.0-13" in asked[0] and "recommended build is kept" in asked[0]
         # The meaningful completion condition is the deletion itself, not an
         # intermediate status label (other background work may overwrite it).
         assert _wait(qapp, lambda: not old.exists())
-        assert (root / "dwproton-11.0-15-x86_64").exists()
+        assert (root / "dwproton-11.0-17-x86_64").exists()
     finally:
         window.close()
 
@@ -303,7 +306,7 @@ def test_no_offer_when_no_runner_was_downloaded_or_nothing_is_unused(
         "nadare.gui.main_window.QMessageBox.question", lambda *a, **k: asked.append(1)
     )
     _make(root, "dwproton-11.0-13-x86_64")
-    _make(root, "dwproton-11.0-15-x86_64")
+    _make(root, "dwproton-11.0-17-x86_64")
     window = _window(tmp_path)
     try:
         window._start("czn", "install")
@@ -312,10 +315,10 @@ def test_no_offer_when_no_runner_was_downloaded_or_nothing_is_unused(
         assert asked == []
 
         window._start("czn", "update")
-        _make(root, "dwproton-11.0-16-x86_64")  # new, but the default profile uses the pin
+        _make(root, "dwproton-11.0-18-x86_64")  # new, but the default profile uses the pin
         window._on_succeeded("czn", "update", 0)
         _wait(qapp, lambda: False, 0.5)
-        # 11.0-13 and 11.0-16 are unused old builds, so this one does ask once.
+        # 11.0-13 and 11.0-18 are unused old builds, so this one does ask once.
         assert len(asked) == 1
     finally:
         window.close()
@@ -324,7 +327,7 @@ def test_no_offer_when_no_runner_was_downloaded_or_nothing_is_unused(
 def test_an_existing_prefix_with_system_wine_still_defaults_to_the_recommended_proton(
     root, tmp_path, qapp, monkeypatch
 ):
-    _make(root, "dwproton-11.0-15-x86_64")
+    _make(root, "dwproton-11.0-17-x86_64")
     config = Config.load(tmp_path / "config.json")
     prefix = tmp_path / "prefix"
     (prefix / "drive_c").mkdir(parents=True)
@@ -343,7 +346,7 @@ def test_an_existing_prefix_with_system_wine_still_defaults_to_the_recommended_p
 
 # ---- deletion safety (audit) ---------------------------------------------------------
 def test_removing_a_symlink_removes_the_link_not_its_target(root):
-    real = _make(root, "dwproton-11.0-15-x86_64")
+    real = _make(root, "dwproton-11.0-17-x86_64")
     link = root / "old"
     link.symlink_to(real)
     assert runners.remove(link) is True
@@ -363,7 +366,7 @@ def test_remove_still_refuses_anything_outside_the_runners_folder(root, tmp_path
 
 
 def test_every_alias_of_a_used_runner_counts_as_used(root):
-    real = _make(root, "dwproton-11.0-15-x86_64")
+    real = _make(root, "dwproton-11.0-17-x86_64")
     alias = root / "old"
     alias.symlink_to(real)
     usage = runners.runner_usage({"czn": {"backend": "stove-czn"}})

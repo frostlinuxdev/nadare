@@ -468,8 +468,17 @@ def test_the_appimage_spec_ships_the_endfield_helper_source():
 
 def test_fetch_7zip_script_pins_source_and_digest():
     script = _text("scripts/fetch_7zip.sh")
-    assert "22cf82fcc6eb7474f1d5bb4f02c0f8ebd573a718089d6833dc30f8350a3b232e" in script
-    assert "https://github.com/ip7z/7zip/releases/download/26.05/7z2605-linux-x64.tar.xz" in script
+    assert "0b6080b8c3e7a579161d2d495224c0e51c467576cb4c7048b0ab485ef44cc22e" in script
+    assert "https://github.com/ip7z/7zip/releases/download/26.05/7z2605-src.tar.xz" in script
+
+
+def test_fetch_7zip_builds_without_the_rar_code():
+    """#1227 F5: unRAR's licence is non-free; the bundled 7zzs is built with no RAR code at all."""
+    script = _text("scripts/fetch_7zip.sh")
+    assert 'rm -rf "$work/CPP/7zip/Archive/Rar" "$work"/CPP/7zip/Compress/Rar*' in script
+    assert "DISABLE_RAR=1" in script and "COMPL_STATIC=1" in script
+    assert "still lists a RAR format" in script  # the build fails if a RAR format is left
+    assert "7z2605-linux-x64" not in script  # never the stock (RAR-capable) binary again
 
 
 def test_fetch_7zip_script_is_executable_and_called_through_bash():

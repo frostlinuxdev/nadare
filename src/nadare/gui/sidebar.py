@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.backends import Status
+from ..core.gamefacts import InstallFacts, display_state, update_available
 from .images import ImageLoader
 from .library import display_title, profile_art_candidates
 from .theme import cover_pixmap, load_card_pixmap, repolish
@@ -36,12 +37,12 @@ ROW_HEIGHT = 38
 
 def is_installed(status: Status | None) -> bool:
     """True when ``status`` means the game is on disk / running / updatable."""
-    if status is None:
+    if status is None or InstallFacts.from_status(status).offers_resume():
         return False
-    state = (status.state or "").strip().lower()
+    state = display_state(status).strip().lower()
     if state in ("installed", "running") or status.running:  # running is on disk (#1207 b232)
         return True
-    return bool((status.data or {}).get("update_available"))
+    return update_available(status)
 
 
 def _running(status: Status | None) -> bool:
@@ -51,9 +52,7 @@ def _running(status: Status | None) -> bool:
 
 
 def _updatable(status: Status | None) -> bool:
-    if status is None:
-        return False
-    return bool((status.data or {}).get("update_available"))
+    return update_available(status)
 
 
 def _icon_candidates(profile: dict[str, Any]) -> list[str]:
@@ -323,7 +322,7 @@ class SidebarGames(QWidget):
             self._hide_uninstalled
             and name != self._active
             and status is not None
-            and (status.state or "").strip().lower() == "not_installed"
+            and display_state(status).strip().lower() == "not_installed"
             and not _updatable(status)
             # A running game is never hidden, whatever its state word says (FGO's adapter can
             # report not_installed while its process runs; #1207 b231).

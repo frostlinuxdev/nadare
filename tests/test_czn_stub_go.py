@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context
+from _parts_patch import patch_everywhere
 
 from nadare.backends.czn import backend as czn_backend
 from nadare.backends.czn.backend import CznBackend
@@ -80,10 +81,10 @@ def shipped(monkeypatch, tmp_path):
     assets.mkdir()
     (assets / "czn_pcsdk_stub.exe").write_bytes(GO)
     (assets / "czn_pcsdk_stub_c.exe").write_bytes(C)
-    monkeypatch.setattr(czn_backend, "STUB_PREBUILT", assets / "czn_pcsdk_stub.exe")
-    monkeypatch.setattr(czn_backend, "STUB_PREBUILT_SHA256", _sha(GO))
-    monkeypatch.setattr(czn_backend, "STUB_C_PREBUILT", assets / "czn_pcsdk_stub_c.exe")
-    monkeypatch.setattr(czn_backend, "STUB_C_PREBUILT_SHA256", _sha(C))
+    patch_everywhere(monkeypatch, czn_backend, "STUB_PREBUILT", assets / "czn_pcsdk_stub.exe")
+    patch_everywhere(monkeypatch, czn_backend, "STUB_PREBUILT_SHA256", _sha(GO))
+    patch_everywhere(monkeypatch, czn_backend, "STUB_C_PREBUILT", assets / "czn_pcsdk_stub_c.exe")
+    patch_everywhere(monkeypatch, czn_backend, "STUB_C_PREBUILT_SHA256", _sha(C))
     monkeypatch.delenv("NADARE_CZN_STUB", raising=False)
 
 
@@ -155,3 +156,15 @@ def test_stub_identity_counts_either_shipped_stub(shipped, tmp_path):
     assert czn_backend.stub_identity(path) == (_sha(C)[:12], True)
     path.write_bytes(b"other")
     assert czn_backend.stub_identity(path)[1] is False
+
+
+def test_the_stub_build_script_path_is_beside_the_backend():
+    """#1248: the code that runs build_stub.sh moved to backend_parts/; the path must not move."""
+    import inspect
+
+    from nadare.backends.czn import backend as czn_backend_mod
+    from nadare.backends.czn.backend_parts import prereqs
+
+    assert prereqs._MODULE_FILE == Path(czn_backend_mod.__file__).resolve()
+    assert (prereqs._MODULE_FILE.with_name("build_stub.sh")).is_file()
+    assert 'Path(_MODULE_FILE).with_name("build_stub.sh")' in inspect.getsource(prereqs)

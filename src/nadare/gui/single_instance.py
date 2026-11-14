@@ -12,9 +12,13 @@ never touches this: only ``nadare gui`` / the menu entry acquire the lock.
 
 from __future__ import annotations
 
+import errno
+import fcntl
 import logging
 import os
 import stat
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -31,6 +35,22 @@ _ACTIVATE_MESSAGE = b"activate"
 #: ``show-profile:<name>\n`` asks the primary to show a profile; the newline ends the name.
 _PROFILE_PREFIX = b"show-profile:"
 _PROFILE_LIMIT = len(_PROFILE_PREFIX) + 256
+
+#: No valid message is larger than the (partial) profile request; refuse past that.
+_BUFFER_LIMIT = _PROFILE_LIMIT + 1
+
+
+def _socket_path(name: str) -> Path:
+    """The filesystem name of a local server, absolute or Qt's bare temp name."""
+    path = Path(name)
+    return path if path.is_absolute() else Path(tempfile.gettempdir()) / name
+
+
+def _stem() -> str:
+    """``nadare`` or ``nadare-unstable``: the unstable build has its own window."""
+    from ..core import paths
+
+    return paths.app_name()
 
 
 def server_name() -> str:
@@ -55,9 +75,9 @@ def server_name() -> str:
         except OSError:
             usable = False
         if usable:
-            return str(base / f"nadare-{uid}.sock")
+            return str(base / f"{_stem()}-{uid}.sock")
     private = _private_socket(uid)
-    return private if private is not None else f"nadare-{uid}"
+    return private if private is not None else f"{_stem()}-{uid}"
 
 
 #: A Unix socket path must fit ``sun_path`` (108 bytes on Linux, with its terminating NUL).
@@ -73,7 +93,7 @@ def _private_socket(uid: int) -> str | None:
     from ..core import paths
 
     folder = paths.state_dir() / "run"
-    path = str(folder / f"nadare-{uid}.sock")
+    path = str(folder / f"{_stem()}-{uid}.sock")
     if len(os.fsencode(path)) > _SOCKET_PATH_MAX:
         return None
     try:
@@ -121,33 +141,85 @@ class SingleInstance(QObject):
     def start(self) -> bool:
         """Try to become the primary instance. Returns ``False`` if another runs."""
         self.status = ""
-        if self._ping():
-            self.status = "another instance is already running"
-            self._send_profile()
-            return False
-        # Do not unlink the socket up front: another process may have bound it
-        # since the ping above. Try to bind; only a provably stale socket (no
-        # live server answers a second ping) may be reclaimed.
-        server = QLocalServer(self)
-        server.newConnection.connect(self._on_new_connection)
-        if not server.listen(self._name):
+        with self._start_lock() as acquired:
+            if not acquired:
+                self.status = "another instance is starting"
+                return False
             if self._ping():
-                server.close()
                 self.status = "another instance is already running"
                 self._send_profile()
                 return False
-            QLocalServer.removeServer(self._name)
+            # Do not unlink the socket up front: another process may have bound it
+            # since the ping above. Try to bind; only a provably stale socket (no
+            # live server answers a second ping) may be reclaimed.
+            server = QLocalServer(self)
+            server.newConnection.connect(self._on_new_connection)
             if not server.listen(self._name):
-                # Never fail silently: a missing window with no message is
-                # indistinguishable from a launcher that does nothing.
-                self.status = f"could not create the single-instance lock {self._name!r}"
-                log.warning(
-                    "single-instance lock unavailable at %r: %s",
-                    self._name,
-                    server.errorString(),
-                )
-                return False
-        self._server = server
+                if self._ping():
+                    server.close()
+                    self.status = "another instance is already running"
+                    self._send_profile()
+                    return False
+                if not self._remove_stale_socket():
+                    server.close()
+                    return False
+                if not server.listen(self._name):
+                    # Never fail silently: a missing window with no message is
+                    # indistinguishable from a launcher that does nothing.
+                    self.status = f"could not create the single-instance lock {self._name!r}"
+                    log.warning(
+                        "single-instance lock unavailable at %r: %s",
+                        self._name,
+                        server.errorString(),
+                    )
+                    return False
+            self._server = server
+            return True
+
+    @contextmanager
+    def _start_lock(self):
+        """Serialise ping, bind and stale-socket reclaim between starting processes."""
+        lock_path = _socket_path(self._name).with_name(
+            _socket_path(self._name).name + ".lock"
+        )
+        fd = -1
+        acquired = True
+        try:
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in (errno.EACCES, errno.EAGAIN):
+                    acquired = False
+                else:
+                    # A filesystem without flock still gets the atomic bind attempt.
+                    log.warning("file locking is unsupported on %s: %s", lock_path, exc)
+        except OSError as exc:
+            log.warning("could not lock %s: %s", lock_path, exc)
+        try:
+            yield acquired
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+    def _remove_stale_socket(self) -> bool:
+        """Remove a stale socket, but never a file, folder, link or FIFO there."""
+        path = _socket_path(self._name)
+        try:
+            mode = os.lstat(path).st_mode
+        except FileNotFoundError:
+            return True
+        except OSError as exc:
+            self.status = f"could not inspect the single-instance lock {path!r}: {exc}"
+            log.warning("could not inspect single-instance lock %r: %s", path, exc)
+            return False
+        if not stat.S_ISSOCK(mode):
+            self.status = (
+                f"the single-instance lock path {str(path)!r} is not a socket; leaving it alone"
+            )
+            log.warning("single-instance lock path %r is not a socket", path)
+            return False
+        QLocalServer.removeServer(self._name)
         return True
 
     def close(self) -> None:
@@ -206,6 +278,12 @@ class SingleInstance(QObject):
         """
         buffer = self._buffers.setdefault(connection, bytearray())
         buffer.extend(bytes(connection.readAll()))
+        if len(buffer) > _BUFFER_LIMIT:
+            # No valid payload reaches this size; a garbage client would otherwise
+            # grow the buffer forever (whitespace strips to an empty prefix).
+            self._buffers.pop(connection, None)
+            connection.disconnectFromServer()
+            return
         data = bytes(buffer).strip()
         if data == _ACTIVATE_MESSAGE:
             self._buffers.pop(connection, None)

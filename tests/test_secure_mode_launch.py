@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _parts_patch import patch_everywhere
 
 from nadare.backends.launcher import NikkeBackend
 from nadare.core import config as config_module
@@ -35,7 +36,7 @@ def test_secure_mode_is_off_by_default(tmp_path):
 def test_secure_mode_wraps_the_play_command(tmp_path, has_bwrap):
     backend = _backend(tmp_path, secure_mode=True)
     argv, env, target = backend.build_launch()
-    assert argv[0] == "bwrap"
+    assert Path(argv[0]).name == "bwrap"
     rest = argv[argv.index("--") + 1 :]
     assert rest[0] == "/usr/bin/wine" and str(target) in rest
     assert "--tmpfs" in argv
@@ -118,7 +119,7 @@ def test_a_launcher_game_runs_play_inside_the_sandbox(tmp_path, monkeypatch, has
         backend.install_dir() / backend.launcher_names[0], "MZ"
     )
     argv, _env, target = backend.build_launch()
-    assert argv[0] == "bwrap" and "--tmpfs" in argv
+    assert Path(argv[0]).name == "bwrap" and "--tmpfs" in argv
     assert argv[argv.index("--") + 1 :][-1] == str(target) == str(exe)
 
 
@@ -144,13 +145,15 @@ def test_a_direct_game_runs_play_inside_the_sandbox(tmp_path, monkeypatch, has_b
         def join(self, timeout=None):
             pass
 
-    monkeypatch.setattr(winegame, "stream", lambda argv, env, **kw: seen.append(argv) or 0)
+    patch_everywhere(
+        monkeypatch, winegame, "stream", lambda argv, env, **kw: seen.append(argv) or 0
+    )
     monkeypatch.setattr(backend, "_ensure_default_runner", lambda strict: None)
     monkeypatch.setattr(backend, "_run_vcredist", lambda created=False: None)
     monkeypatch.setattr(backend, "_renderer_probe", lambda: Probe())
     assert backend.launch() == 0
     argv = seen[0]
-    assert argv[0] == "bwrap" and "--tmpfs" in argv
+    assert Path(argv[0]).name == "bwrap" and "--tmpfs" in argv
     assert argv[argv.index("--") + 1 :][-1] == str(exe)
 
 
@@ -176,7 +179,9 @@ def test_a_direct_game_without_the_option_runs_unwrapped(tmp_path, monkeypatch):
         def join(self, timeout=None):
             pass
 
-    monkeypatch.setattr(winegame, "stream", lambda argv, env, **kw: seen.append(argv) or 0)
+    patch_everywhere(
+        monkeypatch, winegame, "stream", lambda argv, env, **kw: seen.append(argv) or 0
+    )
     monkeypatch.setattr(backend, "_ensure_default_runner", lambda strict: None)
     monkeypatch.setattr(backend, "_run_vcredist", lambda created=False: None)
     monkeypatch.setattr(backend, "_renderer_probe", lambda: Probe())
@@ -257,7 +262,7 @@ def test_the_link_pipe_is_bound_in_and_stops_when_the_game_ends(tmp_path, monkey
         seen.append(argv)
         return 0
 
-    monkeypatch.setattr(winegame, "stream", fake_stream)
+    patch_everywhere(monkeypatch, winegame, "stream", fake_stream)
     monkeypatch.setattr(backend, "_ensure_default_runner", lambda strict: None)
     monkeypatch.setattr(backend, "_run_vcredist", lambda created=False: None)
     monkeypatch.setattr(backend, "_renderer_probe", lambda: Probe())
@@ -347,7 +352,9 @@ def _stella_sora(tmp_path: Path, monkeypatch, **profile):
         def join(self, timeout=None):
             pass
 
-    monkeypatch.setattr(winegame, "stream", lambda argv, env, **kw: seen.append(argv) or 0)
+    patch_everywhere(
+        monkeypatch, winegame, "stream", lambda argv, env, **kw: seen.append(argv) or 0
+    )
     monkeypatch.setattr(backend, "_ensure_default_runner", lambda strict: None)
     monkeypatch.setattr(backend, "_run_vcredist", lambda created=False: None)
     monkeypatch.setattr(backend, "_renderer_probe", lambda: Probe())
@@ -358,11 +365,11 @@ def test_stella_sora_runs_play_inside_the_sandbox(tmp_path, monkeypatch, has_bwr
     backend, exe, seen = _stella_sora(tmp_path, monkeypatch, secure_mode=True)
     assert backend.launch() == 0
     argv = seen[0]
-    assert argv[0] == "bwrap" and "--tmpfs" in argv
+    assert Path(argv[0]).name == "bwrap" and "--tmpfs" in argv
     assert argv[argv.index("--") + 1 :][-1] == str(exe)
 
 
 def test_stella_sora_without_the_option_runs_unwrapped(tmp_path, monkeypatch):
     backend, exe, seen = _stella_sora(tmp_path, monkeypatch)
     assert backend.launch() == 0
-    assert seen[0][0] != "bwrap" and seen[0][-1] == str(exe)
+    assert Path(seen[0][0]).name != "bwrap" and seen[0][-1] == str(exe)

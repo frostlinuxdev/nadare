@@ -72,15 +72,19 @@ def test_prefix_setup_and_installs_use_umu_even_when_play_is_sandboxed(
     assert argv[0] == UMU
 
 
-def test_outside_flatpak_nothing_changes(tmp_path, monkeypatch):
-    """The AppImage keeps its rule: umu only when the host lacks the 32-bit libraries."""
+def test_outside_flatpak_every_launch_goes_through_umu(tmp_path, monkeypatch):
+    """#1338 (user): the AppImage no longer runs `proton run` when the host has the 32-bit
+    libraries; it sets up Nadare's own umu instead."""
     monkeypatch.setattr(sandbox, "in_flatpak", lambda: False)
     monkeypatch.setattr(umu, "system", lambda *_a, **_k: None)
     monkeypatch.setattr(wg.hostlibs, "missing_32bit", lambda *_a, **_k: [])
-    monkeypatch.setattr(umu, "resolve", lambda *_a, **_k: pytest.fail("umu resolved"))
+    monkeypatch.setattr(umu, "resolve", lambda *_a, **_k: "/data/nadare/umu/umu-run")
+    from nadare.core import userns
+
+    monkeypatch.setattr(userns, "blocks_runtime", lambda: False)
     backend = _nikke(tmp_path, monkeypatch, secure_mode=False)
     argv, _env = backend._prefix_command(["game.exe"])
-    assert argv[:2] == [str(tmp_path / "runner" / "proton"), "run"]
+    assert argv[0] == "/data/nadare/umu/umu-run"
 
 
 def test_doctor_says_the_flatpak_uses_umu(monkeypatch, capsys, tmp_path):

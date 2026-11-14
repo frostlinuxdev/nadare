@@ -18,7 +18,9 @@ folder, symlinks included.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import stat
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +29,8 @@ from typing import Any
 from . import backends, flatpakfs, paths, prefixguard
 from .config import MAX_PROFILE_NAME, valid_profile_name
 from .profilenames import short_name
+
+log = logging.getLogger(__name__)
 
 NADARE_DIR = "Nadare"
 MANIFEST_NAME = "nadare-game.json"
@@ -82,6 +86,9 @@ def library_roots(config) -> list[Path]:
         raw = entry.get("path")
         if not isinstance(raw, str) or not os.path.isabs(os.path.expanduser(raw)):
             continue
+        if "\x00" in raw:
+            log.warning("ignoring a library path with a NUL: %r", raw)
+            continue
         root = _real(raw)
         if root not in roots:
             roots.append(root)
@@ -129,6 +136,73 @@ def library_of(folder: str | os.PathLike[str]) -> Path:
     return path
 
 
+def library_root_for(game_dir: str | os.PathLike[str]) -> Path | None:
+    """The library holding a game folder laid out as ``<library>/Nadare/<Game>``.
+
+    A b21 game folder is ``<library>/Nadare/Nadare/<Game>``: both layouts mean the same
+    library. ``~/Nadare/<Game>`` means ``~/Nadare`` because home cannot be a library.
+    """
+    path = Path(os.path.normpath(os.path.expanduser(str(game_dir))))
+    parent = path.parent
+    if parent.name != NADARE_DIR:
+        return None
+    root = parent
+    while True:
+        # Repeatedly apply the picked-folder rule so any run of ``Nadare`` folders folds up.
+        nxt = library_of(root)
+        if nxt == root:
+            return root
+        root = nxt
+
+
+def library_of_game_dir(game_dir: str | os.PathLike[str]) -> Path | None:
+    """The library a game folder belongs to, by its layout alone (resolved).
+
+    ``profiles/<name>`` is in the default library; ``<library>/Nadare/<Game>`` and the b21
+    ``<library>/Nadare/Nadare/<Game>`` are in ``<library>``. The one rule for "which library is
+    this game folder in": callers must not compute ``parent.parent`` themselves (#1293).
+    """
+    folder = _real(game_dir)
+    if folder.parent == default_root():
+        return default_root()
+    found = library_root_for(folder)
+    return _real(found) if found is not None else None
+
+
+def normalise_entries(config) -> bool:
+    """Fold stored ``.../Nadare`` library entries into their library; ``True`` if changed.
+
+    Only the config changes: an unplugged folder keeps its meaning because this is about the
+    name, not the disk. Order is kept and the first of two equal entries wins.
+    """
+    stored = _stored(config)
+    rewritten: list[Any] = []
+    seen: set[str] = set()
+    changed = False
+    for entry in stored:
+        if not isinstance(entry, Mapping):
+            rewritten.append(entry)
+            continue
+        raw = entry.get("path")
+        if not isinstance(raw, str):
+            rewritten.append(entry)
+            continue
+        path = Path(os.path.normpath(os.path.expanduser(raw)))
+        target = library_of(path)
+        text = str(target)
+        if target != path:
+            changed = True
+            entry = {**entry, "path": text}
+        if text in seen:
+            changed = True
+            continue
+        seen.add(text)
+        rewritten.append(entry)
+    if changed:
+        config.data[CONFIG_KEY] = rewritten
+    return changed
+
+
 def add_library(config, path: str | os.PathLike[str]) -> Path:
     """Remember ``path`` as a library and return it resolved. The caller saves the config.
 
@@ -136,7 +210,8 @@ def add_library(config, path: str | os.PathLike[str]) -> Path:
     fine for the same reason. Refused: the filesystem root, home, a folder containing home, a
     personal folder, and a library that is already listed.
     """
-    text = os.path.expanduser(str(path))
+    mapped = library_of(path)
+    text = os.path.expanduser(str(mapped))
     if not str(path).strip() or not os.path.isabs(text):
         raise LibraryError(f"{path} is not a full folder path.")
     root = _real(text)
@@ -255,7 +330,61 @@ def _game_folder(
         return game_dir if game_dir.parent.name == NADARE_DIR else None
     if dirs:
         return None
+    legacy = _legacy_game_folder(profile)
+    if legacy is not None:
+        return legacy
+    recorded = _recorded_default_home(profile)
+    if recorded is not None:
+        return recorded
     return Path(default_root if default_root is not None else paths.profiles_dir()) / name
+
+
+def _legacy_game_folder(profile: Mapping[str, Any]) -> Path | None:
+    """The ``<library>/Nadare/<Game>`` of a profile made before ``owned_dirs`` existed.
+
+    Add Game always made ``<Game>/{prefix,install}`` there and recorded that it made the trees,
+    just not the folder (before 2026-10-27). Only that exact shape, with that record, counts:
+    the same rule ``relink._legacy_dirs`` uses for Move. Anything else stays the user's.
+    """
+    owned = profile.get("owned_trees")
+    prefix = profile.get("prefix")
+    if not isinstance(owned, list) or "prefix" not in owned or not isinstance(prefix, str):
+        return None
+    prefix_path = Path(os.path.expanduser(prefix))
+    home = prefix_path.parent
+    if prefix_path.name != "prefix" or home.parent.name != NADARE_DIR:
+        return None
+    install = profile.get("install_dir")
+    if isinstance(install, str) and install.strip():
+        if "install_dir" not in owned or Path(os.path.expanduser(install)) != home / "install":
+            return None
+    return home
+
+
+def _recorded_default_home(profile: Mapping[str, Any]) -> Path | None:
+    """A default-library game's real folder, from the ``install``/``prefix`` it recorded.
+
+    Old Add Game let the profile name differ from the title-named folder, so guessing
+    ``profiles/<profile>`` misses it (V-2/V-3).
+    """
+    owned = profile.get("owned_trees")
+    if not isinstance(owned, list):
+        return None
+    homes: set[Path] = set()
+    for key, name in (("install_dir", "install"), ("prefix", "prefix")):
+        value = profile.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        if key not in owned:
+            return None
+        path = _real(value)
+        if path.name != name:
+            return None
+        homes.add(path.parent)
+    if len(homes) != 1:
+        return None
+    home = homes.pop()
+    return home if home.parent == default_root() else None
 
 
 def record_new_game(
@@ -283,7 +412,12 @@ def _matches(manifest: Manifest | None, profile: Mapping[str, Any]) -> bool:
         want = _real(value) if isinstance(value, str) and value.strip() else None
         if folder != want:
             return False
-    return manifest.kind == profile.get("backend")
+    # The title is part of the manifest: a rename must reach disk, or Find games would bring
+    # the old name back (#W10-F3).
+    return (
+        manifest.kind == profile.get("backend")
+        and manifest.title == str(profile.get("title") or "")
+    )
 
 
 def sync_game(config, name: str, *, remember_library: bool = True) -> bool:
@@ -298,17 +432,24 @@ def sync_game(config, name: str, *, remember_library: bool = True) -> bool:
     if not isinstance(profile, Mapping):
         return False
     game_dir = _game_folder(profile, name, None)
-    if game_dir is None or game_dir.is_symlink() or not game_dir.is_dir():
+    try:
+        if game_dir is None or game_dir.is_symlink() or not game_dir.is_dir():
+            return False
+    except OSError as exc:
+        log.warning("skipping %s: cannot inspect its game folder %s: %s", name, game_dir, exc)
         return False
     if not _matches(read_manifest(game_dir), profile):
         try:
             write_manifest(profile, game_dir)
         except OSError:
             pass
-    if game_dir.parent.name != NADARE_DIR or not remember_library:
+    if not remember_library:
+        return False
+    library = library_root_for(game_dir)
+    if library is None:
         return False
     try:
-        add_library(config, game_dir.parent.parent)
+        add_library(config, library)
     except LibraryError:
         return False
     return True
@@ -340,7 +481,7 @@ def backfill(config) -> bool:
     still written.
     """
     first = not _set_up(config)
-    changed = False
+    changed = normalise_entries(config)
     for name in list(config.profiles):
         changed = sync_game(config, name, remember_library=first) or changed
     return changed
@@ -356,10 +497,18 @@ def _read(game_dir: Path) -> Manifest:
     if file.is_symlink():
         raise ValueError("the manifest is a link")
     try:
-        with open(file, "rb") as fh:
-            raw = fh.read(MANIFEST_MAX_BYTES + 1)
+        fd = os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
         raise ValueError(f"cannot read it ({exc.strerror or exc})") from None
+    try:
+        # A FIFO would block a plain read; only a regular file can hold the manifest.
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("the manifest is not a regular file")
+        raw = os.read(fd, MANIFEST_MAX_BYTES + 1)
+    except OSError as exc:
+        raise ValueError(f"cannot read it ({exc.strerror or exc})") from None
+    finally:
+        os.close(fd)
     if len(raw) > MANIFEST_MAX_BYTES:
         raise ValueError("the manifest is too big")
     try:
@@ -413,19 +562,32 @@ def read_manifest(game_dir: str | os.PathLike[str]) -> Manifest | None:
 # ---- scan and adopt ---------------------------------------------------------------------------
 
 
+def _game_bases(root: Path) -> list[Path]:
+    """Folders whose direct children are game folders, including the b21 layout."""
+    if root == default_root():
+        # profiles/Nadare holds games an old Move put there (V-3).
+        return [root, root / NADARE_DIR]
+    return [root / NADARE_DIR, root / NADARE_DIR / NADARE_DIR]
+
+
 def _game_dirs(root: Path) -> list[Path]:
-    base = root if root == default_root() else root / NADARE_DIR
-    try:
-        entries = sorted(base.iterdir())
-    except OSError:
-        return []
     found = []
-    for entry in entries:
-        if entry.is_symlink() or not entry.is_dir():
-            continue  # a game folder Nadare made is a real folder
-        manifest = entry / MANIFEST_NAME
-        if manifest.exists() or manifest.is_symlink():
-            found.append(entry)
+    seen: set[Path] = set()
+    for base in _game_bases(root):
+        try:
+            entries = sorted(base.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            manifest = entry / MANIFEST_NAME
+            has_manifest = manifest.exists() or manifest.is_symlink()
+            if entry.name == NADARE_DIR and not has_manifest:
+                continue  # a nested library folder, not a game (FS-5)
+            if entry.is_symlink() or not entry.is_dir():
+                continue  # a game folder Nadare made is a real folder
+            if has_manifest and entry not in seen:
+                seen.add(entry)
+                found.append(entry)
     return found
 
 
@@ -461,7 +623,12 @@ def scan(config, root: str | os.PathLike[str]) -> tuple[list[Candidate], list[st
         folders = [p for p in (manifest.install_dir, manifest.prefix) if p is not None]
         if any(p in used for p in folders):
             continue  # already in the Library
-        if not any(p.is_dir() for p in folders):
+        try:
+            present = any(p.is_dir() for p in folders)
+        except OSError as exc:
+            notes.append(f"{game_dir}: skipped, cannot inspect its folders ({exc.strerror or exc})")
+            continue
+        if not present:
             notes.append(f"{game_dir}: skipped, only the manifest is left")
             continue
         other = backends.existing_profile(manifest.kind, config.profiles)
@@ -578,30 +745,38 @@ def find_unmarked(
     if real_root == default_root():
         return []  # profiles/<name> holds every game's data; nothing to guess there
     usable = [spec for spec in specs if _catalog_kind(spec.kind)]
-    try:
-        entries = sorted((real_root / NADARE_DIR).iterdir())
-    except OSError:
-        return []
     used = _used_folders(config.profiles)
     found: list[Candidate] = []
-    for entry in entries:
-        if entry.is_symlink() or not entry.is_dir():
+    seen: set[Path] = set()
+    for base in _game_bases(real_root):
+        try:
+            entries = sorted(base.iterdir())
+        except OSError:
             continue
-        manifest = entry / MANIFEST_NAME
-        if manifest.exists() or manifest.is_symlink():
-            continue  # scan() reads it
-        game_dir = _real(entry)
-        if any(p == game_dir or game_dir in p.parents for p in used):
-            continue
-        for spec in usable:
-            if backends.existing_profile(spec.kind, config.profiles) is not None:
+        for entry in entries:
+            manifest = entry / MANIFEST_NAME
+            has_manifest = manifest.exists() or manifest.is_symlink()
+            if entry.name == NADARE_DIR and not has_manifest:
+                continue  # a nested library folder, not a game (FS-5)
+            if entry.is_symlink() or not entry.is_dir():
                 continue
-            if any(c.kind == spec.kind for c in found):
+            if has_manifest:
+                continue  # scan() reads it
+            game_dir = _real(entry)
+            if game_dir in seen:
                 continue
-            guess = _guess(game_dir, spec)
-            if guess is not None:
-                found.append(guess)
-                break
+            seen.add(game_dir)
+            if any(p == game_dir or game_dir in p.parents for p in used):
+                continue
+            for spec in usable:
+                if backends.existing_profile(spec.kind, config.profiles) is not None:
+                    continue
+                if any(c.kind == spec.kind for c in found):
+                    continue
+                guess = _guess(game_dir, spec)
+                if guess is not None:
+                    found.append(guess)
+                    break
     return found
 
 
@@ -707,7 +882,10 @@ __all__ = [
     "exe_at_path",
     "find_unmarked",
     "library_roots",
+    "library_of_game_dir",
+    "library_root_for",
     "match_game",
+    "normalise_entries",
     "read_manifest",
     "record_new_game",
     "remove_library",

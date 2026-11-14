@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Backend discovery should not import unrelated implementations."""
 
 from __future__ import annotations

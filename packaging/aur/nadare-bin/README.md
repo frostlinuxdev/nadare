@@ -4,6 +4,8 @@ Wraps the upstream AppImage: unpacked into `/opt/nadare`, `/usr/bin/nadare`
 symlinks to it. Builds with plain `makepkg`; no source package because
 `python-curl-cffi` is not in `extra`.
 
+The package is **not on the AUR yet**: these are the steps for when it is published.
+
 Per release:
 
 1. Bump `pkgver`, reset `pkgrel=1`.

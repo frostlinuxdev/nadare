@@ -40,3 +40,23 @@ def resolve(fetch: Fetch | None = None, token: str | None = None) -> directdl.Pl
             "set the profile's kuro_token (see core/sources/pgr.py for where to find it)."
         ),
     )
+
+
+def resolve_predownload(
+    fetch: Fetch | None = None, token: str | None = None
+) -> directdl.Plan | None:
+    """The next version when Kuro offers a predownload window, else ``None``."""
+    return kuro.resolve_with_tokens(
+        game_tag="pgr",
+        group="G143",
+        prefix="50015",
+        builtin=TOKEN,
+        token=token,
+        exe=EXE,
+        fetch=fetch,
+        refused_hint=(
+            "Kuro may have rotated Punishing: Gray Raven's download token. Update Nadare, or "
+            "set the profile's kuro_token (see core/sources/pgr.py for where to find it)."
+        ),
+        predownload=True,
+    )

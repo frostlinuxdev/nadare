@@ -29,6 +29,13 @@ from pathlib import Path
 from . import paths
 
 SERVICE = "nadare-launcher"
+
+
+def service_name() -> str:
+    """The keyring service: an unstable build keeps its own sign-ins (rotating tokens)."""
+    from . import channel
+
+    return SERVICE + channel.suffix()
 FALLBACK_NAME = "secrets.json"
 
 #: Account-id namespace used before accounts were scoped per consumer/kind.
@@ -194,20 +201,20 @@ class SecretStore:
     # ---- keyring path ------------------------------------------------------
     def _kget(self, account: str) -> str | None:
         try:
-            value = self._keyring.get_password(SERVICE, account)  # type: ignore[attr-defined]
+            value = self._keyring.get_password(service_name(), account)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001
             raise SecretStoreError(f"keyring read failed: {exc}") from exc
         return value or None
 
     def _kset(self, account: str, token: str) -> None:
         try:
-            self._keyring.set_password(SERVICE, account, token)  # type: ignore[attr-defined]
+            self._keyring.set_password(service_name(), account, token)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001
             raise SecretStoreError(f"keyring write failed: {exc}") from exc
 
     def _kdel(self, account: str) -> None:
         try:
-            self._keyring.delete_password(SERVICE, account)  # type: ignore[attr-defined]
+            self._keyring.delete_password(service_name(), account)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001
             if _is_missing_secret(exc):
                 # Deleting a token that is not there is success.

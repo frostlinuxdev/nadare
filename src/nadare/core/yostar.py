@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
-import fcntl
 import hashlib
 import json
 import logging
@@ -41,12 +40,11 @@ import urllib.parse
 from collections import deque
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import diskspace, download, hosting, paths
+from . import diskspace, download, hosting, installlock, paths
 from .events import Cancel, Cancelled, Emitter, Event, emitter
 
 log = logging.getLogger(__name__)
@@ -1008,6 +1006,7 @@ def _sync_entry(
     base_host: str | None,
     chunk: int,
     sleeper: Callable[[float], None] = time.sleep,
+    changed: threading.Event | None = None,
 ) -> None:
     """Download and verify one manifest file (runs inside a worker thread)."""
     url = file_url(manifest, entry)
@@ -1089,29 +1088,21 @@ def _sync_entry(
             os.replace(part, destination)
         except OSError as exc:
             raise ManifestError(f"could not finalise {entry.path}: {exc}") from exc
+        if changed is not None:
+            changed.set()
         progress.set(key, entry.size)
         return
 
     raise ManifestError(last_error)
 
 
-@contextmanager
 def _install_lock(install_dir: Path) -> Iterator[None]:
     """Refuse to run two syncs into one install tree (they share ``.part`` files)."""
-    key = hashlib.sha256(str(install_dir.resolve()).encode()).hexdigest()[:16]
-    lock_path = paths.state_dir() / "locks" / f"sync-{key}.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise SyncBusy(
-                f"another install or update is already running for {install_dir}"
-            ) from None
-        yield
-    finally:
-        os.close(fd)
+    return installlock.hold(
+        install_dir,
+        SyncBusy,
+        f"another install or update is already running for {install_dir}",
+    )
 
 
 def sync(
@@ -1124,6 +1115,7 @@ def sync(
     allowed_hosts: set[str] | None = None,
     workers: int = 6,
     chunk: int = download.DEFAULT_CHUNK,
+    changed: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Serialise :func:`_sync` per install directory."""
     with _install_lock(Path(install_dir).expanduser()):
@@ -1136,6 +1128,7 @@ def sync(
             allowed_hosts=allowed_hosts,
             workers=workers,
             chunk=chunk,
+            changed=changed,
         )
 
 
@@ -1149,6 +1142,7 @@ def _sync(
     allowed_hosts: set[str] | None = None,
     workers: int = 6,
     chunk: int = download.DEFAULT_CHUNK,
+    changed: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Download missing/changed files from ``manifest`` into ``install_dir``.
 
@@ -1235,6 +1229,7 @@ def _sync(
             allowed_hosts=allowed_hosts,
             base_host=base_host,
             chunk=chunk,
+            changed=changed,
         )
 
     try:

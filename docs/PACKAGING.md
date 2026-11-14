@@ -66,7 +66,9 @@ will offer a manual AppImage download that the package manager would overwrite.
 ## What each build must contain
 
 - The PyInstaller onedir bundle, including `src/nadare/assets/7zzs` (run
-  `scripts/fetch_7zip.sh` first; the spec embeds whatever is in `assets/`).
+  `scripts/fetch_7zip.sh` first; the spec embeds whatever is in `assets/`). That script builds
+  7-Zip from its pinned source **without the RAR code** (unRAR's licence is non-free) and needs
+  `make` and `g++`; the build is reproducible and `core/sevenzip.py` pins the result.
 - `LICENSE` under the package's licence directory.
 - The desktop file, icon and (Flatpak/AppImage) the AppStream metainfo.
 - The `.deb` derives its `libc6 (>= ...)` floor from `readelf -V` on the bundle

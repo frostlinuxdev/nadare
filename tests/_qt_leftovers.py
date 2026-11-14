@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """End the windows earlier tests left alive, before a test restyles the whole app (#1024)."""
 
 from __future__ import annotations

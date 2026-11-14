@@ -51,7 +51,8 @@ def test_a_tree_nested_inside_another_profiles_tree_is_refused(cfg_env):
         ("100%$HOME game", 'Exec=/opt/nadare launch -p "100%%\\$HOME game"'),
         ("a%b", "Exec=/opt/nadare launch -p a%%b"),
         ("x`id`y", 'Exec=/opt/nadare launch -p "x\\`id\\`y"'),
-        ("back\\slash", 'Exec=/opt/nadare launch -p "back\\\\slash"'),
+        # Four backslashes in the file: desktop-file-validate rejects two (#1322 SH-5).
+        ("back\\slash", 'Exec=/opt/nadare launch -p "back\\\\\\\\slash"'),
     ],
 )
 def test_desktop_exec_escapes_field_codes_and_shell_metachars(name, expected):

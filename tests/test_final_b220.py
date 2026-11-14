@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -6,6 +7,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from _parts_patch import patch_everywhere
 from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from nadare.core.config import Config
@@ -44,7 +46,7 @@ def test_a_stale_relink_answer_does_not_commit_another_games_plan(tmp_path, qapp
         gate_b.wait(5)
         return SimpleNamespace(state="running")
 
-    monkeypatch.setattr(settings_mod, "create_backend",
+    patch_everywhere(monkeypatch, settings_mod, "create_backend",
                         lambda profile, config: SimpleNamespace(status=lambda: probe(profile)))
     chosen = iter([str(new_a), str(new_b)])
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: next(chosen))

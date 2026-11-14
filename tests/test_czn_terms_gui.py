@@ -15,6 +15,8 @@ try:  # pragma: no cover - exercised only when PyQt6 is missing
 except Exception:  # noqa: BLE001
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
+from _main_window_patch import patch_main_window
+
 from nadare.backends.czn.backend import CznBackend
 from nadare.core.config import Config
 from nadare.gui.main_window import MainWindow
@@ -360,10 +362,9 @@ class _FakeTerms:
 
 
 def _two_czn_window(tmp_path, monkeypatch):
-    import nadare.gui.main_window as mw
 
     monkeypatch.setattr(BackendController, "start", lambda *a, **k: True)
-    monkeypatch.setattr(mw, "TermsDialog", _FakeTerms)
+    patch_main_window(monkeypatch, "TermsDialog", _FakeTerms)
     _FakeTerms.made = []
     config = Config.load(tmp_path / "config.json")
     config.add_profile("czn", backend="stove-czn", title="Chaos Zero Nightmare")

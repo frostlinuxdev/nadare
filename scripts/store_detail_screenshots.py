@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Render representative store detail pages offscreen for review."""
 
 from __future__ import annotations

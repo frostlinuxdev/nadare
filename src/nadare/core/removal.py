@@ -24,6 +24,7 @@ from typing import NamedTuple
 from . import backends, libraries, paths, process, runlock, runlog, shortcuts
 
 _TREE_KEYS = ("install_dir", "prefix", "wineprefix")
+_PENDING_REMOVAL = "removal_pending"
 _BACKUP_KEY = "prefix_backup"
 #: The names ``prefixmove.backup_path`` makes: ``<prefix name>.broken-<stamp>``, plus ``-2``...
 _BACKUP_NAME = re.compile(r"^.+\.broken-\d{8}-\d{6}(?:-\d+)?$")
@@ -321,11 +322,21 @@ def _not_owned_reason(profile, key: str, path: Path, name: str) -> str:
     if isinstance(owned, list) and key in owned:
         recorded = profile.get("owned_paths")
         if not isinstance(recorded, dict) or key not in recorded:
-            return ""  # profile made before paths were recorded (0.1.0b13)
-        try:
-            same = Path(str(recorded[key])).resolve() == resolved
-        except (OSError, RuntimeError):
-            same = False
+            # A profile made before paths were recorded (0.1.0b13): only a path that reaches
+            # the folder without any link can still be the one Nadare made. A game folder
+            # swapped for a link to e.g. Documents must never be emptied (chaos FS-1).
+            literal = Path(os.path.abspath(os.path.expanduser(str(path))))
+            if literal != resolved:
+                return (
+                    "Nadare made this folder, but the path to it now goes through a link, "
+                    "so it is kept (remove it yourself if you want it gone)"
+                )
+            return ""
+        # The record was resolved when Nadare made the folder. Compare it AS RECORDED:
+        # resolving it again would follow a link put in its place later, and both sides would
+        # then name the link's target (chaos FS-1: a game folder swapped for a link to
+        # Documents had Documents/install deleted).
+        same = Path(os.path.normpath(str(recorded[key]))) == resolved
         if same:
             return ""
         return (
@@ -346,6 +357,41 @@ _NOT_CREATED = (
 def _created_by_nadare(profile, key: str, path: Path, name: str) -> bool:
     """Whether Nadare made ``path``, so deleting it cannot take anything of the user's."""
     return not _not_owned_reason(profile, key, path, name)
+
+
+def _configured_tree_path(profile, key: str, name: str) -> Path | None:
+    """The path a tree key points at, whether or not it still exists."""
+    value = _setting(profile, key)
+    if isinstance(value, str) and value:
+        return Path(value).expanduser()
+    if key == "prefix":
+        return default_prefix(name)
+    return None
+
+
+def _same_tree_path(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        left = Path(os.path.abspath(os.path.expanduser(str(a))))
+        right = Path(os.path.abspath(os.path.expanduser(str(b))))
+        return os.path.normpath(str(left)) == os.path.normpath(str(right))
+
+
+def _pending_removed_path(profile, key: str, name: str) -> Path | None:
+    """A missing tree this profile recorded as being removed before a crash, if still ours."""
+    pending = profile.get(_PENDING_REMOVAL)
+    if not isinstance(pending, dict):
+        return None
+    recorded = pending.get(key)
+    if not isinstance(recorded, str) or not recorded:
+        return None
+    candidate = _configured_tree_path(profile, key, name)
+    if candidate is None or not _same_tree_path(candidate, Path(recorded)):
+        return None
+    if _not_owned_reason(profile, key, candidate, name):
+        return None  # only a tree Nadare owns may be treated as already removed
+    return Path(recorded)
 
 
 def _recorded_backups(profile) -> list[str]:
@@ -443,7 +489,13 @@ def removable_trees(config, name: str) -> list[RemovableTree]:
                 continue
         else:
             expanded = Path(value).expanduser()
-            if not expanded.is_dir():
+            try:
+                present = expanded.is_dir()
+            except OSError:
+                # An over-long or otherwise unusable configured path is not a tree we can
+                # delete; the missing-tree warning below keeps the profile instead of crashing.
+                present = False
+            if not present:
                 continue
         safe, reason = tree_safety(config.profiles, name, expanded)
         if safe:
@@ -576,7 +628,9 @@ def remove_game(
     lock = process.OperationLock(name)
     try:
         lock.acquire()
-    except process.ProfileLockError:
+    except process.ProfileLockError as exc:
+        if exc.unusable:
+            raise backends.BackendError(str(exc)) from None
         raise backends.BackendError(process.OPERATION_BUSY.format(name=name)) from None
     # This separate profile lock stops another Nadare command (such as Move)
     # from overlapping the deletion; it does not stop a game from launching, so
@@ -585,7 +639,9 @@ def remove_game(
     try:
         try:
             game_lock.acquire()
-        except process.ProfileLockError:
+        except process.ProfileLockError as exc:
+            if exc.unusable:
+                raise backends.BackendError(str(exc)) from None
             result = RemovalResult(profile=name, profile_kept=True, refused=True)
             result.warnings.append(
                 "this game's profile is in use by another Nadare command; nothing was deleted"
@@ -678,6 +734,7 @@ def _remove_locked(
     requested = list(dict.fromkeys(delete_trees))
     trees: list[RemovableTree] = []
     keep_profile = False
+    done: list[Path] = []
     if requested:
         by_key = {t.key: t for t in removable_trees(config, name)}
         trees = [by_key[k] for k in requested if k in by_key and by_key[k].safe]
@@ -691,6 +748,10 @@ def _remove_locked(
                 alias_found or any(k in missing for k in alias_requested)
             ):
                 continue  # prefix/wineprefix are two names for the same tree
+            removed = _pending_removed_path(config.profiles.get(name, {}), key, name)
+            if removed is not None:
+                done.append(removed)  # a killed Remove already deleted this owned tree
+                continue
             missing.append(key)
         labels = {
             "install_dir": "install folder",
@@ -711,9 +772,20 @@ def _remove_locked(
     # read-only config directory would leave the files gone but the profile on
     # disk. A no-op save is the cheapest such preflight.
     if drop_profile and save and not keep_profile:
+        profile = config.profiles[name]
+        pending = {
+            key: str(by_key[key].path)
+            for key in requested
+            if key in by_key and by_key[key].safe
+        }
+        if pending:
+            profile[_PENDING_REMOVAL] = pending
+        else:
+            profile.pop(_PENDING_REMOVAL, None)
         try:
-            config.save()
+            config.save()  # also records the pending deletion before the first one starts
         except OSError as exc:
+            profile.pop(_PENDING_REMOVAL, None)
             result.warnings.append(f"could not save config: {exc}")
             result.profile_kept = True
             result.refused = True
@@ -732,7 +804,6 @@ def _remove_locked(
     # 4. Opt-in deletion of the configured install dir / prefix trees. These go
     # first: only when every requested tree was handled without a skip or a
     # failure may the shortcuts, login and data folder follow.
-    done: list[Path] = []
     touched = False  # any deletion started (a partly deleted tree is not "nothing changed")
     # Trees of this profile the user did not tick: never delete one nested inside a ticked
     # one. Only those inside each tree are passed on, so an unrelated unticked tree does

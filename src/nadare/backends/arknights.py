@@ -59,6 +59,7 @@ TODO: Yostar rotates both the installer URL and its filename; the download API
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -257,6 +258,9 @@ class ArknightsBackend(WineGameBackend):
         marker = self._install_marker_path()
         # A marker already there (an interrupted earlier run) must stay until a sync completes.
         was_marked = marker.exists() or marker.is_symlink()
+        # An update cancelled before it replaced a file leaves the complete install usable.
+        was_complete = not was_marked and self._read_version_file() is not None
+        changed = threading.Event()
         self._write_install_marker()
         self.ctx.emit(Event("step", f"{self.display_name}: syncing {manifest.version} directly"))
         try:
@@ -266,6 +270,7 @@ class ArknightsBackend(WineGameBackend):
                 emit=self.ctx.emit,
                 cancel=self.ctx.cancel,
                 workers=workers,
+                changed=changed,
             )
         except yostar.ManifestRefused as exc:
             # Refused while checking the manifest's host or taking its lock, before any file is
@@ -278,6 +283,10 @@ class ArknightsBackend(WineGameBackend):
             # A download or check failed part way: files may already be replaced, so the
             # marker stays and the next sync finishes the job (round 6).
             raise self._manifest_error(exc, changed=True) from exc
+        except BaseException:
+            if was_complete and not changed.is_set():
+                marker.unlink(missing_ok=True)
+            raise
         marker.unlink(missing_ok=True)
         self._record_synced_version(manifest)
         self.info(

@@ -62,3 +62,5 @@ build/flatpak/
 !src/nadare/assets/nikke_intlsvc_host.exe
 !src/nadare/assets/nikke_sail_host.exe
 src/nadare/assets/7zzs
+src/nadare/assets/umu-launcher-*-zipapp.tar
+src/nadare/assets/CHANNEL

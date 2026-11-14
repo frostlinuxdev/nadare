@@ -53,7 +53,9 @@ def _backend(tmp_path, monkeypatch, *, downloaded: int, publisher: int):
         kuropatch, "prepare",
         lambda *a: kuropatch.PatchPlan(groups=(), deletes=(), publisher_bytes=publisher),
     )
-    monkeypatch.setattr(kuropatch, "retired_on_disk", lambda *a: ("old.pak",))
+    monkeypatch.setattr(
+        kuropatch, "retired_scan", lambda *a: kuropatch.RetiredScan(("old.pak",), ())
+    )
     (root / "old.pak").write_bytes(b"left over")
 
     def sync(plan, dest, *, emit=None, **kwargs):
@@ -83,7 +85,7 @@ def test_the_backend_warns_on_an_oversized_update(tmp_path, monkeypatch):
 def test_a_failing_cleanup_never_fails_the_update(tmp_path, monkeypatch):
     backend, events = _backend(tmp_path, monkeypatch, downloaded=GB, publisher=13 * GB)
     monkeypatch.setattr(
-        kuropatch, "retired_on_disk", lambda *a: (_ for _ in ()).throw(OSError("disk"))
+        kuropatch, "retired_scan", lambda *a: (_ for _ in ()).throw(OSError("disk"))
     )
     backend._sync_direct()
     assert (backend.install_dir() / "old.pak").exists()

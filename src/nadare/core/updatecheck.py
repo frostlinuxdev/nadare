@@ -35,6 +35,8 @@ _PEP440_LABEL = {"a": "alpha", "b": "beta", "rc": "rc"}
 #: Components kept when padding a version for comparison; enough for any real
 #: release while still distinguishing ``1.2.3`` from ``1.2.3.4``.
 _VERSION_WIDTH = 8
+#: Longest numeric part accepted; anything longer is not a version (and int() would choke).
+_MAX_PART_DIGITS = 9
 
 #: Release-page hosts a known API host may legitimately link to.
 _RELEASE_SITE_ALIASES = {"api.github.com": "github.com"}
@@ -101,7 +103,10 @@ def version_key(tag: Any) -> tuple[int, ...] | None:
             core, sep, pre = pep.group(1), "-", pep.group(2) + pep.group(3)
     if not _CORE_RE.match(core):
         return None
-    nums = [int(part) for part in core.split(".")]
+    parts = core.split(".")
+    if any(len(part) > _MAX_PART_DIGITS for part in parts):
+        return None
+    nums = [int(part) for part in parts]
     nums = (nums + [0] * _VERSION_WIDTH)[:_VERSION_WIDTH]
     if not sep:
         return (*nums, 1, 0, 0)
@@ -120,7 +125,10 @@ def version_key(tag: Any) -> tuple[int, ...] | None:
         else 2
     )
     match = _DIGITS_RE.search(pre)
-    return (*nums, 0, rank, int(match.group(1)) if match else 0)
+    number = match.group(1) if match else "0"
+    if len(number) > _MAX_PART_DIGITS:
+        return None
+    return (*nums, 0, rank, int(number))
 
 
 def is_prerelease(tag: Any) -> bool:

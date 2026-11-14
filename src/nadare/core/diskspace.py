@@ -11,12 +11,20 @@ picking a tiny partition in the Add game wizard.
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
+import json
+import logging
 import os
 import threading
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import paths
 from .backends import BackendError
+
+log = logging.getLogger(__name__)
 
 #: Fraction of headroom added on top of ``needed_bytes``.
 DEFAULT_MARGIN = 0.05
@@ -142,6 +150,46 @@ def tree_bytes(path: str | os.PathLike[str], *, limit: int = 500_000) -> int:
     return total
 
 
+def install_space(
+    backend: object, margin: float = DEFAULT_MARGIN
+) -> tuple[int, Path] | None:
+    """Refuse a fresh install that cannot fit where ``backend`` writes it.
+
+    The size is the chosen install variant (e.g. WuWa's quality) when the backend offers
+    one; what is already on disk (a resumed install) counts as written. Returns
+    ``(size, folder)`` for the caller's wording, or ``None`` when either is unknown.
+    """
+    from . import backends as core_backends
+
+    kind = str(getattr(backend, "kind", "") or "")
+    folder = getattr(backend, "install_dir", None)
+    size = getattr(backend, "install_size_hint", None)
+    if not size or not callable(folder):
+        return None
+    asked = core_backends.install_choice(kind) if kind else None
+    if asked is not None:
+        option, sizes = asked
+        profile = getattr(getattr(backend, "ctx", None), "profile", None)
+        if isinstance(profile, dict):
+            # Top level, else ``extra`` (the backends' rule; core must not import backends).
+            chosen = profile.get(option.key)
+            extra = profile.get("extra")
+            if chosen in (None, "") and isinstance(extra, dict):
+                chosen = extra.get(option.key)
+            if chosen in (None, ""):
+                chosen = option.default
+            # Trimmed and case-blind, as the backends read it ("UHD" is uhd; stress s3 F4).
+            choice_size = sizes.get(str(chosen).strip().lower()) or sizes.get(
+                str(option.default).strip().lower()
+            )
+            if choice_size:
+                size = choice_size
+    path = Path(folder())
+    needed = max(0, int(size) - tree_bytes(path))
+    check_space(path, needed, margin=margin)
+    return int(size), path
+
+
 def _device(path: str | os.PathLike[str]) -> int:
     """The id of the filesystem holding ``path`` (0 when it cannot be read)."""
     try:
@@ -150,11 +198,115 @@ def _device(path: str | os.PathLike[str]) -> int:
         return 0
 
 
+def _reservation_file(path: str | os.PathLike[str]) -> Path:
+    """The shared record for reservations on the filesystem holding ``path``.
+
+    Keyed by filesystem, not folder: two installs into one folder are already refused by
+    the install lock; the case to catch is two processes filling one disk with two games.
+    """
+    digest = hashlib.sha256(str(_device(path)).encode("utf-8")).hexdigest()[:32]
+    return paths.state_dir() / "reservations" / f"{digest}.json"
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def _read_records(handle) -> list[dict[str, object]]:
+    """Valid records still owned by a live process (dead pids are ignored)."""
+    handle.seek(0)
+    try:
+        payload = json.load(handle)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    records: list[dict[str, object]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        try:
+            record = {
+                "pid": int(item["pid"]),
+                "owner": str(item["owner"]),
+                "device": int(item["device"]),
+                "amount": int(item["amount"]),
+                "free_at_start": int(item["free_at_start"]),
+                "path": str(item["path"]),
+                "token": str(item["token"]),
+            }
+        except (KeyError, TypeError, ValueError):
+            continue
+        if _pid_alive(int(record["pid"])):
+            records.append(record)
+    return records
+
+
+def _write_records(handle, records: list[dict[str, object]]) -> None:
+    handle.seek(0)
+    handle.truncate()
+    json.dump(records, handle)
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def _open_records(path: Path):
+    handle = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a+", encoding="utf-8")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    except OSError as exc:
+        log.debug("could not open disk reservation record %s: %s", path, exc)
+        if handle is not None:
+            handle.close()
+        return None
+    return handle
+
+
+def _close_records(handle) -> None:
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    handle.close()
+
+
+def _file_outstanding(records: list[dict[str, object]], device: int, exclude: str) -> int:
+    """Bytes promised by other processes on this install folder."""
+    total = 0
+    me = os.getpid()
+    for record in records:
+        if int(record["pid"]) == me:  # this process's _PROMISES already counts it
+            continue
+        if int(record["device"]) != device or str(record["owner"]) == exclude:
+            continue
+        try:
+            written = max(0, int(record["free_at_start"]) - free_bytes(str(record["path"])))
+        except BackendError:
+            written = 0
+        total += max(0, int(record["amount"]) - written)
+    return total
+
+
 @dataclass
 class _Promise:
     amount: int  # bytes the install still had to write when it reserved
     free_at_start: int
     path: Path
+    token: str
 
 
 #: What running installs have promised, per filesystem and owner (#770).
@@ -184,20 +336,40 @@ def _outstanding(device: int, exclude: str) -> int:
 class Reservation:
     """Space an install has promised for as long as it runs; use it as a context manager."""
 
-    def __init__(self, owner: str, device: int, promise: _Promise) -> None:
+    def __init__(
+        self, owner: str, device: int, promise: _Promise, record: Path
+    ) -> None:
         self.owner = owner
         self._device = device
         self._promise = promise
+        self._record = record
         self._released = False
+
+    def _release_record(self) -> None:
+        handle = _open_records(self._record)
+        if handle is None:
+            return
+        try:
+            records = _read_records(handle)
+            kept = [r for r in records if str(r["token"]) != self._promise.token]
+            if len(kept) != len(records):
+                try:
+                    _write_records(handle, kept)
+                except OSError as exc:
+                    log.debug("could not update disk reservation record: %s", exc)
+        finally:
+            _close_records(handle)
 
     def release(self) -> None:
         with _LOCK:
-            if not self._released:
-                self._released = True
-                key = (self._device, self.owner)
-                # Only our own promise: a newer one for the same owner must survive.
-                if _PROMISES.get(key) is self._promise:
-                    del _PROMISES[key]
+            if self._released:
+                return
+            self._released = True
+            key = (self._device, self.owner)
+            # Only our own promise: a newer one for the same owner must survive.
+            if _PROMISES.get(key) is self._promise:
+                del _PROMISES[key]
+            self._release_record()
 
     def __enter__(self) -> Reservation:
         return self
@@ -221,22 +393,47 @@ def reserve(
     """
     needed = max(0, int(needed_bytes))
     device = _device(path)
+    record_file = _reservation_file(path)
     with _LOCK:
-        others = _outstanding(device, exclude=owner)
-        available = free_bytes(path)
-        if others > 0 and needed > 0:
-            required = int(needed * (1.0 + max(0.0, margin)))
-            if available - others < required:
-                raise BackendError(
-                    f"Not enough disk space on {mount_point(path)} for both installs: this one "
-                    f"needs about {human_size(needed)}, {human_size(available)} is free and "
-                    f"{human_size(others)} is still promised to other installs. Wait for the "
-                    "other install to finish, or choose another folder.",
-                    code=4,
+        handle = _open_records(record_file)
+        try:
+            records = _read_records(handle) if handle is not None else []
+            others = _outstanding(device, exclude=owner) + _file_outstanding(
+                records, device, owner
+            )
+            available = free_bytes(path)
+            if others > 0 and needed > 0:
+                required = int(needed * (1.0 + max(0.0, margin)))
+                if available - others < required:
+                    raise BackendError(
+                        f"Not enough disk space on {mount_point(path)} for both installs: this "
+                        f"one needs about {human_size(needed)}, {human_size(available)} is free "
+                        f"and {human_size(others)} is still promised to other installs. Wait for "
+                        "the other install to finish, or choose another folder.",
+                        code=4,
+                    )
+            promise = _Promise(needed, available, Path(path), uuid.uuid4().hex)
+            _PROMISES[(device, owner)] = promise
+            if handle is not None:
+                records = [r for r in records if str(r["owner"]) != owner]
+                records.append(
+                    {
+                        "pid": os.getpid(),
+                        "owner": owner,
+                        "device": device,
+                        "amount": needed,
+                        "free_at_start": available,
+                        "path": str(promise.path),
+                        "token": promise.token,
+                    }
                 )
-        promise = _Promise(needed, available, Path(path))
-        _PROMISES[(device, owner)] = promise
-    return Reservation(owner, device, promise)
+                try:
+                    _write_records(handle, records)
+                except OSError as exc:
+                    log.debug("could not write disk reservation record: %s", exc)
+        finally:
+            _close_records(handle)
+    return Reservation(owner, device, promise, record_file)
 
 
 __all__ = [

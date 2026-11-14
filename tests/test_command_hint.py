@@ -121,7 +121,9 @@ def test_missing_wine_error_names_the_runner_settings(tmp_path, monkeypatch):
 
     from nadare.backends.czn import backend as czn_backend
 
-    backend = czn_backend.CznBackend(make_context(tmp_path, "stove-czn", {"runner": "wine"}))
+    backend = czn_backend.CznBackend(make_context(tmp_path, "stove-czn", {}))
+    # The plain-Wine fallback (no Proton runner); a profile word no longer selects it (W9-1).
+    monkeypatch.setattr(backend, "resolve_runner", lambda: ("", "wine"))
     monkeypatch.delenv("CZN_WINE", raising=False)
     monkeypatch.setattr(czn_backend.shutil, "which", lambda *a, **k: None)
 

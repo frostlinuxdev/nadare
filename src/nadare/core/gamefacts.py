@@ -16,6 +16,13 @@ if TYPE_CHECKING:
     from .backends import Status
 
 
+def update_available(status: Status | None) -> bool:
+    """Whether this status offers an update (the sidebar dot and the card agree here)."""
+    if status is None or InstallFacts.from_status(status).offers_resume():
+        return False
+    return bool((status.data or {}).get("update_available"))
+
+
 def primary_operation(status: Status | None) -> str | None:
     """The game page's main action for this status (``None`` when there is no clear one)."""
     if status is None:
@@ -28,6 +35,9 @@ def primary_operation(status: Status | None) -> str | None:
     if status.state == "not_installed":
         if (status.data or {}).get("can_install") is False:
             return "settings"
+        return "install"
+    if InstallFacts.from_status(status).offers_resume():
+        # A partial install/update is still an Install action, shown as RESUME.
         return "install"
     data = status.data or {}
     if data.get("update_available"):
@@ -106,5 +116,27 @@ class InstallFacts:
             return "interrupted"
         return "complete" if self.installed else "none"
 
+    @classmethod
+    def from_status(cls, status: Status | None) -> InstallFacts:
+        """The install facts a backend status carries (``none`` when there is no status)."""
+        if status is None:
+            return cls(installed=False, incomplete=False)
+        data = status.data or {}
+        state = (status.state or "").strip().lower()
+        return cls(
+            installed=state in ("installed", "running") or bool(status.running),
+            incomplete=bool(data.get("incomplete")),
+            paused=bool(data.get("paused")),
+        )
+
     def offers_resume(self) -> bool:
         return self.state() in ("paused", "interrupted")
+
+
+def display_state(status: Status | None) -> str:
+    """The state views show: an interrupted install is not an installed game."""
+    if status is None:
+        return ""
+    if InstallFacts.from_status(status).offers_resume():
+        return "not_installed"
+    return status.state or ""

@@ -51,6 +51,10 @@ jobs:
       - name: Lint
         run: ruff check src tests packaging scripts ci
 
+      - name: File sizes (warn only, #1248)
+        run: python scripts/check_file_sizes.py
+        continue-on-error: true
+
       - name: Format check (non-blocking, see issue #66)
         run: ruff format --check src tests packaging scripts || echo "::warning::ruff format differs (see issue #66)"
         continue-on-error: true

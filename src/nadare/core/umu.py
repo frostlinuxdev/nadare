@@ -12,6 +12,7 @@ launch/install path via :func:`resolve`.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -49,6 +50,12 @@ MIN_SYSTEM_VERSION = (1, 3, 0)
 #: The interpreter the zipapp's shebang names (and the one it will run under).
 SHEBANG_PYTHON = "/usr/bin/python3"
 
+#: The pinned archive the AppImage carries (``scripts/fetch_umu.sh``): the managed copy is
+#: installed from it with no network (#1338). Source installs have none and download.
+BUNDLED_ARCHIVE = Path(__file__).resolve().parents[1] / "assets" / (
+    f"umu-launcher-{UMU_VERSION}-zipapp.tar"
+)
+
 #: The archive member we install; everything else in the tar is ignored.
 _MEMBER = "umu/umu-run"
 
@@ -75,6 +82,15 @@ RUNTIME_MISMATCH_HINT = (
     "it asks for, so the game's Windows environment cannot start. Update "
     "umu-launcher (Nadare brings its own, so updating Nadare also works), or pick an "
     "older runner in the game's settings."
+)
+
+
+#: Shown when no umu could be found or set up on a desktop install: Nadare never falls back to
+#: running Proton without it (#1338), so say what to do.
+UNAVAILABLE_HINT = (
+    "Nadare could not set up umu, which runs your games in the Steam Runtime with their "
+    "fixes. Check your internet connection and press Play again, or install your "
+    "distribution's umu-launcher package."
 )
 
 
@@ -185,6 +201,20 @@ def _smoke_test(python: str, executable: Path) -> None:
         raise UmuError("the downloaded umu does not run")
 
 
+def _bundled_archive() -> Path | None:
+    """The AppImage's own umu archive when it is there and matches the pin, else ``None``."""
+    try:
+        if not BUNDLED_ARCHIVE.is_file():
+            return None
+        digest = hashlib.sha256(BUNDLED_ARCHIVE.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    if digest != UMU_TAR_SHA256:
+        log.warning("bundled umu archive does not match the pinned sha256; not using it")
+        return None
+    return BUNDLED_ARCHIVE
+
+
 def ensure_managed(
     *, emit: Emitter | None = None, cancel: Cancel | None = None
 ) -> Path:
@@ -208,10 +238,27 @@ def ensure_managed(
 
     say = emitter(emit)
     destination = managed_path()
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise UmuError(f"cannot create {destination.parent}: {exc}") from exc
+    bundled = _bundled_archive()
+    if bundled is not None:
+        say(Event("step", "Setting up umu (bundled with Nadare)"))
+        _extract_member(
+            bundled, destination, check=lambda candidate: _smoke_test(python, candidate)
+        )
+        say(Event("done", "umu is ready", data={"path": str(destination)}))
+        return destination
     cache = paths.cache_dir() / "umu"
-    cache.mkdir(parents=True, exist_ok=True)
-    archive = cache / f"umu-launcher-{UMU_VERSION}-zipapp.tar"
+    try:
+        cache.mkdir(parents=True, exist_ok=True)
+        # One archive per call: two first launches at once must not delete each other's download.
+        fd, name = tempfile.mkstemp(prefix=f"umu-launcher-{UMU_VERSION}-", suffix=".tar", dir=cache)
+        os.close(fd)
+    except OSError as exc:
+        raise UmuError(f"cannot use the cache folder {cache}: {exc}") from exc
+    archive = Path(name)
 
     say(Event("step", "Setting up umu (one-time, <1 MB)"))
     try:
@@ -284,6 +331,14 @@ def system(
         version = parse_version((result.stdout or "") + (result.stderr or ""))
     except (OSError, subprocess.SubprocessError):
         return found
+    if getattr(result, "returncode", 0) != 0:
+        # It does not run at all (a broken install), unlike an unreadable banner: use ours.
+        log.info(
+            "system umu-run %s does not run (exit %s); using the managed copy",
+            found,
+            result.returncode,
+        )
+        return None
     if version is not None and version < MIN_SYSTEM_VERSION:
         log.info("system umu-run %s is too old (%s); using the managed copy", found, version)
         return None
@@ -316,14 +371,55 @@ def resolve(
     if not allow_download:
         return None
 
+    global _last_setup_error
     try:
-        return str(ensure_managed(emit=emit, cancel=cancel))
+        found = str(ensure_managed(emit=emit, cancel=cancel))
     except UmuError as exc:
         log.info("managed umu unavailable: %s", exc)
+        _last_setup_error = str(exc)
         return None
+    _last_setup_error = ""
+    return found
+
+
+#: Why the last :func:`resolve` could not set umu up ("" when it could).
+_last_setup_error = ""
+
+
+def unavailable_message() -> str:
+    """:data:`UNAVAILABLE_HINT`, plus the reason the last setup gave (python3 missing, a folder
+    that cannot be written...): the generic "check your internet" alone misled (stress u1)."""
+    if _last_setup_error:
+        return f"{UNAVAILABLE_HINT} ({_last_setup_error})"
+    return UNAVAILABLE_HINT
+
+
+#: Shown before a launch through umu when its Steam Runtime is not on disk yet: umu downloads
+#: it before the game starts, and the page otherwise said only "launching" for minutes.
+FIRST_RUNTIME_NOTE = (
+    "First Proton launch on this computer: umu downloads the Steam Runtime once (a few "
+    "hundred MB). The game starts when it is done; this can take a few minutes."
+)
+
+
+def runtime_downloaded() -> bool:
+    """Whether umu's Steam Runtime is already on disk (any variant). Never raises."""
+    from . import userns
+
+    try:
+        return bool(userns._srt_bwrap_paths())
+    except Exception:  # noqa: BLE001 - unknown: say nothing rather than fail a launch
+        return True
+
+
+def note_first_runtime(emit: Emitter | None) -> None:
+    """Emit :data:`FIRST_RUNTIME_NOTE` when the launch about to run will download the runtime."""
+    if not runtime_downloaded():
+        emitter(emit)(Event("step", FIRST_RUNTIME_NOTE))
 
 
 __all__ = [
+    "FIRST_RUNTIME_NOTE",
     "MIN_SYSTEM_VERSION",
     "RUNTIME_MISMATCH_HINT",
     "SUPPORTED_RUNTIME_APPIDS",
@@ -336,7 +432,9 @@ __all__ = [
     "is_setup_failure_line",
     "managed",
     "managed_path",
+    "note_first_runtime",
     "parse_version",
     "resolve",
+    "runtime_downloaded",
     "system",
 ]

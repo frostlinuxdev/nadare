@@ -117,7 +117,8 @@ def test_doctor_strict_fails_when_libs_are_missing_and_the_runtime_is_blocked(
     assert app.run_cli(["doctor", "--strict"]) == 1
     out = capsys.readouterr().out
     assert "32-bit libs: missing libGL.so.1" in out
-    assert "doctor: not ready (32-bit libs missing and the runtime sandbox is blocked)" in out
+    # Same rule as the launch (#1338): the Ubuntu block is a blocker on its own.
+    assert "doctor: not ready (Ubuntu's AppArmor blocks the Steam Runtime" in out
 
 
 def test_doctor_strict_passes_when_libs_are_missing_but_the_runtime_works(

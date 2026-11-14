@@ -7,8 +7,6 @@ started: subprocess entry points are monkeypatched.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from _backend_helpers import make_context, write_exe
 
@@ -241,18 +239,27 @@ class TestWineBuild:
         with pytest.raises(BackendError):
             WineBackend(ctx).build()
 
-    def test_whitespace_wine_binary_falls_back_to_autodetect(self, tmp_path, monkeypatch):
-        """05-9: a whitespace-only wine_binary must not become the name "None"."""
+    def test_whitespace_wine_binary_means_the_proton_default(self, tmp_path, monkeypatch):
+        """05-9: a whitespace-only wine_binary is no custom Wine (and never the name "None").
+
+        Generic games run on the default Proton since 2026-11-13; no system Wine lookup.
+        """
+        from nadare.core import runners, umu
+
         game = tmp_path / "game"
         write_exe(game / "game.exe", "MZ")
-        monkeypatch.setattr(wine_mod, "first_wine", lambda: Path("/opt/wine/bin/wine"))
+        pinned = tmp_path / "dwproton"
+        monkeypatch.setattr(runners, "ensure_pinned", lambda *a, **k: pinned)
+        monkeypatch.setattr(runners, "installed_pinned", lambda *a, **k: pinned)
+        monkeypatch.setattr(umu, "system", lambda *a, **k: "/usr/bin/umu-run")
+        monkeypatch.setattr(wine_mod, "first_wine", lambda: pytest.fail("no system Wine lookup"))
         ctx = make_context(
             tmp_path,
             "wine",
             {"install_dir": str(game), "exe_name": "game.exe", "wine_binary": "   "},
         )
-        argv, *_ = WineBackend(ctx).build()
-        assert argv[0] == "/opt/wine/bin/wine"
+        argv, env, *_ = WineBackend(ctx).build()
+        assert argv[0] == "/usr/bin/umu-run" and env["PROTONPATH"] == str(pinned)
 
     def test_build_pins_xdg_environment(self, tmp_path):
         """R2-F1: the child env pins Nadare's XDG roots, not the host's."""

@@ -144,6 +144,7 @@ class SandboxMixin:
                 raise
             self.info(f"Sandbox: your home folder is hidden from {thing}.", sandbox=True)
             return wrapped
+        self._runtime_before_sandbox(argv, env)
         located = self._sandbox_check(subject)
         if located.binary is None:
             if not located.found:
@@ -185,6 +186,35 @@ class SandboxMixin:
             raise
         self.info(f"Sandbox: your home folder is hidden from {thing}.", sandbox=True)
         return wrapped
+
+    def _run_unwrapped(self, argv: list[str], env: dict[str, str], *, on_line) -> int:  # noqa: ANN001
+        """Run a setup step outside the Sandbox and return its exit code (backends supply it)."""
+        raise NotImplementedError
+
+    def _runtime_before_sandbox(self, argv: list[str], env: dict[str, str]) -> None:
+        """Let umu set up its Steam Runtime before the Sandbox looks for the runtime's bubblewrap.
+
+        A first launch through umu had no runtime yet, so the Sandbox found no copy to use
+        (Ubuntu VM, 2026-11-14). ``umu-run ""`` downloads the runtime and creates the prefix
+        and runs no game code; it runs outside the Sandbox like the rest of prefix setup.
+        """
+        if not argv or Path(argv[0]).name != "umu-run":
+            return
+        from . import umu
+
+        if umu.runtime_downloaded():
+            return
+        from .events import mask
+
+        self.info("Setting up the Steam Runtime and the prefix before the Sandbox starts.")
+        try:
+            code = self._run_unwrapped(
+                [argv[0], ""], dict(env), on_line=lambda line: self.info(mask(line))
+            )
+        except NotImplementedError:
+            return
+        if code != 0:
+            self.info(f"umu's runtime setup ended with exit code {code}.")
 
     def _start_link_relay(self, directory: Path | None = None) -> Path | None:
         """Start the relay that lets the game open web links; its pipe, or ``None`` on failure.

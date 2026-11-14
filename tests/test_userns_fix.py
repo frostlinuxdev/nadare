@@ -73,7 +73,7 @@ def test_install_profile_runs_pkexec_with_the_fixed_script() -> None:
     ok, text = userns.install_profile(run=fake)
     assert ok is True
     assert seen == [["pkexec", "/bin/sh", "-c", userns.fix_script()]]
-    assert "Install" in text  # tells the user to press Install again
+    assert text == "Done."  # the dialog says what comes next (Play now, Install now...)
 
 
 @pytest.mark.parametrize(
@@ -172,11 +172,11 @@ def test_fix_button_is_hidden_without_pkexec(qapp, monkeypatch) -> None:
 
 def test_fix_button_runs_the_fix_and_reports_success(qapp, monkeypatch) -> None:
     monkeypatch.setattr(userns, "can_fix", lambda: True)
-    monkeypatch.setattr(userns, "install_profile", lambda: (True, "Done. Press Install again."))
+    monkeypatch.setattr(userns, "install_profile", lambda: (True, "Done."))
     dialog = userns_dialog.UsernsDialog(MESSAGE)
     dialog.fix_button.click()
     assert not dialog.fix_button.isEnabled()  # no double-run while the prompt is open
-    _wait(qapp, lambda: "Press Install again" in dialog.status.text())
+    _wait(qapp, lambda: "Done" in dialog.status.text())
 
 
 def test_a_cancelled_prompt_lets_the_user_try_again(qapp, monkeypatch) -> None:

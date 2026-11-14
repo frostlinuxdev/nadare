@@ -366,7 +366,7 @@ def system_entries(
 
 #: Nadare's own bundled third-party files: (name, licence, path under ``_internal``).
 ASSETS = (
-    ("7-Zip", "GNU LGPL, BSD and unRAR terms (see the text)",
+    ("7-Zip", "GNU LGPL and BSD; built from source without the RAR code (see the text)",
      "nadare/assets/licenses/7zip-License.txt"),
     ("Inter font", "OFL-1.1", "nadare/assets/fonts/OFL.txt"),
 )

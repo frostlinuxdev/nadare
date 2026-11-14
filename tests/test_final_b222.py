@@ -1,9 +1,11 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from types import SimpleNamespace
 
 import pytest
+from _parts_patch import patch_everywhere
 from PyQt6.QtWidgets import QApplication
 
 from nadare.core.config import Config
@@ -17,13 +19,14 @@ def qapp():
     yield QApplication.instance() or QApplication([])
 
 def test_manage_runners_snapshots_profiles_under_the_config_lock(tmp_path, qapp, monkeypatch):
-    monkeypatch.setattr(
-        settings_mod, "create_backend",
+    patch_everywhere(monkeypatch, settings_mod, "create_backend",
         lambda profile, config: SimpleNamespace(
             status=lambda: SimpleNamespace(state="not_installed")
         ),
     )
-    monkeypatch.setattr(settings_mod, "discover_runners", lambda kind="": [("Default", "")])
+    patch_everywhere(
+        monkeypatch, settings_mod, "discover_runners", lambda kind="": [("Default", "")]
+    )
     seen = []
 
     class DummyDialog:

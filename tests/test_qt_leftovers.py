@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Leftover windows are ended before an app-wide restyle (#1024).
 
 After the GUI test files a worker can hold about 30,000 live widgets (705 top-level windows

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """guard() must not release the run lock before on_stop has finished."""
 from __future__ import annotations
 

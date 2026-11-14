@@ -75,10 +75,11 @@ def test_installed_game_locks_the_wine_prefix(tmp_path, qapp):
         editor = page.option_widget("prefix")
         assert editor.isReadOnly(), "changing the prefix after install hides the game"
 
+        # Not installed: a catalog game's prefix still changes only as a whole (#1293).
         fresh = tmp_path / "fresh"
         page.load(_config(tmp_path, "stove-czn", prefix=str(fresh)), "sample")
         _settle(qapp)
-        assert not page.option_widget("prefix").isReadOnly()
+        assert page.option_widget("prefix").isReadOnly()
     finally:
         page.deleteLater()
         qapp.processEvents()

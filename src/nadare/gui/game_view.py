@@ -10,9 +10,8 @@ those signals to workers.
 from __future__ import annotations
 
 import html
-import time
+import time as time  # noqa: E402, F401
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
 from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
@@ -25,14 +24,12 @@ from PyQt6.QtGui import (
     QPixmap,
 )
 from PyQt6.QtWidgets import (
-    QApplication,
     QCheckBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QMenu,
-    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -43,25 +40,66 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import friendly, hostlibs, steamsetup, userns
+# Names that tests and callers reach through this module; the code using them moved to
+# game_view_parts/ (#1248). Re-exported so ``game_view.X`` is the same object.
+from PyQt6.QtWidgets import QMessageBox as QMessageBox  # noqa: E402, F401
+
 from ..core.backends import (
     Status,
     install_choice_label,
     page_notice,
     page_summary,
-    supports_news,
-    supports_update,
 )
-from ..core.eta import EtaEstimator, SpeedMeter, format_eta, format_speed
-from ..core.events import Event
-from ..core.exitcode import STOPPED_EXIT_CODES, crash_signal, play_time
-from ..core.gamefacts import InstallFacts, SandboxFacts, primary_operation
+from ..core.eta import EtaEstimator, SpeedMeter
 from ..core.news import CREDIT
+from .game_view_parts.busy import (
+    _ANNOUNCED_ON_SUCCESS,
+    _BUSY_STATES,
+    _CANCEL_GRACE_S,
+    _GAME_END_LINES,
+    _LAUNCH_EXIT_GRACE_S,
+    _PAUSED_TEXT,
+    _RETRYABLE,
+    _STATE_CHANGING,
+    OPERATION_TITLES,
+    BusyMixin,
+    can_pause_kind,
+    operation_title,
+)
+from .game_view_parts.console import (
+    _LOG_COLORS,
+    ConsoleMixin,
+)
+from .game_view_parts.news import (
+    NewsMixin,
+)
+from .game_view_parts.qr import (
+    QrMixin,
+)
+from .game_view_parts.shared import (
+    _NEWS_THUMB_MAX_H,
+    _QR_SCAN_HINT,
+    _REMEMBER_TEXT,
+    _REMEMBER_TIP,
+    _SANDBOX_TIP,
+    ElidedLabel,
+    NewsCard,
+    _format_news_date,
+    _make_keyboard_link,
+    _QrPanel,
+    _ThumbnailLabel,
+)
+from .game_view_parts.status import (
+    PRIMARY_LABELS,
+    StatusMixin,
+    _version_text,
+)
+from .game_view_parts.switches import (
+    SwitchesMixin,
+)
 from .images import ImageLoader
 from .library import FlowLayout, backend_label, profile_art_candidates, profile_title
-from .logs_dialog import LogsDialog
-from .theme import ACCENT, badge_style, cover_pixmap, set_state_property
-from .userns_dialog import UsernsDialog
+from .theme import cover_pixmap, set_state_property
 
 #: Backends whose label ("Steam game", "Wine / Proton game") adds nothing on the game page.
 _SELF_EVIDENT_BACKENDS = frozenset({"steam", "wine"})
@@ -77,100 +115,8 @@ class GameSnapshot:
     qr: str | None = None
 
 
-#: Primary button label for each operation.
-PRIMARY_LABELS = {
-    "install": "INSTALL",
-    "update": "UPDATE",
-    "login": "LOG IN",
-    "launch": "LAUNCH",
-    "stop": "PLAYING",
-    "settings": "SET GAME FILE IN SETTINGS",
-    "retry": "RETRY",
-    "remove": "REMOVE THIS GAME…",
-}
-
-#: User-facing operation names used in dialogs (never the raw operation id).
-OPERATION_TITLES = {
-    "install": "Installing",
-    "update": "Updating",
-    "repair": "Repairing",
-    "remake_prefix": "Rebuilding the Wine prefix",
-    "launch": "Launching",
-    "verify": "Checking game files",
-    "login": "Logging in",
-    "status": "Checking",
-    "remove": "Removing",
-}
-
-
-def operation_title(operation: str) -> str:
-    """Friendly title for ``operation``; unknown ids degrade readably."""
-    return OPERATION_TITLES.get(operation, operation.capitalize())
-
-
-
-#: Busy operation -> pill state shown while it runs.
-_BUSY_STATES = {
-    "install": "installing",
-    "update": "updating",
-    "repair": "repairing",
-    "remake_prefix": "rebuilding",
-    "launch": "launching",
-    "login": "login",
-    "verify": "verifying",
-    "stop": "stopping",
-    "uninstall": "uninstalling",
-    "remove": "uninstalling",
-    "set_remember": "saving",
-    "logout": "logging out",
-}
-
-#: Log line colours by event kind.
-_LOG_COLORS = {
-    "error": "#ff8a8a",
-    "done": "#6ea8ff",
-    "status": "#85868d",
-    "step": "#8ab4ff",
-    "progress": "#85868d",
-    "log": "#c7cad0",
-}
-
-#: News thumbnails stay 16:9 but never grow taller than this (px).
-_NEWS_THUMB_MAX_H = 240
-
 #: Operation banner height (px).
 _BANNER_H = 110
-
-#: A second click right after a button turns into CANCEL must not cancel the new job.
-_CANCEL_GRACE_S = 0.5
-
-#: A game that exits non-zero after at least this long had a real session; a quicker
-#: non-zero exit is a failed launch. Stop-requested signal codes are always normal.
-_LAUNCH_EXIT_GRACE_S = 30.0
-_PAUSED_TEXT = "Paused. Everything downloaded so far is kept."
-
-#: Operations whose success makes the status shown before them out of date.
-_STATE_CHANGING = frozenset({"install", "update", "repair", "remake_prefix", "uninstall"})
-
-#: Operations whose success is said on the progress line afterwards: OUTPUT is folded (#993),
-#: so its "done" line alone would leave no sign that an install or update worked.
-_ANNOUNCED_ON_SUCCESS = frozenset({"install", "update", "repair", "verify", "remake_prefix"})
-
-#: A backend's own last line for a launch (CZN); the page then adds no second one.
-_GAME_END_LINES = frozenset({"game exited normally", "game stopped"})
-
-#: Operations the failure dialog and the RETRY button can run again as they were.
-_RETRYABLE = frozenset(
-    {"install", "update", "repair", "remake_prefix", "verify", "login", "launch"}
-)
-
-
-#: Under the login QR: what to do, and the one safety rule for QR logins.
-_QR_SCAN_HINT = (
-    "Scan this QR code with the STOVE mobile app (new to STOVE? get it at "
-    "https://www.onstove.com). Only scan a code shown here, in your own Nadare window."
-)
-
 
 class HeroCard(QFrame):
     """The game hero panel: an optional full-bleed image under a dark gradient.
@@ -225,15 +171,6 @@ class HeroCard(QFrame):
         gradient.setColorAt(1.0, QColor(7, 9, 13, 0))
         painter.fillRect(0, 0, width, height, gradient)
         painter.end()
-
-
-def _make_keyboard_link(widget: QWidget, selector: str, name: str) -> None:
-    """Let Tab reach a clickable card, show where it is, and give it a name (#901).
-
-    ``selector`` is the Qt type and object name the focus ring is styled on."""
-    widget.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-    widget.setAccessibleName(name)
-    widget.setStyleSheet(f"{selector}:focus {{ border: 2px solid {ACCENT}; }}")
 
 
 class _BannerCard(QLabel):
@@ -347,20 +284,6 @@ class BannerStrip(QWidget):
         self.setVisible(self._row.count() > 0)
 
 
-def _format_news_date(published_at: Any) -> str:
-    """Format an epoch-millisecond timestamp as ``YYYY-MM-DD`` (best effort)."""
-    try:
-        millis = int(published_at or 0)
-    except (TypeError, ValueError):
-        return ""
-    if millis <= 0:
-        return ""
-    try:
-        return datetime.fromtimestamp(millis / 1000).strftime("%Y-%m-%d")
-    except (OverflowError, OSError, ValueError):
-        return ""
-
-
 class _NotifyLabel(QLabel):
     """A label that says when its text changed, so the box around it can hide when empty."""
 
@@ -375,283 +298,11 @@ class _NotifyLabel(QLabel):
         self.text_changed.emit()
 
 
-class ElidedLabel(QLabel):
-    """A word-wrapped label limited to ``max_lines`` with an elided last line."""
-
-    def __init__(self, text: str = "", max_lines: int = 2, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._max_lines = max(1, int(max_lines))
-        self._full_text = ""
-        self.setWordWrap(True)
-        # Remote titles are data, never markup.
-        self.setTextFormat(Qt.TextFormat.PlainText)
-        self.setText(text)
-
-    def setText(self, text: str) -> None:  # noqa: N802 - Qt naming
-        self._full_text = str(text or "")
-        self.setToolTip(Qt.convertFromPlainText(self._full_text))
-        self._reflow()
-
-    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        super().resizeEvent(event)
-        self._reflow()
-
-    def _reflow(self) -> None:
-        width = self.width()
-        text = self._full_text
-        if width <= 1 or not text:
-            super().setText(text)
-            return
-        metrics = self.fontMetrics()
-        lines: list[str] = []
-        current = ""
-        truncated = False
-        for word in text.split():
-            candidate = f"{current} {word}".strip()
-            if not current or metrics.horizontalAdvance(candidate) <= width:
-                current = candidate
-            else:
-                lines.append(current)
-                current = word
-                if len(lines) == self._max_lines:
-                    truncated = True
-                    break
-        if not truncated:
-            if current:
-                lines.append(current)
-            if len(lines) > self._max_lines:
-                lines = lines[: self._max_lines]
-                truncated = True
-        if truncated and lines:
-            lines[-1] = metrics.elidedText(lines[-1] + " …", Qt.TextElideMode.ElideRight, width)
-        display = "\n".join(lines) if lines else text
-        if display != self.text():
-            super().setText(display)
-
-
-class _ThumbnailLabel(QLabel):
-    """A 16:9 cover-cropped news thumbnail that re-crops as the card resizes."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("NewsThumb")
-        self.setMinimumHeight(0)
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self._source: QPixmap | None = None
-        self._seed = "news"
-        self._last_size = (0, 0)
-
-    def set_source(self, source: QPixmap | None, seed: str) -> None:
-        self._source = source if (source is not None and not source.isNull()) else None
-        self._seed = seed
-        self._last_size = (0, 0)
-        self._refresh()
-
-    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        super().resizeEvent(event)
-        self._refresh()
-
-    def _refresh(self) -> None:
-        width = self.width()
-        if width <= 1:
-            return
-        # 16:9, capped so a maximised window still shows a full row of cards.
-        height = min(_NEWS_THUMB_MAX_H, round(width * 9 / 16))
-        height = max(height, 1)
-        if height != self.height():
-            self.setFixedHeight(height)
-        if (width, height) == self._last_size:
-            return
-        self._last_size = (width, height)
-        self.setPixmap(cover_pixmap(self._source, width, height, self._seed, radius=10))
-
-
-class NewsCard(QFrame):
-    """One clickable official news item (thumbnail, title, meta)."""
-
-    clicked = pyqtSignal(str)  # article url
-
-    def __init__(
-        self,
-        item: dict[str, Any],
-        parent: QWidget | None = None,
-        loader: ImageLoader | None = None,
-        fallback: list[str] | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self.setObjectName("NewsCard")
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        self._url = str(item.get("url") or "")
-        self._title = str(item.get("title") or "")
-        self.setToolTip(self._url)
-        if self._url:
-            _make_keyboard_link(
-                self, "QFrame#NewsCard", self._title or "Open the article in your browser"
-            )
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
-
-        self.thumb = _ThumbnailLabel(self)
-        image_path = item.get("image_path")
-        seed = str(item.get("title") or "news")
-        # Items without their own image (update notices) show the game's art
-        # rather than a bare gradient that reads as "image failed to load".
-        candidates = [str(image_path)] if image_path else []
-        candidates += [str(path) for path in fallback or [] if path]
-        if loader is not None:
-            loader.request(candidates, 480, 270, self._apply_thumb, crop=True)
-        else:
-            path = ImageLoader.resolve(candidates)
-            self.thumb.set_source(QPixmap(path) if path else None, seed)
-        layout.addWidget(self.thumb)
-
-        self.title_label = ElidedLabel(str(item.get("title") or ""), max_lines=2)
-        self.title_label.setObjectName("NewsTitle")
-        layout.addWidget(self.title_label)
-
-        meta = QHBoxLayout()
-        meta.setSpacing(8)
-        category = str(item.get("category") or "").strip()
-        if category:
-            self.category_label = QLabel(category.upper())
-            self.category_label.setTextFormat(Qt.TextFormat.PlainText)
-            self.category_label.setObjectName("NewsCategory")
-            meta.addWidget(self.category_label)
-        self.meta_label = QLabel(_format_news_date(item.get("published_at")))
-        self.meta_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.meta_label.setObjectName("Dim")
-        meta.addWidget(self.meta_label)
-        meta.addStretch(1)
-        layout.addLayout(meta)
-
-    def _apply_thumb(self, pixmap: QPixmap | None) -> None:
-        """Apply a decoded thumbnail; ignore a card deleted by a fast switch."""
-        try:
-            self.thumb.set_source(pixmap, self._title or "news")
-        except RuntimeError:
-            return  # the underlying C++ widget is gone
-
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(
-            event.position().toPoint()
-        ):
-            if self._url:
-                self.clicked.emit(self._url)
-        super().mouseReleaseEvent(event)
-
-
-    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt naming
-        if self._url and event.key() in (
-            Qt.Key.Key_Return,
-            Qt.Key.Key_Enter,
-            Qt.Key.Key_Space,
-        ):
-            self.clicked.emit(self._url)
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
 #: Backwards-compatible alias for the old single-row widget name.
 NewsRow = NewsCard
 
 
-def _version_text(version: object) -> str:
-    """``v``-prefixed version for the pill row; some backends already include the ``v``."""
-    text = str(version or "").strip()
-    if not text:
-        return ""
-    return text if text[0] in "vV" and text[1:2].isdigit() else f"v{text}"
-
-
-_REMEMBER_TEXT = "Remember me on this device"
-_REMEMBER_TIP = (
-    "Keeps you logged in on this device, so you do not need to scan the QR code "
-    "each time. Turning it off deletes the saved login."
-)
-
-
-_SANDBOX_TIP = (
-    "Hides your home folder from the game, so it cannot read your files. The game can "
-    "still use the network. Needs bubblewrap, which comes with the game runtime."
-)
-
-
-class _QrPanel(QFrame):
-    """The STOVE login QR as a card overlaid on the launcher (not a new window).
-
-    It used to sit inline at the bottom of the game page, under the progress bar
-    and often off screen. As an overlay it is always visible and centred, and it
-    needs no extra window (which Wayland would place wherever it likes).
-    """
-
-    QR_SIZE = 320
-    cancel_clicked = pyqtSignal()
-    remember_clicked = pyqtSignal(bool)
-
-    def __init__(self, parent: QWidget) -> None:
-        super().__init__(parent)
-        self.setObjectName("StatsBar")
-        self.setAutoFillBackground(True)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 24, 28, 20)
-        layout.setSpacing(12)
-        title = QLabel("Scan to log in")
-        title.setObjectName("HeroKicker")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
-        self.label = QLabel()
-        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.label.setMinimumSize(self.QR_SIZE + 8, self.QR_SIZE + 8)
-        layout.addWidget(self.label)
-        self.hint = QLabel(_QR_SCAN_HINT)
-        self.hint.setObjectName("Hint")
-        self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.hint.setWordWrap(True)
-        layout.addWidget(self.hint)
-        # Fallback when STOVE sends a login link but no QR image: the URL is
-        # selectable so it can still be opened in the phone app.
-        self.link = QLabel()
-        self.link.setObjectName("Hint")
-        self.link.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.link.setWordWrap(True)
-        self.link.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self.link.hide()
-        layout.addWidget(self.link)
-        # Where the decision is made: tick it before approving the scan.
-        self.remember = QCheckBox(_REMEMBER_TEXT)
-        self.remember.setToolTip(_REMEMBER_TIP)
-        self.remember.setVisible(False)
-        self.remember.clicked.connect(self.remember_clicked.emit)
-        layout.addWidget(self.remember, 0, Qt.AlignmentFlag.AlignCenter)
-        self.cancel_button = QPushButton("Cancel login")
-        self.cancel_button.setObjectName("GhostButton")
-        self.cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.cancel_button.clicked.connect(self.cancel_clicked.emit)
-        layout.addWidget(self.cancel_button, 0, Qt.AlignmentFlag.AlignCenter)
-        self.hide()
-
-    def reposition(self) -> None:
-        """Centre over the parent page, kept inside its bounds."""
-        parent = self.parentWidget()
-        if parent is None:
-            return
-        self.adjustSize()
-        x = max(0, (parent.width() - self.width()) // 2)
-        y = max(0, (parent.height() - self.height()) // 2)
-        self.move(x, y)
-
-
-def can_pause_kind(kind: str) -> bool:
-    """Whether installs of backend ``kind`` resume from what is already on disk."""
-    from ..core.directkinds import DIRECT_KINDS
-
-    return kind in DIRECT_KINDS or kind == "stellasora-yostar"
-
-
-class GameView(QWidget):
+class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, SwitchesMixin, QWidget):
     """The single-game launch page."""
 
     action_requested = pyqtSignal(str)  # operation name
@@ -663,11 +314,14 @@ class GameView(QWidget):
     resume_requested = pyqtSignal()
     queue_next_requested = pyqtSignal()
     queue_now_requested = pyqtSignal()
+    predownload_requested = pyqtSignal()
+    predownload_cancel_requested = pyqtSignal()
     back_requested = pyqtSignal()
     settings_requested = pyqtSignal()
     move_requested = pyqtSignal(str)  # profile name
     remove_requested = pyqtSignal(str)  # profile name
     report_requested = pyqtSignal(str)
+    found_copy_requested = pyqtSignal(str)  # profile name: use a copy found on disk (#1293)
     steam_setup_requested = pyqtSignal()
     remember_toggled = pyqtSignal(bool)  # the user ticked/unticked Remember me
     sandbox_toggled = pyqtSignal(bool)  # the user turned the Sandbox on or off
@@ -695,6 +349,7 @@ class GameView(QWidget):
         self._sandbox_active: bool | None = None
         self._paused_op: str | None = None
         self._failed_op: str | None = None  # what RETRY runs again after a failure
+        self._found_copy: str | None = None  # a folder the start-up check found (#1293)
         self._queue_waiting = False  # waits for an install slot (#770)
         #: True between a successful install/update/... and the status that
         #: follows it, so the stale status cannot offer the same action again.
@@ -715,6 +370,10 @@ class GameView(QWidget):
         self.news_columns = 1
         self._profile_seq = 0
         self._media_seq = 0
+        self._predownload_version = ""
+        self._predownload_ready = False
+        self._predownload_running = False
+        self._predownload_fraction: float | None = None
 
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
@@ -919,6 +578,10 @@ class GameView(QWidget):
         self.update_btn = QPushButton("Update")
         self.update_btn.setObjectName("GhostButton")
         self.update_btn.clicked.connect(lambda: self.action_requested.emit("update"))
+        self.predownload_btn = QPushButton()
+        self.predownload_btn.setObjectName("GhostButton")
+        self.predownload_btn.clicked.connect(self._on_predownload_clicked)
+        self.predownload_btn.setVisible(False)
         self.verify = QPushButton("Check game files")
         self.verify.setObjectName("GhostButton")
         self.verify.setToolTip(
@@ -952,6 +615,7 @@ class GameView(QWidget):
             self.login,
             self.logout,
             self.update_btn,
+            self.predownload_btn,
             self.verify,
             self.repair_btn,
             self.steam_setup_btn,
@@ -1167,6 +831,13 @@ class GameView(QWidget):
         self._profile_seq += 1
         self._media_seq += 1
         self._status = None
+        self._found_copy = None  # an offer for one game never follows to the next
+        # Until this game's status lands, the previous game's predownload button must not show.
+        self._predownload_version = ""
+        self._predownload_ready = False
+        self._predownload_running = False
+        self._predownload_fraction = None
+        self.predownload_btn.setVisible(False)
         # Switching games ends the previous game's operation on this page. The
         # timer/elapsed clock belonged to that page state; MainWindow restores
         # set_busy below when the *new* profile is itself running an operation.
@@ -1269,657 +940,56 @@ class GameView(QWidget):
         """Block until scheduled image decodes have delivered their callbacks."""
         self.images.wait(timeout_ms)
 
-    # ---- status ------------------------------------------------------------
-    def set_status(self, status: Status) -> None:
-        self._awaiting_status = False
-        self._apply_status(status)
-        self._refresh_actions()
-        self._apply_sandbox()  # the switch locks while the game runs
-        self._render_notice()  # installed or not decides how much of it shows
-
-    def _apply_status(self, status: Status) -> None:
-        self._status = status
-        playing = status.running or status.state == "running"
-        if playing:
-            self.kicker.setText("NOW PLAYING")
-        elif status.state == "not_installed":
-            self.kicker.setText("NOT PLAYED YET")
-        else:
-            self.kicker.setText("GAME")
-        # Only "now playing" says something; the other two just repeat the page.
-        self.kicker.setVisible(playing)
-        self._set_badge(status.state, status.message)
-        version = _version_text(status.version)
-        data = status.data or {}
-        latest = _version_text(data.get("latest_version")) if data.get("update_available") else ""
-        if version and latest:
-            version = f"{version} · {latest} available"
-        self.version_label.setText(version)
-        self._set_account(status)
-        self._set_detail(status.message or "")
-        # The notice folds to one line once the game is installed; the snapshot status
-        # arrives after set_profile has already rendered the whole notice.
-        self._render_notice()
-
-    def _set_account(self, status: Status) -> None:
-        """Say whether the account is logged in, for backends that track it."""
-        data = status.data or {}
-        known = "logged_in" in data and status.state != "not_installed"
-        self.account_label.setVisible(known)
-        if known:
-            text = "Logged in" if data["logged_in"] else "Not logged in"
-            account = data.get("account")
-            if data["logged_in"] and isinstance(account, str) and account:
-                text += f" as {account}"
-            self.account_label.setText(text)
-
-    def _set_badge(self, state: str, message: str = "") -> None:
-        pill_state, label = badge_style(state)
-        self.badge.setText(label)
-        set_state_property(self.badge, pill_state)
-        self.badge.setToolTip(message or "")
-        # An idle, installed game is "ready" by its Launch button; say it only when odd.
-        self.badge.setVisible(state != "installed")
-
-    def _set_detail(self, text: str) -> None:
-        self.detail_label.setText(text)
-        self.detail_label.setVisible(bool(text))
-
-    # ---- primary action ----------------------------------------------------
-    def _primary_op(self) -> str | None:
-        if self._busy_op is not None or self._awaiting_status:
-            return None
-        return primary_operation(self._status)
-
-    def _refresh_actions(self) -> None:
-        self._refresh_steam_setup()
-        self._apply_sandbox_lock()
-        self.queue_row.setVisible(self._busy_op is not None and self._queue_waiting)
-        if self._busy_op is not None:
-            self.pause_button.setVisible(self._can_pause())
-            self.cancel_paused_button.setVisible(False)
-            # A launch that is busy means the game process is up: say so and
-            # offer Stop; every other busy operation is a cancellable one.
-            running = self._busy_op == "launch"
-            # Remove runs outside the controller: there is nothing to cancel.
-            removing = self._busy_op == "remove"
-            self.stop_button.setVisible(running)
-            if running:
-                self.primary.setText("PLAYING")
-                self.primary.setObjectName("Playing")
-                self.primary.setEnabled(False)
-            else:
-                self.primary.setText("REMOVING…" if removing else "CANCEL")
-                self.primary.setObjectName("Danger")
-                self.primary.setEnabled(not removing)
-            self._polish(self.primary)
-            for button in (
-                self.login,
-                self.logout,
-                self.update_btn,
-                self.verify,
-                self.repair_btn,
-            ):
-                button.setEnabled(False)
-            return
-
-        self.pause_button.setVisible(False)
-        self.cancel_paused_button.setVisible(self._paused_op is not None)
-        op = self._primary_op()
-        self.stop_button.setVisible(op == "stop" and self._paused_op is None)
-        self.primary.setObjectName("Playing" if op == "stop" else "Primary")
-        self._polish(self.primary)
-        if self._paused_op is not None:
-            self.primary.setText("RESUME")
-            self.primary.setEnabled(True)
-        elif op is None:
-            # No status yet: a neutral, disabled skeleton, never CANCEL.
-            self.primary.setText(PRIMARY_LABELS["launch"])
-            self.primary.setEnabled(False)
-        else:
-            data = (self._status.data if self._status else None) or {}
-            interrupted = op == "install" and InstallFacts(
-                installed=False, incomplete=bool(data.get("incomplete"))
-            ).offers_resume()
-            self.primary.setText("RESUME" if interrupted else PRIMARY_LABELS.get(op, op.upper()))
-            # Even "SET GAME FILE IN SETTINGS" is a real action: it opens Settings.
-            # PLAYING is a state, not an action: the x next to it stops the game.
-            self.primary.setEnabled(op != "stop")
-
-        # The status before the operation is stale until the re-probe lands.
-        status = None if self._awaiting_status else self._status
-        installed = bool(status and status.state == "installed")
-        running = bool(status and (status.running or status.state == "running"))
-        # Signing in does not need the game files: STOVE and the login page are
-        # remote, and an install started later keeps the saved login.
-        facts = (status.data if status else {}) or {}
-        # A backend whose sign-in runs the game's own service (NIKKE) says it needs the install.
-        can_login = facts.get("can_login") is not False
-        paused = self._paused_op is not None
-        self.login.setEnabled(bool(status) and not running and can_login and not paused)
-        label = facts.get("login_label")
-        self.login.setText(label if isinstance(label, str) and label else "Log in")
-        self.login.setToolTip(
-            "Resume or cancel the paused download first."
-            if paused
-            else ""
-            if can_login
-            else "Install the game first, then log in."
-        )
-        # Log out only needs an idle account: it must be reachable even when the
-        # game is not installed (e.g. to drop a saved login), unless the backend
-        # knows there is no sign-in to drop.
-        # An expired saved login is still a saved login: Log out clears it.
-        signed_out = facts.get("logged_in") is False and not facts.get("login_expired")
-        self.logout.setEnabled(bool(status) and not running and not signed_out and not paused)
-        self.logout.setToolTip("Resume or cancel the paused download first." if paused else "")
-        can_update = supports_update(str(self._profile_data.get("backend") or ""))
-        if ((status.data if status else {}) or {}).get("can_update") is False:
-            can_update = False
-        # Update starts its own download, which would drop the paused one's RESUME entry.
-        self.update_btn.setEnabled(
-            installed and not running and can_update and self._paused_op is None
-        )
-        self.update_btn.setToolTip(
-            "Resume or cancel the paused download first."
-            if can_update and self._paused_op
-            else ""
-            if can_update
-            else "Nadare cannot update this game; update it in Steam or its own launcher."
-        )
-        self.verify.setEnabled(
-            bool(status)
-            and not running
-            and status.state not in ("error", "not_installed")
-            and self._paused_op is None
-        )
-        # Verify and Repair start their own operation, which would drop the paused download
-        # (its RESUME entry), so they wait until it is resumed or cancelled (#855).
-        paused_tip = "Resume or cancel the paused download first."
-        self.verify.setToolTip(paused_tip if self._paused_op else self._verify_tip)
-        can_repair = bool(((status.data if status else {}) or {}).get("can_repair"))
-        self.repair_btn.setEnabled(self.verify.isEnabled() and can_repair)
-        self.repair_btn.setToolTip(paused_tip if self._paused_op else self._repair_tip)
-
-    def _refresh_steam_setup(self) -> None:
-        """Set up is offered only for a known Steam game with no operation running."""
-        self.steam_setup_btn.setVisible(self._steam_setup_available())
-
-    def _steam_setup_available(self) -> bool:
-        if self._busy_op is not None:
-            return False
-        status = self._status
-        if status is not None and (status.running or status.state == "running"):
-            return False  # the runner step closes Steam, which would end the play session
-        if str(self._profile_data.get("backend") or "") != "steam":
-            return False
-        data = self._profile_data
-        extra = data.get("extra")
-        app_id = data.get("steam_app_id") or data.get("app_id")
-        if not app_id and isinstance(extra, dict):
-            app_id = extra.get("steam_app_id") or extra.get("app_id")
-        return bool(app_id) and steamsetup.game_for(str(app_id)) is not None
-
-    def set_account_controls(self, supported: bool) -> None:
-        """Show account controls only for backends that log in."""
-        self.login.setVisible(supported)
-        self.logout.setVisible(supported)
-        self._refresh_actions()
-
-    def set_remember(self, supported: bool, checked: bool) -> None:
-        """Show Remember me (page + QR card) for backends that support it."""
-        for box in (self.remember, self.qr_frame.remember):
-            box.blockSignals(True)
-            box.setVisible(bool(supported))
-            box.setChecked(bool(checked))
-            box.blockSignals(False)
-
-    def _on_remember_clicked(self, checked: bool) -> None:
-        # Keep the page and QR-card boxes in step, then tell the window.
-        for box in (self.remember, self.qr_frame.remember):
-            box.blockSignals(True)
-            box.setChecked(bool(checked))
-            box.blockSignals(False)
-        self.remember_toggled.emit(bool(checked))
-
-    def set_sandbox(
-        self, supported: bool, checked: bool, blocked: str = "", *, ready: bool = True
+    def set_predownload_progress(
+        self, active: bool, fraction: float | None = None
     ) -> None:
-        """Show the Sandbox switch for games that offer it; ``blocked`` greys it out with why.
+        """Show a predownload running beside the normal page, without disabling Play."""
+        self._predownload_running = active
+        self._predownload_fraction = fraction if active else None
+        self._refresh_predownload_button()
 
-        ``ready`` is False when no bubblewrap exists here: the switch keeps the choice, the pill
-        does not claim protection the next launch cannot give.
-        """
-        self.sandbox.blockSignals(True)
-        self.sandbox.setVisible(bool(supported))
-        self.sandbox.setChecked(bool(checked))
-        self._sandbox_supported = bool(supported)
-        self._sandbox_blocked = blocked
-        self._sandbox_ready = bool(ready)
-        self.sandbox.blockSignals(False)
-        self._apply_sandbox()
+    def _on_predownload_clicked(self) -> None:
+        if self._predownload_running:
+            self.predownload_cancel_requested.emit()
+        else:
+            self.predownload_requested.emit()
 
-    def _sandbox_facts(self) -> SandboxFacts:
-        return SandboxFacts(
-            supported=self._sandbox_supported,
-            chosen=self.sandbox.isChecked(),
-            # A game already running when the page opened counts too (final round).
-            running=self._busy_op == "launch"
-            or bool(self._status and (self._status.running or self._status.state == "running")),
-            active=self._sandbox_active,
-            blocked=self._sandbox_blocked,
-            ready=self._sandbox_ready,
-        )
-
-    def _apply_sandbox(self) -> None:
-        """Draw the switch and the pill from the facts: the saved switch is not the running game."""
-        facts = self._sandbox_facts()
-        self.sandbox.setEnabled(facts.editable())
-        self.sandbox.setToolTip(facts.tooltip(_SANDBOX_TIP))
-        pill = facts.pill()
-        self.sandbox_pill.setText(pill or "SANDBOX")
-        self.sandbox_pill.setVisible(bool(pill))
-
-    def _apply_sandbox_lock(self) -> None:
-        self._apply_sandbox()
-
-    def _on_sandbox_clicked(self, checked: bool) -> None:
-        self._apply_sandbox()
-        self.sandbox_toggled.emit(bool(checked))
+    def _refresh_predownload_button(self) -> None:
+        """Pick the one of four states the button can have, or hide it when there is none."""
+        version = self._predownload_version
+        if self._predownload_running:
+            text = f"Predownloading {version}…" if version else "Predownloading…"
+            if self._predownload_fraction is not None:
+                percent = int(self._predownload_fraction * 100)
+                text = f"{text} {percent}%"
+            self.predownload_btn.setText(text)
+            self.predownload_btn.setToolTip(
+                "Click to stop. What is downloaded so far is kept."
+            )
+            self.predownload_btn.setEnabled(True)
+            self.predownload_btn.setVisible(True)
+        elif not version:
+            self.predownload_btn.setVisible(False)
+        elif self._predownload_ready:
+            self.predownload_btn.setText(f"{version} predownloaded")
+            self.predownload_btn.setToolTip(
+                f"Version {version} is downloaded. The update on release day will use it."
+            )
+            self.predownload_btn.setEnabled(False)
+            self.predownload_btn.setVisible(True)
+        else:
+            self.predownload_btn.setText(f"Predownload {version}")
+            self.predownload_btn.setToolTip(
+                f"Download version {version} now, before it is released. "
+                "The game stays playable; on release day the update uses these files."
+            )
+            self.predownload_btn.setEnabled(True)
+            self.predownload_btn.setVisible(True)
 
     @staticmethod
     def _polish(widget: QWidget) -> None:
         widget.style().unpolish(widget)
         widget.style().polish(widget)
-
-    def _on_primary(self) -> None:
-        if self._busy_op is not None:
-            if time.monotonic() < self._primary_grace_until:
-                # The first click of a double-click already started the job; the
-                # button turned into CANCEL/STOP under the user's finger.
-                return
-            # PLAYING is disabled, so this is a CANCEL for every other operation.
-            if self._busy_op != "launch":
-                self.cancel_requested.emit()
-            return
-        if self._paused_op is not None:
-            self.resume_requested.emit()
-            return
-        op = self._primary_op()
-        if op == "retry" and self._failed_op is not None:
-            self.action_requested.emit(self._failed_op)
-        elif op == "retry":
-            # Show CHECKING (primary disabled) until the status lands: a second
-            # click used to race the first and open a modal "Busy" (#624).
-            self._awaiting_status = True
-            self._refresh_actions()
-            self.action_requested.emit("status")
-        elif op == "settings":
-            self.settings_requested.emit()
-        elif op == "remove":
-            self.remove_requested.emit(self._profile)
-        elif op:
-            self.action_requested.emit(op)
-
-    def _on_stop_clicked(self) -> None:
-        if time.monotonic() < self._primary_grace_until:
-            return  # the second click of the double-click that started the game
-        answer = QMessageBox.question(
-            self,
-            "Stop game",
-            f"Stop {self.title.text()}? Anything you have not saved in the game may be lost.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if answer == QMessageBox.StandardButton.Yes:
-            # The backend's stop operation, not the generic cancel path.
-            self.action_requested.emit("stop")
-
-    # ---- lifecycle ---------------------------------------------------------
-    def set_busy(self, operation: str) -> None:
-        """Mark ``operation`` as running and start the elapsed clock."""
-        resumed = self._paused_op is not None
-        self._paused_op = None
-        self._failed_op = None
-        self._last_done = ""
-        self._queue_waiting = False
-        self._busy_op = operation
-        if operation == "launch":
-            # What this launch has is fixed now; the switch can change later, the process cannot.
-            # Only a guess until the backend reports: never one the machine cannot keep.
-            self._sandbox_active = bool(
-                self._sandbox_supported
-                and self.sandbox.isChecked()
-                and self._sandbox_ready
-                and not self._sandbox_blocked
-            )
-        self._primary_grace_until = time.monotonic() + _CANCEL_GRACE_S
-        self.news_frame.setVisible(False)
-        self._started_at = time.time()
-        self._last_step_at = 0.0
-        # Remove sends no progress events: show the busy animation, not a dead 0%.
-        self.progress.setRange(0, 0 if operation == "remove" else 100)
-        self.progress.setVisible(operation != "launch")
-        self.progress.setValue(0)
-        self.step_label.setText(
-            "Playing"
-            if operation == "launch"
-            else "Removing…"
-            if operation == "remove"
-            else "Resuming: checking what is already downloaded…"
-            if resumed
-            else operation.capitalize()
-        )
-        if resumed:
-            self._append_line("resumed", "status")
-        self.elapsed_label.setText("·  0:00")
-        self._set_badge(
-            "running" if operation == "launch" else _BUSY_STATES.get(operation, "installing"), ""
-        )
-        self._hide_qr()
-        self._timer.start()
-        self._set_console_expanded(self._console_preference)
-        self._refresh_actions()
-
-    def set_waiting(self, operation: str, ahead: int = 0, can_now: bool = False) -> None:
-        """Show that ``operation`` waits for another install to finish (#770).
-
-        ``ahead`` is how many waiting installs come before this one; ``can_now`` whether the
-        running one can be paused so this one starts at once.
-        """
-        self.set_busy(operation)
-        self._timer.stop()
-        self.elapsed_label.setText("")
-        self.progress.setRange(0, 0)  # the busy animation: nothing is downloading yet
-        self._queue_waiting = True
-        self.set_queue_position(ahead, can_now)
-        self._append_line("waiting for another install to finish", "status")
-
-    def set_queue_position(self, ahead: int, can_now: bool) -> None:
-        """Update the waiting message and which queue buttons make sense."""
-        if ahead > 0:
-            noun = "install" if ahead == 1 else "installs"
-            self.step_label.setText(f"Waiting · {ahead} {noun} ahead of this one")
-        else:
-            self.step_label.setText("Waiting for another install to finish…")
-        self.queue_next_btn.setVisible(ahead > 0)
-        self.queue_now_btn.setVisible(can_now)
-        self._refresh_actions()
-
-    def _on_skip_clicked(self) -> None:
-        # Hide first: a second click must not skip whatever step comes next.
-        self.skip_button.setHidden(True)
-        self.skip_step_requested.emit()
-
-    def _clear_busy_progress(self) -> None:
-        """Return the progress area to its idle shape when an operation ends."""
-        self._queue_waiting = False
-        self._sandbox_active = None
-        self._apply_sandbox()
-        self.skip_button.setHidden(True)
-        self.progress.setRange(0, 100)  # never leave the busy animation running
-        self.progress.setValue(0)
-        self.progress.setVisible(False)
-        self._eta.reset()
-        self._speed.reset()
-        self.progress.setFormat("%p%")
-        self.step_label.setText("")
-        self.elapsed_label.setText("")
-        self._started_at = 0.0
-
-    def finish(self, operation: str, exit_code: int) -> None:
-        """Stop the clock and report the result."""
-        from .workers import BACKGROUND
-
-        # Snapshot what ended before clearing the busy state: whether STOP was
-        # requested while the game ran, and how long it ran for.
-        stop_requested = self._busy_op == "stop"
-        retry_op = operation if operation in _RETRYABLE else None
-        # Preparation (runner download, prefix setup) is not play time: count from the
-        # last phase step, which a launch emits right before it starts the game.
-        since = self._last_step_at or self._started_at
-        elapsed = time.time() - since if since else 0.0
-        # A background refresh ending must not drop a pause on this page.
-        if operation not in BACKGROUND:
-            self._paused_op = None
-        self._busy_op = None
-        self._clear_busy_progress()
-        self.news_frame.setVisible(self._news_shown)
-        self._timer.stop()
-        self._hide_qr()
-        self._tick()
-        self._awaiting_status = exit_code == 0 and operation in _STATE_CHANGING
-        self._restore_badge()
-        self._refresh_actions()
-        if operation in BACKGROUND and self._paused_op is not None:
-            # The pause survives a background refresh, and so does its message (#1207 b160).
-            self.step_label.setText(_PAUSED_TEXT)
-        if operation == "launch":
-            if exit_code == 0:
-                if self._last_done.lower() not in _GAME_END_LINES:  # CZN says it itself
-                    self._append_line("game exited normally", "done")
-                return
-            crash = "" if stop_requested else crash_signal(exit_code)
-            if crash and elapsed >= _LAUNCH_EXIT_GRACE_S:
-                # A real session that ended in a crash signal is not a normal quit (#1031).
-                self.show_error(
-                    "The game crashed",
-                    f"The game crashed ({crash}, exit code {exit_code}) after "
-                    f"{play_time(elapsed)}. Open the logs for details.",
-                    retry_op=retry_op,
-                    failed=True,
-                )
-                return
-            # Many Wine/Proton games and launchers exit non-zero on quit, and
-            # STOP ends them with a signal code. Neither is a failed launch.
-            if (
-                stop_requested
-                or exit_code in STOPPED_EXIT_CODES
-                or elapsed >= _LAUNCH_EXIT_GRACE_S
-            ):
-                self._append_line(f"Game closed (exit code {exit_code})", "status")
-                return
-        if exit_code == 0 and operation in _ANNOUNCED_ON_SUCCESS:
-            done = self._last_done or f"{operation_title(operation)} finished"
-            self.step_label.setText(f"✓ {done}")  # cleared by the next operation
-        if exit_code != 0:
-            self.show_error(
-                "Operation failed",
-                f"{operation_title(operation)} did not finish (exit code {exit_code}). "
-                "Open the logs for details.",
-                retry_op=retry_op,
-                failed=True,
-            )
-
-    def fail(self, message: str, *, quiet: bool = False) -> None:
-        """End the busy state after a failure; ``quiet`` writes it to OUTPUT without a box.
-
-        Quiet is for a failure another dialog explains next (the game's terms).
-        """
-        retry_op = self._busy_op if self._busy_op in _RETRYABLE else None
-        self._paused_op = None
-        self._busy_op = None
-        self._clear_busy_progress()
-        self.news_frame.setVisible(self._news_shown)
-        self._timer.stop()
-        self._hide_qr()
-        self._restore_badge()
-        self._refresh_actions()
-        if quiet:
-            self._append_line(message, "error")
-            return
-        self.show_error("Nadare could not finish", message, retry_op=retry_op, failed=True)
-
-    def cancelled(self) -> None:
-        self._paused_op = None
-        self._busy_op = None
-        self._clear_busy_progress()
-        self.news_frame.setVisible(self._news_shown)
-        self._timer.stop()
-        self._hide_qr()
-        self._restore_badge()
-        self._refresh_actions()
-        self._append_line("cancelled", "status")
-
-    def is_paused(self) -> bool:
-        return self._paused_op is not None
-
-    def _can_pause(self) -> bool:
-        """Pause only where the downloads really resume from what is already on disk."""
-        from .workers import PAUSABLE
-
-        return self._busy_op in PAUSABLE and can_pause_kind(
-            str(self._profile_data.get("backend") or "")
-        )
-
-    def set_paused(self, operation: str) -> None:
-        """Show that ``operation`` is paused, with RESUME ready on the primary button."""
-        self._busy_op = None
-        self._clear_busy_progress()
-        self.news_frame.setVisible(self._news_shown)
-        self._timer.stop()
-        self._hide_qr()
-        self._restore_badge()
-        self._paused_op = operation
-        self.step_label.setText(_PAUSED_TEXT)
-        self._refresh_actions()
-        self._append_line("paused", "status")
-
-    def _restore_badge(self) -> None:
-        """Drop the busy pill once an operation ends without a status refresh."""
-        if self._status is not None:
-            self._set_badge(self._status.state, self._status.message)
-        else:
-            self._set_badge("checking", "")
-
-    def _tick(self) -> None:
-        if not self._started_at:
-            return
-        elapsed = int(time.time() - self._started_at)
-        minutes, seconds = divmod(elapsed, 60)
-        self.elapsed_label.setText(f"·  {minutes}:{seconds:02d}")
-
-    # ---- events ------------------------------------------------------------
-    def append_event(self, event: Event) -> None:
-        kind = event.kind
-        data = event.data or {}
-        if self._busy_op == "launch" and "sandbox" in data:
-            self._sandbox_active = bool(data["sandbox"])
-            self._apply_sandbox()
-        if kind in ("step", "status", "done", "error"):
-            # Only a step that says so can be skipped, and only until the next step or the end.
-            self.skip_button.setHidden(not (kind == "step" and (event.data or {}).get("skippable")))
-        if kind == "step":
-            self._last_step_at = time.time()
-            self.step_label.setText(event.message or "")
-            data = event.data or {}
-            png = data.get("png")
-            url = data.get("url")
-            if not self._show_qr(png) and url:
-                self._show_qr_link(str(url))
-            if data.get("qr_state"):
-                self._set_qr_state(str(data["qr_state"]))
-            if event.progress is not None:
-                self._set_progress(event.progress)
-        elif kind == "progress":
-            if (event.data or {}).get("indeterminate"):
-                # Busy bar: the phase has no measurable progress (silent installer).
-                self.progress.setVisible(True)
-                self.progress.setRange(0, 0)
-            elif event.progress is not None:
-                self._set_progress(event.progress)
-            if event.message:
-                self.step_label.setText(self._with_speed(event))
-        elif kind == "status":
-            if event.message:
-                self._set_detail(event.message)
-        elif kind == "done":
-            self._hide_qr()
-            self._last_done = event.message or ""
-            self._append_line(event.message or "done", "done")
-        elif kind == "error":
-            self._hide_qr()
-            if self._busy_op is None and event.message == self._last_line:
-                # A background check (status, news) that fails again with the same words
-                # every time would fill OUTPUT with one line per check (b23-rc4 click-through).
-                return
-            self._set_console_expanded(True)
-            self._append_line(event.message, "error")
-        else:
-            self._append_line(event.message, kind)
-        if event.progress is not None and kind not in ("step", "progress"):
-            self._set_progress(event.progress)
-
-    def _with_speed(self, event: Event) -> str:
-        """The progress text, with the download speed after it when the event counts bytes."""
-        data = event.data or {}
-        done = data.get("done")
-        if data.get("stage") != "download" or not isinstance(done, int | float):
-            return event.message
-        speed = format_speed(self._speed.update(float(done), time.monotonic()))
-        return f"{event.message}  ·  {speed}" if speed else event.message
-
-    def _set_progress(self, value: float) -> None:
-        self.progress.setRange(0, 100)  # leave the busy (indeterminate) state
-        self.progress.setVisible(True)
-        self.progress.setValue(max(0, min(100, int(round(value * 100)))))
-        eta = format_eta(self._eta.update(value, time.monotonic()))
-        self.progress.setFormat(f"%p%  ·  {eta}" if eta else "%p%")
-
-    def _show_qr(self, path: str | None) -> bool:
-        """Render the STOVE login QR from ``event.data['png']`` (host path)."""
-        if not path:
-            return False
-        pixmap = QPixmap(str(path))
-        if pixmap.isNull():
-            return False
-        size = _QrPanel.QR_SIZE
-        if pixmap.width() != size:
-            # Nearest-neighbour keeps the modules crisp, which scanners prefer.
-            mode = (
-                Qt.TransformationMode.FastTransformation
-                if pixmap.width() < size
-                else Qt.TransformationMode.SmoothTransformation
-            )
-            pixmap = pixmap.scaledToWidth(size, mode)
-        self.qr_frame.link.hide()
-        self.qr_label.show()
-        self.qr_label.setPixmap(pixmap)
-        self.qr_hint.setText(self._QR_HINTS["scan"])
-        self.qr_frame.show()
-        self.qr_frame.raise_()
-        self.qr_frame.reposition()
-        return True
-
-    def _show_qr_link(self, url: str) -> None:
-        """Show the login link when the QR image is missing or unreadable."""
-        self.qr_label.hide()
-        self.qr_hint.setText(
-            "Could not display the QR code. Open this link in the STOVE app on your phone:"
-        )
-        self.qr_frame.link.setText(url)
-        self.qr_frame.link.show()
-        self.qr_frame.show()
-        self.qr_frame.raise_()
-        self.qr_frame.reposition()
-
-    def show_qr(self, path: str | None) -> None:
-        """Re-show a still-live login QR (e.g. when returning to a busy login)."""
-        self._show_qr(path)
-
-    def _set_qr_state(self, state: str) -> None:
-        """Reflect the coarse QR login state under the code."""
-        hint = self._QR_HINTS.get(state)
-        if hint:
-            self.qr_hint.setText(hint)
-        if state == "expired":
-            self.qr_label.clear()
-
-    def _hide_qr(self) -> None:
-        self.qr_frame.hide()
-        self.qr_label.clear()
-        self.qr_frame.link.clear()
-        self.qr_frame.link.hide()
 
     # ---- news ---------------------------------------------------------------
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
@@ -1933,141 +1003,6 @@ class GameView(QWidget):
             self.news_columns = columns
             self._relayout_news()
 
-    def _news_columns(self) -> int:
-        """Four columns for a very wide window, three for a wide one, two for a
-        medium one, else one.
-
-        The news grid sits inside the page next to the fixed-width navigation
-        sidebar, so the breakpoints are applied to the surrounding window rather
-        than to the slightly narrower grid viewport.
-        """
-        window = self.window()
-        width = window.width() if window is not None else self.width()
-        if width >= 1700:
-            return 4
-        if width >= 1000:
-            return 3
-        if width >= 640:
-            return 2
-        return 1
-
-    def _relayout_news(self) -> None:
-        """Reflow the news cards into the responsive grid."""
-        while self.news_grid.count():
-            self.news_grid.takeAt(0)
-        self.news_columns = self._news_columns()
-        for column in range(8):
-            self.news_grid.setColumnStretch(column, 0)
-        for column in range(self.news_columns):
-            self.news_grid.setColumnStretch(column, 1)
-        for index, card in enumerate(self.news_rows):
-            row, column = divmod(index, self.news_columns)
-            self.news_grid.addWidget(card, row, column, Qt.AlignmentFlag.AlignTop)
-
-    def set_news(self, result: Any) -> None:
-        """Render up to eight official news items from a ``NewsResult``."""
-        items = list(getattr(result, "items", []) or [])[:8]
-        available = bool(getattr(result, "available", True))
-        key = (
-            self._profile,
-            available,
-            # Every field a card shows, or a re-dated or re-categorised article keeps its old
-            # values after a silent refresh (#975).
-            tuple(
-                (
-                    item.get("id"),
-                    item.get("title"),
-                    item.get("image_path"),
-                    item.get("url"),
-                    item.get("category"),
-                    item.get("published_at"),
-                )
-                for item in items
-            ),
-        )
-        if items and self.news_rows and key == self._news_key:
-            return  # a silent refresh with the same items: keep the cards, no flash
-        self._clear_news()
-        self._news_key = key
-        for item in items:
-            card = NewsCard(item, self.news_frame, loader=self.images, fallback=self._news_fallback)
-            card.clicked.connect(self._open_external)
-            self.news_rows.append(card)
-        if self.news_rows:
-            self.news_hint.setVisible(False)
-            self.news_reason.setVisible(False)
-            self.news_retry.setVisible(False)
-            self._set_news_visible(True)
-            self._relayout_news()
-        else:
-            has_feed = supports_news(str(self._profile_data.get("backend") or ""))
-            self.news_hint.setText("News unavailable")
-            self.news_hint.setVisible(True)
-            self.news_reason.setText(
-                "There is no news to show right now."
-                if available
-                else "Nadare could not reach the publisher's news feed. "
-                "Check your connection, then try again."
-            )
-            self.news_reason.setVisible(True)
-            self.news_retry.setVisible(has_feed)
-            # Nothing to show: hide the section entirely only when the backend
-            # has no feed at all; otherwise keep the reason and Retry, plus the log.
-            self._set_news_visible(available or has_feed)
-
-    def _set_news_visible(self, shown: bool) -> None:
-        """Remember the wanted visibility; the section stays hidden during an
-        operation so the progress bar and output get the room."""
-        self._news_shown = bool(shown)
-        self.news_frame.setVisible(self._news_shown and self._busy_op is None)
-
-    def _clear_news(self) -> None:
-        for card in self.news_rows:
-            card.setParent(None)
-            card.deleteLater()
-        self.news_rows = []
-        self._news_key = None
-        if getattr(self, "news_grid", None) is not None:
-            while self.news_grid.count():
-                self.news_grid.takeAt(0)
-        self.news_hint.setVisible(True)
-        self.news_reason.clear()
-        self.news_reason.setVisible(False)
-        self.news_retry.setVisible(False)
-        self._set_news_visible(False)
-
-    def _output_has_content(self) -> bool:
-        return self._busy_op is not None or not self.console.document().isEmpty()
-
-    def _sync_progress_frame(self) -> None:
-        """Show the progress strip only while there is a step to report."""
-        self.progress_frame.setVisible(
-            self._busy_op is not None or bool(self.step_label.text().strip())
-        )
-
-    def _set_console_expanded(self, expanded: bool) -> None:
-        self._console_expanded = bool(expanded)
-        has_content = self._output_has_content()
-        self.output_head.setVisible(has_content)
-        self.console.setVisible(self._console_expanded and has_content)
-        self.console_toggle.setText("Hide output" if self._console_expanded else "Show output")
-
-    def _clear_console(self) -> None:
-        self.console.clear()
-        self._last_line = ""
-        self._set_console_expanded(self._console_expanded)
-
-    def _toggle_console(self) -> None:
-        self._set_console_expanded(not self._console_expanded)
-        self._console_preference = self._console_expanded
-        self.console_preference_changed.emit(self._console_expanded)
-
-    def set_console_preference(self, expanded: bool) -> None:
-        """The saved Show/Hide output choice; an error still opens the output either way."""
-        self._console_preference = bool(expanded)
-        if self._busy_op is None:
-            self._set_console_expanded(self._console_preference)
-
     def _open_external(self, url: str) -> None:
         if not url:
             return
@@ -2076,80 +1011,8 @@ class GameView(QWidget):
             return
         QDesktopServices.openUrl(qurl)
 
-    def append_line(self, message: str, kind: str = "log") -> None:
-        """Add one line to the page console (for results that arrive outside an operation)."""
-        self._append_line(message, kind)
-
     def _forget_last_line(self, *_args: object) -> None:
         self._last_line = ""
-
-    def _append_line(self, message: str, kind: str = "log") -> None:
-        if not message:
-            return
-        self._last_line = str(message)
-        color = _LOG_COLORS.get(kind, _LOG_COLORS["log"])
-        safe = html.escape(str(message)).replace("\n", "<br>")
-        self.console.appendHtml(f'<span style="color:{color}">{safe}</span>')
-        self._set_console_expanded(self._console_expanded)
-        scrollbar = self.console.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
-
-    # ---- dialogs -----------------------------------------------------------
-    def show_error(
-        self, title: str, message: str, retry_op: str | None = None, *, failed: bool = False
-    ) -> None:
-        """Tell the user something went wrong.
-
-        ``failed`` is for an operation that ended badly: the box then offers
-        Open logs, and Retry when ``retry_op`` can be run again as it was.
-        """
-        self._set_console_expanded(True)
-        if userns.has_hint(message):
-            UsernsDialog(message, self).exec()
-        elif not failed:
-            QMessageBox.warning(self, title, message)
-        else:
-            # What the RETRY button re-runs if this box is closed.
-            self._failed_op = retry_op
-            choice = self._failure_choice(title, message, retry_op is not None)
-            if choice == "retry" and retry_op is not None:
-                self.action_requested.emit(retry_op)
-            elif choice == "logs":
-                self._open_logs()
-
-    def _failure_choice(self, title: str, message: str, can_retry: bool) -> str:
-        """Ask what to do about a failure: ``"retry"``, ``"logs"`` or ``"close"``."""
-        plain, details = friendly.split(message)
-        box = QMessageBox(QMessageBox.Icon.Warning, title, plain, parent=self)
-        if details:
-            box.setDetailedText(details)  # the raw text, behind "Show Details..."
-        retry = box.addButton("Retry", QMessageBox.ButtonRole.AcceptRole) if can_retry else None
-        logs = box.addButton("Open logs", QMessageBox.ButtonRole.ActionRole)
-        # Missing 32-bit libraries come with a command: copy it instead of retyping (#338 F-08).
-        command = hostlibs.install_command_in(message)
-        copy = (
-            box.addButton("Copy install command", QMessageBox.ButtonRole.ActionRole)
-            if command
-            else None
-        )
-        close = box.addButton("Close", QMessageBox.ButtonRole.RejectRole)
-        box.setDefaultButton(retry or close)
-        box.setEscapeButton(close)
-        box.exec()
-        clicked = box.clickedButton()
-        if copy is not None and clicked is copy:
-            QApplication.clipboard().setText(command)
-            return "close"
-        if retry is not None and clicked is retry:
-            return "retry"
-        return "logs" if clicked is logs else "close"
-
-    def _open_logs(self) -> None:
-        self._logs_dialog = LogsDialog([self._profile], profile=self._profile, parent=self)
-        self._logs_dialog.report_requested.connect(self.report_requested.emit)
-        self._logs_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        self._logs_dialog.show()
-
 
 __all__ = [
     "BannerStrip",
@@ -2160,4 +1023,29 @@ __all__ = [
     "NewsCard",
     "NewsRow",
     "PRIMARY_LABELS",
+    "OPERATION_TITLES",
+    "operation_title",
+    "_BUSY_STATES",
+    "_CANCEL_GRACE_S",
+    "_LAUNCH_EXIT_GRACE_S",
+    "_PAUSED_TEXT",
+    "_STATE_CHANGING",
+    "_ANNOUNCED_ON_SUCCESS",
+    "_GAME_END_LINES",
+    "_RETRYABLE",
+    "can_pause_kind",
+    "_LOG_COLORS",
+    "PRIMARY_LABELS",
+    "_version_text",
+    "_NEWS_THUMB_MAX_H",
+    "_QR_SCAN_HINT",
+    "_make_keyboard_link",
+    "_format_news_date",
+    "ElidedLabel",
+    "_ThumbnailLabel",
+    "NewsCard",
+    "_REMEMBER_TEXT",
+    "_REMEMBER_TIP",
+    "_SANDBOX_TIP",
+    "_QrPanel",
 ]

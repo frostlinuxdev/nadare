@@ -68,6 +68,8 @@ def _isolated_environment(
     monkeypatch.setenv("NADARE_INDEX_BASE", "")
     monkeypatch.setenv("NADARE_RELEASES_API", "")
     monkeypatch.delenv("CZN_MANIFEST_INDEX", raising=False)
+    # A shell that exported NADARE_CHANNEL=unstable must not move every test's folders.
+    monkeypatch.delenv("NADARE_CHANNEL", raising=False)
     monkeypatch.delenv("YOSTAR_MANIFEST_INDEX", raising=False)
     monkeypatch.delenv("YOSTAR_MEDIA_FILE", raising=False)
 
@@ -225,10 +227,74 @@ def _no_automatic_update_checks(monkeypatch):
     monkeypatch.setattr(MainWindow, "_maybe_start_check_update", lambda self, profile: False)
 
 
+@pytest.fixture(autouse=True)
+def _no_automatic_found_copies_check(monkeypatch):
+    """Window tests never start the start-up "game found in another folder" check (#1293).
+
+    It reads the libraries on a thread and can raise a banner; tests of it call
+    ``_real_start_found_copies_check`` or ``_show_found_copies`` themselves.
+    """
+    try:
+        from nadare.gui.main_window import MainWindow
+    except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
+        return
+    real = getattr(MainWindow, "_start_found_copies_check", None)
+    if real is None:
+        return
+    monkeypatch.setattr(MainWindow, "_real_start_found_copies_check", real, raising=False)
+    monkeypatch.setattr(MainWindow, "_start_found_copies_check", lambda self: None)
+    # The real chooser is a modal dialog: a test that reaches it unstubbed would hang.
+    monkeypatch.setattr(MainWindow, "_choose_found_copy", lambda self, name, copies: None)
+
+
+@pytest.fixture(autouse=True)
+def _library_picker_is_a_folder_dialog_in_tests(monkeypatch):
+    """Move's library list (#1293) is a modal dialog; tests pick through the folder dialog.
+
+    Tests of Move stub ``QFileDialog.getExistingDirectory``; routing the picker there keeps
+    them meaningful and keeps the real modal out of every offscreen run.
+    """
+    try:
+        from PyQt6.QtWidgets import QFileDialog
+
+        from nadare.gui.settings import SettingsPage
+    except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
+        return
+    if not hasattr(SettingsPage, "_choose_library"):
+        return
+
+    def pick(self, config, title, start):
+        return QFileDialog.getExistingDirectory(self, title, str(start)) or None
+
+    monkeypatch.setattr(
+        SettingsPage, "_real_choose_library", SettingsPage._choose_library, raising=False
+    )
+    monkeypatch.setattr(SettingsPage, "_choose_library", pick)
+    # Settings' "use this folder" chooser (#1293) is modal too.
+    monkeypatch.setattr(SettingsPage, "_choose_found_copy", lambda self, name, copies: None)
+
+
 #: Plain daemon threads that do image work in Qt (news images, the cover-cache sweep).
 _BACKGROUND_THREAD_NAMES = frozenset(
-    {"nadare-news-fetch", "nadare-news-image", "cover-cache-migration"}
+    {"nadare-news-fetch", "nadare-news-image", "cover-cache-migration", "nadare-found-copies"}
 )
+
+
+def _join_until(thread: threading.Thread, deadline: float) -> None:
+    """Join ``thread`` by ``deadline``, also when it is still starting.
+
+    ``threading.enumerate()`` lists a thread whose ``start()`` was called but which has not
+    run yet; joining it raises "cannot join thread before it is started" (the recurring
+    test_selfupdate_window teardown error on CI, 3.12/3.13). Wait for it to start instead.
+    """
+    while True:
+        try:
+            thread.join(max(0.0, deadline - time.monotonic()))
+            return
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(0.005)
 
 
 @pytest.fixture(autouse=True)
@@ -246,7 +312,7 @@ def _background_work_ends_with_its_test():
     deadline = time.monotonic() + 3.0
     for thread in threading.enumerate():
         if thread.name in _BACKGROUND_THREAD_NAMES and thread is not threading.current_thread():
-            thread.join(max(0.0, deadline - time.monotonic()))
+            _join_until(thread, deadline)
     try:
         from PyQt6.QtCore import QCoreApplication, QThreadPool
     except Exception:  # noqa: BLE001 - PyQt6 may be missing; nothing to wait for
@@ -415,3 +481,14 @@ def _no_leaked_detached_workers():
         if isinstance(worker, QThread) and worker.isRunning():
             continue  # never drop a running thread
         workers._detached.discard(worker)
+
+
+@pytest.fixture(autouse=True)
+def _no_bundled_umu(monkeypatch, tmp_path_factory):
+    """A local AppImage build leaves the pinned umu archive in src/nadare/assets; tests must not
+    depend on it (#1338). Tests of the bundle point BUNDLED_ARCHIVE at their own file."""
+    from nadare.core import umu as _umu
+
+    monkeypatch.setattr(
+        _umu, "BUNDLED_ARCHIVE", tmp_path_factory.getbasetemp() / "no-bundled-umu.tar"
+    )

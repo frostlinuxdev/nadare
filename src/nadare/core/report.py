@@ -17,7 +17,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from . import events, paths, process, runlog, sessionfiles
+from . import events, paths, process, runlog, runners, sessionfiles
+from .gameversion import read_czn_version, read_install_version
 
 MAX_REPORT_BYTES = 300_000
 STUB_SHIPPED_SHA256 = (
@@ -25,6 +26,17 @@ STUB_SHIPPED_SHA256 = (
     "fe4a5bad970750e974cf999e31e3b87132fbb25f9c04c9eea69e3acc2e243185",
 )
 
+
+
+def _managed_umu_text() -> str:
+    """The managed umu a launch uses when the system has none (#1338), for support reports."""
+    try:
+        from . import umu
+
+        found = umu.managed()
+    except Exception:  # noqa: BLE001 - a report must never fail on this line
+        return "unknown"
+    return str(found) if found else "not set up yet"
 
 def redact(
     text: str,
@@ -165,9 +177,12 @@ def build_report(
     ]
     from nadare import __version__
 
+    from . import channel
+
     appimage = os.environ.get("APPIMAGE")
     lines += [
-        f"Nadare: {__version__}",
+        # An unstable build says so: its bugs may come from research code (core/channel.py).
+        f"Nadare: {channel.title(__version__)}",
         # Not the path: a file name can say more about a person than the problem needs.
         "Run kind: AppImage" if appimage else "Run kind: source/pip",
     ]
@@ -195,6 +210,7 @@ def build_report(
         # The language helps with text problems in games; the timezone only says where someone is.
         f"Language: {os.environ.get('LANG', 'unknown')}",
         f"umu-run: {_command(run_command, ['umu-run', '--version'])}",
+        f"umu-run (Nadare's own): {_managed_umu_text()}",
     ]
     doctor = events.mask(doctor_text) if doctor_text else "unavailable: doctor checks not supplied"
     lines += ["", "Doctor:", doctor or "unavailable: no output", "", "## Profile"]
@@ -213,10 +229,18 @@ def build_report(
             "Settings:",
             json.dumps(safe, ensure_ascii=False, sort_keys=True, default=str),
         ]
-        game_dir = Path(str(profile.get("install_dir") or ""))
+        install_dir = profile.get("install_dir")
+        installed_version = read_install_version(install_dir)
+        if installed_version is None and "czn" in str(profile.get("backend", "")).lower():
+            installed_version = read_czn_version(
+                profile.get("prefix") or profile.get("wineprefix")
+            )
+        game_dir = Path(str(install_dir or ""))
+        runner_value = runners.profile_runner_value(profile) or "unknown"
         lines += [
-            f"Installed version: {profile.get('version') or 'unknown'}",
-            f"Runner: {profile.get('runner') or 'unknown'}",
+            f"Installed version: {installed_version or 'unknown'}",
+            # Top level or ``extra``, as the backends read it; redacted like every other line.
+            f"Runner: {runner_value}",
         ]
         configured = profile.get("prefix") or profile.get("wineprefix")
         prefix_dir = Path(os.path.expanduser(str(configured))) if configured else profiles / name
@@ -284,7 +308,9 @@ def build_report(
     result = redact(
         "\n".join(lines), username=username, home=home, hostname=hostname, mask=False
     )
-    encoded = result.encode("utf-8")
+    # A Linux log name is bytes and may be surrogate-escaped in Python: replace those so the
+    # report can still be encoded and written as UTF-8.
+    encoded = result.encode("utf-8", errors="replace")
     if len(encoded) > min(max_bytes, MAX_REPORT_BYTES):
         suffix = encoded[-(min(max_bytes, MAX_REPORT_BYTES) - 80) :].decode(
             "utf-8", errors="replace"
@@ -292,6 +318,8 @@ def build_report(
         note = "\n".join(session_note).strip()
         head = "# Nadare support report (truncated; newest content kept)\n\n"
         result = head + (note + "\n\n" if note else "") + suffix
+    else:
+        result = encoded.decode("utf-8")
     return result
 
 

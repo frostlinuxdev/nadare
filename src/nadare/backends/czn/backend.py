@@ -21,41 +21,32 @@ Sequence (mirrors ``czn_direct_launch.sh`` / ``czn_gui.py``):
 
 from __future__ import annotations
 
-import atexit
-import contextlib
-import hashlib
+# Names that tests and callers reach through this module; the code using them moved to
+# backend_parts/ (#1248). Re-exported so ``backend.X`` is the same object.
+import atexit as atexit  # noqa: E402, F401
 import json
 import logging
 import os
-import re
-import select
-import shutil
-import signal
-import subprocess
-import sys
-import tempfile
-import threading
-import time
-from collections.abc import Callable
+import select as select  # noqa: E402, F401
+import shutil as shutil  # noqa: E402, F401
+import time as time  # noqa: E402, F401
 from pathlib import Path
 from typing import Any
 
-from ...core import download as net
 from ...core import (
+    gameversion,
     graphics,
-    hostlibs,
     monitors,
     paths,
     prefixmove,
     process,
     removal,
-    runlock,
-    sandbox,
     vcredist,
     webview2,
 )
-from ...core import runners as core_runners
-from ...core import umu as umu_mod
+from ...core import hostlibs as hostlibs  # noqa: E402, F401
+from ...core import sandbox as sandbox  # noqa: E402, F401
+from ...core import umu as umu_mod  # noqa: E402, F401
 from ...core.backends import (
     PREFIX_HELP,
     BackendError,
@@ -63,57 +54,193 @@ from ...core.backends import (
     Option,
     Status,
 )
-from ...core.events import Cancelled, Event, mask
+from ...core.events import Event
 from ...core.removal import tree_safety
 from ...core.runtimewatch import RuntimeWatch
-from ...core.secrets import SecretStore, SecretStoreError, default_collection_exists
+from .backend_parts.auth import (
+    AUTH_MODULE as AUTH_MODULE,
+)
+from .backend_parts.auth import (
+    AuthMixin,
+)
+from .backend_parts.credentials import (
+    _WIPES as _WIPES,
+)
+from .backend_parts.credentials import (
+    CREDENTIAL_HANDOFF as CREDENTIAL_HANDOFF,
+)
+from .backend_parts.credentials import (
+    CREDENTIAL_INPUT as CREDENTIAL_INPUT,
+)
+from .backend_parts.credentials import (
+    LOGOUT_KEYRING_NOTICE as LOGOUT_KEYRING_NOTICE,
+)
+from .backend_parts.credentials import (
+    MISMATCH_NOTICE as MISMATCH_NOTICE,
+)
+from .backend_parts.credentials import (
+    CredentialsMixin,
+)
+from .backend_parts.credentials import (
+    _cache_keyring as _cache_keyring,
+)
+from .backend_parts.credentials import (
+    _keyring_credential as _keyring_credential,
+)
+from .backend_parts.credentials import (
+    _live_clear as _live_clear,
+)
+from .backend_parts.credentials import (
+    _profile_slug as _profile_slug,
+)
+from .backend_parts.credentials import (
+    _read_keyring as _read_keyring,
+)
+from .backend_parts.credentials import (
+    _write_private as _write_private,
+)
+from .backend_parts.credentials import (
+    forget_saved_credential as forget_saved_credential,
+)
+from .backend_parts.launching import (
+    _INSTALLER_ENV as _INSTALLER_ENV,
+)
+from .backend_parts.launching import (
+    _RESULT as _RESULT,
+)
+from .backend_parts.launching import (
+    _STOPPED_EXIT_CODES as _STOPPED_EXIT_CODES,
+)
+from .backend_parts.launching import (
+    GAME_HELPER_EXES as GAME_HELPER_EXES,
+)
+from .backend_parts.launching import (
+    LaunchingMixin,
+)
+from .backend_parts.launching import (
+    _cmdline_has_exe as _cmdline_has_exe,
+)
+from .backend_parts.prereqs import (
+    STUB_C_NAME as STUB_C_NAME,
+)
+from .backend_parts.prereqs import (
+    STUB_C_PREBUILT as STUB_C_PREBUILT,
+)
+from .backend_parts.prereqs import (
+    STUB_C_PREBUILT_SHA256 as STUB_C_PREBUILT_SHA256,
+)
+from .backend_parts.prereqs import (
+    STUB_NAME as STUB_NAME,
+)
+from .backend_parts.prereqs import (
+    STUB_PREBUILT as STUB_PREBUILT,
+)
+from .backend_parts.prereqs import (
+    STUB_PREBUILT_SHA256 as STUB_PREBUILT_SHA256,
+)
+from .backend_parts.prereqs import (
+    VCREDIST_SHA256 as VCREDIST_SHA256,
+)
+from .backend_parts.prereqs import (
+    WEBVIEW2_SHA256 as WEBVIEW2_SHA256,
+)
+from .backend_parts.prereqs import (
+    WEBVIEW2_URL as WEBVIEW2_URL,
+)
+from .backend_parts.prereqs import (
+    PrereqsMixin,
+)
+from .backend_parts.prereqs import (
+    _stub_label as _stub_label,
+)
+from .backend_parts.prereqs import (
+    stub_identity as stub_identity,
+)
+from .backend_parts.runner import (
+    _RUNNER_INTEGRITY_EXIT as _RUNNER_INTEGRITY_EXIT,
+)
+from .backend_parts.runner import (
+    _RUNNER_MATCH as _RUNNER_MATCH,
+)
+from .backend_parts.runner import (
+    DEFAULT_RUNNER as DEFAULT_RUNNER,
+)
+from .backend_parts.runner import (
+    RUNNER_EXIT_MESSAGES as RUNNER_EXIT_MESSAGES,
+)
+from .backend_parts.runner import (
+    RunnerMixin,
+)
+from .backend_parts.shared import (
+    _KEYRING_CACHE as _KEYRING_CACHE,
+)
+from .backend_parts.shared import (
+    _LIVE_LOCK as _LIVE_LOCK,
+)
+from .backend_parts.shared import (
+    _LIVE_SESSIONS as _LIVE_SESSIONS,
+)
+from .backend_parts.shared import (
+    AUTH_EXIT_MESSAGES as AUTH_EXIT_MESSAGES,
+)
+from .backend_parts.shared import (
+    PREFIX_MARKER as PREFIX_MARKER,
+)
+from .backend_parts.shared import (
+    TERMS_URL as TERMS_URL,
+)
+from .backend_parts.shared import (
+    UPDATE_MODULE as UPDATE_MODULE,
+)
+from .backend_parts.shared import (
+    _live_get as _live_get,
+)
+from .backend_parts.shared import (
+    _live_set as _live_set,
+)
+from .backend_parts.shared import (
+    _profile_setting as _profile_setting,
+)
+from .backend_parts.shared import (
+    _register_ephemeral as _register_ephemeral,
+)
+from .backend_parts.shared import (
+    _registered_ephemeral as _registered_ephemeral,
+)
+from .backend_parts.shared import (
+    _remember_notice as _remember_notice,
+)
+from .backend_parts.shared import (
+    _unlink_quietly as _unlink_quietly,
+)
+from .backend_parts.streaming import (
+    _FILE_PROGRESS as _FILE_PROGRESS,
+)
+from .backend_parts.streaming import (
+    _QR_MESSAGE as _QR_MESSAGE,
+)
+from .backend_parts.streaming import (
+    _QR_STATE as _QR_STATE,
+)
+from .backend_parts.streaming import (
+    EXIT_MESSAGES as EXIT_MESSAGES,
+)
+from .backend_parts.streaming import (
+    HEARTBEAT_SECONDS as HEARTBEAT_SECONDS,
+)
+from .backend_parts.streaming import (
+    StreamingMixin,
+)
 from .news import IMAGE_HOSTS, fetch_czn_news
 
 KIND = "stove-czn"
 
 log = logging.getLogger(__name__)
 
-AUTH_MODULE = "nadare.backends.czn.auth"
-UPDATE_MODULE = "nadare.backends.czn.update"
-
-GAME_SUBDIR = Path("drive_c/ProgramData/Smilegate/Games/ChaosZeroNightmare")
-#: Written into a prefix Nadare created, so uninstall knows it may delete it.
-PREFIX_MARKER = ".nadare-prefix"
-SERVICE = "STOVE_CHAOSZERO"
+# One source with core.gameversion (the support report and Find games read the UPF too).
+GAME_SUBDIR = gameversion.CZN_GAME_SUBDIR
+SERVICE = gameversion.CZN_SERVICE
 SHIELD_NAME = "ssr-stove-shield.exe"
-STUB_NAME = "czn_pcsdk_stub.exe"
-
-#: Seconds of silence from a long-running child before a "still working" line.
-HEARTBEAT_SECONDS = 15.0
-
-#: Environment for silent installers run through Proton. The native Wayland
-#: driver makes the WebView2 installer exit silently (exit 8, nothing installed)
-#: on some setups; an installer needs no window, so it always runs via XWayland.
-_INSTALLER_ENV = {"PROTON_ENABLE_WAYLAND": "0"}
-#: Both stubs ship prebuilt so users need no mingw-w64; each is used only when it
-#: matches its digest. The default is the Go build (``scripts/build_stub_go.sh``,
-#: reproducible in a pinned container); the C build (``scripts/build_stub.sh
-#: --container``) ships for one release as a fallback. A profile picks the C stub
-#: with ``pcsdk_stub = "c"``, or the environment with ``NADARE_CZN_STUB=c``.
-STUB_PREBUILT = Path(__file__).resolve().parents[2] / "assets" / STUB_NAME
-STUB_PREBUILT_SHA256 = "0a8cc27d2b6a7eb5097d65ca04214de997693da34483e11bc5d76211caddbdf7"
-STUB_C_NAME = "czn_pcsdk_stub_c.exe"
-STUB_C_PREBUILT = Path(__file__).resolve().parents[2] / "assets" / STUB_C_NAME
-STUB_C_PREBUILT_SHA256 = "fe4a5bad970750e974cf999e31e3b87132fbb25f9c04c9eea69e3acc2e243185"
-DEFAULT_RUNNER = "dwproton"  # the tested DW-Proton release
-WEBVIEW2_URL = webview2.DEFAULT_URL
-#: The bootstrapper is fetched through a mutable Microsoft redirector, so the
-#: download is accepted only when it lands on a Microsoft host and matches a
-#: pinned SHA-256. AUDIT H1: the hash is never guessed; it is resolved at run
-#: time from the ``NADARE_WEBVIEW2_SHA256`` environment variable or the
-#: profile's ``webview2_sha256`` setting, with this constant only as the final
-#: fallback. When no pin is configured the installer is refused *before* it is
-#: downloaded rather than run unverified (never silently bypassed).
-#: Pinned 2026-10-13 from the Evergreen standalone x64 installer (Microsoft
-#: Last-Modified 2026-10-08, 214090448 B). Microsoft re-issues this file with each
-#: Edge release, so the pin goes stale; override with NADARE_WEBVIEW2_SHA256 or
-#: the profile's ``webview2_sha256`` until it is bumped.
-WEBVIEW2_SHA256: str | None = webview2.PINNED_SHA256
 #: The WebView2 pipeline lives in :mod:`nadare.core.webview2` so every
 #: Wine-family backend shares one verifier and installer. Re-exported here
 #: because existing CZN tests (and callers) reference these names.
@@ -125,44 +252,8 @@ EXIT_WEBVIEW2_FAILED = webview2.EXIT_WEBVIEW2_FAILED
 #: Wine-family backend shares one URL/pin. Re-exported here because existing CZN
 #: tests (and callers) reference these names.
 VCREDIST_URL = vcredist.VCREDIST_URL
-VCREDIST_SHA256: str | None = vcredist.VCREDIST_SHA256
 VCREDIST_INDEX_MAX_HASHES = vcredist.VCREDIST_INDEX_MAX_HASHES
 VCREDIST_HOST_SUFFIXES: tuple[str, ...] = vcredist.VCREDIST_HOST_SUFFIXES
-
-#: STOVE's own page where an account agrees to the game's terms (the ``406401`` answer links it).
-TERMS_URL = (
-    "https://policy.onstove.com/?inflow_path=LAUNCHER&show_play_button=Y"
-    "&game_id=STOVE_CHAOSZERO&lang=en"
-)
-
-#: czn-linux subprocess exit codes -> a user-safe message. The backend-side
-#: WebView2 codes live in their own map (below) so a helper that later returns
-#: 10/11 cannot surface a WebView2-specific message for an unrelated failure.
-EXIT_MESSAGES: dict[int, str] = {
-    1: "setup or usage error",
-    2: "cannot reach the update server",
-    3: "the STOVE login expired — log in again",
-    4: "cannot reach STOVE (network)",
-    5: "the game update failed",
-    6: "the game exited without contacting the launcher stub (the PCSDK "
-    "handshake may have changed, or this runner cannot run the game)",
-    7: "the game rejected the login session",
-    8: "the game is already running",
-    9: "a runner download failed its checksum",
-}
-
-#: ``czn_auth.py`` exit codes -> a user-safe message. Its own table: the auth
-#: worker's 2 does not mean the updater's 2, so reusing ``EXIT_MESSAGES`` told
-#: the user "cannot reach the update server" for an expired QR / rejected signin.
-AUTH_EXIT_MESSAGES: dict[int, str] = {
-    2: "STOVE login returned an unexpected error; try again in a minute "
-    "(if it keeps happening, open the logs)",
-    3: "STOVE rejected or expired the sign-in. Scan a fresh QR code and try again.",
-    4: "Could not reach STOVE. Check your internet connection and try again.",
-    5: "This STOVE account has not accepted Chaos Zero Nightmare's terms of service yet. "
-    "Read and accept them in Nadare when it asks, or open " + TERMS_URL + " in your browser "
-    "while signed in to the same STOVE account, then try again.",
-}
 
 #: ``czn_update.py`` exit codes -> a user-safe message. Its own table: 1 is a
 #: download failure and 2 is setup/network, matching neither ``EXIT_MESSAGES``
@@ -173,86 +264,13 @@ UPDATE_EXIT_MESSAGES: dict[int, str] = {
     5: "the game files are missing or incomplete — press Install to repair them",
 }
 
-#: Runner-install failure codes -> a user-safe message. 4 means the GitHub
-#: runner download failed, not that the game's STOVE server is unreachable.
-RUNNER_EXIT_MESSAGES: dict[int, str] = {
-    1: "Nadare could not install the required Proton runner. Try Install again, or "
-    "choose a runner in Settings → Manage runners.",
-    4: "Could not download the required Proton runner from GitHub. Check your internet "
-    "connection and try again, or choose a runner in Settings → Manage runners.",
-    9: "The downloaded Proton runner was damaged or changed. Try Install again.",
-}
-
 #: Backend-side (not czn-linux) exit codes for WebView2 failures.
 WEBVIEW2_MESSAGES: dict[int, str] = webview2.MESSAGES
-
-#: auth.py ``qr_status`` states grouped into the coarse state the GUI renders.
-_QR_STATE = {
-    "init": "waiting",
-    "ongoing": "waiting",
-    "success": "approved",
-    "expired": "expired",
-    "close": "expired",
-    "closed": "expired",
-    "cancel": "expired",
-    "cancelled": "expired",
-}
-_QR_MESSAGE = {
-    "waiting": "Waiting for you to approve the scan in the STOVE app…",
-    "approved": "Approved — finishing login…",
-    "expired": "QR code expired — log in again for a fresh code.",
-}
-
-#: Exit code the runner downloader uses for a checksum mismatch.
-_RUNNER_INTEGRITY_EXIT = 9
-_RUNNER_MATCH = {"cachyos": "cachyos", "ge": "GE-Proton", "dwproton": "dwproton"}
-_FILE_PROGRESS = re.compile(r"^\s*\[(\d+)/(\d+)\]\s*(.*)$")
-_RESULT = re.compile(r"RESULT\s+([a-z-]+)")
-
-#: Emitted once when "Remember me" is on but no OS keyring is available.
-#: Exit codes a game child reports when it was terminated on purpose
-#: (-SIGTERM, 128+SIGTERM, and the 256-15 wrap umu/proton produce; likewise SIGINT).
-_STOPPED_EXIT_CODES = frozenset({-15, 143, 241, -2, 130, 254})
-
-
-def _remember_notice() -> str:
-    """The notice when the saved login cannot be stored on this device."""
-    return (
-        "Remember me unavailable: this system cannot store your login securely. "
-        "Nadare will ask you to sign in again next time."
-    )
-
 
 def __getattr__(name: str) -> Any:
     if name == "REMEMBER_NOTICE":
         return _remember_notice()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-#: Emitted when the stored credential belongs to a different account.
-MISMATCH_NOTICE = "Saved login no longer matches this account; log in again"
-#: Emitted when log out could not remove the persisted credential from the OS
-#: keyring; local (in-memory) state is still cleared, but the saved login may
-#: survive a restart.
-LOGOUT_KEYRING_NOTICE = (
-    "Logged out, but the saved login could not be removed from the system keyring"
-)
-#: Temp file the auth worker uses to hand the rotating credential to us.
-CREDENTIAL_HANDOFF = "credential.json"
-CREDENTIAL_INPUT = "credential-in.json"
-
-#: Process-wide live sessions, keyed by profile name. The GUI builds a fresh
-#: backend object for every operation (``gui/workers.py``), so a QR login must
-#: outlive the object that performed it; a separate process cannot share this
-#: and must rely on ``remember_me`` + the keyring.
-_LIVE_LOCK = threading.Lock()
-#: Bumped whenever a profile's saved login is wiped, so a keyring write that was already running
-#: can tell it landed after the wipe and take it back (#956).
-_WIPES: dict[str, int] = {}
-_LIVE_SESSIONS: dict[str, dict[str, str]] = {}
-#: Keyring reads are cached once per process so ``status()`` does not unlock the
-#: user's keyring on every poll.
-_KEYRING_CACHE: dict[str, dict[str, str] | None] = {}
 
 
 def _reset_process_state() -> None:
@@ -262,203 +280,20 @@ def _reset_process_state() -> None:
         _KEYRING_CACHE.clear()
 
 
-def _live_get(profile: str) -> dict[str, str] | None:
-    with _LIVE_LOCK:
-        cred = _LIVE_SESSIONS.get(profile)
-        return dict(cred) if cred else None
-
-
-def _live_set(profile: str, refresh_token: str, member_no: str) -> None:
-    with _LIVE_LOCK:
-        _LIVE_SESSIONS[profile] = {"refresh_token": refresh_token, "member_no": member_no}
-
-
-def _live_clear(profile: str) -> None:
-    with _LIVE_LOCK:
-        _LIVE_SESSIONS.pop(profile, None)
-
-
-def _cache_keyring(profile: str, cred: dict[str, str] | None) -> None:
-    with _LIVE_LOCK:
-        _KEYRING_CACHE[profile] = cred
-
-
-def forget_saved_credential(profile: str) -> None:
-    """Delete a profile's persisted credential without touching its live session.
-
-    Used when Remember me is switched off while the profile is busy, so the
-    keyring entry cannot be cleared by the normal ``set_remember`` worker.
-    """
-    try:
-        SecretStore(allow_fallback=False).delete(profile)
-    except SecretStoreError:
-        # A locked/unavailable keyring is transient: propagate so the GUI can
-        # report a failed wipe, and do not cache a "forgotten" state that would
-        # only last until the process restarts (the entry is still there).
-        raise
-    _cache_keyring(profile, None)
-
-
-def _read_keyring(profile: str) -> dict[str, str] | None:
-    """Read the persisted credential, or ``None`` when there definitively is none.
-
-    A :class:`SecretStoreError` (locked service, D-Bus hiccup) propagates so the
-    caller can avoid caching a transient failure.
-    """
-    raw = SecretStore(allow_fallback=False).get(profile)
-    if not raw:
-        return None
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return None
-    if not isinstance(data, dict) or not data.get("refresh_token"):
-        return None
-    return {
-        "refresh_token": str(data["refresh_token"]),
-        "member_no": str(data.get("member_no") or ""),
-    }
-
-
-def _keyring_credential(profile: str) -> dict[str, str] | None:
-    with _LIVE_LOCK:
-        if profile in _KEYRING_CACHE:
-            return _KEYRING_CACHE[profile]
-    try:
-        cred = _read_keyring(profile)
-    except SecretStoreError:
-        # A locked/unavailable keyring is transient: report "no credential" now
-        # but do not cache it, so a later poll can retry once it unlocks.
-        return None
-    with _LIVE_LOCK:
-        return _KEYRING_CACHE.setdefault(profile, cred)
-
-
-def _profile_slug(name: str) -> str:
-    """A filesystem-safe, collision-free path component for a profile name.
-
-    A name that is already safe keeps its readable form. Anything else is
-    sanitised *and* suffixed with a short hash of the exact name, so two
-    distinct valid names ("a b" / "a_b") can never share a handoff directory
-    and cross-assign a rotating refresh token.
-    """
-    if re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9._-]*", name):
-        return name
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name).lstrip(".") or "profile"
-    digest = hashlib.sha256(name.encode("utf-8", "surrogatepass")).hexdigest()[:8]
-    return f"{safe}-{digest}"
-
-
-def _unlink_quietly(path: Path) -> None:
-    try:
-        Path(path).unlink()
-    except OSError:
-        pass
-
-
-def _profile_setting(profile: dict[str, Any], key: str) -> Any:
-    """Read a profile key from the top level or its ``extra`` mapping."""
-    value = profile.get(key)
-    if value not in (None, ""):
-        return value
-    extra = profile.get("extra")
-    if isinstance(extra, dict):
-        return extra.get(key)
-    return None
-
-
-#: Helper processes the game leaves around; they are not "the game running"
-#: (a crash handler can linger after the game has exited) but Stop kills them.
-GAME_HELPER_EXES = frozenset({"crashpad_handler.exe"})
-
-
-def stub_identity(path: Path) -> tuple[str | None, bool]:
-    """``(sha256[:12], is the shipped stub)`` of ``path``; ``(None, False)`` if unreadable."""
-    try:
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return None, False
-    return digest[:12], digest in (STUB_PREBUILT_SHA256, STUB_C_PREBUILT_SHA256)
-
-
-def _stub_label(path: Path) -> str:
-    """``(Go)``, ``(C)`` or ``(not shipped)``: which build ``path`` is, for the launch log."""
-    try:
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        return "(unreadable)"
-    if digest == STUB_PREBUILT_SHA256:
-        return "(Go)"
-    if digest == STUB_C_PREBUILT_SHA256:
-        return "(C)"
-    return "(not shipped)"
-
-
-def _cmdline_has_exe(raw: bytes, prefix: str, *, exclude: frozenset[str] = frozenset()) -> bool:
-    """Whether any NUL-separated argv token names an exe under ``prefix``.
-
-    Matching whole argv tokens instead of the raw cmdline stops an unrelated
-    process that merely mentions the path inside one argument (an editor, a
-    log, ``ps``) from being mistaken for the game. Tokens whose file name is in
-    ``exclude`` are ignored."""
-    for token in raw.split(b"\0"):
-        if not token:
-            continue
-        text = token.decode("utf-8", "replace").lower()
-        if not text.startswith(prefix):
-            continue
-        if exclude and text.replace("/", "\\").rsplit("\\", 1)[-1] in exclude:
-            continue
-        return True
-    return False
-
-
-#: Session paths already handed to ``atexit`` this process (one hook each).
-_registered_ephemeral: set[Path] = set()
-
-
-def _register_ephemeral(path: Path) -> None:
-    """Ensure ``session.json`` is removed on process exit as a backstop.
-
-    The launch path deletes it in a ``finally``; this covers the case where the
-    whole launcher is closed while that thread is still unwinding (or blocked on
-    a detached child's inherited stdio). Each path is registered once per
-    process, so repeated launches do not pile up exit hooks.
-    """
-    target = Path(path)
-    if target in _registered_ephemeral:
-        return
-    _registered_ephemeral.add(target)
-    atexit.register(_unlink_quietly, target)
-
-
-def _write_private(path: Path, text: str) -> None:
-    """Atomically write a file that is 0600 from creation."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        fh.write(text)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
-
-
-class CznBackend(GameBackend):
+class CznBackend(
+    AuthMixin,
+    CredentialsMixin,
+    LaunchingMixin,
+    PrereqsMixin,
+    RunnerMixin,
+    StreamingMixin,
+    GameBackend,
+):
     unofficial_notice = True
 
     kind = KIND
     supports_remember_me = True
     supports_login = True
-
-    @staticmethod
-    def forget_saved_login(profile: str) -> None:
-        forget_saved_credential(profile)
-
-    @staticmethod
-    def drop_live_session(profile: str) -> None:
-        """Forget the login held in memory, so a profile added later under this name cannot
-        adopt the old account (#931). Removal calls it; turning Remember me off does not."""
-        _live_clear(profile)
 
     options = (
         Option("prefix", "Wine prefix", "path_dir", PREFIX_HELP),
@@ -544,252 +379,8 @@ class CznBackend(GameBackend):
         # (or drop it) and rewrite czn_auth.json without the secret.
         self._migrate_legacy_state()
 
-    # ---- paths -------------------------------------------------------------
-    def _auth_dir(self) -> Path:
-        return self.ctx.profile_dir("auth")
-
-    def _session_dir(self) -> Path:
-        """A private, host-only dir for the auth credential handoff.
-
-        ``$XDG_RUNTIME_DIR/nadare/<profile>/`` (0700) when the runtime dir is
-        set, otherwise the profile data dir. This is *not* used for
-        ``session.json``: the umu/Steam-Runtime sandbox does not mount
-        ``$XDG_RUNTIME_DIR`` (only a few sockets), so the game cannot read a
-        session there.
-        """
-        runtime = os.environ.get("XDG_RUNTIME_DIR")
-        if runtime:
-            base = Path(runtime) / "nadare" / _profile_slug(self.ctx.name)
-        else:
-            base = self._data_dir()
-        try:
-            base.mkdir(parents=True, exist_ok=True)
-            os.chmod(base, 0o700)
-        except OSError:
-            pass
-        return base
-
-    def _session(self) -> Path:
-        """The game session file, placed next to the stub executable.
-
-        The sandbox can read the directory the stub runs from (the proven
-        czn-linux ``tools/session.json`` layout); ``$XDG_RUNTIME_DIR`` is only
-        partially bind-mounted and is invisible to the game.
-        """
-        return self._stub().parent / "session.json"
-
-    # ---- credentials (keyring only, never plaintext) -----------------------
-    def _store(self) -> SecretStore:
-        """Token storage that refuses the plaintext fallback."""
-        return SecretStore(allow_fallback=False)
-
-    def _remember_enabled(self) -> bool:
-        return bool(self.ctx.profile.get("remember_me", False))
-
-    def set_remember(self, enabled: bool, persist_flag: bool = True) -> None:
-        """Toggle per-profile "Remember me"; turning it off wipes the keyring.
-
-        ``persist_flag=False`` keeps the caller (the Settings page) as the
-        single owner of the ``remember_me`` config write, while the credential
-        side effect still happens here.
-        """
-        enabled = bool(enabled)
-        if persist_flag:
-            self.ctx.set("remember_me", enabled)
-        if not enabled:
-            if not self._delete_credential():
-                # A locked keyring keeps the saved login; surface the failure
-                # instead of pretending Remember me (and the token) is gone.
-                raise BackendError(LOGOUT_KEYRING_NOTICE, 1)
-            return
-        # Persist the current live session immediately (if any): enabling the
-        # toggle must not require a fresh login/launch to save the token.
-        live = _live_get(self.ctx.name)
-        if live:
-            self._save_credential(live["refresh_token"], live.get("member_no"))
-        elif self._refresh_token:
-            self._save_credential(self._refresh_token, self._member_no)
-        elif not self._store().secure:
-            # Nothing can be saved until the keyring works; do not leave the
-            # box ticked without telling the user why the login will not last.
-            self._notify_remember_unavailable()
-
-    def _load_credential(self) -> dict[str, str] | None:
-        """Read the persisted credential, at most once per process.
-
-        ``status()`` polls frequently; the keyring must not be unlocked on
-        every call, so the first read is cached for the life of the process.
-        """
-        return _keyring_credential(self.ctx.name)
-
-    def _save_credential(self, refresh_token: str, member_no: str | None) -> None:
-        """Keep the live session in memory; persist only if remember is on.
-
-        The keyring entry is a single JSON blob holding *only* the launcher
-        refresh token and the member number. Access and game tokens are never
-        persisted.
-        """
-        if not refresh_token:
-            return
-        member = str(member_no or "")
-        self._refresh_token = refresh_token
-        self._member_no = member or None
-        _live_set(self.ctx.name, refresh_token, member)
-        if not self._remember_enabled():
-            return
-        store = self._store()
-        if not store.secure:
-            self._notify_remember_unavailable()
-            return
-        cred = {"refresh_token": refresh_token, "member_no": member}
-        wipes = _WIPES.get(self.ctx.name, 0)
-        try:
-            store.set(self.ctx.name, json.dumps(cred))
-        except SecretStoreError:
-            # STOVE has already rotated the token, so any entry still in the
-            # keyring is superseded: restoring it next start would only hit
-            # 44010. Drop it rather than leave a dead credential behind.
-            self._delete_credential()
-            self._notify_remember_unavailable()
-            return
-        if _WIPES.get(self.ctx.name, 0) != wipes:
-            # Remember me was turned off (or the account forgotten) while the write ran.
-            self._delete_credential()
-            return
-        _cache_keyring(self.ctx.name, cred)
-
-    def _delete_credential(self) -> bool:
-        """Delete the persisted credential; report whether the keyring refused.
-
-        A locked/unavailable keyring raises :class:`SecretStoreError`. The
-        in-memory state is still cleared by the caller (we are logged out), but
-        the persisted entry may survive, so the failure is surfaced rather than
-        silently reported as a successful removal.
-        """
-        deleted = True
-        _WIPES[self.ctx.name] = _WIPES.get(self.ctx.name, 0) + 1
-        # No default collection means nothing was ever stored; deleting would
-        # create the collection and pop the "Choose password for new keyring"
-        # dialog. Only False proves that, so None/True keep deleting as before.
-        if default_collection_exists() is not False:
-            try:
-                self._store().delete(self.ctx.name)
-            except SecretStoreError:
-                deleted = False
-        _cache_keyring(self.ctx.name, None)
-        return deleted
-
-    def logout(self) -> None:
-        """Forget the account everywhere: keyring, cache and process memory.
-
-        Runs under the rotation lock, so a renewal in progress (here or in another Nadare
-        command) cannot save the login again after it (#957).
-        """
-        with self._rotation_lock(wait=30):
-            deleted = self._delete_credential()
-            _live_clear(self.ctx.name)
-            self._refresh_token = None
-            self._member_no = None
-            self._restore_attempted = True
-            self._restored = False
-        if not deleted:
-            self.ctx.emit(Event("status", LOGOUT_KEYRING_NOTICE))
-            self.info(LOGOUT_KEYRING_NOTICE)
-        self.ctx.emit(Event("done", "Logged out of STOVE"))
-
-    def _notify_remember_unavailable(self) -> None:
-        if self._remember_notice_shown:
-            return
-        self._remember_notice_shown = True
-        self.ctx.emit(Event("status", _remember_notice(), data={"remember_unavailable": True}))
-
-    def _notify_mismatch(self) -> None:
-        self.ctx.emit(Event("status", MISMATCH_NOTICE))
-
-    def _handoff_path(self) -> Path:
-        return self._session_dir() / CREDENTIAL_HANDOFF
-
-    def _input_path(self) -> Path:
-        return self._session_dir() / CREDENTIAL_INPUT
-
-    def _read_handoff_credential(self) -> dict[str, str] | None:
-        path = self._handoff_path()
-        try:
-            raw = path.read_text(encoding="utf-8")
-        except OSError:
-            return None
-        try:
-            path.unlink()
-        except OSError:
-            pass
-        try:
-            data = json.loads(raw)
-        except ValueError:
-            return None
-        if not isinstance(data, dict) or not data.get("refresh_token"):
-            return None
-        return {
-            "refresh_token": str(data["refresh_token"]),
-            "member_no": str(data.get("member_no") or ""),
-        }
-
-    def _cleanup_stale_session(self) -> None:
-        """Drop session files left by a crash — never while our game runs."""
-        if self._running():
-            return
-        for path in (
-            self._session(),
-            self._data_dir() / "session.json",
-            self._session_dir() / "session.json",
-        ):
-            try:
-                path.unlink()
-            except OSError:
-                pass
-
-    def _migrate_legacy_state(self) -> None:
-        """Move a legacy plaintext ``launcher_refresh`` out of czn_auth.json."""
-        path = self._auth_dir() / "czn_auth.json"
-        try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return
-        if not isinstance(state, dict) or not state.get("launcher_refresh"):
-            return
-        refresh = str(state.pop("launcher_refresh"))
-        member_no = str(state.get("member_no") or "")
-        # Only keep it if the user opted in *and* the keyring is usable;
-        # otherwise the plaintext token is dropped (never remembered).
-        if self._remember_enabled():
-            try:
-                store = self._store()
-                if store.secure:
-                    cred = {"refresh_token": refresh, "member_no": member_no}
-                    store.set(self.ctx.name, json.dumps(cred))
-                    _cache_keyring(self.ctx.name, cred)
-            except SecretStoreError:
-                # A transient keyring failure must not destroy the only copy of
-                # the saved login: leave the plaintext token for a later attempt.
-                self._notify_remember_unavailable()
-                return
-        try:
-            _write_private(path, json.dumps(state, separators=(",", ":")))
-        except OSError:
-            pass
-
     def _qr_png(self) -> Path:
         return self._data_dir() / "czn_qr.png"
-
-    def _stub(self) -> Path:
-        return self.ctx.profile_dir("stub") / STUB_NAME
-
-    def _shipped_stub(self) -> tuple[Path, str, str]:
-        """``(asset, digest, label)`` of the shipped stub this profile should run."""
-        raw = os.environ.get("NADARE_CZN_STUB") or _profile_setting(self.ctx.profile, "pcsdk_stub")
-        choice = str(raw or "").strip().lower()
-        if choice == "c":
-            return STUB_C_PREBUILT, STUB_C_PREBUILT_SHA256, "C"
-        return STUB_PREBUILT, STUB_PREBUILT_SHA256, "Go"
 
     def _data_dir(self) -> Path:
         return self.ctx.data_dir()
@@ -799,11 +390,6 @@ class CznBackend(GameBackend):
 
     def _cache_dir(self) -> Path:
         return paths.cache_dir() / "czn"
-
-    def _stub_log(self) -> Path:
-        d = paths.logs_dir()
-        d.mkdir(parents=True, exist_ok=True)
-        return d / f"{self.ctx.name}-czn-stub.log"
 
     def prefix(self) -> Path:
         raw = str(self.ctx.profile.get("prefix") or "").strip()
@@ -838,16 +424,6 @@ class CznBackend(GameBackend):
             env["CZN_CREDENTIAL_IN"] = str(self._input_path())
         return env
 
-    def _stage_input_credential(self) -> None:
-        """Write the live token to a 0600 file the worker reads and deletes."""
-        if not self._refresh_token:
-            return
-        path = self._input_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({"refresh_token": self._refresh_token}, f)
-
     @staticmethod
     def _win(path: Path) -> str:
         return "Z:" + str(path).replace("/", os.sep).replace("/", "\\")
@@ -866,446 +442,6 @@ class CznBackend(GameBackend):
         except ValueError:
             return self._win(path)
         return "C:\\" + "\\".join(rel.parts)
-
-    def _fail(
-        self,
-        what: str,
-        code: int,
-        messages: dict[int, str] | None = None,
-        cause: BaseException | None = None,
-    ) -> None:
-        table = EXIT_MESSAGES if messages is None else messages
-        raise BackendError(table.get(code, f"{what} failed (exit {code})"), code) from cause
-
-    def _fail_auth(self, what: str, code: int) -> None:
-        """Report an auth-worker failure, keeping its real message when useful."""
-        if code == 2 and self._last_auth_error:
-            raise BackendError(
-                f"STOVE returned an unexpected error: {self._last_auth_error}. "
-                "Try again in a minute; if it keeps happening, open the logs.",
-                code,
-            )
-        self._fail(what, code, AUTH_EXIT_MESSAGES)
-
-    # ---- event plumbing ----------------------------------------------------
-    def _emit_json_event(self, obj: dict[str, Any]) -> None:
-        name = obj.get("event")
-        if name == "qr":
-            self.ctx.emit(
-                Event(
-                    "step",
-                    "Scan the QR code with the STOVE app",
-                    data={
-                        "png": obj.get("png"),
-                        "url": obj.get("url"),
-                        "timeout": obj.get("timeout"),
-                    },
-                )
-            )
-        elif name == "qr_status":
-            state = str(obj.get("state") or "")
-            qr_state = _QR_STATE.get(state, "waiting")
-            self.ctx.emit(
-                Event(
-                    "step",
-                    _QR_MESSAGE[qr_state],
-                    data={"qr_state": qr_state, "state": state},
-                )
-            )
-        elif name == "logged_in":
-            self.ctx.emit(Event("step", "Logged in to STOVE"))
-        elif name == "credential":
-            # Internal handoff only: the launcher refresh token must never
-            # reach the UI. The backend reads it from the 0600 handoff file.
-            return
-        elif name == "session":
-            self.ctx.emit(
-                Event(
-                    "step",
-                    "Game token ready",
-                    data={
-                        "path": obj.get("path"),
-                        "expires_at": obj.get("expires_at"),
-                        "expires_in": obj.get("expires_in"),
-                    },
-                )
-            )
-        elif name == "status":
-            self.ctx.emit(Event("status", "STOVE status", data=obj))
-        elif name == "progress":
-            done, total = obj.get("done"), obj.get("total")
-            frac = (
-                (done / total)
-                if isinstance(done, int) and isinstance(total, int) and total
-                else None
-            )
-            self.ctx.emit(
-                Event(
-                    "progress",
-                    str(obj.get("stage", "download")),
-                    progress=frac,
-                    data={"done": done, "total": total},
-                )
-            )
-        elif name == "installed":
-            self.ctx.emit(
-                Event(
-                    "step",
-                    f"Runner installed: {obj.get('tag', '')}",
-                    data={"path": obj.get("path"), "tag": obj.get("tag")},
-                )
-            )
-        elif name == "error":
-            message = mask(str(obj.get("message", "")))
-            # ``_run_auth`` uses this to tell an expired QR / rejected sign-in
-            # (exit 3) from a STOVE/API error (exit 2) in the final dialog.
-            self._last_auth_error = message
-            self.ctx.emit(Event("error", message, data={"kind": obj.get("kind")}))
-        else:
-            self.info(mask(str(obj)))
-
-    def _emit_text(self, line: str) -> None:
-        line = line.rstrip()
-        if not line.strip():
-            return
-        self._watch.feed(line)
-        m = _FILE_PROGRESS.match(line)
-        if m:
-            done, total = int(m.group(1)), int(m.group(2))
-            self.ctx.emit(
-                Event(
-                    "progress",
-                    line.strip(),
-                    progress=(done / total if total else None),
-                    data={"done": done, "total": total},
-                )
-            )
-            return
-        tag = line.lstrip()[:3]
-        kind = "step" if tag in ("[*]", "[+]") else ("error" if tag == "[!]" else "log")
-        self.ctx.emit(Event(kind, mask(line.strip())))
-
-    def _explain(self, message: str) -> str:
-        """Add the userns and/or failed-umu-setup hint to a failure message."""
-        return self._watch.explain(message)
-
-    def _stream(
-        self,
-        cmd: list[str],
-        env: dict[str, str],
-        *,
-        parse_json: bool = False,
-        collect: list[dict[str, Any]] | None = None,
-        cwd: Path | None = None,
-        kill_game: bool = False,
-        beat_as_log: bool = False,
-        beat_until: Callable[[], bool] | None = None,
-    ) -> int:
-        """Run ``cmd``, streaming its output as events.
-
-        Under :meth:`_activity_label` a silent child gets a heartbeat line every
-        ``HEARTBEAT_SECONDS``. ``beat_as_log`` emits plain log lines instead of
-        busy-bar progress events (the game page must not show a busy bar while
-        a game runs); ``beat_until`` stops the beats once it returns true.
-        """
-        self.ctx.emit(Event("log", "$ " + " ".join(cmd)))
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                text=True,
-                bufsize=1,
-                env=env,
-                cwd=str(cwd) if cwd else None,
-                start_new_session=True,
-            )
-        except OSError as e:
-            raise BackendError(f"cannot start {cmd[0]!r}: {e}") from e
-        if proc.stdout is None:
-            raise BackendError("child process has no stdout pipe")
-        fd = proc.stdout.fileno()
-        pending = b""
-        label = self._activity
-        started = last_beat = time.monotonic()
-        if label and not beat_as_log:
-            # A bar that visibly moves, so a silent installer is not mistaken for a hang.
-            self.ctx.emit(
-                Event("progress", f"{label}…", data={"indeterminate": True})
-            )
-        try:
-            # Poll with select so Cancel is honoured while the child is silent
-            # (a running game prints nothing). Raw reads keep select reliable:
-            # a buffered text wrapper can hold lines select cannot see.
-            while True:
-                if self.ctx.cancel.cancelled:
-                    self._abort_child(proc, kill_game=kill_game)
-                    raise Cancelled()
-                try:
-                    ready, _, _ = select.select([fd], [], [], 0.25)
-                except (OSError, ValueError):
-                    break
-                if not ready:
-                    # Plain Wine leaves wineserver/service processes running
-                    # that inherit our pipe, so EOF may never come. Once the
-                    # process we started has exited we are done.
-                    if proc.poll() is not None:
-                        break
-                    now = time.monotonic()
-                    if label and now - last_beat >= HEARTBEAT_SECONDS:
-                        last_beat = now
-                        if beat_until is not None and beat_until():
-                            label = None  # up and running: no more "still starting" lines
-                        elif beat_as_log:
-                            self.ctx.emit(
-                                Event(
-                                    "log",
-                                    f"{label}… {int(now - started)} s "
-                                    "(the first launch through umu downloads the Steam "
-                                    "Linux Runtime and can take a few minutes)",
-                                )
-                            )
-                        else:
-                            self.ctx.emit(
-                                Event(
-                                    "progress",
-                                    f"{label}… {int(now - started)} s "
-                                    "(the installer prints nothing while it works)",
-                                    data={"indeterminate": True},
-                                )
-                            )
-                    continue
-                try:
-                    chunk = os.read(fd, 65536)
-                except OSError:
-                    break
-                if not chunk:
-                    break  # EOF: every writer closed the pipe
-                last_beat = time.monotonic()
-                pending += chunk
-                *lines, pending = pending.split(b"\n")
-                for raw in lines:
-                    self._handle_line(
-                        raw.decode("utf-8", "replace").rstrip("\r"), parse_json, collect
-                    )
-            if pending:
-                tail = pending.decode("utf-8", "replace").rstrip("\r")
-                self._handle_line(tail, parse_json, collect)
-        finally:
-            if proc.stdout is not None:
-                proc.stdout.close()
-        return proc.wait()
-
-    def _handle_line(
-        self, line: str, parse_json: bool, collect: list[dict[str, Any]] | None
-    ) -> None:
-        if parse_json and line.lstrip().startswith("{"):
-            try:
-                obj = json.loads(line)
-            except ValueError:
-                obj = None
-            if isinstance(obj, dict) and "event" in obj:
-                if collect is not None:
-                    collect.append(obj)
-                self._emit_json_event(obj)
-                return
-        self._emit_text(line)
-
-    def _abort_child(self, proc: subprocess.Popen, *, kill_game: bool = False) -> None:
-        """Stop a cancelled child *and* the game it started.
-
-        ``proton run`` hands the real game to a wineserver that lives in its own
-        session, so killing the wrapper's process group alone leaves it running.
-        """
-        self._kill(proc)
-        if not kill_game:
-            return
-        try:
-            self.stop()
-        except Exception:  # noqa: BLE001 - cancelling must always finish
-            pass
-
-    def _run_module(
-        self,
-        module: str,
-        args: list[str],
-        *,
-        parse_json: bool = False,
-        collect: list[dict[str, Any]] | None = None,
-        extra_env: dict[str, str] | None = None,
-    ) -> int:
-        env = self._env()
-        if extra_env:
-            env.update(extra_env)
-        return self._stream(
-            [sys.executable, "-m", module, *args],
-            env,
-            parse_json=parse_json,
-            collect=collect,
-        )
-
-    @staticmethod
-    def _kill(proc: subprocess.Popen) -> None:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                proc.kill()
-
-    # ---- runner ------------------------------------------------------------
-    def _installed_runner(self, rid: str) -> Path | None:
-        root = self._runners_dir()
-        if not root.is_dir():
-            return None
-        exact = root / rid
-        if rid and not rid.startswith(".") and (exact / "proton").is_file():
-            return exact  # "GE-Proton9-1" must not resolve to GE-Proton9-10
-        want = _RUNNER_MATCH.get(rid, rid).lower()
-        cands = [
-            d
-            for d in root.iterdir()
-            if d.is_dir()
-            and not d.name.startswith(".")
-            and (d / "proton").is_file()
-            and want in d.name.lower()
-        ]
-        def _key(d: Path) -> list[int]:
-            return [int(n) for n in re.findall(r"\d+", d.name)]
-
-        return max(cands, key=lambda d: (_key(d), d.name)) if cands else None
-
-    def _installed_pinned(self, rid: str) -> Path | None:
-        """The already-installed *tested* release of ``rid``, if there is one."""
-        tag = core_runners.pinned_tag(rid)
-        root = self._runners_dir()
-        if not tag or not root.is_dir():
-            return None
-        for d in sorted(root.iterdir()):
-            if (
-                d.is_dir()
-                and not d.name.startswith(".")
-                and (d / "proton").is_file()
-                and core_runners.matches_tag(d.name, tag)
-            ):
-                return d
-        return core_runners.installed_pinned(rid)
-
-    def _pinned_runner(self, rid: str) -> Path:
-        """The tested release of ``rid``: reuse it when installed, else download it once.
-
-        A newer or older untested build that happens to be installed is not used
-        in its place. Only when the pinned release cannot be downloaded (offline)
-        does an installed build of the same family stand in, with a notice.
-        """
-        pinned = self._installed_pinned(rid)
-        if pinned is not None:
-            return pinned
-        try:
-            return self._download_runner(rid, latest=False)
-        except BackendError as exc:
-            if exc.code == _RUNNER_INTEGRITY_EXIT:
-                raise  # a tampered or corrupt download must not fall back quietly
-            fallback = self._installed_runner(rid)
-            if fallback is None:
-                raise
-            self.ctx.emit(
-                Event(
-                    "status",
-                    f"could not download the tested {rid} runner; using the installed "
-                    f"{fallback.name} (untested)",
-                )
-            )
-            return fallback
-
-    def _download_runner(self, rid: str, latest: bool) -> Path:
-        self.ctx.emit(Event("step", f"Downloading runner {rid}…"))
-        try:
-            return core_runners.install(
-                rid, latest=latest, emit=self.ctx.emit, cancel=self.ctx.cancel
-            )
-        except Cancelled:
-            raise
-        except net.IntegrityError as exc:
-            self._fail(f"runner {rid}", _RUNNER_INTEGRITY_EXIT, RUNNER_EXIT_MESSAGES, exc)
-        except (net.DownloadError, OSError) as exc:
-            self._fail(f"runner {rid}", 4, RUNNER_EXIT_MESSAGES, exc)
-        except core_runners.RunnerError as exc:
-            # "cannot query/fetch" is GitHub being unreachable; the rest is a
-            # refusal (untrusted host, no tarball, no checksum to verify against).
-            offline = str(exc).startswith(("cannot query", "cannot fetch"))
-            self._fail(f"runner {rid}", 4 if offline else 1, RUNNER_EXIT_MESSAGES, exc)
-        raise AssertionError("unreachable")  # pragma: no cover - _fail always raises
-
-    def resolve_runner(self) -> tuple[str, str]:
-        """Return ``(protonpath, kind)`` where kind is ``proton`` or ``wine``.
-
-        ``profile['runner']`` may be a Proton directory, a runner id
-        (``dwproton``/``cachyos``/``ge``) or ``GE-Proton``; empty falls back to
-        the pinned tested release (DW-Proton).
-        """
-        rid = str(self.ctx.profile.get("runner") or "").strip() or DEFAULT_RUNNER
-        if rid in ("wine", "system", "none"):
-            return "", "wine"
-        if rid in ("dwproton", "cachyos", "ge"):
-            return str(self._pinned_runner(rid)), "proton"
-        if rid.upper().startswith("GE-PROTON"):
-            found = self._installed_runner(rid)
-            return (str(found) if found is not None else rid), "proton"
-        p = Path(os.path.expanduser(rid))
-        if p.is_dir() and (p / "proton").is_file():
-            return str(p), "proton"
-        raise BackendError(f"unknown or missing runner: {rid!r}")
-
-    def runner_name(self) -> str:
-        try:
-            proton, kind = self.resolve_runner()
-        except BackendError:
-            return ""
-        if kind == "wine":
-            return "wine"
-        try:
-            return (Path(proton) / "version").read_text().split()[1]
-        except (OSError, IndexError):
-            return Path(proton).name
-
-    # ---- running-state -----------------------------------------------------
-    def _game_pids(self, *, helpers: bool = True) -> list[int]:
-        prefix = ("Z:" + str(self.game_dir() / "bin").replace("/", "\\") + "\\").lower()
-        uid = os.getuid()
-        pids: list[int] = []
-        for d in Path("/proc").iterdir():
-            if not d.name.isdigit():
-                continue
-            try:
-                # Only processes owned by this user can be the game; this stops
-                # another user from planting a matching argv and being counted.
-                if d.stat().st_uid != uid:
-                    continue
-                raw = (d / "cmdline").read_bytes()
-            except OSError:
-                continue
-            exclude = frozenset() if helpers else GAME_HELPER_EXES
-            if _cmdline_has_exe(raw, prefix, exclude=exclude):
-                pids.append(int(d.name))
-        return pids
-
-    def _game_running(self) -> bool:
-        """The game itself is running (a lingering crash handler is not)."""
-        return bool(self._game_pids(helpers=False))
-
-    def _running_elsewhere(self) -> bool:
-        """Another Flatpak instance launched this prefix's game."""
-        return sandbox.in_flatpak() and runlock.running(self.prefix())
-
-    def _running(self) -> bool:
-        return self._game_running() or self._running_elsewhere()
 
     # ---- status ------------------------------------------------------------
     def status(self) -> Status:
@@ -1350,342 +486,6 @@ class CznBackend(GameBackend):
             },
         )
 
-    def _session_info(self) -> dict[str, Any] | None:
-        try:
-            d = json.loads(self._session().read_text())
-            exp = int(d.get("expire_time", "0")) // 1000
-            nickname = str(d.get("member_nickname") or "")
-            if nickname == "0":
-                nickname = ""
-            return {
-                "path": str(self._session()),
-                "expires_at": exp,
-                "valid": bool(d.get("access_token")) and exp > time.time(),
-                "nickname": nickname,
-            }
-        except Exception:
-            return None
-
-    # ---- install / update --------------------------------------------------
-    def _ensure_prefix(self) -> None:
-        prefix = self.prefix()
-        if (prefix / "drive_c").is_dir():
-            return
-        # Only a tree this call creates is cleaned up on failure: an existing prefix (even a
-        # half-built one the user pointed us at) is never deleted.
-        if prefix.exists() and not prefix.is_dir():
-            # A file where the prefix goes is a clear error, not a raw FileExistsError (#1207 b011).
-            raise BackendError(
-                f"{prefix} is a file, not a folder: move it away or choose another place", 1
-            )
-        created = not prefix.exists()
-        try:
-            # An existing empty folder is as good as a new one; one holding anything else is
-            # the user's, and must never be stamped as Nadare's (uninstall deletes stamped ones).
-            ours = created or not any(prefix.iterdir())
-        except OSError:
-            ours = False
-        prefix.mkdir(parents=True, exist_ok=True)
-        self.ctx.emit(Event("step", f"Creating the Wine prefix at {prefix}…"))
-        try:
-            with self._activity_label("Creating the Wine prefix"):
-                code = self._run_in_prefix(["wineboot", "-u"])
-            if code != 0 or not (prefix / "drive_c").is_dir():
-                raise BackendError(
-                    self._explain(f"prefix creation failed (exit {code})"),
-                    1,
-                )
-        except BaseException:
-            # A failed or cancelled wineboot can leave drive_c behind, which the next run
-            # would take for a finished prefix.
-            if created:
-                shutil.rmtree(prefix, ignore_errors=True)
-            raise
-        self._write_prefix_markers(prefix, self.runner_name(), created=ours)
-
-    @staticmethod
-    def _write_prefix_markers(prefix: Path, runner: str, *, created: bool = True) -> None:
-        """Record who made the prefix without writing through a symlink planted at a name.
-
-        ``created=False`` (a folder that already held the user's files) records only the runner.
-        """
-        markers = [("czn-runner", runner + "\n")]
-        if created:
-            markers.insert(0, (PREFIX_MARKER, "created by Nadare\n"))
-        try:
-            for name, text in markers:
-                fd, tmp = tempfile.mkstemp(dir=prefix, prefix=f".{name}.")
-                try:
-                    with os.fdopen(fd, "w") as handle:
-                        handle.write(text)
-                    os.replace(tmp, prefix / name)
-                except OSError:
-                    with contextlib.suppress(OSError):
-                        os.unlink(tmp)
-                    raise
-        except OSError:
-            pass
-
-    @staticmethod
-    def _stub_connected(log: Path) -> bool:
-        """True once the stub reports the game opened the launcher pipe."""
-        try:
-            text = log.read_text(errors="replace")
-        except OSError:
-            return False
-        return "game connected" in text or "heartbeats started" in text
-
-    def _webview2_installed(self) -> bool:
-        """Whether the WebView2 runtime is in the prefix and registered, not just on disk."""
-        return webview2.installed(self.prefix()) and webview2.registered(self.prefix())
-
-    def _webview2_pin(self) -> str:
-        """Resolve the expected installer SHA-256 from a trusted source."""
-        return webview2.resolve_pin(self.ctx.profile, WEBVIEW2_SHA256)
-
-    def _webview2_overridden(self) -> bool:
-        """True when the user pinned a hash explicitly (env or profile)."""
-        return webview2.overridden(self.ctx.profile)
-
-    @staticmethod
-    def _webview2_index_pins() -> set[str]:
-        """Installer hashes published in the Nadare index (empty on any error)."""
-        return webview2.index_pins()
-
-    @staticmethod
-    def _webview2_index_source() -> str:
-        """The immutable per-build installer URL published in the index."""
-        return webview2.index_source()
-
-    def _verify_webview2(self, path: Path) -> None:
-        """Refuse a WebView2 installer that does not match the pinned SHA-256."""
-        webview2.verify(
-            path,
-            profile=self.ctx.profile,
-            cancel=self.ctx.cancel,
-            constant=WEBVIEW2_SHA256,
-            index_pins_fn=self._webview2_index_pins,
-            overridden_fn=self._webview2_overridden,
-        )
-
-    def _download_webview2(self, url: str, tmp: Path, inst: Path) -> None:
-        """Download ``url`` to ``tmp``, verify it, and move it to ``inst``."""
-        webview2.download(
-            url,
-            tmp,
-            inst,
-            verify_fn=self._verify_webview2,
-            emit=self.ctx.emit,
-            cancel=self.ctx.cancel,
-        )
-
-    def _ensure_webview2(self) -> None:
-        webview2.ensure(
-            self.prefix(),
-            profile=self.ctx.profile,
-            cache_dir_fn=self._cache_dir,
-            run_in_prefix=self._run_in_prefix,
-            emit=self.ctx.emit,
-            cancel=self.ctx.cancel,
-            constant=WEBVIEW2_SHA256,
-            url=WEBVIEW2_URL,
-            installed_fn=self._webview2_installed,
-            pin_fn=self._webview2_pin,
-            index_pins_fn=self._webview2_index_pins,
-            index_source_fn=self._webview2_index_source,
-            overridden_fn=self._webview2_overridden,
-            verify_fn=self._verify_webview2,
-            download_fn=self._download_webview2,
-            installer_environment=self._installer_environment,
-            activity_label=self._activity_label,
-            explain=self._explain,
-        )
-
-    # ---- Visual C++ runtime (shared in nadare.core.vcredist) ---------------
-    def _vcredist_installed(self) -> bool:
-        """Whether the real (not Wine-builtin) VC++ runtime is in the prefix."""
-        return vcredist.installed(self.prefix())
-
-    def _vcredist_pin(self) -> str:
-        """Resolve the expected installer SHA-256 from a trusted source."""
-        return vcredist.resolve_pin(self.ctx.profile, VCREDIST_SHA256)
-
-    def _vcredist_overridden(self) -> bool:
-        """True when the user pinned a hash explicitly (env or profile)."""
-        return vcredist.overridden(self.ctx.profile)
-
-    @staticmethod
-    def _vcredist_index_pins() -> set[str]:
-        """Installer hashes published in the Nadare index (empty on any error)."""
-        return vcredist.index_pins()
-
-    @staticmethod
-    def _vcredist_index_source() -> str:
-        """The immutable per-build installer URL published in the index."""
-        return vcredist.index_source()
-
-    def _verify_vcredist(self, path: Path) -> None:
-        """Refuse an installer that matches no accepted pin (deletes it)."""
-        vcredist.verify(
-            path,
-            profile=self.ctx.profile,
-            emit=self.ctx.emit,
-            cancel=self.ctx.cancel,
-            constant=VCREDIST_SHA256,
-            index_pins_fn=self._vcredist_index_pins,
-            overridden_fn=self._vcredist_overridden,
-        )
-
-    def _download_vcredist(self, url: str, tmp: Path, inst: Path) -> None:
-        """Download ``url`` to ``tmp``, verify it, and move it to ``inst``."""
-        vcredist.download(
-            url,
-            tmp,
-            inst,
-            verify_fn=self._verify_vcredist,
-            emit=self.ctx.emit,
-            cancel=self.ctx.cancel,
-        )
-
-    def _install_vcredist(self) -> None:
-        """Download, verify and run the VC++ redistributable (may raise)."""
-        with self._installer_environment(), self._activity_label(
-            "Installing the Visual C++ runtime"
-        ):
-            self._install_vcredist_inner()
-
-    def _install_vcredist_inner(self) -> None:
-        try:
-            vcredist.install(
-                self.prefix(),
-                profile=self.ctx.profile,
-                cache_dir=self._cache_dir(),
-                run_in_prefix=self._run_in_prefix,
-                emit=self.ctx.emit,
-                cancel=self.ctx.cancel,
-                constant=VCREDIST_SHA256,
-                index_pins_fn=self._vcredist_index_pins,
-                index_source_fn=self._vcredist_index_source,
-                overridden_fn=self._vcredist_overridden,
-                verify_fn=self._verify_vcredist,
-                download_fn=self._download_vcredist,
-            )
-        except vcredist.StepSkipped:
-            raise  # the user chose Skip: ensure carries on without the runtime
-        except BackendError as e:
-            raise BackendError(self._explain(e.message), e.code) from e
-
-    def _ensure_vcredist(self) -> None:
-        """Best-effort VC++ runtime install; never aborts the caller.
-
-        Always runs for CZN (it is not a user setting; an old ``vcredist: false`` in
-        a profile is ignored). Only a user cancellation propagates.
-        """
-        with self._installer_environment():
-            vcredist.ensure(
-                self.prefix(),
-                profile=self.ctx.profile,
-                cache_dir=self._cache_dir(),
-                run_in_prefix=self._run_in_prefix,
-                emit=self.ctx.emit,
-                cancel=self.ctx.cancel,
-                constant=VCREDIST_SHA256,
-                index_pins_fn=self._vcredist_index_pins,
-                index_source_fn=self._vcredist_index_source,
-                overridden_fn=self._vcredist_overridden,
-                verify_fn=self._verify_vcredist,
-                download_fn=self._download_vcredist,
-                install_fn=self._install_vcredist,
-            )
-
-    def _ensure_stub(self) -> Path:
-        stub = self._stub()
-        source, digest, _ = self._shipped_stub()
-        if stub.is_file():
-            return self._refresh_stub(stub)
-        if self._install_prebuilt_stub(stub, source, digest):
-            self._note_stub(stub)
-            return stub
-        script = Path(__file__).with_name("build_stub.sh")
-        if not script.is_file():
-            raise BackendError("PCSDK stub is missing and build_stub.sh was not found", 1)
-        stub.parent.mkdir(parents=True, exist_ok=True)
-        env = self._env()
-        env["CZN_STUB_OUT"] = str(stub)
-        self.ctx.emit(Event("step", "Building the PCSDK stub (mingw-w64)…"))
-        code = self._stream(["bash", str(script)], env)
-        if code != 0 or not stub.is_file():
-            raise BackendError("PCSDK stub build failed (install mingw-w64)", 1)
-        self._note_stub(stub)
-        return stub
-
-    def _note_stub(self, stub: Path) -> None:
-        """Log which stub this profile runs; the log header names the build, this names the stub."""
-        sha, shipped = stub_identity(stub)
-        if sha is not None:
-            kind = "the shipped one" if shipped else "not the shipped one"
-            self.info(f"PCSDK stub {_stub_label(stub)}: sha256 {sha}… ({kind})")
-
-    def _refresh_stub(self, stub: Path) -> Path:
-        """Keep a profile's stub in step with the selected shipped one, never losing the old copy.
-
-        A copy made by an older Nadare (or swapped in by hand) would otherwise run forever;
-        that includes the other shipped build when the profile switched between them.
-        """
-        source, digest, _ = self._shipped_stub()
-        try:
-            current = hashlib.sha256(stub.read_bytes()).hexdigest()
-        except OSError:
-            return stub  # unreadable: let the launch report whatever is wrong with it
-        sha = current[:12]
-        if current == digest:
-            self._note_stub(stub)
-            return stub
-        backup = stub.with_name(stub.name + ".old")
-        try:
-            os.replace(stub, backup)
-        except OSError:
-            self._note_stub(stub)
-            return stub
-        if self._install_prebuilt_stub(stub, source, digest):
-            self.info(
-                f"PCSDK stub {_stub_label(stub)}: sha256 {sha}… differed from the shipped one; "
-                f"replaced it (the old copy is kept as {backup.name})"
-            )
-            return stub
-        try:
-            os.replace(backup, stub)
-        except OSError as exc:
-            raise BackendError(f"could not restore the PCSDK stub: {exc}", 1) from exc
-        self.info(
-            f"PCSDK stub: sha256 {sha}… differs from the shipped one; kept "
-            "(no verified copy to replace it)"
-        )
-        return stub
-
-    @staticmethod
-    def _install_prebuilt_stub(
-        dest: Path, source: Path | None = None, digest: str | None = None
-    ) -> bool:
-        """Copy the bundled stub to ``dest`` if present and digest-verified."""
-        source = STUB_PREBUILT if source is None else source
-        digest = STUB_PREBUILT_SHA256 if digest is None else digest
-        try:
-            data = source.read_bytes()
-        except OSError:
-            return False
-        if hashlib.sha256(data).hexdigest() != digest:
-            return False
-        try:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            tmp = dest.with_name(dest.name + ".part")
-            tmp.write_bytes(data)
-            tmp.chmod(0o755)
-            tmp.replace(dest)
-        except OSError:
-            return False
-        return True
-
     def install(self) -> None:
         if self._running():
             self._fail("install", 8)
@@ -1725,6 +525,30 @@ class CznBackend(GameBackend):
                 f"{len(bad)} game file(s) are still damaged: {shown}. "
                 "Try again, or reinstall the game."
             )
+        if self.installed():
+            # The parts Verify names must be rebuilt too, not only the downloaded files.
+            # Checked directly: verify() would hash every game file again.
+            if not self._stub().is_file():
+                self._ensure_stub()
+            if not self._webview2_installed():
+                self._ensure_webview2()
+            remaining = [
+                name
+                for name, ok in (
+                    ("stub", self._stub().is_file()),
+                    ("webview2", self._webview2_installed()),
+                )
+                if not ok
+            ]
+            if remaining:
+                self.ctx.emit(
+                    Event(
+                        "done",
+                        "Repair finished, but these checks still fail: "
+                        + ", ".join(remaining),
+                    )
+                )
+                return
         self.ctx.emit(Event("done", "All game files check out"))
 
     def remake_prefix(self) -> None:
@@ -1764,580 +588,11 @@ class CznBackend(GameBackend):
             )
         )
 
-    # ---- login -------------------------------------------------------------
-    def login(self) -> None:
-        with self._rotation_lock(wait=10):
-            self._login_unlocked()
-
-    def _login_unlocked(self) -> None:
-        png = self._qr_png()
-        png.unlink(missing_ok=True)
-        self._auth_dir().mkdir(parents=True, exist_ok=True)
-        # A successful login supersedes any startup restore for this process.
-        self._restore_attempted = True
-        session = self._session()
-        # M2: auth must be able to write --out even before the stub exists.
-        session.parent.mkdir(parents=True, exist_ok=True)
-        # M1: the game token minted by login must not outlive the operation.
-        _register_ephemeral(session)
-        try:
-            code, handoff = self._run_auth(
-                ["login", "--out", str(session), "--qr-timeout", "300", "--qr-png", str(png)]
-            )
-            # M2: renew() already rotated and handed off the credential before a
-            # later step (e.g. write_session_json) could fail; ingest it first so
-            # a successful STOVE rotation is never dropped.
-            if handoff:
-                self._save_credential(handoff["refresh_token"], handoff.get("member_no"))
-        finally:
-            png.unlink(missing_ok=True)
-            _unlink_quietly(session)
-        if code != 0:
-            self._fail_auth("login", code)
-        self.ctx.emit(Event("done", "Logged in to STOVE"))
-
     # ---- the game's terms of service --------------------------------------
     #: Shown by the GUI when a login or launch stops because the terms are not accepted.
     TERMS_MESSAGE = AUTH_EXIT_MESSAGES[5]
     #: STOVE's page for agreeing to them, for users who prefer their browser.
     TERMS_URL = TERMS_URL
-
-    def _require_login_for_terms(self) -> None:
-        if not self._refresh_token:
-            raise BackendError("Log in to STOVE first, then Nadare can show the terms.", 3)
-
-    def _keep_terms_handoff(self, handoff: dict[str, str] | None) -> None:
-        """Store the rotated credential, but never one that belongs to another account."""
-        if not handoff:
-            return
-        member = handoff.get("member_no") or ""
-        if self._member_no and member and member != self._member_no:
-            self._forget_credential()
-            raise BackendError(
-                "The STOVE account changed since you logged in. Log in again.", 3
-            )
-        self._save_credential(handoff["refresh_token"], member or self._member_no)
-
-    def terms(self) -> dict[str, Any]:
-        """The terms this account still has to agree to.
-
-        Returns ``{"pending", "documents", "missing", "member_no"}``: ``missing`` lists pending
-        terms STOVE gave no text for (the caller must not ask the user to agree while any), and
-        ``member_no`` names the account these terms were read for. Renews the login (STOVE
-        rotates the token), so it runs under the same lock as a launch. Nothing is agreed here.
-        """
-        with self._rotation_lock(wait=30):
-            self._adopt_newer_credential()
-            self._require_login_for_terms()
-            events: list[dict[str, Any]] = []
-            code, handoff = self._run_auth(["terms"], collect=events)
-            self._keep_terms_handoff(handoff)
-        if code != 0:
-            self._fail_auth("terms", code)
-        found = [e for e in events if e.get("event") == "terms"]
-        documents = found[-1].get("documents") if found else None
-        if not found or not isinstance(documents, list):
-            raise BackendError(
-                "STOVE did not return the game's terms. Try again in a minute, or open "
-                + TERMS_URL
-                + " in your browser.",
-                2,
-            )
-        missing = found[-1].get("missing")
-        return {
-            "pending": bool(found[-1].get("pending")),
-            "documents": documents,
-            "missing": missing if isinstance(missing, list) else [],
-            "member_no": self._member_no,
-        }
-
-    def accept_terms(self, expect_member: str | None = None) -> None:
-        """Agree to the game's terms for this account. Call only after the user said yes.
-
-        ``expect_member`` is the account :meth:`terms` showed; if another account is logged in
-        by now nothing is sent.
-        """
-        with self._rotation_lock(wait=30):
-            self._adopt_newer_credential()
-            self._require_login_for_terms()
-            if expect_member and self._member_no and str(self._member_no) != str(expect_member):
-                raise BackendError(
-                    "A different STOVE account is logged in now. Open the terms again.", 3
-                )
-            code, handoff = self._run_auth(["accept-terms", "--agree"])
-            self._keep_terms_handoff(handoff)
-        if code != 0:
-            self._fail_auth("accept the terms", code)
-        self.ctx.emit(Event("done", "Terms accepted"))
-
-    def _run_auth(
-        self, args: list[str], collect: list[dict[str, Any]] | None = None
-    ) -> tuple[int, dict[str, str] | None]:
-        """Run the auth worker and read its 0600 credential handoff."""
-        self._last_auth_error = None
-        handoff = self._handoff_path()
-        # ``credential.json.tmp`` is the worker's write-then-replace staging
-        # file and holds the same rotating token: sweep it with the handoff.
-        leftovers = (
-            handoff,
-            handoff.with_name(handoff.name + ".tmp"),
-            self._input_path(),
-        )
-        for leftover in leftovers:
-            _unlink_quietly(leftover)
-        try:
-            self._stage_input_credential()
-            try:
-                code = self._run_module(
-                    AUTH_MODULE,
-                    [*args, "--json"],
-                    parse_json=True,
-                    collect=collect,
-                    extra_env=self._auth_env(),
-                )
-            except BaseException:
-                # A rotation already handed off must survive a cancel/crash.
-                data = self._read_handoff_credential()
-                if data:
-                    self._save_credential(data["refresh_token"], data.get("member_no"))
-                raise
-            return code, self._read_handoff_credential()
-        finally:
-            # Never leave the credential handoff on disk, even if the worker
-            # crashed or we are cancelled mid-run.
-            for leftover in leftovers:
-                _unlink_quietly(leftover)
-
-    def _forget_credential(self) -> None:
-        """Drop the stored and in-memory credential (keyring, live cache, ids)."""
-        self._delete_credential()
-        _live_clear(self.ctx.name)
-        self._refresh_token = None
-        self._member_no = None
-
-    @contextlib.contextmanager
-    def _rotation_lock(self, wait: float):
-        """Serialise token rotation for this profile across processes (#28).
-
-        STOVE rotates the refresh token on every sign-in, so two processes
-        renewing the same chain would leave one with a dead token.
-        """
-        lock = process.ProfileLock(self.ctx.name, wait=wait)
-        try:
-            lock.acquire()
-        except process.ProfileLockError:
-            raise BackendError(
-                "Another Nadare window or command is signing this account in. "
-                "Wait a moment and try again.",
-                1,
-            ) from None
-        try:
-            yield
-        finally:
-            lock.release()
-
-    def _adopt_newer_credential(self) -> None:
-        """Under the lock, prefer the keyring token another process just rotated."""
-        if not self._remember_enabled():
-            return
-        try:
-            cred = _read_keyring(self.ctx.name)
-        except SecretStoreError:
-            return
-        if cred and cred["refresh_token"] != self._refresh_token:
-            self._refresh_token = cred["refresh_token"]
-            self._member_no = cred["member_no"] or None
-            _live_set(self.ctx.name, cred["refresh_token"], cred["member_no"])
-            _cache_keyring(self.ctx.name, cred)
-
-    def _mint_session(self) -> int:
-        """One refresh + game-token exchange; writes the ephemeral session."""
-        with self._rotation_lock(wait=60):
-            self._adopt_newer_credential()
-            code = self._mint_session_unlocked()
-        if code != 0:
-            # The worker may have written session.json before a later step failed; nothing
-            # downstream registers it for cleanup yet, so a failed mint must not leave a live
-            # game token behind (#916).
-            _unlink_quietly(self._session())
-        return code
-
-    def _mint_session_unlocked(self) -> int:
-        code, handoff = self._run_auth(["token", "--out", str(self._session())])
-        if code == 3 and not handoff:
-            # STOVE rejected the refresh token (44010): the stored chain is dead.
-            # Drop it everywhere, or a fresh backend would adopt it again and
-            # status() would keep reporting a login that every launch refutes.
-            self._forget_credential()
-            return code
-        if not handoff:
-            return code
-        # M2: a rotation handed off before a later network step failed must
-        # still be kept, or STOVE has already invalidated the previous token.
-        member = handoff.get("member_no") or ""
-        if self._member_no and member and member != self._member_no:
-            # Checked before anything is adopted, also when the worker failed: a rotation that
-            # names another account is never kept as this one (#959).
-            self._forget_credential()
-            # The worker wrote session.json before the mismatch was detected;
-            # remove the game token so launch() cannot start with it.
-            _unlink_quietly(self._session())
-            self._notify_mismatch()
-            return 3
-        # A handoff without a member number keeps the one already known.
-        self._save_credential(handoff["refresh_token"], member or self._member_no)
-        return code
-
-    def restore(self) -> bool:
-        """Restore a remembered session, at most once per process start.
-
-        A keyring-backed credential is refreshed exactly once and checked for
-        identity continuity. A network error leaves the user logged out with
-        no retry loop; a member-number mismatch wipes the credential and asks
-        for a new QR login.
-        """
-        if self._restore_attempted:
-            return self._restored
-        self._restore_attempted = True
-        if not self._refresh_token and self._remember_enabled():
-            cred = self._load_credential()
-            if cred:
-                self._refresh_token = cred["refresh_token"]
-                self._member_no = cred["member_no"] or None
-                _live_set(self.ctx.name, cred["refresh_token"], cred["member_no"])
-        if not self._refresh_token:
-            self._restore_code = 0
-            return False
-        self._restore_code = self._mint_session()
-        if self._restore_code != 0:
-            # Network failure or an invalid chain: stay logged out, no retry.
-            # Keep the keyring entry (and the worker's exit code) so the next
-            # Launch can explain what happened instead of blaming the login.
-            self._refresh_token = None
-            return False
-        self._restored = True
-        return True
-
-    def _raise_login_required(self) -> None:
-        """Explain why a launch has no usable login, without a dead-end message."""
-        if self._restore_code == 4:
-            raise BackendError(
-                "Could not refresh the saved STOVE login because there is no "
-                "internet connection. Reconnect and press Launch again.",
-                4,
-            )
-        if self._restore_code == 3:
-            raise BackendError(
-                "The saved STOVE login expired or was used elsewhere. Log in again.",
-                3,
-            )
-        if self._restore_code == 5:
-            raise BackendError(self.TERMS_MESSAGE, 5)
-        raise BackendError("log in first, or turn on 'Remember me on this device'", 3)
-
-    # ---- launch ------------------------------------------------------------
-    def _prefix_command(
-        self, args: list[str], extra_env: dict[str, str] | None = None
-    ) -> tuple[list[str], dict[str, str]]:
-        """Build the umu-run/wine command and environment for running `args` in
-        this profile's prefix with the selected runner."""
-        prefix = self.prefix()
-        proton, kind = self.resolve_runner()
-        env = self._env()
-        env["WINEPREFIX"] = str(prefix)
-        env.update(graphics.renderer_env(self.ctx.profile, kind=kind, environ=env))
-        # CZN is an OpenGL game whose render thread is CPU-bound under Wine. Driver-side
-        # GL threading looked helpful on one AMD box (p99 ~140 -> ~50 ms) but the A/B was
-        # not controlled, so it is opt-in: ``gl_threading: true`` in the profile.
-        if self.ctx.profile.get("gl_threading", False) is True:
-            env.setdefault("mesa_glthread", "true")  # Mesa (AMD/Intel/nouveau)
-            env.setdefault("__GL_THREADED_OPTIMIZATIONS", "1")  # NVIDIA proprietary
-        monitors.apply_env(env, self.ctx)
-        profile_env = self.ctx.profile.get("extra_env")
-        if isinstance(profile_env, dict):
-            process.apply_extra_env(env, profile_env, reserved=process.LAUNCH_RESERVED_ENV)
-        if extra_env:
-            env.update(extra_env)
-        if kind == "proton":
-            umu = umu_mod.system()
-            if umu is None and not sandbox.in_flatpak():
-                missing = self._missing_hostlibs()
-                if missing:
-                    umu = umu_mod.resolve(
-                        "umu-run",
-                        allow_download=True,
-                        emit=self.ctx.emit,
-                        cancel=self.ctx.cancel,
-                    )
-            # umu treats the prefix as Proton's compat-data dir and expects the
-            # Wine prefix at <prefix>/pfx; a symlink pfx -> . lets one dir serve both.
-            pfx = prefix / "pfx"
-            if not pfx.exists():
-                try:
-                    pfx.symlink_to(".", target_is_directory=True)
-                except OSError:
-                    pass
-            env["PROTONPATH"] = proton
-            env.setdefault("GAMEID", "0")
-            env["PROTON_ENABLE_WAYLAND"] = (
-                env["PROTON_ENABLE_WAYLAND"]
-                if isinstance(profile_env, dict) and "PROTON_ENABLE_WAYLAND" in profile_env
-                else os.environ.get("PROTON_ENABLE_WAYLAND", self._wayland_default())
-            )
-            if extra_env and "PROTON_ENABLE_WAYLAND" in extra_env:
-                env["PROTON_ENABLE_WAYLAND"] = extra_env["PROTON_ENABLE_WAYLAND"]
-            env.pop("UMU_NO_PROTON", None)
-            if umu:
-                return [umu, *args], process.sanitize_game_env(env)
-            # No umu-run (or inside Flatpak): run the Proton tree directly, so
-            # umu-launcher is not a hard dependency.
-            if not (Path(proton) / "proton").is_file():
-                raise BackendError(
-                    "the selected runner needs umu-run (umu-launcher): install "
-                    "umu-launcher, or choose a Proton runner that does not need it "
-                    "in Settings",
-                    1,
-                )
-            # Running a Steam-Runtime Proton build directly makes it load the
-            # host's 32-bit libraries; without them wineboot cannot find
-            # FreeType and the WebView2 installer hangs silently. Fail fast
-            # (once per backend) unless we are inside the Flatpak runtime, which
-            # ships its own libraries.
-            if not sandbox.in_flatpak():
-                missing = self._missing_hostlibs()
-                if missing:
-                    raise BackendError(hostlibs.hint(missing), 1)
-            argv, env_updates = sandbox.proton_direct(proton, prefix, args)
-            env.update(env_updates)
-            return argv, process.sanitize_game_env(env)
-        wine = os.environ.get("CZN_WINE") or shutil.which("wine")
-        if not wine:
-            raise BackendError(
-                "no Proton runner found: pick one in Settings -> Manage runners "
-                "(CZN_WINE also works for advanced use)",
-                1,
-            )
-        # A fresh plain-Wine prefix otherwise pops "Wine could not find a
-        # wine-mono / wine-gecko package" dialogs. The game and WebView2 need
-        # neither, so suppress both prompts (Proton handles this itself).
-        parts = [p for p in str(env.get("WINEDLLOVERRIDES") or "").split(";") if p.strip()]
-        if "mscoree,mshtml=" not in parts:
-            parts.append("mscoree,mshtml=")
-        env["WINEDLLOVERRIDES"] = ";".join(parts)
-        return [wine, *args], process.sanitize_game_env(env)
-
-    def _missing_hostlibs(self) -> list[str] | None:
-        """The missing host 32-bit sonames, checked at most once per object.
-
-        Honours ``NADARE_SKIP_HOSTLIBS_CHECK=1`` as an escape hatch, and returns
-        ``None`` when the check is skipped or inconclusive. Never raises.
-        """
-        if not self._hostlibs_checked:
-            self._hostlibs_checked = True
-            if os.environ.get("NADARE_SKIP_HOSTLIBS_CHECK") != "1":
-                self._hostlibs_result = hostlibs.missing_32bit()
-        return self._hostlibs_result
-
-    def _wayland_default(self) -> str:
-        """``1`` (native Wayland) unless the profile asks for X11/XWayland."""
-        choice = str(_profile_setting(self.ctx.profile, "display") or "auto").strip().lower()
-        return "0" if choice in ("x11", "xwayland") else "1"
-
-    def _mangohud_wrap(self, full: list[str], env: dict[str, str]) -> list[str]:
-        """Prefix the game command with ``mangohud`` when ``NADARE_MANGOHUD=1``
-        asks for the FPS overlay and it is installed.
-
-        The old per-profile ``mangohud`` key is deliberately ignored: older
-        betas could leave it on with no Settings control to turn it off, and
-        MangoHud hangs CZN under ``umu-run``.
-        """
-        if os.environ.get("NADARE_MANGOHUD") != "1":
-            return full
-        binary = shutil.which("mangohud")
-        if not binary:
-            self.info("MangoHud is enabled for this profile but is not installed")
-            return full
-        env.setdefault("MANGOHUD", "1")
-        env.setdefault(
-            "MANGOHUD_CONFIG", "fps,frametime,frame_timing,gpu_stats,cpu_stats,position=top-left"
-        )
-        # --dlsym makes MangoHud hook GL/EGL through dlsym, which a Wine/Proton
-        # OpenGL game needs.
-        return [binary, "--dlsym", *full]
-
-    @contextlib.contextmanager
-    def _activity_label(self, label: str):
-        """Name the silent work inside the block so ``_stream`` can show it is alive."""
-        previous = self._activity
-        self._activity = label
-        try:
-            yield
-        finally:
-            self._activity = previous
-
-    @contextlib.contextmanager
-    def _installer_environment(self):
-        """Run prefix commands made inside the block as silent installers.
-
-        They get ``_INSTALLER_ENV`` (no native Wayland: an installer needs no
-        window and the Wayland driver breaks the WebView2 one).
-        """
-        previous = self._run_env
-        self._run_env = _INSTALLER_ENV
-        try:
-            yield
-        finally:
-            self._run_env = previous
-
-    def _run_in_prefix(self, args: list[str]) -> int:
-        cmd, env = self._prefix_command(args, self._run_env)
-        cwd = self.game_dir() if self.game_dir().is_dir() else self.prefix()
-        return self._stream(cmd, env, cwd=cwd)
-
-    def launch(self) -> int:
-        with self._run_lock():
-            return self._launch()
-
-    def _run_lock(self) -> contextlib.AbstractContextManager[None]:
-        """Inside the Flatpak, let other Nadare instances see this launch and ask it to stop."""
-        if not sandbox.in_flatpak():
-            return contextlib.nullcontext()
-        return runlock.guard(self.prefix(), self.ctx.cancel.cancel)
-
-    def _launch(self) -> int:
-        if not self.installed():
-            raise BackendError("the game is not installed", 1)
-        # The run lock this launch holds itself would look like another instance.
-        if self._game_running():
-            self._fail("launch", 8)
-        if os.environ.get("CZN_SKIP_UPDATE") != "1":
-            code = self._run_module(UPDATE_MODULE, ["update", "--apply"])
-            if code == 3:
-                self._fail("launch", 8)
-            if code == 2:
-                self.info("could not check for updates (offline?); launching the installed version")
-            elif code != 0:
-                self._fail("launch update", 5)
-        # Restore a remembered/live session once, then mint the game token
-        # right before launch so session.json is fresh and short-lived. Clear a
-        # stale session only immediately before minting (a session we already
-        # minted in this process must survive).
-        if not self._restore_attempted:
-            self._cleanup_stale_session()
-            if not self.restore():
-                self._raise_login_required()
-        else:
-            # A login in this process set the token, or an earlier launch
-            # already restored it; (re-)mint the game session right before
-            # every launch, since the previous run deletes session.json on exit.
-            self._cleanup_stale_session()
-            if not self._refresh_token:
-                self._raise_login_required()
-            auth_code = self._mint_session()
-            if auth_code != 0:
-                self._fail_auth("token refresh", auth_code)
-        session = self._session()
-        try:
-            stub = self._ensure_stub()
-            self._ensure_vcredist()
-            log = self._stub_log()
-            log.unlink(missing_ok=True)
-            session.parent.mkdir(parents=True, exist_ok=True)
-            _register_ephemeral(session)
-            self.ctx.emit(Event("step", "Starting Chaos Zero Nightmare…"))
-            cmd = [
-                str(stub),
-                self._win(session),
-                "--launch",
-                self._win(self.shield()),
-                self._win_cwd(self.game_dir()),
-            ]
-            full, env = self._prefix_command(cmd)
-            # Set after _prefix_command: its env cleanup drops every CZN_* name, and
-            # without this path the stub never logs, so the game never looks started.
-            env["CZN_STUB_LOG"] = self._win(log)
-            full = self._mangohud_wrap(full, env)
-            cwd = self.game_dir() if self.game_dir().is_dir() else self.prefix()
-            _renderer, note = graphics.effective_renderer(self.ctx.profile)
-            if note:
-                self.info(note)
-            probe = graphics.RendererProbe(
-                self._game_pids, on_result=lambda label: self.info(f"renderer: {label}")
-            ).start()
-        except BaseException:
-            # The minted game token must not outlive a failed pre-launch step.
-            session.unlink(missing_ok=True)
-            raise
-        try:
-            with self._activity_label("Starting the game"):
-                code = self._stream(
-                    full,
-                    env,
-                    cwd=cwd,
-                    kill_game=True,
-                    beat_as_log=True,
-                    beat_until=lambda: self._stub_connected(log),
-                )
-        finally:
-            # session.json holds a live game token; it must not outlive the run. The Go
-            # stub already read and deleted it at start (#811); this covers the C stub.
-            session.unlink(missing_ok=True)
-            probe.stop()
-            probe.join(timeout=1.0)
-        self._renderer = probe.result
-        result = self._stub_result(log)
-        if result == "ok":
-            self.ctx.emit(Event("done", "Game exited normally"))
-            return 0
-        if result == "no-connect":
-            self._fail("launch", 6)
-        if result == "handshake-rejected":
-            self._fail("launch", 7)
-        if code in _STOPPED_EXIT_CODES:
-            # SIGTERM/SIGINT through umu/proton (``nadare stop``, or the user closing
-            # the window): a deliberate stop, not a failed launch.
-            self.ctx.emit(Event("done", "Game stopped"))
-            return 0
-        self._fail("launch", code or 1)
-        return code  # unreachable
-
-    @staticmethod
-    def _stub_result(log: Path) -> str | None:
-        try:
-            m = None
-            for line in log.read_text(errors="replace").splitlines():
-                hit = _RESULT.search(line)
-                if hit:
-                    m = hit.group(1)
-            return m
-        except OSError:
-            return None
-
-    def stop(self) -> None:
-        pids = self._game_pids()
-        if not pids:
-            if self._running_elsewhere():
-                self.info("asking the other Nadare window to stop the game")
-                runlock.request_stop(self.prefix())
-                deadline = time.monotonic() + 20
-                while time.monotonic() < deadline and runlock.running(self.prefix()):
-                    time.sleep(0.2)
-                if runlock.running(self.prefix()):
-                    self.info("the game did not stop within 20 s")
-            return
-        for pid in pids:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
-        deadline = time.time() + 10
-        while time.time() < deadline and self._game_running():
-            time.sleep(0.25)
-        for pid in self._game_pids():
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
 
     # ---- verify / uninstall ------------------------------------------------
     def verify(self) -> dict[str, Any]:

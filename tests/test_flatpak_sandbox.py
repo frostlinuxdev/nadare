@@ -441,3 +441,15 @@ def test_a_command_that_is_not_proton_is_not_wrapped(layout):
     argv, _env = _wrap(layout, ["/usr/bin/wine", "game.exe"])
     inner = argv[argv.index("--", argv.index("flatpak-spawn")) + 1 :]
     assert inner == ["/usr/bin/wine", "game.exe"]
+
+
+def test_a_new_prefix_is_made_and_exposed(layout):
+    """First Sandboxed launch of a new game in the Flatpak (Ubuntu 26.04 VM, 2026-11-14): the
+    prefix did not exist yet, so it was not exposed and Proton could not create pfx.lock."""
+    import shutil
+
+    shutil.rmtree(layout["prefix"])
+    argv, _env = _wrap(layout)
+    assert layout["prefix"].is_dir()
+    assert f"--sandbox-expose-path={layout['prefix']}" in _spawn_args(argv)
+

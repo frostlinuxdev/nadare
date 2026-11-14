@@ -10,9 +10,11 @@ from __future__ import annotations
 import dataclasses
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
 from nadare.backends import winegame as wg
@@ -132,7 +134,7 @@ class TestArknightsMode:
             captured.append(list(argv))
             return 0
 
-        monkeypatch.setattr(wg, "stream", fake_stream)
+        patch_everywhere(monkeypatch, wg, "stream", fake_stream)
         assert backend.launch() == 0
         assert captured[0][0] == "/usr/bin/wine"
         assert captured[0][1] == str(exe)
@@ -148,7 +150,7 @@ class TestArknightsMode:
         )
         monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
         monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer)
-        monkeypatch.setattr(wg, "stream", lambda *a, **k: 0)
+        patch_everywhere(monkeypatch, wg, "stream", lambda *a, **k: 0)
         write_exe(backend.install_dir() / "game launcher.exe", "MZ")
         messages: list[str] = []
         original = backend.ctx.emit
@@ -225,9 +227,7 @@ class TestStellaSora:
         )
         exe = write_exe(backend.install_dir() / "StellaSora.exe", "MZ")
         captured: list[list[str]] = []
-        monkeypatch.setattr(
-            wg,
-            "stream",
+        patch_everywhere(monkeypatch, wg, "stream",
             lambda argv, env, on_line=None, cancel=None: (captured.append(list(argv)), 0)[1],
         )
         assert backend.launch() == 0
@@ -265,10 +265,14 @@ class TestStellaSora:
         monkeypatch.setattr(
             wg.runners, "ensure_pinned", lambda *a, **k: calls.append(1) or tmp_path
         )
-        monkeypatch.setattr(wg, "stream", lambda *a, **k: 0)
+        patch_everywhere(monkeypatch, wg, "stream", lambda *a, **k: 0)
         monkeypatch.setattr(wg.hostlibs, "missing_32bit", lambda: [])
-        # CI runners have no wine; the test must not depend on one being installed.
-        monkeypatch.setattr(wg, "first_wine", lambda: Path("/usr/bin/wine"))
+        # The faked download installs nothing; stand in a Proton and umu so the launch does not
+        # depend on the host (a Proton game never falls back to a plain Wine, #1338).
+        monkeypatch.setattr(backend, "resolve_runner", lambda: (str(tmp_path), "proton"))
+        patch_everywhere(monkeypatch, wg, "umu", SimpleNamespace(
+            system=lambda *a, **k: "/usr/bin/umu-run", resolve=lambda *a, **k: "/usr/bin/umu-run",
+            managed=lambda: None, note_first_runtime=lambda emit: None))
         backend.launch()
         assert calls == [1]
 
@@ -284,9 +288,7 @@ class TestStellaSora:
         )
         exe = write_exe(backend.install_dir() / "bin" / "StellaSora.exe", "MZ")
         captured: list[list[str]] = []
-        monkeypatch.setattr(
-            wg,
-            "stream",
+        patch_everywhere(monkeypatch, wg, "stream",
             lambda argv, env, on_line=None, cancel=None: (captured.append(list(argv)), 0)[1],
         )
         backend.launch()
@@ -414,7 +416,10 @@ class TestDirectInstallCompletion:
         backend.install()
         assert backend.status().state == "installed"
 
-        def interrupted(man, d, emit=None, cancel=None, **kw):
+        def interrupted(man, d, emit=None, cancel=None, changed=None, **kw):
+            # Like the real sync: a replaced file is reported through ``changed`` (#1310 W6-2).
+            if changed is not None:
+                changed.set()
             _write_files(Path(d), {"Arknights.exe": b"MZ2"}, stop_after="Arknights.exe")
             return {"downloaded": 1, "skipped": 0}
 
@@ -523,7 +528,7 @@ class TestLaunchExplainsRuntimeFailures:
             on_line(line)
             return code
 
-        monkeypatch.setattr(wg, "stream", fake_stream)
+        patch_everywhere(monkeypatch, wg, "stream", fake_stream)
         return backend
 
     def test_a_runtime_mismatch_is_explained_even_with_exit_0(self, tmp_path, monkeypatch):

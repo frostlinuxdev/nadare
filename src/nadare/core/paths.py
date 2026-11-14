@@ -15,14 +15,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from . import channel
+
+#: The stable build's folder name; :func:`app_name` is the one every path uses.
 APP = "nadare"
+
+
+def app_name() -> str:
+    """``nadare``, or ``nadare-unstable`` for an unstable build (its own folders)."""
+    return APP + channel.suffix()
 
 
 def _xdg(env: str, default: str) -> Path:
     base = os.environ.get(env, "")
     if not os.path.isabs(base):  # the XDG spec: a relative value is invalid and must be ignored
         base = os.path.expanduser(default)
-    return Path(base) / APP
+    return Path(base) / app_name()
 
 
 def data_dir() -> Path:
@@ -113,7 +121,7 @@ class RelativePolicy:
 DIRECT_PATHS = RelativePolicy(
     backslash="reject",
     strip=False,
-    reject_nul=False,
+    reject_nul=True,  # a NUL from a plan path reached stat() as a raw ValueError
     reject_drive=False,
     dots="drop",
 )
@@ -133,6 +141,25 @@ MANIFEST_PATHS = RelativePolicy(
     reject_drive=True,
     dots="normpath",
 )
+
+SEVENZ_PATHS = RelativePolicy(
+    backslash="convert",
+    strip=False,
+    reject_nul=True,
+    reject_drive=True,
+    dots="drop",
+)
+
+#: Nadare's own folders in an install (``.nadare``, ``.nadare-dl``, journal/state names). A
+#: publisher path may never reach one: a forged ``.done`` record would make an install look done.
+NADARE_OWNED_PREFIX = ".nadare"
+
+
+def _reject_nadare_owned(relative: str) -> str:
+    """Return ``relative``, or reject it when its first component belongs to Nadare."""
+    if relative.split("/", 1)[0].casefold().startswith(NADARE_OWNED_PREFIX):
+        raise PathProblem("nadare-owned")
+    return relative
 
 
 def check_relative(path: object, policy: RelativePolicy) -> str:
@@ -160,15 +187,15 @@ def check_relative(path: object, policy: RelativePolicy) -> str:
             raise PathProblem("dotdot")
         if not parts:
             raise PathProblem("empty-normalised")
-        return "/".join(parts)
+        return _reject_nadare_owned("/".join(parts))
     if policy.dots == "reject":
         for part in text.split("/"):
             if part in ("", ".", ".."):
                 raise PathProblem("component")
-        return text
+        return _reject_nadare_owned(text)
     norm = posixpath.normpath(text)
     if norm in (".", "..") or norm.startswith("../") or "/../" in norm:
         raise PathProblem("escape")
     if norm.startswith("/"):
         raise PathProblem("absolute")
-    return norm
+    return _reject_nadare_owned(norm)

@@ -30,14 +30,26 @@ class StoreGame:
         return kind_for(self.app_id)
 
 
+def normalise_app_id(value: object) -> str | None:
+    """The canonical ASCII-digit app id, or ``None`` when ``value`` is not one.
+
+    Leading zeros are not part of an id (a pasted store URL may carry them), so the backend,
+    Store tiles and artwork all key on the same number.
+    """
+    text = str(value or "")
+    if not (text.isascii() and text.isdigit()):
+        return None
+    return text.lstrip("0") or "0"
+
+
 def kind_for(app_id: str) -> str:
-    return f"{PREFIX}{app_id}"
+    return f"{PREFIX}{normalise_app_id(str(app_id).strip()) or app_id}"
 
 
 def app_id_of(kind: str) -> str | None:
     """The app id a Store kind stands for, or ``None`` when it is not a Steam tile."""
     rest = kind[len(PREFIX) :] if kind.startswith(PREFIX) else ""
-    return rest if rest.isascii() and rest.isdigit() else None
+    return normalise_app_id(rest)
 
 
 def store_games() -> list[StoreGame]:
@@ -66,8 +78,8 @@ def _app_id_of_profile(data: Mapping[str, Any]) -> str:
     extra = data.get("extra")
     for source in (data, extra if isinstance(extra, Mapping) else {}):
         for key in ("steam_app_id", "app_id"):
-            value = str(source.get(key) or "").strip()
-            if value.isascii() and value.isdigit():
+            value = normalise_app_id(str(source.get(key) or "").strip())
+            if value is not None:
                 return value
     return ""
 

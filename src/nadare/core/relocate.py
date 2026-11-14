@@ -9,6 +9,7 @@ Nothing is deleted except the partial copy this call made itself.
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import stat
@@ -182,13 +183,20 @@ def move_tree(
     _check(src, dst)
     try:
         dst.parent.mkdir(parents=True, exist_ok=True)
-        if _same_device(src, dst):
+        same_device = _same_device(src, dst)
+    except OSError as exc:
+        raise RelocateError(f"Could not move {src}: {exc}") from exc
+    if same_device:
+        try:
             if os.path.lexists(dst):
                 raise RelocateError(f"{dst} appeared; nothing was replaced.")
             os.rename(src, dst)
             return Moved(renamed=True, kept_old=None)
-    except OSError as exc:
-        raise RelocateError(f"Could not move {src}: {exc}") from exc
+        except OSError as exc:
+            if exc.errno != errno.EXDEV:
+                raise RelocateError(f"Could not move {src}: {exc}") from exc
+            # A same-device name can still refuse EXDEV (bind mount, btrfs subvolume):
+            # fall through to the verified copy path below.
 
     try:
         before = _summary(src)

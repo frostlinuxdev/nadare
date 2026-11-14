@@ -81,8 +81,8 @@ RUNNERS: dict[str, RunnerSpec] = {
         "DW-Proton",
         "dawn-winery/dwproton-mirror",
         r"dwproton-[A-Za-z0-9._-]+-x86_64\.tar\.xz",
-        ("dwproton-11.0-15", "8066dec3d7f532d55e5b6d697a61d6d4a3091f859a1ef9b2943895aa1b947afd"),
-        ("dwproton-11.0-15-x86_64.tar.xz", 339563992),
+        ("dwproton-11.0-17", "dd8af140eacca2bb78ac3cdd641649091dbf65c30c24ede36cef8e875fbb0dd8"),
+        ("dwproton-11.0-17-x86_64.tar.xz", 342043716),
     ),
     "ge": RunnerSpec(
         "ge",
@@ -244,10 +244,22 @@ def resolve_runner(value: str | os.PathLike[str] | None) -> Path | None:
             raise RunnerError("no Proton runner installed; install one first")
         return max(candidates, key=_runner_rank)
     candidate = Path(text).expanduser()
+    by_name = not candidate.is_absolute() and os.sep not in text
     if not candidate.is_absolute():
         candidate = paths.runners_dir() / text
     if _looks_like_runner(candidate):
         return candidate
+    # A runner tag names an installed build whose folder has a suffix
+    # ("GE-Proton11-7" -> "GE-Proton11-7-x86_64"). Match the exact name first,
+    # then the whole tag, never a prefix (9-1 must not pick 9-10).
+    if by_name:
+        available = all_runners()
+        for path in available:
+            if path.name.lower() == text.lower():
+                return path
+        for path in available:
+            if matches_tag(path.name, text):
+                return path
     available = ", ".join(p.name for p in all_runners()) or "none"
     raise RunnerError(f"runner {text!r} not found (installed: {available})")
 
@@ -527,6 +539,16 @@ def installed_pinned(family: str = DEFAULT_FAMILY) -> Path | None:
         if runner_family(path) == family and matches_tag(path.name, tag):
             return path
     return None
+
+
+def installed_family(family: str) -> Path | None:
+    """The newest installed build of ``family``, pinned or not, or ``None``.
+
+    This is the build CZN falls back to when the pinned release cannot be
+    downloaded, so cleanup must treat it as in use too.
+    """
+    candidates = [p for p in all_runners() if runner_family(p) == family]
+    return max(candidates, key=_runner_rank) if candidates else None
 
 
 def ensure_pinned(
@@ -818,7 +840,7 @@ def _extract(tar_path: Path, *, cancel: Cancel | None, emit: Emitter) -> Path:
 
 #: Backends whose profiles use :data:`DEFAULT_FAMILY` when they name no runner.
 PROTON_DEFAULT_BACKENDS = frozenset(
-    {"stove-czn", "arknights-yostar", "stellasora-yostar", *CATALOG_KINDS}
+    {"stove-czn", "arknights-yostar", "stellasora-yostar", "wine", *CATALOG_KINDS}
 )
 
 
@@ -845,7 +867,7 @@ def runner_size(runner: str | os.PathLike[str]) -> int:
     return total
 
 
-def _profile_value(profile: Mapping[str, Any], key: str) -> Any:
+def profile_value(profile: Mapping[str, Any], key: str) -> Any:
     """``key`` from the top level, else from ``extra``: how backends read it (``profile_setting``).
 
     Usage must see the runner a launch would use, or a runner chosen under ``extra`` looks
@@ -858,6 +880,16 @@ def _profile_value(profile: Mapping[str, Any], key: str) -> Any:
     if isinstance(extra, Mapping) and extra.get(key) not in (None, ""):
         return extra[key]
     return None
+
+
+#: Kept for existing callers; see :func:`profile_value`.
+_profile_value = profile_value
+
+
+def profile_runner_value(profile: Mapping[str, Any]) -> str:
+    """The profile's runner setting, top level or ``extra``, as the backends read it."""
+    value = profile_value(profile, "proton_runner") or profile_value(profile, "runner")
+    return str(value).strip() if value not in (None, "") else ""
 
 
 def runner_usage(profiles: Mapping[str, Mapping[str, Any]]) -> dict[str, list[str]]:
@@ -880,15 +912,17 @@ def runner_usage(profiles: Mapping[str, Mapping[str, Any]]) -> dict[str, list[st
     }
 
     for name, profile in profiles.items():
-        value = str(
-            _profile_value(profile, "proton_runner") or _profile_value(profile, "runner") or ""
-        ).strip()
+        value = profile_runner_value(profile)
+        if value.lower() in ("wine", "system", "none"):
+            value = ""  # these words mean the default runner (#1324): that runner is in use
         targets: list[Path | None] = []
         if not value:
             if profile.get("backend") in PROTON_DEFAULT_BACKENDS:
                 targets.append(installed_pinned(DEFAULT_FAMILY))
         elif value in RUNNERS:
-            targets.append(installed_pinned(value))
+            # When the pin is not installed, CZN launches with the newest installed
+            # build of that family instead: keep that fallback as well.
+            targets.append(installed_pinned(value) or installed_family(value))
         elif value in ("latest", "auto"):
             try:
                 targets.append(resolve_runner(value))

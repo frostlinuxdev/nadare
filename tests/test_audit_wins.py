@@ -8,6 +8,7 @@ import types
 from pathlib import Path
 
 from _backend_helpers import make_context
+from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
 from nadare.backends import wine
@@ -53,7 +54,7 @@ def test_status_resolves_the_launcher_once(tmp_path, monkeypatch):
     calls = []
     real = backend.find_launcher
     monkeypatch.setattr(backend, "find_launcher", lambda: calls.append(1) or real())
-    monkeypatch.setattr(wg, "scan_pids", lambda patterns: [])
+    patch_everywhere(monkeypatch, wg, "scan_pids", lambda patterns: [])
     backend.status()  # no launcher installed: the answer "none" must not be searched for again
     assert len(calls) == 1
 

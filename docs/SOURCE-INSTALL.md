@@ -94,7 +94,7 @@ Nadare is profile-based. There is no profile editor in the CLI yet, so create
 `~/.config/nadare/config.json` by hand once:
 
 **Chaos Zero Nightmare** (installs under Nadare's own data directory; the
-`dwproton` runner, the tested DW-Proton 11.0-15 release, is downloaded and
+`dwproton` runner, the tested DW-Proton 11.0-16 release, is downloaded and
 checksum-verified on first install; `"cachyos"` and `"ge"` are alternatives):
 ```json
 {
@@ -206,7 +206,7 @@ The CZN PCSDK stub is rebuilt automatically when missing; force a rebuild with
 **Downloaded package** (AppImage): download the new artifact and
 replace the old one. Nadare does not update itself. (A crash-safe update journal
 exists in the code but game updaters do not use it yet.)
-Direct-mode games (Arknights with a manifest source, always Stella Sora) show an UPDATE button when the published manifest version differs from the version last synced; this check honours the *Check for launcher and game updates* setting.
+Direct-mode games (Arknights and Stella Sora, which download directly by default) show an UPDATE button when the published manifest version differs from the version last synced; this check honours the *Check for launcher and game updates* setting.
 
 FGO's runtime stack is updated by `lepton-fgo update`; Nadare calls it as part of
 the backend's `update`.

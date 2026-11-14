@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """A stop request written after the lock was released must survive hold()."""
 from __future__ import annotations
 

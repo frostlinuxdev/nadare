@@ -14,6 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _parts_patch import patch_everywhere
 
 from nadare.core.backends import BackendError
 from nadare.core.config import Config
@@ -101,7 +102,7 @@ def _nikke(tmp_path, **profile):
 def quiet_launch(monkeypatch):
     from nadare.backends import winegame as wg
 
-    monkeypatch.setattr(wg, "stream", lambda *a, **k: 0)
+    patch_everywhere(monkeypatch, wg, "stream", lambda *a, **k: 0)
     monkeypatch.setattr(
         wg.WineGameBackend, "_ensure_default_runner", lambda self, strict=False: None
     )

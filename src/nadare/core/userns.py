@@ -43,6 +43,13 @@ SHORT_MESSAGE = (
     "Ubuntu is blocking the game's sandbox. Nadare needs a one-time permission to continue."
 )
 
+#: Said under :data:`SHORT_MESSAGE`: Close is not "play without it" (the user kept the launch
+#: strict, #1338), so say what Close means.
+WITHOUT_IT = (
+    "The game cannot start until this is allowed. You can allow it now, or the next time you "
+    "press Play."
+)
+
 #: Output fragments that mean the runtime sandbox could not create a namespace.
 _FAILURE_LINES = (
     "setting up uid map",
@@ -62,21 +69,29 @@ def restricted(path: str = SYSCTL_PATH) -> bool:
 
 
 def _srt_bwrap_paths() -> list[str]:
-    """Return the Steam Runtime bwrap copies already downloaded, newest first."""
-    data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(
-        os.path.expanduser("~"), ".local", "share"
-    )
-    pattern = os.path.join(
-        glob.escape(data_home),
-        "umu",
-        "*",
-        "pressure-vessel",
-        "libexec",
-        "steam-runtime-tools-0",
-        "srt-bwrap",
-    )
+    """Return the Steam Runtime bwrap copies already downloaded, newest first.
+
+    umu writes to ``$HOME/.local/share/umu`` whatever ``XDG_DATA_HOME`` says (inside the Flatpak
+    that is the app's own data folder); both places are looked at.
+    """
+    roots = [os.path.normpath(os.path.join(os.path.expanduser("~"), ".local", "share"))]
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        roots.append(os.path.normpath(xdg))
+    found: list[str] = []
+    for root in roots:
+        pattern = os.path.join(
+            glob.escape(root),
+            "umu",
+            "*",
+            "pressure-vessel",
+            "libexec",
+            "steam-runtime-tools-0",
+            "srt-bwrap",
+        )
+        found += [path for path in glob.glob(pattern) if path not in found]
     try:
-        return sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+        return sorted(found, key=os.path.getmtime, reverse=True)
     except OSError:
         return []
 
@@ -221,7 +236,7 @@ def install_profile(run=subprocess.run) -> tuple[bool, str]:
         return False, "Could not start the password prompt. Use Copy fix command instead."
     code = result.returncode
     if code == 0:
-        return True, "Done. Press Install again."
+        return True, "Done."
     if code == 126:
         return False, "Cancelled: no permission was given."
     if code == 127:
@@ -254,3 +269,33 @@ __all__ = [
     "split_hint",
     "with_hint",
 ]
+
+
+#: The launch message when Ubuntu blocks the Steam Runtime: the GUI opens its fix dialog for
+#: any message carrying :func:`hint` (#1338: asked before the launch, not after a failure).
+BLOCKED_BEFORE_LAUNCH = (
+    "Ubuntu blocks the Steam Runtime this game runs in until a one-time permission is given."
+)
+
+
+def blocks_runtime() -> bool:
+    """Whether the Steam Runtime's bwrap would be refused here (Ubuntu 24.04+).
+
+    Without Nadare's profile, "unknown" (the runtime is not downloaded yet) and a probe that
+    crashes count as blocked: umu's first run would fail the same way, so the player gets the
+    one-time fix first. With the profile file present, only a probe that really fails counts
+    (the file can be left behind by a fix that did not load). Never raises.
+    """
+    try:
+        if not restricted():
+            return False
+        installed = profile_installed()
+    except Exception:  # noqa: BLE001 - cannot tell: do not block a launch on it
+        return False
+    try:
+        result = probe()
+    except Exception:  # noqa: BLE001 - a crashing probe is "unknown"
+        result = None
+    if installed:
+        return result is False
+    return result is not True

@@ -26,6 +26,7 @@ try:  # pragma: no cover
 except Exception:  # noqa: BLE001
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
+from _parts_patch import patch_everywhere
 from test_nikke_launcherless_hosts import make_prefix
 from test_nikke_updates import _nikke, api, env, installs  # noqa: F401 - fixtures
 
@@ -332,7 +333,7 @@ def test_a_direct_game_launch_feeds_its_output_through_the_filter(tmp_path, monk
         handlers.append(on_line)
         return 0
 
-    monkeypatch.setattr(wg, "stream", fake_stream)
+    patch_everywhere(monkeypatch, wg, "stream", fake_stream)
     target = tmp_path / "game" / "StarRail.exe"
     target.parent.mkdir()
     target.write_bytes(b"MZ")

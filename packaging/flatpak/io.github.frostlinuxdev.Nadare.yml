@@ -44,6 +44,9 @@ finish-args:
   - --filesystem=/run/media
   # Steam's Flatpak keeps its libraries here, which "home" does not reach.
   - --filesystem=~/.var/app/com.valvesoftware.Steam
+  # umu keeps its Steam Runtime in ~/.local/share/umu whatever XDG_DATA_HOME says; without this
+  # its container cannot see the runtime it downloaded (VMs, 2026-11-14). Lutris/Bottles do the same.
+  - --filesystem=xdg-data/umu:create
   - --filesystem=xdg-run/gamescope-0:rw
   - --filesystem=/run/udev:ro
   - --allow=multiarch

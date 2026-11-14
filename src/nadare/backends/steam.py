@@ -30,8 +30,9 @@ import subprocess
 import time
 from pathlib import Path
 
-from ..core import process, sandbox
+from ..core import process, sandbox, steamstore
 from ..core.backends import BackendError, GameBackend, Option, Status
+from ..core.config import as_bool
 from ..core.events import Event, mask
 from .wine import (
     ProcessQuery,
@@ -197,9 +198,10 @@ class SteamBackend(GameBackend):
         ).strip()
         if not app_id:
             raise BackendError("steam profile has no steam_app_id")
-        if not app_id.isdigit():
+        canonical = steamstore.normalise_app_id(app_id)
+        if canonical is None:
             raise BackendError(f"steam_app_id must be a numeric store id, got {app_id!r}")
-        return app_id
+        return canonical
 
     def _client(self) -> list[str]:
         configured = (
@@ -303,7 +305,7 @@ class SteamBackend(GameBackend):
             stop_pids(pids)
         else:
             self.info("no matching Steam game process found")
-        if profile_setting(self.ctx.profile, "stop_steam"):
+        if as_bool(profile_setting(self.ctx.profile, "stop_steam"), False):
             try:
                 client = self._client()
                 subprocess.run(

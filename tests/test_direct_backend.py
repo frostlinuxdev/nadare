@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from _backend_helpers import make_context
 from _httpserver import Server
+from _parts_patch import patch_everywhere
 
 from nadare.backends import direct
 from nadare.backends import winegame as wg
@@ -185,7 +186,9 @@ def test_a_lost_archive_record_is_reported_by_name(game):
 
 def test_check_update_caches_the_published_version(game, monkeypatch):
     game.install()
-    monkeypatch.setattr(wg, "UPDATE_CHECK_INTERVAL", 0)  # the install just refreshed the cache
+    patch_everywhere(  # the install just refreshed the cache
+        monkeypatch, wg, "UPDATE_CHECK_INTERVAL", 0
+    )
     game.state["version"] = "9"
     game.check_update()
     st = game.status()
@@ -680,3 +683,49 @@ def test_wuwa_offers_quality_as_a_visible_choice():
     assert option.kind == "choice" and not option.advanced
     assert [v for _label, v in option.choices] == ["sd", "hd", "uhd"]
     assert option.default == "hd"
+
+
+# ---------------------------------------------------- WuWa runs under its own umu id (#1334)
+def _wuwa_env(tmp_path, monkeypatch, profile=None):
+    from nadare.backends import direct
+
+    values = {"prefix": str(tmp_path / "pfx"), **(profile or {})}
+    ctx = make_context(tmp_path, "direct-wuwa", values)
+    b = direct.WutheringWavesBackend(ctx)
+    monkeypatch.setattr(b, "resolve_runner", lambda: ("/opt/proton", "proton"))
+    monkeypatch.setattr("nadare.core.umu.system", lambda configured="umu-run": "/usr/bin/umu-run")
+    return b._prefix_command(["x.exe"])[1]
+
+
+def test_wuwa_runs_under_its_umu_id_so_the_runner_fixes_apply(tmp_path, monkeypatch):
+    # DW-Proton 11.0-17 fixes 3.8's white web pages in gamefixes-umu/umu-3513350.py; with
+    # GAMEID=0 that fix never ran (2026-11-14, flxpc).
+    env = _wuwa_env(tmp_path, monkeypatch)
+    assert env["GAMEID"] == "umu-3513350" and env["UMU_ID"] == "umu-3513350"
+
+
+def test_a_profile_gameid_still_wins_for_wuwa(tmp_path, monkeypatch):
+    env = _wuwa_env(tmp_path, monkeypatch, {"extra_env": {"GAMEID": "0", "UMU_ID": "0"}})
+    assert env["GAMEID"] == "0" and env["UMU_ID"] == "0"
+
+
+def test_other_direct_games_still_send_no_game_id(tmp_path, monkeypatch):
+    from nadare.backends import direct
+
+    ctx = make_context(tmp_path, "direct-pgr", {"prefix": str(tmp_path / "pfx")})
+    b = direct.PgrBackend(ctx)
+    monkeypatch.setattr(b, "resolve_runner", lambda: ("/opt/proton", "proton"))
+    monkeypatch.setattr("nadare.core.umu.system", lambda configured="umu-run": "/usr/bin/umu-run")
+    env = b._prefix_command(["x.exe"])[1]
+    assert "GAMEID" not in env or env["GAMEID"] in ("", "0")
+
+
+def test_a_hand_edited_numeric_gameid_zero_still_wins(tmp_path, monkeypatch):
+    """Stress F2: JSON ``0`` (a number) is a real id; it must not fall back to WuWa's."""
+    env = _wuwa_env(tmp_path, monkeypatch, {"extra_env": {"GAMEID": 0, "UMU_ID": 0}})
+    assert env["GAMEID"] == "0" and env["UMU_ID"] == "0"
+
+
+def test_an_empty_gameid_falls_back_to_the_game_default(tmp_path, monkeypatch):
+    env = _wuwa_env(tmp_path, monkeypatch, {"extra_env": {"GAMEID": "  "}})
+    assert env["GAMEID"] == "umu-3513350"

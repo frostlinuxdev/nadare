@@ -73,6 +73,27 @@ if [[ -n "${NADARE_UPDATE_INFO:-}" ]]; then
     echo "[*] update information: $NADARE_UPDATE_INFO"
 fi
 
+# --- channel ----------------------------------------------------------------
+# NADARE_CHANNEL=unstable builds the research AppImage (src/nadare/core/channel.py): own
+# folders, keyring service and window, never updates itself. The marker is bundled by
+# PyInstaller and removed again right after, so the source tree stays a stable build.
+channel_marker="src/nadare/assets/CHANNEL"
+rm -f "$channel_marker"
+case "${NADARE_CHANNEL:-stable}" in
+    stable) image_stem="Nadare" ;;
+    unstable)
+        if [[ -n "${NADARE_UPDATE_INFO:-}" ]]; then
+            echo "[!] an unstable build carries no update information (it would update into the stable release)" >&2
+            exit 1
+        fi
+        image_stem="Nadare-unstable"
+        ;;
+    *)
+        echo "[!] NADARE_CHANNEL must be stable or unstable (got '${NADARE_CHANNEL}')" >&2
+        exit 1
+        ;;
+esac
+
 # --- resolve and verify appimagetool (fail before the long build) -----------
 #: Release tag and SHA-256 of the appimagetool build pinned for releases.  Both
 #: are intentionally empty in the source tree: a release build (NADARE_RELEASE=1)
@@ -213,11 +234,22 @@ if [[ ! "$version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?([A-Za-z0-9.+-]*)$ ]]; then
 fi
 output_dir="${OUTPUT_DIR:-dist}"
 mkdir -p "$output_dir"
-image="$(cd "$output_dir" && pwd)/Nadare-${version}-x86_64.AppImage"
+if [[ "$image_stem" == "Nadare-unstable" ]]; then
+    image="$(cd "$output_dir" && pwd)/Nadare-unstable-${version}-x86_64.AppImage"
+else
+    image="$(cd "$output_dir" && pwd)/Nadare-${version}-x86_64.AppImage"
+fi
 
 echo "[*] Nadare ${version}: building PyInstaller onedir bundle (${PY})"
 bash scripts/fetch_7zip.sh
+bash scripts/fetch_umu.sh
+if [[ "$image_stem" == "Nadare-unstable" ]]; then
+    printf 'unstable\n' > "$channel_marker"
+    trap 'rm -f "$root/$channel_marker"' EXIT
+    echo "[*] unstable channel build"
+fi
 "$PY" -m PyInstaller --clean -y packaging/nadare.spec
+rm -f "$channel_marker"
 
 # --- stage the AppDir -------------------------------------------------------
 echo "[*] Staging AppDir"

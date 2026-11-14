@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
 from nadare.backends import winegame as wg
@@ -72,7 +73,7 @@ def _stream_that(monkeypatch, lines: list[str], code: int) -> None:
                 on_line(line)
         return code
 
-    monkeypatch.setattr(wg, "stream", fake)
+    patch_everywhere(monkeypatch, wg, "stream", fake)
     monkeypatch.setattr(
         ArknightsBackend, "_prefix_command", lambda self, args, extra_env=None, **_kw: (["x"], {})
     )

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
 from nadare.backends import direct, launcher
@@ -77,7 +78,7 @@ def test_vcredist_output_does_not_make_a_good_launch_look_failed(
         return 0
 
     monkeypatch.setattr(WineGameBackend, "_run_vcredist", fake_vcredist)
-    monkeypatch.setattr(wg, "stream", fake_stream)
+    patch_everywhere(monkeypatch, wg, "stream", fake_stream)
 
     assert backend.launch() == 0
     assert backend._watch.userns_blocked is False
@@ -99,7 +100,7 @@ def test_a_runtime_failure_after_a_long_session_with_exit_0_is_a_status(
         clock[0] += 3600  # an hour of play
         return 0
 
-    monkeypatch.setattr(wg, "stream", fake_stream)
+    patch_everywhere(monkeypatch, wg, "stream", fake_stream)
 
     assert backend.launch() == 0
     status = [event.message for event in events if event.kind == "status"]
@@ -114,7 +115,7 @@ def test_a_runtime_failure_with_a_nonzero_exit_still_fails(launch_rig, monkeypat
         on_line(BWRAP_FAILURE)
         return 1
 
-    monkeypatch.setattr(wg, "stream", fake_stream)
+    patch_everywhere(monkeypatch, wg, "stream", fake_stream)
     with pytest.raises(BackendError, match="could not start"):
         backend.launch()
 
@@ -127,7 +128,7 @@ def test_a_quick_exit_0_with_a_runtime_failure_still_fails(launch_rig, monkeypat
         on_line(BWRAP_FAILURE)
         return 0
 
-    monkeypatch.setattr(wg, "stream", fake_stream)
+    patch_everywhere(monkeypatch, wg, "stream", fake_stream)
     with pytest.raises(BackendError, match="could not start"):
         backend.launch()
 
@@ -142,7 +143,7 @@ def test_update_by_starting_the_launcher_survives_exit_code_0(launch_rig, monkey
         clock[0] += 600  # the launcher downloaded the update and quit
         return 0
 
-    monkeypatch.setattr(wg, "stream", fake_stream)
+    patch_everywhere(monkeypatch, wg, "stream", fake_stream)
     backend.update()  # used to raise although the launcher updated and quit normally
 
 
@@ -184,7 +185,7 @@ def _install_rig(tmp_path, monkeypatch):
     monkeypatch.setattr(launcher, "_extract_nsis", fake_extract)
     monkeypatch.setattr(sevenzip, "find", lambda **kw: "/usr/bin/7z")
     monkeypatch.setattr(ak, "stream", silent_that_writes_nothing)
-    monkeypatch.setattr(wg, "stream", silent_that_writes_nothing)
+    patch_everywhere(monkeypatch, wg, "stream", silent_that_writes_nothing)
     monkeypatch.delenv("NADARE_NIKKE_DIRECT", raising=False)
     monkeypatch.delenv("NADARE_NIKKE_SILENT", raising=False)
     return backend, events, calls, launcher_dir

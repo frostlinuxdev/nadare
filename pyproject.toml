@@ -1,10 +1,11 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "nadare-launcher"
-version = "0.1.0b23"
+version = "0.1.0b24"
 description = "An open-source Linux launcher for anime gacha games (Fate/Grand Order, Chaos Zero Nightmare, and more)"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Background image threads must not outlive the test that started them (#1024).
 
 A news-image download left running by one test was still decoding WebP inside Qt while the

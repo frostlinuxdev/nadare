@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import tempfile
 import threading
 import time
@@ -27,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import paths
+from . import legacywine, paths
 
 log = logging.getLogger(__name__)
 
@@ -135,7 +136,11 @@ TOP_DEFAULTS: dict[str, Any] = {
     "sidebar_hide_uninstalled": False,  # hide games known not to be installed in the sidebar
     "language": "en",
     "telemetry": False,  # always false; kept explicit for the record
+    "wine_binary_migrated": False,  # generic Wine profiles were offered their old plain Wine
 }
+
+#: Set once a config has run the generic-profile Wine migration.
+LEGACY_WINE_FLAG = "wine_binary_migrated"
 
 
 #: Every top-level setting Nadare itself reads or writes. Anything else in a config without a
@@ -156,11 +161,26 @@ KNOWN_TOP_KEYS: frozenset[str] = frozenset(TOP_DEFAULTS) | {
 _PROFILE_BOOLS = ("remember_me", "accept_account_notice", "secure_mode")
 
 
-def _coerce_bool(value: Any, default: bool) -> bool:
-    """Turn a hand-edited boolean into a real ``bool`` (or keep the default).
+def profile_value(profile: Mapping[str, Any], key: str, default: Any = None) -> Any:
+    """Read a profile key from the top level, else its ``extra`` mapping.
+
+    Backends and Settings both use this, so a hand-edited ``extra`` value is read
+    the same way everywhere.
+    """
+    value = profile.get(key)
+    if value not in (None, ""):
+        return value
+    extra = profile.get("extra")
+    if isinstance(extra, Mapping) and extra.get(key) not in (None, ""):
+        return extra[key]
+    return default
+
+
+def as_bool(value: Any, default: bool | None = None) -> bool | None:
+    """A real boolean, or a hand-edited string/integer that clearly means one.
 
     ``json`` keeps ``"false"`` a string, which is truthy; accepting the common
-    string/integer spellings prevents a setting from silently flipping on.
+    spellings prevents a setting from silently flipping on.
     """
     if isinstance(value, bool):
         return value
@@ -168,13 +188,16 @@ def _coerce_bool(value: Any, default: bool) -> bool:
         return bool(value)
     if isinstance(value, str):
         text = value.strip().lower()
-        if text == "true":
+        if text in ("1", "true", "yes", "on"):
             return True
-        if text == "false":
+        if text in ("0", "false", "no", "off"):
             return False
-        if text in ("0", "1"):
-            return text == "1"
     return default
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    """Turn a hand-edited boolean into a real ``bool`` (or keep the default)."""
+    return bool(as_bool(value, default))
 
 
 def _new_profile(values: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -222,12 +245,27 @@ class Config:
         present = p.exists()
         text: str | None = None
         if present:
+            # Open non-blocking and require a regular file first: reading a FIFO would wait
+            # forever for a writer (the same rule libraries._read applies to its manifest).
+            try:
+                fd = os.open(p, os.O_RDONLY | os.O_NONBLOCK)
+            except FileNotFoundError:
+                present = False  # removed between exists() and the open: missing (#1207 b055)
+            except OSError as exc:
+                raise ConfigReadError(f"cannot read {p}: {exc.strerror or exc}") from exc
+            else:
+                try:
+                    if not stat.S_ISREG(os.fstat(fd).st_mode):
+                        raise ConfigReadError(f"cannot read {p}: not a regular file")
+                finally:
+                    os.close(fd)
+        if present:
             try:
                 text = p.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 text = None
             except FileNotFoundError:
-                present = False  # removed between exists() and the read: missing (#1207 b055)
+                present = False  # removed between the check and the read: missing (#1207 b055)
             except OSError as exc:
                 raise ConfigReadError(f"cannot read {p}: {exc.strerror or exc}") from exc
         if present:
@@ -287,6 +325,11 @@ class Config:
                 cfg.notice = f"{notice}\n\n{message}" if notice else message
         cfg._snapshot = on_disk if renames else copy.deepcopy(cfg.data["profiles"])
         cfg._top_snapshot = cfg._top_level()
+        if present and not cfg.data.get(LEGACY_WINE_FLAG):
+            # A generic wine profile that already has a prefix was running on plain Wine;
+            # remember which one, so the new Proton default does not switch it underneath.
+            cfg._migrate_legacy_wine()
+            cfg.data[LEGACY_WINE_FLAG] = True
         if cls._migrated(before_migration):
             # Like a rename, a migration's edits are local changes against what the file holds,
             # or the next save would keep the old format on disk and migrate again every start.
@@ -298,6 +341,7 @@ class Config:
             cfg._removed |= set(cfg._snapshot) - set(cfg.profiles)
         if renames and isinstance(raw_active, str) and raw_active in renames:
             cfg._top_snapshot["active_profile"] = raw_active
+        cfg._sweep_stale_temps()
         return cfg
 
     def _migrate_profile_dirs(self, renames: dict[str, str]) -> list[tuple[str, str]]:
@@ -465,6 +509,8 @@ class Config:
         for key, default in TOP_DEFAULTS.items():
             if isinstance(default, bool):
                 data[key] = _coerce_bool(data.get(key, default), default)
+        if not isinstance(data.get("dismissed_notices"), list):
+            data["dismissed_notices"] = []  # a hand-edited scalar must not break notices
         profiles = data.get("profiles")
         if not isinstance(profiles, dict):
             profiles = {}
@@ -504,6 +550,35 @@ class Config:
         if data.get("active_profile") not in norm:
             data["active_profile"] = next(iter(norm), "")
         return data
+
+    def _migrate_legacy_wine(self) -> None:
+        """Write the old plain Wine into profiles that already had a Wine prefix.
+
+        Only a one-time migration: a new generic game gets the Proton default.
+        """
+        found = legacywine.find_plain_wine()
+        if found is None:
+            return
+        for profile in self.profiles.values():
+            if profile.get("backend") != "wine":
+                continue
+            if str(profile_value(profile, "runner") or "").strip():
+                continue
+            if str(profile_value(profile, "proton_runner") or "").strip():
+                continue
+            if str(profile_value(profile, "wine_binary") or "").strip():
+                continue
+            raw_prefix = profile_value(profile, "prefix") or profile_value(
+                profile, "wineprefix"
+            )
+            if not raw_prefix:
+                continue
+            try:
+                prefix = Path(os.path.expanduser(str(raw_prefix)))
+                if (prefix / "drive_c").is_dir():
+                    profile["wine_binary"] = str(found)
+            except (OSError, ValueError):
+                continue
 
     @staticmethod
     def _normalise_legacy_keys(profile: dict[str, Any]) -> None:
@@ -575,14 +650,49 @@ class Config:
         finally:
             os.close(fd)
 
+    @staticmethod
+    def _sweep_temps(parent: Path) -> None:
+        """Delete only Nadare's own ``.config-*.tmp`` save leftovers."""
+        try:
+            candidates = list(parent.glob(".config-*.tmp"))
+        except OSError:
+            return
+        for tmp in candidates:
+            try:
+                if not tmp.is_symlink() and tmp.is_file():
+                    tmp.unlink()
+            except OSError:
+                pass
+
+    def _sweep_stale_temps(self) -> None:
+        """Sweep a killed save's temp while holding the same lock a save takes."""
+        target = Path(os.path.realpath(self.path))
+        if not target.parent.is_dir():
+            return
+        try:
+            if next(target.parent.glob(".config-*.tmp"), None) is None:
+                return
+        except OSError:
+            return
+        try:
+            with self._file_lock():
+                self._sweep_temps(target.parent)
+        except OSError:
+            log.debug("could not sweep config temporary files in %s", target.parent)
+
     def save(self) -> Path:
         # Replace the file a symlink points at, not the link itself: a config
         # kept in a dotfiles repo must stay linked after a save.
         target = Path(os.path.realpath(self.path))
         with self._lock:
             target.parent.mkdir(parents=True, exist_ok=True)
+            # A fresh config has no legacy profiles: mark the migration as done so it
+            # never runs against games added later.
+            self.data[LEGACY_WINE_FLAG] = True
             with self._file_lock():
                 self._merge_disk_profiles()
+                # The lock proves no other save is using an older temp: sweep a killed one.
+                self._sweep_temps(target.parent)
                 fd, tmp = tempfile.mkstemp(
                     dir=str(target.parent), prefix=".config-", suffix=".tmp"
                 )
@@ -662,6 +772,77 @@ class Config:
         Config._normalise_legacy_keys(merged)
         return merged
 
+    @staticmethod
+    def _list_entry_key(key: str, item: Any) -> Any:
+        """Identity of one entry for the top-level list merges.
+
+        Libraries are the same root when their resolved paths match, even when
+        one process stored a different spelling. Anything else (a damaged
+        library entry, a notice id) is identified by its JSON value.
+        """
+        if key == "libraries" and isinstance(item, Mapping):
+            raw = item.get("path")
+            if isinstance(raw, str):
+                return os.path.realpath(os.path.expanduser(raw))
+        return json.dumps(item, sort_keys=True, default=str)
+
+    @classmethod
+    def _merge_list(
+        cls, key: str, snapshot: list[Any], local: list[Any], disk: list[Any]
+    ) -> list[Any]:
+        """Three-way merge of an ordered list, first entry for an identity wins.
+
+        The order is the snapshot, then local additions, then disk additions;
+        removals on either side subtract from the shared base.
+        """
+        def index(items: list[Any]) -> tuple[dict[Any, Any], list[Any]]:
+            values: dict[Any, Any] = {}
+            order: list[Any] = []
+            for item in items:
+                ident = cls._list_entry_key(key, item)
+                if ident not in values:
+                    values[ident] = item
+                    order.append(ident)
+            return values, order
+
+        base, base_order = index(snapshot)
+        ours, our_order = index(local)
+        theirs, their_order = index(disk)
+        removed = (set(base) - set(ours)) | (set(base) - set(theirs))
+        order = base_order + [i for i in our_order if i not in base]
+        order += [i for i in their_order if i not in base and i not in ours]
+        merged: list[Any] = []
+        for ident in order:
+            if ident in removed:
+                continue
+            if ident in ours:
+                merged.append(ours[ident])
+            elif ident in theirs:
+                merged.append(theirs[ident])
+            else:
+                merged.append(base[ident])
+        return merged
+
+    def _merge_disk_lists(self, raw: dict[str, Any]) -> set[str]:
+        """Merge list settings (libraries, notice ids) and return their keys.
+
+        A wrong-shaped value keeps the old replace-on-save handling: only three
+        real lists are merged.
+        """
+        merged_keys: set[str] = set()
+        for key in ("libraries", "dismissed_notices"):
+            present = key in self._top_snapshot or key in self.data or key in raw
+            values = (
+                self._top_snapshot.get(key, []),
+                self.data.get(key, []),
+                raw.get(key, []),
+            )
+            if not present or not all(isinstance(value, list) for value in values):
+                continue
+            self.data[key] = self._merge_list(key, *values)
+            merged_keys.add(key)
+        return merged_keys
+
     def _merge_disk_profiles(self) -> None:
         """Fold in what another process wrote since we loaded.
 
@@ -681,7 +862,15 @@ class Config:
             backup = self._quarantine(self.path, keep=True)
             log.warning("config on disk is not valid JSON; kept a copy at %s", backup)
             return
-        if not isinstance(raw, dict):
+        if (
+            not isinstance(raw, dict)
+            or self._bad_profiles(raw)
+            or self._missing_profiles_section(raw)
+        ):
+            # Valid JSON of the wrong shape would be overwritten by this save; keep a copy
+            # first, exactly as load() already does.
+            backup = self._quarantine(self.path, keep=True)
+            log.warning("config on disk has the wrong shape; kept a copy at %s", backup)
             return
         disk = raw.get("profiles")
         if not isinstance(disk, dict):
@@ -722,11 +911,14 @@ class Config:
                 local.clear()
                 local.update(merged)
             # A profile added locally but not saved yet keeps the local values.
+        merged_lists = self._merge_disk_lists(raw)
         for key, value in raw.items():
-            if key == "profiles":
+            if key == "profiles" or key in merged_lists:
                 continue
             if isinstance(TOP_DEFAULTS.get(key), bool):
                 value = _coerce_bool(value, TOP_DEFAULTS[key])
+            elif key == "dismissed_notices" and not isinstance(value, list):
+                value = []
             if key not in self._top_snapshot:
                 # A key this process had not seen when it loaded: another
                 # process added it. Keep it unless we set our own value.

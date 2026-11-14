@@ -45,11 +45,17 @@ def _https(url: str) -> str:
     return url
 
 
-def _cdn_root(index: dict[str, Any]) -> tuple[dict[str, Any], str]:
+def _cdn_root(
+    index: dict[str, Any], block: dict[str, Any] | None = None
+) -> tuple[dict[str, Any], str]:
     try:
-        default = index["default"]
-        cdns = default["cdnList"]
-        config = default["config"]
+        if block is None:
+            default = index["default"]
+            cdns = default["cdnList"]
+            config = default["config"]
+        else:
+            config = block["config"]
+            cdns = block["cdnList"] if "cdnList" in block else index["default"]["cdnList"]
         root = max(cdns, key=lambda cdn: int(cdn["P"]))["url"]
     except (KeyError, TypeError, ValueError) as exc:
         raise directdl.DirectError("index is missing the CDN list or config") from exc
@@ -77,7 +83,8 @@ def resolve_with_tokens(
     exe: str,
     fetch: Fetch | None,
     refused_hint: str,
-) -> directdl.Plan:
+    predownload: bool = False,
+) -> directdl.Plan | None:
     """Plan for a Kuro game, trying the profile token, then published, then builtin.
 
     An explicit ``token`` is the only candidate. The published token is only
@@ -106,6 +113,7 @@ def resolve_with_tokens(
                 exe=exe,
                 fetch=fetch,
                 refused_hint=refused_hint,
+                predownload=predownload,
             )
         except directdl.DirectError as exc:
             last = exc
@@ -121,6 +129,7 @@ def resolve_with_tokens(
                     exe=exe,
                     fetch=fetch,
                     refused_hint=refused_hint,
+                    predownload=predownload,
                 )
             except directdl.DirectError as exc:
                 last = exc
@@ -136,7 +145,8 @@ def resolve_game(
     exe: str,
     fetch: Fetch | None = None,
     refused_hint: str = "",
-) -> directdl.Plan:
+    predownload: bool = False,
+) -> directdl.Plan | None:
     """Plan for a Kuro launcher-platform game from its ``index.json`` URL.
 
     The index names the CDN roots and the current ``indexFile``, a list of
@@ -149,7 +159,10 @@ def resolve_game(
     except directdl.DirectError as exc:
         raise directdl.DirectError(f"{exc}. {refused_hint}".strip()) from exc
     index = _json(raw, "index")
-    config, root = _cdn_root(index)
+    block = index.get("predownload") if predownload else None
+    if predownload and not isinstance(block, dict):
+        return None
+    config, root = _cdn_root(index, block if isinstance(block, dict) else None)
 
     try:
         version = str(config["version"])
@@ -189,47 +202,16 @@ def resolve_game(
     )
 
 
-def resolve_bundle(
-    index_url: str,
+def _bundle_files(
+    fetch: Fetch,
+    root: str,
+    names: list[Any],
+    packs: dict[str, Any],
     *,
     game_tag: str,
     exe: str,
-    tier: str,
-    fetch: Fetch | None = None,
-    refused_hint: str = "",
 ) -> directdl.Plan:
-    """Plan for one resource tier of a game on Kuro's bundle index (launcher 3.0 and newer).
-
-    The index lists ``resourcePacks`` (each with its own ``indexFile`` and ``baseUrl``) and
-    ``bundles`` (a tier such as SD, HD or UHD is a list of pack names, always the shared
-    ``common`` pack plus one tier pack). The plan is every pack of the chosen bundle together.
-    """
-    fetch = fetch or default_fetch
-    try:
-        raw = fetch(index_url, None)
-    except directdl.DirectError as exc:
-        raise directdl.DirectError(f"{exc}. {refused_hint}".strip()) from exc
-    index = _json(raw, "index")
-    try:
-        cdns = index["cdnList"]
-        root = _https(str(max(cdns, key=lambda cdn: int(cdn["P"]))["url"]))
-        packs = index["resourcePacks"]
-        bundles = index["bundles"]
-    except (KeyError, TypeError, ValueError) as exc:
-        raise directdl.DirectError("index is missing the CDN list, packs or bundles") from exc
-    if not isinstance(packs, dict) or not isinstance(bundles, dict) or not bundles:
-        raise directdl.DirectError("index packs or bundles are not objects")
-
-    wanted = str(tier or "").strip().lower()
-    bundle = next((b for name, b in bundles.items() if name.lower() == wanted), None)
-    if not isinstance(bundle, dict):
-        raise directdl.DirectError(
-            f"no {tier!r} resource quality in the index (it offers: {', '.join(bundles)})"
-        )
-    names = bundle.get("resourcePacks")
-    if not isinstance(names, list) or not names:
-        raise directdl.DirectError("the bundle names no packs")
-
+    """Read every pack's file list and build the plan for the named packs."""
     files: list[directdl.RemoteFile] = []
     seen: set[str] = set()
     pack_versions: list[tuple[str, str]] = []
@@ -276,3 +258,85 @@ def resolve_bundle(
         game_tag=game_tag, version=version, files=tuple(files), exe=exe,
         extra=_patch_extra(root, patch_configs),
     )
+
+
+def _bundle_names(bundles: Any, tier: str) -> list[Any]:
+    """The pack names of the tier's bundle (matched case-insensitively)."""
+    if not isinstance(bundles, dict) or not bundles:
+        raise directdl.DirectError("index packs or bundles are not objects")
+    wanted = str(tier or "").strip().lower()
+    bundle = next((b for name, b in bundles.items() if name.lower() == wanted), None)
+    if not isinstance(bundle, dict):
+        raise directdl.DirectError(
+            f"no {tier!r} resource quality in the index (it offers: {', '.join(bundles)})"
+        )
+    names = bundle.get("resourcePacks")
+    if not isinstance(names, list) or not names:
+        raise directdl.DirectError("the bundle names no packs")
+    return names
+
+
+def resolve_bundle(
+    index_url: str,
+    *,
+    game_tag: str,
+    exe: str,
+    tier: str,
+    fetch: Fetch | None = None,
+    refused_hint: str = "",
+    predownload: bool = False,
+) -> directdl.Plan | None:
+    """Plan for one resource tier of a game on Kuro's bundle index (launcher 3.0 and newer).
+
+    The index lists ``resourcePacks`` (each with its own ``indexFile`` and ``baseUrl``) and
+    ``bundles`` (a tier such as SD, HD or UHD is a list of pack names, always the shared
+    ``common`` pack plus one tier pack). The plan is every pack of the chosen bundle together.
+    With ``predownload`` the next version is read from the index's ``predownload`` block.
+    """
+    fetch = fetch or default_fetch
+    try:
+        raw = fetch(index_url, None)
+    except directdl.DirectError as exc:
+        raise directdl.DirectError(f"{exc}. {refused_hint}".strip()) from exc
+    index = _json(raw, "index")
+    block = index.get("predownload") if predownload else None
+    if predownload and (not isinstance(block, dict) or not block):
+        return None
+    try:
+        source: dict[str, Any] = block if isinstance(block, dict) else index
+        cdns = source["cdnList"] if "cdnList" in source else index["cdnList"]
+        root = _https(str(max(cdns, key=lambda cdn: int(cdn["P"]))["url"]))
+        packs = source["resourcePacks"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise directdl.DirectError("index is missing the CDN list, packs or bundles") from exc
+    if not isinstance(packs, dict):
+        raise directdl.DirectError("index packs or bundles are not objects")
+
+    if predownload:
+        names: list[Any] | None = None
+        levels = block.get("resourceLevels") if isinstance(block, dict) else None
+        if isinstance(levels, dict):
+            wanted = str(tier or "").strip().lower()
+            level = next(
+                (value for name, value in levels.items() if name.lower() == wanted), None
+            )
+            if isinstance(level, dict):
+                candidate = level.get("resourcePacks")
+                if isinstance(candidate, list) and candidate:
+                    names = candidate
+        if names is None:
+            try:
+                bundles = index["bundles"]
+            except KeyError as exc:
+                raise directdl.DirectError(
+                    "index is missing the CDN list, packs or bundles"
+                ) from exc
+            names = _bundle_names(bundles, tier)
+    else:
+        try:
+            bundles = index["bundles"]
+        except KeyError as exc:
+            raise directdl.DirectError("index is missing the CDN list, packs or bundles") from exc
+        names = _bundle_names(bundles, tier)
+
+    return _bundle_files(fetch, root, names, packs, game_tag=game_tag, exe=exe)

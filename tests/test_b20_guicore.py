@@ -18,6 +18,8 @@ try:  # pragma: no cover - exercised only when PyQt6 is missing
 except Exception:  # noqa: BLE001
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
+from _main_window_patch import patch_main_window
+
 from nadare.core import removal
 from nadare.core.backends import Status
 from nadare.core.config import Config
@@ -244,7 +246,7 @@ def test_a_hung_startup_probe_gives_its_slot_back_after_a_while(tmp_path, qapp, 
     try:
         window._probe_all()
         assert len(started) == mw.STARTUP_PROBE_LIMIT  # three running, none ever reports back
-        monkeypatch.setattr(mw, "STARTUP_PROBE_TIMEOUT", 0.0)
+        patch_main_window(monkeypatch, "STARTUP_PROBE_TIMEOUT", 0.0)
         window._pump_probes()
         assert len(started) > mw.STARTUP_PROBE_LIMIT  # the stuck ones no longer hold the queue
     finally:
@@ -270,11 +272,11 @@ def test_queued_startup_probes_do_not_read_an_old_process_snapshot(tmp_path, qap
 
     monkeypatch.setattr(window, "_start", fake_start)
     try:
-        monkeypatch.setattr(mw, "PROBE_ROUND_MAX_AGE", 3600.0)
+        patch_main_window(monkeypatch, "PROBE_ROUND_MAX_AGE", 3600.0)
         window._probe_all()
         first_burst = list(payloads)
         assert len({id(p) for p in first_burst}) == 1  # a burst shares one snapshot
-        monkeypatch.setattr(mw, "PROBE_ROUND_MAX_AGE", 0.0)  # everything later is "old"
+        patch_main_window(monkeypatch, "PROBE_ROUND_MAX_AGE", 0.0)  # everything later is "old"
         for profile in list(window._probe_active):
             window._probe_finished(profile)
         assert len(payloads) > len(first_burst)

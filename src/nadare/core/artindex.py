@@ -104,13 +104,26 @@ def parse_candidate(raw: Any, hosts: tuple[str, ...]) -> ArtCandidate | None:
 
 
 def valid_document(doc: Any) -> bool:
-    """True when ``doc`` claims the schema version this build understands.
+    """True when ``doc`` has the schema and shape :func:`parse` can use.
 
-    Used as the validator of both index hooks, so a document from a newer schema is
-    rejected before :func:`indexfetch.fetch_json` writes it over the last good copy.
+    Used as the validator of both index hooks, so a document from a newer schema or
+    with unusable games/covers is rejected before :func:`indexfetch.fetch_json`
+    writes it over the last good copy.
     """
     # ``type(...) is int``: JSON ``true`` equals 1 in Python but is not schema 1.
-    return isinstance(doc, dict) and type(doc.get("schema")) is int and doc["schema"] == SCHEMA
+    if not isinstance(doc, dict) or type(doc.get("schema")) is not int or doc["schema"] != SCHEMA:
+        return False
+    games = doc.get("games")
+    if not isinstance(games, dict):
+        return False
+    # Per entry only the shape: an entry without covers is skipped by parse (a newer index may
+    # carry other art kinds), but a cover field that is not a list means a broken document.
+    for entry in games.values():
+        if not isinstance(entry, dict):
+            return False
+        if "cover" in entry and not isinstance(entry["cover"], list):
+            return False
+    return True
 
 
 def parse(doc: Any) -> dict[str, list[ArtCandidate]]:

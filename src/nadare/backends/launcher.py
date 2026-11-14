@@ -44,7 +44,7 @@ from ..core import (
     x11windows,
 )
 from ..core.backends import PREFIX_HELP, BackendError, BackendUnsupported, Option, Status
-from ..core.config import valid_profile_name
+from ..core.config import as_bool, valid_profile_name
 from ..core.events import Cancelled, Event
 from ..core.process import process_age_seconds
 from ..core.sources import nikke as nikke_source
@@ -136,6 +136,13 @@ def _newer(path: Path, than: Path) -> bool:
 
 class SilentInstallUnavailable(Exception):
     """The silent install cannot be used here; the installer window is the way instead."""
+
+
+@dataclasses.dataclass(frozen=True)
+class _MissingClientFile:
+    """A launcherless game's own file that Verify/Repair report as missing or damaged."""
+
+    path: str
 
 
 #: Unpacking a 20 MB installer takes seconds; anything past this is stuck.
@@ -448,7 +455,7 @@ class NikkeBackend(LauncherBackend):
 
     def _hidden_watch(self) -> trayidle.HiddenWindowWatch | None:
         """The tray watch when the option is on and NIKKE really runs on X11."""
-        if profile_setting(self.ctx.profile, "stop_when_hidden") is not True:
+        if not as_bool(profile_setting(self.ctx.profile, "stop_when_hidden"), False):
             return None
         if not self._display_in_use().startswith("x11"):
             return None
@@ -489,6 +496,9 @@ class NikkeBackend(LauncherBackend):
             if files is not None:
                 # Only now: a Play that falls back to the launcher lets the launcher update.
                 self._update_before_play()
+                # The normal Play path sets up the pinned runner; this one has to as well, or a
+                # newly pinned DW-Proton is missing and the helper ran on a plain Wine (#1338).
+                self._ensure_default_runner(strict=True)
                 return self._launch_launcherless(files)
         return self._launch_with_watch()
 
@@ -573,6 +583,61 @@ class NikkeBackend(LauncherBackend):
             return False  # not installed: Install, not Update
         return digest.hexdigest() != latest["md5"]
 
+    def _managed_client_ok(self) -> bool:
+        """Whether the Nadare-managed launcherless client is present and matches the publisher."""
+        return self._client_exe().is_file() and not self._client_outdated(
+            self._read_client_latest() or None
+        )
+
+    def _missing_entries(self, *, verify: bool = True) -> list[_MissingClientFile]:
+        """The client file Repair must fetch when the launcherless client is damaged."""
+        del verify
+        if self._managed_client_ok():
+            return []
+        return [_MissingClientFile("NIKKE/game/nikke.exe")]
+
+    def _sync_direct(self) -> dict[str, Any]:
+        """Repair a launcherless client by downloading what differs from the publisher."""
+        self._update_client_direct()
+        return {}
+
+    def verify(self) -> dict[str, Any]:
+        report = super().verify()
+        if not self._launcherless_wanted():
+            return report
+        ok = self._managed_client_ok()
+        report["checks"]["client"] = ok
+        if not ok:
+            report["verified"] = False
+            failed = list(report.get("failed") or ())
+            if "client" not in failed:
+                failed.append("client")
+            report["failed"] = failed
+            report["message"] = (
+                "integrity check failed: the NIKKE game client is missing, damaged or "
+                "outdated; click Repair files or Update"
+            )
+        return report
+
+    def repair(self) -> None:
+        if not self._launcherless_wanted():
+            return super().repair()
+        if not self._client_exe().is_file():
+            raise BackendError("NIKKE is not installed yet")
+        self.ctx.emit(Event("step", "Checking the NIKKE game client"))
+        self._sync_direct()
+        try:
+            missing = self._missing_entries(verify=False)
+        except (railrepo.RailError, OSError) as exc:
+            raise BackendError(f"could not check the NIKKE game client ({exc})") from exc
+        if missing:
+            names = ", ".join(entry.path for entry in missing[:5])
+            raise BackendError(
+                f"{len(missing)} game file(s) are still damaged: {names}. "
+                "Try again, or reinstall the game."
+            )
+        self.ctx.emit(Event("done", "All game files check out"))
+
     def check_update(self) -> None:
         """Refresh the cached client version (launcherless only, offline-safe, every few hours)."""
         if not self._launcherless_wanted():
@@ -598,16 +663,19 @@ class NikkeBackend(LauncherBackend):
                 log.debug("NIKKE: launcher check failed: %s", exc)
 
     def _client_update_status(self, result: Status) -> None:
-        """Purely local: compare nikke.exe with the cached published client."""
+        """Purely local: compare the client and launcher with their cached published records."""
         if not self._launcherless_wanted():
             return
-        latest = self._read_client_latest()
-        outdated = self._client_outdated(latest) or self._launcher_outdated(
-            self._read_launcher_latest()
-        )
-        result.data["update_available"] = outdated
-        if outdated and latest is not None and latest.get("version"):
-            result.data["latest_version"] = latest["version"]
+        client = self._read_client_latest()
+        launcher = self._read_launcher_latest()
+        client_outdated = self._client_outdated(client)
+        launcher_outdated = self._launcher_outdated(launcher)
+        result.data["update_available"] = client_outdated or launcher_outdated
+        # Name the version of what Update would replace, not always the client's.
+        if client_outdated and client is not None and client.get("version"):
+            result.data["latest_version"] = client["version"]
+        elif launcher_outdated and launcher is not None and launcher.get("version"):
+            result.data["latest_version"] = launcher["version"]
 
     def _mark_update_incomplete(self, marker: Path | None = None) -> Path:
         """Write the "update unfinished" marker; raises BackendError when it cannot."""
@@ -885,7 +953,7 @@ class NikkeBackend(LauncherBackend):
         return super()._wayland_default()
 
     def _launcherless_wanted(self) -> bool:
-        return profile_setting(self.ctx.profile, "launcherless") is True
+        return bool(as_bool(profile_setting(self.ctx.profile, "launcherless"), False))
 
     def _session_cache(self) -> Path:
         """Nadare's private copy of the INTL sign-in for this profile."""

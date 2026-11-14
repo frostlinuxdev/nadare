@@ -13,9 +13,9 @@ Example (`~/.config/nadare/config.json`, one game under `profiles`):
 
 | key | what it does | used by |
 | --- | --- | --- |
-| `installer_url` | Download this installer instead of the publisher's current one | launcher games, Arknights |
-| `installer_sha256` | Checksum the installer must match | launcher games, Arknights |
-| `installer_args` | Extra arguments given to the installer | launcher games, Arknights |
+| `installer_url` | Download this installer instead of the publisher's current one | launcher games, Arknights in official mode (rare: see BACKENDS.md) |
+| `installer_sha256` | Checksum the installer must match | launcher games, Arknights in official mode (rare: see BACKENDS.md) |
+| `installer_args` | Extra arguments given to the installer | launcher games, Arknights in official mode (rare: see BACKENDS.md) |
 | `manifest_index` | Alternative download list index (Yostar games) | Arknights, Stella Sora |
 | `manifest_file` | Alternative download list file (Yostar games) | Arknights, Stella Sora |
 | `media_file` | Alternative media file list | Arknights |

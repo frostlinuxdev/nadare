@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """A game that cannot get OpenGL says why (#132).
 
 On a host without libglvnd (seen in a Fedora container with NVIDIA, Proton run directly because

@@ -12,6 +12,7 @@ import os
 
 import pytest
 from _backend_helpers import make_context
+from _main_window_patch import patch_main_window
 
 from nadare.backends.fgo import installer, lepton
 from nadare.backends.fgo.backend import ACCOUNT_NOTICE, FgoLeptonBackend
@@ -230,7 +231,7 @@ def test_gui_continue_persists_flag_and_starts_install(tmp_path, qt_env, monkeyp
         def exec(self):
             return QDialog.DialogCode.Accepted
 
-    monkeypatch.setattr(mw, "AccountNoticeDialog", FakeDialog)
+    patch_main_window(monkeypatch, "AccountNoticeDialog", FakeDialog)
     try:
         window._on_game_action("install")
         assert config.profile("gfgo")["accept_account_notice"] is True
@@ -258,7 +259,7 @@ def test_gui_cancel_starts_nothing(tmp_path, qt_env, monkeypatch):
         def exec(self):
             return QDialog.DialogCode.Rejected
 
-    monkeypatch.setattr(mw, "AccountNoticeDialog", FakeDialog)
+    patch_main_window(monkeypatch, "AccountNoticeDialog", FakeDialog)
     try:
         window._on_game_action("install")
         assert config.profile("gfgo").get("accept_account_notice", False) is False
@@ -272,8 +273,8 @@ def test_gui_cancel_starts_nothing(tmp_path, qt_env, monkeypatch):
 @pytestmark_gui
 def test_gui_non_gated_operation_needs_no_notice(tmp_path, qt_env, monkeypatch):
     mw, window, config, starts = _make_window(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        mw,
+    patch_main_window(
+        monkeypatch,
         "AccountNoticeDialog",
         lambda *a, **k: pytest.fail("dialog must not be shown for status"),
     )

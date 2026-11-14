@@ -44,6 +44,9 @@ _DIRECTORY_TYPE = 64
 _MAX_WORKERS = 32
 #: Marker directory (same as :mod:`directdl`).
 STATE_DIR = ".nadare"
+#: A chunk name is used as a file name in the predownload cache. Only this shape is accepted:
+#: no path separators, no leading dot, and short enough for every filesystem.
+_CHUNK_NAME_RE = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,199}")
 
 
 class SophonError(RuntimeError):
@@ -182,6 +185,8 @@ def _safe_relative_path(path: str) -> str:
             message = f"path must be relative: {path!r}"
         elif exc.code == "component":
             message = f"unsafe path component in {path!r}"
+        elif exc.code == "nadare-owned":
+            message = f"path is inside a Nadare-owned folder: {path!r}"
         else:
             message = f"unsafe path: {path!r}"
         raise SophonError(message) from None
@@ -193,13 +198,11 @@ def _target_path(root: Path, relative: str) -> Path:
     The root itself may be a symlink; only components beneath it are forbidden.
     """
     relative = _safe_relative_path(relative)
-    if relative.split("/", 1)[0] == STATE_DIR:
-        # Nadare's own ledger lives there; a manifest may not plant or replace it (final round).
-        raise SophonError(f"unsafe path component in {relative!r}")
     root_real = Path(os.path.realpath(root))
     target = root / relative
+    parts = relative.split("/")
     current = root
-    for part in relative.split("/"):
+    for index, part in enumerate(parts):
         current = current / part
         try:
             mode = current.lstat().st_mode
@@ -209,6 +212,12 @@ def _target_path(root: Path, relative: str) -> Path:
             raise SophonError(f"cannot inspect install path {relative!r}: {exc}") from exc
         if stat.S_ISLNK(mode):
             raise SophonError(f"symlink in install path {relative!r}")
+        if index < len(parts) - 1:
+            if not stat.S_ISDIR(mode):
+                raise SophonError(f"unsafe path {relative!r}: {part!r} is not a folder")
+        elif not stat.S_ISREG(mode):
+            # A manifest file may not replace a folder that is already installed.
+            raise SophonError(f"unsafe path {relative!r}: a folder is in the way")
 
     try:
         parent_real = Path(os.path.realpath(target.parent))
@@ -325,15 +334,11 @@ def _ledger_path(pkg: SophonPackage, root: Path) -> Path:
 
 def _validate_ledger_entry(entry: str, ledger: Path) -> str:
     """Return a ledger path, or raise :class:`SophonError` when it is unsafe."""
-    if not isinstance(entry, str) or not entry:
-        raise SophonError(f"unsafe empty path in {ledger.name}")
-    if "\\" in entry:
-        raise SophonError(f"unsafe backslash path in {ledger.name}: {entry!r}")
-    if entry.startswith("/"):
-        raise SophonError(f"unsafe absolute path in {ledger.name}: {entry!r}")
-    if any(part in ("", ".", "..") for part in entry.split("/")):
-        raise SophonError(f"unsafe path in {ledger.name}: {entry!r}")
-    return entry
+    try:
+        # The same shared validator direct downloads use: it also refuses NUL and .nadare.
+        return paths.check_relative(entry, paths.SOPHON_PATHS)
+    except paths.PathProblem as exc:
+        raise SophonError(f"unsafe path in {ledger.name}: {entry!r} ({exc.code})") from None
 
 
 def _ensure_safe_parents(root: Path, relative: str) -> None:
@@ -650,12 +655,8 @@ def _chunk_matches(fh: Any, chunk: ChunkEntry) -> bool:
     return hashlib.md5(local).hexdigest().lower() == chunk.md5.lower()
 
 
-def _fetch_chunk(
-    pool: download_module.HttpClientPool, pkg: SophonPackage, chunk: ChunkEntry, cancel: Any
-) -> bytes:
-    body = _fetch_bytes(
-        pool, f"{pkg.chunk_url}/{chunk.name}", max(chunk.csize, chunk.size) + (1 << 16), cancel
-    )
+def _verify_chunk_body(chunk: ChunkEntry, body: bytes) -> bytes:
+    """Check a compressed chunk body exactly as the network path does, and decompress it."""
     if chunk.cmd5 and hashlib.md5(body).hexdigest().lower() != chunk.cmd5.lower():
         raise SophonError(f"compressed md5 mismatch for chunk {chunk.name!r}")
     try:
@@ -671,6 +672,51 @@ def _fetch_chunk(
     return data
 
 
+def _read_cached_chunk(path: Path, chunk: ChunkEntry) -> bytes | None:
+    """The decompressed chunk from the cache, or None after dropping a bad cached file.
+
+    A cached file is only trusted after the same checks as a body from the network.
+    """
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    try:
+        return _verify_chunk_body(chunk, path.read_bytes())
+    except (OSError, SophonError):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return None
+
+
+def _fetch_chunk(
+    pool: download_module.HttpClientPool, pkg: SophonPackage, chunk: ChunkEntry, cancel: Any
+) -> bytes:
+    body = _fetch_bytes(
+        pool, f"{pkg.chunk_url}/{chunk.name}", max(chunk.csize, chunk.size) + (1 << 16), cancel
+    )
+    return _verify_chunk_body(chunk, body)
+
+
+def _fetch_chunk_cached(
+    pool: download_module.HttpClientPool,
+    pkg: SophonPackage,
+    chunk: ChunkEntry,
+    cancel: Any,
+    chunk_cache: Path | None,
+) -> bytes:
+    """A chunk from the predownload cache when it verifies, else from the network."""
+    if chunk_cache is not None and _CHUNK_NAME_RE.fullmatch(chunk.name):
+        cached = _read_cached_chunk(chunk_cache / chunk.name, chunk)
+        if cached is not None:
+            return cached
+    return _fetch_chunk(pool, pkg, chunk, cancel)
+
+
 def sync_package(
     pkg: SophonPackage,
     root: Path,
@@ -678,6 +724,7 @@ def sync_package(
     emit: Emitter | None = None,
     cancel: Cancel | None = None,
     workers: int = 4,
+    chunk_cache: Path | None = None,
 ) -> None:
     """Install ``pkg`` into ``root``, fetching only missing or damaged chunks.
 
@@ -797,7 +844,9 @@ def sync_package(
                             old_file.seek(chunk.offset)
                             data = old_file.read(chunk.size)
                         else:
-                            data = _fetch_chunk(pool, pkg, chunk, combined)
+                            data = _fetch_chunk_cached(
+                                pool, pkg, chunk, combined, chunk_cache
+                            )
                             combined.raise_if_cancelled()
                         output.seek(chunk.offset)
                         output.write(data)
@@ -944,3 +993,153 @@ def sync_package(
             except OSError:
                 log.warning("could not remove %s", stale, exc_info=True)
     say(Event("log", f"installed {pkg.name}", data={"sophon": pkg.name}))
+
+
+def _predownload_ready_path(pkg: SophonPackage, cache: Path) -> Path:
+    return cache / f"{pkg.name}.ready"
+
+
+def predownload_ready(pkg: SophonPackage, cache: Path) -> bool:
+    """True when ``cache`` holds every chunk of this exact build."""
+    try:
+        return (
+            _predownload_ready_path(pkg, cache).read_text(encoding="utf-8")
+            == pkg.manifest_id
+        )
+    except (OSError, UnicodeError):
+        return False
+
+
+def _needed_chunks(
+    files: list[FileEntry], root: Path, cancel: Cancel | None
+) -> dict[str, ChunkEntry]:
+    """Chunks of ``files`` that the installed files at ``root`` do not already have."""
+    needed: dict[str, ChunkEntry] = {}
+    for entry in files:
+        target = _target_path(root, entry.path)
+        if target.is_file():
+            with open(target, "rb") as installed:
+                for chunk in entry.chunks:
+                    if cancel is not None:
+                        cancel.raise_if_cancelled()
+                    if not _chunk_matches(installed, chunk):
+                        needed.setdefault(chunk.name, chunk)
+        else:
+            for chunk in entry.chunks:
+                needed.setdefault(chunk.name, chunk)
+    return needed
+
+
+def _store_chunk(cache: Path, chunk: ChunkEntry, body: bytes) -> None:
+    """Write a verified compressed chunk through ``.part`` and an atomic replace."""
+    temporary = cache / f"{chunk.name}.part"
+    with open(temporary, "wb") as fh:
+        fh.write(body)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(temporary, cache / chunk.name)
+
+
+def predownload_package(
+    pkg: SophonPackage,
+    root: Path,
+    cache: Path,
+    *,
+    emit: Emitter | None = None,
+    cancel: Cancel | None = None,
+    workers: int = 4,
+) -> int:
+    """Fetch the chunks of ``pkg`` the installed game at ``root`` lacks into ``cache``.
+
+    The game is only read, never written: it stays playable while the next version is
+    downloaded. The return value is the number of compressed bytes fetched (0 when the
+    cache was already complete).
+    """
+    if cancel is not None:
+        cancel.raise_if_cancelled()
+    say = emitter(emit)
+    pool = download_module.HttpClientPool()
+    try:
+        files = _load_manifest(pool, pkg, cancel)
+        needed = _needed_chunks(files, root, cancel)
+
+        # Validate every name before creating a directory or fetching anything: a chunk name is
+        # a file name in the cache, so a hostile one must never reach the filesystem.
+        for name in needed:
+            if not _CHUNK_NAME_RE.fullmatch(name):
+                raise SophonError(f"unsafe chunk name: {name!r}")
+
+        to_fetch: dict[str, ChunkEntry] = {}
+        for name, chunk in needed.items():
+            if _read_cached_chunk(cache / name, chunk) is None:
+                to_fetch[name] = chunk
+
+        total = sum(chunk.csize for chunk in to_fetch.values())
+        cache.mkdir(parents=True, exist_ok=True)
+        diskspace.check_space(cache, total)
+
+        downloaded = 0
+        if to_fetch:
+            stop = Cancel()
+            combined = _CombinedCancel(cancel, stop)
+            done = 0
+            last = -1
+            last_time = 0.0
+            lock = threading.Lock()
+
+            def add_progress(amount: int) -> None:
+                nonlocal done, last, last_time
+                with lock:
+                    done += amount
+                    now = time.monotonic()
+                    if done < total and now - last_time < _PROGRESS_INTERVAL:
+                        return
+                    last_time = now
+                    if done == last:
+                        return
+                    last = done
+                    current = done
+                download_module._emit_progress(say, "download", current, total)
+
+            def fetch(chunk: ChunkEntry, token: _CombinedCancel) -> int:
+                token.raise_if_cancelled()
+                body = _fetch_bytes(
+                    pool,
+                    f"{pkg.chunk_url}/{chunk.name}",
+                    max(chunk.csize, chunk.size) + (1 << 16),
+                    token,
+                )
+                _verify_chunk_body(chunk, body)
+                token.raise_if_cancelled()
+                _store_chunk(cache, chunk, body)
+                add_progress(len(body))
+                return len(body)
+
+            tasks = list(to_fetch.values())
+            limit = max(1, min(workers, _MAX_WORKERS, len(tasks)))
+            errors: list[BaseException] = []
+            with ThreadPoolExecutor(max_workers=limit) as executor:
+                futures = [executor.submit(fetch, chunk, combined) for chunk in tasks]
+                for future in as_completed(futures):
+                    try:
+                        downloaded += future.result()
+                    except BaseException as exc:
+                        errors.append(exc)
+                        if len(errors) == 1:
+                            stop.cancel()
+                            for other in futures:
+                                other.cancel()
+            for exc in errors:
+                if not isinstance(exc, Cancelled | FutureCancelled):
+                    raise exc
+            if errors:
+                raise next((e for e in errors if isinstance(e, Cancelled)), Cancelled())
+            if total:
+                download_module._emit_progress(say, "download", total, total)
+
+        if cancel is not None:
+            cancel.raise_if_cancelled()
+        _atomic_write_text(_predownload_ready_path(pkg, cache), pkg.manifest_id)
+        return downloaded
+    finally:
+        pool.close()

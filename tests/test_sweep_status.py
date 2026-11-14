@@ -14,13 +14,16 @@ from nadare.backends.fgo import readiness
 from nadare.backends.fgo.readiness import Probe
 from nadare.backends.steam import SteamBackend
 from nadare.backends.wine import WineBackend
-from nadare.core.backends import BackendError
 
 
 # ---------------------------------------------------------------------------
 # #290: Wine status must notice a missing runtime
 # ---------------------------------------------------------------------------
 def test_wine_status_without_a_runtime_is_not_installed(tmp_path, monkeypatch):
+    """A generic game whose chosen runner is gone is not reported ready.
+
+    (Before 2026-11-13 this was "no system Wine"; generic games now use Proton.)
+    """
     game = tmp_path / "game"
     write_exe(game / "game.exe", "MZ")
     ctx = make_context(
@@ -30,18 +33,13 @@ def test_wine_status_without_a_runtime_is_not_installed(tmp_path, monkeypatch):
             "install_dir": str(game),
             "exe_name": "game.exe",
             "prefix": str(tmp_path / "prefix"),
+            "runner": str(tmp_path / "deleted-runner"),
         },
     )
 
-    def _no_wine() -> Path:
-        raise BackendError("wine not found on PATH")
-
-    monkeypatch.setattr(wine_mod, "first_wine", _no_wine)
-    monkeypatch.setattr(wine_mod.shutil, "which", lambda name, *_a, **_k: None)
-
     status = WineBackend(ctx).status()
     assert status.state != "installed"
-    assert "Wine is not installed" in status.message
+    assert "not found" in status.message
 
 
 # ---------------------------------------------------------------------------

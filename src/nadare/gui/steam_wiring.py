@@ -60,9 +60,11 @@ def steam_app_id(profile: Mapping[str, Any]) -> str:
     candidates = [profile.get("steam_app_id"), profile.get("app_id")]
     if isinstance(extra, Mapping):
         candidates += [extra.get("steam_app_id"), extra.get("app_id")]
+    from ..core import steamstore
+
     for value in candidates:
-        text = str(value or "").strip()
-        if text.isascii() and text.isdigit():
+        text = steamstore.normalise_app_id(str(value or "").strip())
+        if text is not None:
             return text
     return ""
 

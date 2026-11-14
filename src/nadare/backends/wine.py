@@ -16,7 +16,7 @@ Profile keys (top level or under ``extra``):
     a Steam Linux Runtime Proton runner directory; when set the game runs
     through ``umu-run`` with ``PROTONPATH`` instead of a bare Wine.
 ``wine_binary``
-    Wine executable (autodetected when empty).
+    Wine executable. When empty, the game runs on the default Proton runner.
 ``umu_binary``
     ``umu-run`` (default).
 ``launch_args``
@@ -42,18 +42,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..core import graphics, hostlibs, monitors, paths, process, runners, sandbox, umu, vcredist
+from ..core import (
+    download,
+    graphics,
+    legacywine,
+    monitors,
+    paths,
+    process,
+    runners,
+    sandbox,
+    umu,
+    userns,
+    vcredist,
+)
 from ..core.backends import PREFIX_HELP, BackendError, GameBackend, Option, Status
+from ..core.config import as_bool, profile_value
 from ..core.events import Cancel, Cancelled, Event, mask
 from ..core.sandboxed import SandboxMixin
-
-#: Wine builds probed, in order, when the profile leaves ``wine_binary`` empty.
-WINE_CANDIDATES = (
-    "~/.local/share/frostlinuxlauncher/wine-tkg/bin/wine",
-    "~/.config/heroic/tools/wine/wine-tkg-staging/bin/wine",
-    "~/wine-tkg/bin/wine",
-    "/usr/bin/wine",
-)
 
 _SIGNAL_TERM = 15
 
@@ -63,13 +68,7 @@ _SIGNAL_TERM = 15
 # --------------------------------------------------------------------------
 def profile_setting(profile: dict[str, Any], key: str, default: Any = None) -> Any:
     """Read a profile key from the top level or from its ``extra`` mapping."""
-    value = profile.get(key)
-    if value not in (None, ""):
-        return value
-    extra = profile.get("extra")
-    if isinstance(extra, dict) and extra.get(key) not in (None, ""):
-        return extra[key]
-    return default
+    return profile_value(profile, key, default)
 
 
 def path_option(value: Any, base: Path | None = None) -> Path | None:
@@ -456,10 +455,11 @@ def stop_pids(pids: Iterable[int], signal_: int = _SIGNAL_TERM) -> None:
 
 
 def first_wine() -> Path:
-    for candidate in WINE_CANDIDATES:
-        path = Path(os.path.expanduser(candidate))
-        if path.is_file():
-            return path
+    """The first plain Wine found, for callers that still need one."""
+    found = legacywine.find_plain_wine()
+    if found is not None:
+        return found
+    # Keep the module-level lookup hook for callers that patch it in tests.
     found = shutil.which("wine")
     if found:
         return Path(found)
@@ -482,7 +482,7 @@ class WineBackend(SandboxMixin, GameBackend):
             "Windows executable, relative to the game folder.",
         ),
         Option("prefix", "Wine prefix", "path_dir", PREFIX_HELP),
-        Option("runner", "Runner", "runner", "Proton build/tag; empty uses system Wine."),
+        Option("runner", "Runner", "runner", "Proton build/tag; empty uses the default Proton."),
         Option(
             "renderer",
             "Renderer",
@@ -505,7 +505,7 @@ class WineBackend(SandboxMixin, GameBackend):
             "wine_binary",
             "Wine binary",
             "path_file",
-            "Wine executable (autodetected when empty).",
+            "A custom Wine executable; empty uses the default Proton.",
             advanced=True,
         ),
         Option(
@@ -582,11 +582,26 @@ class WineBackend(SandboxMixin, GameBackend):
         install_dir = install_dir.resolve()
         return install_dir if target.is_relative_to(install_dir) else target.parent
 
+    def _wine_binary(self) -> Path | None:
+        return path_option(profile_setting(self.ctx.profile, "wine_binary"))
+
     def _runner(self) -> str | None:
+        """The Proton runner to use: the profile's choice, or the default family.
+
+        A ``wine_binary`` always means that Wine. Otherwise an empty runner means
+        the recommended Proton, never an auto-detected system Wine.
+        """
         raw = profile_setting(self.ctx.profile, "proton_runner") or profile_setting(
             self.ctx.profile, "runner"
         )
-        return str(raw).strip() if raw else None
+        chosen = str(raw).strip() if raw else ""
+        if chosen.lower() in ("wine", "system", "none"):
+            chosen = ""
+        if chosen:
+            return chosen
+        if self._wine_binary() is not None:
+            return None
+        return runners.DEFAULT_FAMILY
 
     def _runner_path(self, runner: str) -> Path:
         """Resolve a runner tag/path the same way the Arknights backend does."""
@@ -598,34 +613,37 @@ class WineBackend(SandboxMixin, GameBackend):
             raise BackendError(f"runner {runner!r} not found")
         return Path(resolved)
 
+    def _runner_for_build(self, runner: str) -> Path:
+        """A family id gets its pinned build (downloading it once); anything else resolves."""
+        if runner not in runners.RUNNERS:
+            return self._runner_path(runner)
+        try:
+            return runners.ensure_pinned(
+                runner, emit=self.ctx.emit, cancel=self.ctx.cancel
+            )
+        except (runners.RunnerError, download.DownloadError, OSError) as exc:
+            raise BackendError(f"could not set up the Proton runner: {exc}") from exc
+
     def _runtime_error(self) -> str | None:
         """Why no launch runtime resolves, or ``None`` when one does.
 
         Mirrors :meth:`_prefix_command` (the launch path) without downloading
-        or creating anything, so ``status()`` cannot report a game as ready
-        when ``build()`` would fail with "wine not found on PATH".
+        or creating anything: a default runner that is not installed yet is
+        fetched at the first launch, so status must not call it an error.
         """
         runner = self._runner()
         if runner:
-            try:
-                self._runner_path(runner)
-            except BackendError as exc:
-                return str(exc)
-            configured = str(profile_setting(self.ctx.profile, "umu_binary", "umu-run"))
-            umu_run = umu.system(configured) or umu.managed()
-            if not umu_run and not sandbox.in_flatpak():
-                # Missing 32-bit libraries are exactly the case where launch
-                # installs the managed umu; status must not download, and must
-                # not call that launch-ready setup an error.
-                if not hostlibs.missing_32bit():
-                    return "umu-run not found on PATH (needed for a Proton runner)"
+            if runner in runners.RUNNERS:
+                if runners.installed_pinned(runner) is None:
+                    return None  # fetched at the first launch
+            else:
+                try:
+                    self._runner_path(runner)
+                except BackendError as exc:
+                    return str(exc)
+            # No system or managed umu yet is not an error: the launch installs Nadare's own
+            # (from the AppImage's bundled archive, else a download). Status never sets it up.
             return None
-        if profile_setting(self.ctx.profile, "wine_binary"):
-            return None
-        try:
-            first_wine()
-        except BackendError:
-            return "Wine is not installed; install Wine or choose a Proton runner"
         return None
 
     def _patterns(self, target: Path | None = None) -> ProcessQuery:
@@ -643,13 +661,20 @@ class WineBackend(SandboxMixin, GameBackend):
             match=str(extra) if extra else "",
         )
 
-    def _prefix_command(self, args: list[str]) -> tuple[list[str], dict[str, str]]:
-        """Build the Wine/``umu-run`` command and environment for ``args``."""
+    def _prefix_command(
+        self, args: list[str], *, sandboxed: bool = False
+    ) -> tuple[list[str], dict[str, str]]:
+        """Build the Wine/``umu-run`` command and environment for ``args``.
+
+        ``sandboxed``: the command will run in the Sandbox. Inside the Flatpak that means
+        ``flatpak-spawn --sandbox``, where umu (in the app's data folder, and needing the session
+        bus) cannot run, so Proton runs directly like the catalog games (VMs, 2026-11-14).
+        """
         prefix = self._prefix()
         env = process.build_env(None, extra={"WINEPREFIX": str(prefix)})
         runner = self._runner()
         if runner:
-            runner_path = self._runner_path(runner)
+            runner_path = self._runner_for_build(runner)
             env["PROTONPATH"] = str(runner_path)
             env["STEAM_COMPAT_DATA_PATH"] = str(prefix)
             # Native Wayland keeps Wine in charge of its own child windows so
@@ -658,42 +683,36 @@ class WineBackend(SandboxMixin, GameBackend):
             configured = str(profile_setting(self.ctx.profile, "umu_binary", "umu-run"))
             # An installed managed copy counts as it does in status(), complete host libraries
             # or not; only a download waits for missing ones (#973).
-            umu_run = umu.system(configured)
-            if umu_run is None:
-                managed = umu.managed()
-                umu_run = str(managed) if managed else None
-            missing = None
-            if umu_run is None and sandbox.in_flatpak():
-                # Inside the Flatpak, umu's Steam Runtime is what Proton was built for (the
-                # Flatpak runtime lacks libraries its video decoding needs). This backend never
-                # runs in the Sandbox, so umu's container is always allowed here.
-                umu_run = umu.resolve(
+            # Every Proton launch goes through umu (user, #1338): a system umu-run, else Nadare's
+            # own (installed from the AppImage's bundled archive, else downloaded once). The one
+            # exception is the Flatpak's Sandbox (see the docstring).
+            umu_run = (
+                None
+                if sandboxed and sandbox.in_flatpak()
+                else umu.resolve(
                     configured,
                     allow_download=True,
                     emit=self.ctx.emit,
                     cancel=self.ctx.cancel,
                 )
-            elif umu_run is None:
-                missing = hostlibs.missing_32bit()
-                if missing:
-                    umu_run = umu.resolve(
-                        configured,
-                        allow_download=True,
-                        emit=self.ctx.emit,
-                        cancel=self.ctx.cancel,
-                    )
+            )
             if umu_run:
+                if not sandbox.in_flatpak() and userns.blocks_runtime():
+                    raise BackendError(
+                        userns.with_hint(userns.BLOCKED_BEFORE_LAUNCH, blocked=True)
+                    )
+                umu.note_first_runtime(self.ctx.emit)
                 argv = [umu_run, *args]
             elif sandbox.in_flatpak():
                 argv, env_updates = sandbox.proton_direct(runner_path, prefix, args)
                 env.update(env_updates)
-            elif missing:
-                raise BackendError(hostlibs.hint(missing))
             else:
-                raise BackendError("umu-run not found on PATH (needed for a Proton runner)")
+                message = umu.unavailable_message()
+                if userns.blocks_runtime():
+                    message = userns.with_hint(message, blocked=True)
+                raise BackendError(message)
         else:
-            wine = profile_setting(self.ctx.profile, "wine_binary")
-            resolved_wine = path_option(wine)
+            resolved_wine = self._wine_binary()
             argv = [
                 str(resolved_wine) if resolved_wine is not None else str(first_wine()),
                 *args,
@@ -723,11 +742,17 @@ class WineBackend(SandboxMixin, GameBackend):
         elif isinstance(extra_args, (list, tuple)):
             args += [str(a) for a in extra_args]
         target = self._target()
-        argv, env = self._prefix_command([str(target), *args])
+        argv, env = self._prefix_command(
+            [str(target), *args], sandboxed=self.secure_mode_enabled()
+        )
         argv, env = self._secure_wrap(argv, env)
         return argv, env, self._prefix(), target
 
     # ---- Visual C++ runtime (shared in nadare.core.vcredist) ----------------
+    def _run_unwrapped(self, argv: list[str], env: dict[str, str], *, on_line) -> int:  # noqa: ANN001
+        """A setup step outside the Sandbox (core/sandboxed.py asks for umu's runtime first)."""
+        return stream(argv, env, on_line=on_line, cancel=self.ctx.cancel)
+
     def _run_in_prefix(self, argv: list[str]) -> int:
         """Run ``argv`` inside this profile's Wine/Proton prefix."""
         cmd, env = self._prefix_command(list(argv))
@@ -739,7 +764,7 @@ class WineBackend(SandboxMixin, GameBackend):
         This backend never creates a prefix, so the step runs only when the
         profile sets ``"vcredist": true``.
         """
-        if profile_setting(self.ctx.profile, "vcredist") is not True:
+        if not as_bool(profile_setting(self.ctx.profile, "vcredist"), False):
             return
         vcredist.ensure(
             self._prefix(),
@@ -846,12 +871,17 @@ class WineBackend(SandboxMixin, GameBackend):
         proton: str | None = None
         runner = self._runner()
         if runner:
-            try:
-                proton = str(self._runner_path(runner))
-            except BackendError:
-                proton = None
-        wine = path_option(profile_setting(self.ctx.profile, "wine_binary"))
-        stop_runner_wineserver(prefix=self._prefix(), proton=proton, wine_binary=wine)
+            if runner in runners.RUNNERS:
+                pinned = runners.installed_pinned(runner)
+                proton = str(pinned) if pinned is not None else None
+            else:
+                try:
+                    proton = str(self._runner_path(runner))
+                except BackendError:
+                    proton = None
+        stop_runner_wineserver(
+            prefix=self._prefix(), proton=proton, wine_binary=self._wine_binary()
+        )
 
     def verify(self) -> dict:
         try:

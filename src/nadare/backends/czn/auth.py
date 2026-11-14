@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-# Copyright (C) 2026 czn-linux contributors
-# Derived from yporoc/ChaosZeroNightmareLauncher-Lite (GPL-3.0), which
-# specifies no "or later" grant, so this file stays GPL-3.0-only.
+# Copyright (C) 2026 CZN Launcher Lite contributors
+#   (https://github.com/yporoc/ChaosZeroNightmareLauncher-Lite)
+# Copyright (C) 2026 Nadare contributors (modifications)
+# Derived from yporoc/ChaosZeroNightmareLauncher-Lite, licensed "version 3 of the License"
+# with no "or later" grant, so this file stays GPL-3.0-only.
+# Modified (GPLv3 section 5(a)): ported to a standalone, GUI-less Linux module, first on
+# 2026-10-12 and changed since; `git log -- src/nadare/backends/czn/auth.py` has every change.
 """czn_auth.py — STOVE login + game-token exchange for Chaos Zero Nightmare,
 native Linux, no STOVE launcher.
 

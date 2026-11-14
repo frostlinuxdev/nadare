@@ -59,6 +59,12 @@ def test_no_backend_imports_private_names_from_a_sibling_backend():
                 # Same-package siblings (``.wine``) and the parent package (``..core``).
                 if node.module.startswith("core") or node.level > 1:
                     continue
+                # One module split into ``<module>_parts/`` (#1248) is still one unit: the module
+                # importing its own parts, and the parts importing each other, are not siblings.
+                if node.module.startswith(f"{path.stem}_parts") or path.parent.name.endswith(
+                    "_parts"
+                ):
+                    continue
                 for alias in node.names:
                     if alias.name.startswith("_") and not alias.name.startswith("__"):
                         bad.append(

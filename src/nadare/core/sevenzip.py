@@ -15,7 +15,9 @@ from . import paths, process
 
 BUNDLED = Path(__file__).parents[1] / "assets" / "7zzs"
 _SYSTEM_NAMES = ("7z", "7zz", "7za")
-BUNDLED_SHA256 = "8952c73646dc8d4abfb31e48a949ba0ac15cb2437da9e4430886ddb6e12b383b"
+#: ``scripts/fetch_7zip.sh`` builds 7-Zip 26.05 from source without the RAR code (#1227 F5); the
+#: build is reproducible, so this pins its output.
+BUNDLED_SHA256 = "6aa936dc4566b59171298ddc63ccd23ec19dc0eaa9bd50b8df3eef7da1350fac"
 
 
 def _digest(path: Path) -> str | None:

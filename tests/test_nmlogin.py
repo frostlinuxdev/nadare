@@ -11,6 +11,7 @@ import urllib.request
 
 import pytest
 from _backend_helpers import make_context, make_jwt, write_exe
+from _parts_patch import patch_everywhere
 
 from nadare.backends import direct, nmlogin
 from nadare.backends import winegame as wg
@@ -342,7 +343,7 @@ def launch_spy(monkeypatch):
     monkeypatch.setattr(WineGameBackend, "_prefix_command", fake_prefix_command)
     monkeypatch.setattr(WineGameBackend, "_ensure_default_runner", lambda self, strict: None)
     monkeypatch.setattr(WineGameBackend, "_run_vcredist", lambda self, created=False: None)
-    monkeypatch.setattr(wg, "stream", lambda *a, **k: 0)
+    patch_everywhere(monkeypatch, wg, "stream", lambda *a, **k: 0)
     return seen
 
 
@@ -399,7 +400,7 @@ def test_other_games_launch_unchanged(tmp_path, monkeypatch):
     monkeypatch.setattr(WineGameBackend, "_prefix_command", fake_prefix_command)
     monkeypatch.setattr(WineGameBackend, "_ensure_default_runner", lambda self, strict: None)
     monkeypatch.setattr(WineGameBackend, "_run_vcredist", lambda self, created=False: None)
-    monkeypatch.setattr(wg, "stream", lambda *a, **k: 0)
+    patch_everywhere(monkeypatch, wg, "stream", lambda *a, **k: 0)
     b = direct.BrownDust2Backend(
         make_context(tmp_path, "direct-bd2", {"prefix": str(tmp_path / "pfx")})
     )

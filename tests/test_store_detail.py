@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Offscreen tests for the built-in store detail view."""
 
 from __future__ import annotations

@@ -19,6 +19,8 @@ try:  # pragma: no cover - only when PyQt6 is missing
 except Exception:  # noqa: BLE001
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
+from _parts_patch import patch_everywhere
+
 from nadare.core.config import Config
 from nadare.gui import settings as settings_mod
 from nadare.gui.settings import SettingsPage
@@ -50,9 +52,7 @@ class Rig:
     def __init__(
         self, tmp_path, qapp, monkeypatch, *, answers=(YES, YES), sibling=False, shared=False
     ):
-        monkeypatch.setattr(
-            settings_mod,
-            "create_backend",
+        patch_everywhere(monkeypatch, settings_mod, "create_backend",
             lambda profile, config: SimpleNamespace(
                 status=lambda: SimpleNamespace(state="installed", data={})
             ),

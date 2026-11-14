@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
 
+from . import paths
 from .events import Cancel, Cancelled
 
 
@@ -499,31 +500,33 @@ def _parse_files_info(r: _Reader) -> tuple[list[bool], list[bool], list[str], li
 
 
 def _safe_name(raw: str) -> str:
-    if "\x00" in raw:
-        raise SevenZipError("file name contains NUL")
     name = raw.replace("\\", "/")
     while name.startswith("./"):
         name = name[2:]
-    if not name or name.startswith("/"):
-        raise SevenZipError(f"unsafe file name {raw!r}")
-    if len(name) >= 2 and name[1] == ":" and name[0].isalpha():
-        raise SevenZipError(f"unsafe file name {raw!r}")
-    parts = name.split("/")
-    if any(part == ".." for part in parts):
-        raise SevenZipError(f"unsafe file name {raw!r}")
-    clean = "/".join(part for part in parts if part not in ("", "."))
-    if not clean:
-        raise SevenZipError(f"unsafe file name {raw!r}")
-    return clean
+    try:
+        return paths.check_relative(name, paths.SEVENZ_PATHS)
+    except paths.PathProblem as exc:
+        if exc.code == "nul":
+            raise SevenZipError("file name contains NUL") from None
+        if exc.code == "nadare-owned":
+            raise SevenZipError(f"file name is inside a Nadare-owned folder {raw!r}") from None
+        raise SevenZipError(f"unsafe file name {raw!r}") from None
 
 
-def _safe_destination_path(dest: Path, relative: str) -> Path:
-    """Return an extraction path with no symlinked components below ``dest``."""
+def _safe_destination_path(
+    dest: Path, relative: str, *, directory: bool | None = None
+) -> Path:
+    """Return an extraction path with no symlinked components below ``dest``.
+
+    ``directory`` says whether a folder or a file is about to be written, so a member
+    cannot replace an existing item of the other kind.
+    """
     relative = _safe_name(relative)
     dest_real = Path(os.path.realpath(dest))
     target = dest / relative
+    parts = relative.split("/")
     current = dest
-    for part in relative.split("/"):
+    for index, part in enumerate(parts):
         current = current / part
         try:
             mode = current.lstat().st_mode
@@ -533,6 +536,15 @@ def _safe_destination_path(dest: Path, relative: str) -> Path:
             raise SevenZipError(f"cannot inspect destination path {relative!r}: {exc}") from exc
         if stat.S_ISLNK(mode):
             raise SevenZipError(f"symlink in destination path {relative!r}")
+        if index < len(parts) - 1:
+            if not stat.S_ISDIR(mode):
+                raise SevenZipError(
+                    f"cannot extract {relative!r}: {part!r} is not a folder"
+                )
+        elif directory is True and not stat.S_ISDIR(mode):
+            raise SevenZipError(f"cannot extract folder {relative!r}: a file is in the way")
+        elif directory is False and not stat.S_ISREG(mode):
+            raise SevenZipError(f"cannot extract file {relative!r}: a folder is in the way")
     try:
         parent_real = Path(os.path.realpath(target.parent))
         if os.path.commonpath((str(dest_real), str(parent_real))) != str(dest_real):
@@ -819,9 +831,15 @@ def _extract_archive(
         plan[folder_index] = (stream_map, last_stream, prefix)
         total += prefix
 
+    # Check every wanted path before writing anything: a collision must leave the old item alone.
+    for item in archive.files:
+        if wanted(item.path):
+            _safe_destination_path(dest, item.path, directory=item.is_dir)
     dest.mkdir(parents=True, exist_ok=True)
     for item in dirs:
-        _safe_destination_path(dest, item.path).mkdir(parents=True, exist_ok=True)
+        _safe_destination_path(dest, item.path, directory=True).mkdir(
+            parents=True, exist_ok=True
+        )
 
     lock = threading.Lock()
     count = 0
@@ -1029,9 +1047,9 @@ def _staged_path(dest: Path, relative: str) -> tuple[Path, Path]:
 
     The staging name is short and independent of the member's name (so a long member name still
     fits NAME_MAX) and unique per open (two workers on one duplicate path never collide)."""
-    final = _safe_destination_path(dest, relative)
+    final = _safe_destination_path(dest, relative, directory=False)
     final.parent.mkdir(parents=True, exist_ok=True)
-    final = _safe_destination_path(dest, relative)
+    final = _safe_destination_path(dest, relative, directory=False)
     _sweep_dead_staging(final)
     token = f"{os.getpid():x}-{os.urandom(3).hex()}"
     return final, final.with_name(f".{token}.nadare-new")

@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from _parts_patch import patch_everywhere
 
 from nadare.core import artwork, flatpakfs, paths
 
@@ -105,8 +106,7 @@ def test_settings_stores_the_copy_of_a_picked_background(tmp_path, monkeypatch):
     from nadare.gui import settings as settings_mod
 
     app = QApplication.instance() or QApplication([])
-    monkeypatch.setattr(
-        settings_mod, "create_backend",
+    patch_everywhere(monkeypatch, settings_mod, "create_backend",
         lambda profile, config: SimpleNamespace(
             status=lambda: SimpleNamespace(state="not_installed", data={})
         ),

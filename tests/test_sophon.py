@@ -667,19 +667,24 @@ def test_hoyo_sophon_genshin_and_zzz_install_only_game_and_the_chosen_audio(
     assert game.size > 10**10 and audio.size > 10**8
 
 
-def test_hoyo_honkai_impact_still_uses_the_old_package_list():
+def test_hoyo_honkai_impact_uses_its_sophon_game_and_asset_manifests():
+    branches = (
+        "https://sg-hyp-api.hoyoverse.com/hyp/hyp-connect/api/getGameBranches"
+        "?launcher_id=VYTpXlbWo8&game_ids%5B%5D=5TIVvvcwtM"
+    )
+    build = (
+        "https://sg-public-api.hoyoverse.com/downloader/sophon_chunk/api/getBuild"
+        "?branch=main&package_id=19XDCbNucU&password=ag43v1QVxlUH"
+    )
     f = FakeFetch(
         {
-            (
-                "https://sg-hyp-api.hoyoverse.com/hyp/hyp-connect/api/getGamePackages"
-                "?launcher_id=VYTpXlbWo8"
-            ): (
-                FIXTURES / "hoyo_getGamePackages.json"
-            ).read_bytes()
+            branches: (FIXTURES / "hoyo_getGameBranches_hi3.json").read_bytes(),
+            build: (FIXTURES / "hoyo_getBuild_hi3.json").read_bytes(),
         }
     )
     plan = hoyo.resolve("bh3_global", f)
-    assert plan.game_tag == "hi3" and plan.version == "9.1.0" and plan.archives and not plan.sophon
+    assert plan.game_tag == "hi3" and plan.version == "9.1.0" and not plan.archives
+    assert [p.name for p in plan.sophon] == ["hi3-9.1.0", "hi3-9.1.0-asb"]
 
 
 def test_a_flaky_cdn_is_retried(servers, tmp_path, monkeypatch):

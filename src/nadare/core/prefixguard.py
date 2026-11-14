@@ -108,6 +108,9 @@ def unsafe_reason(
     """
     if not path or not str(path).strip():
         return ""
+    text = str(path)
+    if "\x00" in text:
+        return "a path cannot contain a NUL character"
     resolved = _real(path)
     home = _real(Path.home())
     reason = place_reason(resolved, home=home)

@@ -357,6 +357,30 @@ def test_the_restart_command_runs_the_new_file_with_a_clean_appimage_environment
     assert clean["HOME"] == "/home/x" and clean["PATH"] == "/usr/bin"
 
 
+def test_a_copy_started_extracted_restarts_extracted(tmp_path):
+    """No FUSE (``--appimage-extract-and-run``): the runtime eats the flag, so the app only sees
+    that it runs from an extracted copy. The new file must start the same way, or the restart
+    dies without a window (b24 upgrade audit, D-F5; seen with the real runtime 2026-11-13)."""
+    env = {"PATH": "/usr/bin", "APPDIR": "/tmp/appimage_extracted_0d1b441d8a6abbcf"}
+    _argv, clean = selfupdate.restart_command(tmp_path / NAME, env, pid=1)
+    assert clean["APPIMAGE_EXTRACT_AND_RUN"] == "1"
+    assert "APPDIR" not in clean
+
+
+def test_a_mounted_copy_restarts_mounted(tmp_path):
+    env = {"PATH": "/usr/bin", "APPDIR": "/tmp/.mount_NadareEkFnGa"}
+    _argv, clean = selfupdate.restart_command(tmp_path / NAME, env, pid=1)
+    assert "APPIMAGE_EXTRACT_AND_RUN" not in clean
+
+
+def test_the_extract_and_run_variable_is_kept(tmp_path):
+    env = {
+        "PATH": "/usr/bin", "APPDIR": "/tmp/appimage_extracted_x", "APPIMAGE_EXTRACT_AND_RUN": "1"
+    }
+    _argv, clean = selfupdate.restart_command(tmp_path / NAME, env, pid=1)
+    assert clean["APPIMAGE_EXTRACT_AND_RUN"] == "1"
+
+
 def test_the_default_checksum_fetch_reads_a_real_file():
     sums = f"{DIGEST}  {NAME}\n".encode()
     server = Server({"/SHA256SUMS": sums}, keepalive=True)

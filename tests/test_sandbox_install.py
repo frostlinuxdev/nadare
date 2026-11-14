@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
 from nadare.backends import launcher
@@ -59,7 +60,7 @@ def rig(tmp_path, monkeypatch):
         (outdir / INNER).write_text("MZ")
 
     monkeypatch.setattr(ak, "stream", fake_stream)
-    monkeypatch.setattr(wg, "stream", fake_stream)
+    patch_everywhere(monkeypatch, wg, "stream", fake_stream)
     monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
     monkeypatch.setattr(WineGameBackend, "_run_vcredist", lambda self, created=False: None)
     monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer)
@@ -106,7 +107,7 @@ def test_the_silent_downloader_runs_in_the_sandbox_by_default(tmp_path, rig, def
     calls, _installer = rig
     events: list = []
     _backend(tmp_path, events).install()
-    assert len(calls) == 1 and calls[0][0] == "bwrap"
+    assert len(calls) == 1 and Path(calls[0][0]).name == "bwrap"
     inner = calls[0][calls[0].index("--") + 1 :]
     assert inner[-3:] == ["/Silent", "/Dst=C:\\NIKKE", "/StartAfterInstall=false"]
     assert [ok for ok, _msg in _reports(events)] == [True]
@@ -119,7 +120,7 @@ def test_the_installer_window_runs_in_the_sandbox_with_the_installer_readable(
     calls, installer = rig
     monkeypatch.setattr(sevenzip, "find", lambda **kw: None)  # no silent path: the window
     _backend(tmp_path, []).install()
-    assert len(calls) == 1 and calls[0][0] == "bwrap"
+    assert len(calls) == 1 and Path(calls[0][0]).name == "bwrap"
     assert str(installer.resolve()) in _ro_binds(calls[0])
     assert str(installer) in calls[0][calls[0].index("--") + 1 :]
 
@@ -127,7 +128,7 @@ def test_the_installer_window_runs_in_the_sandbox_with_the_installer_readable(
 def test_an_explicit_off_installs_without_it(tmp_path, rig, default_on, has_bwrap):
     calls, _installer = rig
     _backend(tmp_path, [], secure_mode=False).install()
-    assert calls[0][0] != "bwrap"
+    assert Path(calls[0][0]).name != "bwrap"
 
 
 def test_default_on_without_bubblewrap_installs_unprotected_and_says_so(
@@ -136,7 +137,7 @@ def test_default_on_without_bubblewrap_installs_unprotected_and_says_so(
     calls, _installer = rig
     events: list = []
     _backend(tmp_path, events).install()
-    assert calls[0][0] != "bwrap"
+    assert Path(calls[0][0]).name != "bwrap"
     reports = _reports(events)
     assert reports and reports[0][0] is False
     assert "installer runs without it" in reports[0][1]

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """A running game says "Playing" in the sidebar, in the bright accent, without animation (#1136)."""
 
 from __future__ import annotations

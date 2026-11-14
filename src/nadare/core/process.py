@@ -195,6 +195,15 @@ def child_environ(base: Mapping[str, str] | None = None) -> dict[str, str]:
 #: Stop and the vcredist install use.
 LAUNCH_RESERVED_ENV = frozenset({"WINEPREFIX", "STEAM_COMPAT_DATA_PATH", "PROTONPATH"})
 
+#: Environment that pins a publisher/silent installer to XWayland. The native
+#: Wayland driver makes some installer windows (WebView2) exit silently.
+INSTALLER_ENV = {"PROTON_ENABLE_WAYLAND": "0"}
+
+
+def installer_env() -> dict[str, str]:
+    """A fresh environment for running a publisher installer on XWayland."""
+    return dict(INSTALLER_ENV)
+
 
 def apply_extra_env(
     env: dict[str, str],
@@ -817,6 +826,20 @@ def which(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
 # ---------------------------------------------------------------------------
 # per-profile lock
 # ---------------------------------------------------------------------------
+#: ``flock`` errno values meaning the filesystem cannot lock at all, rather than "held".
+_FLOCK_UNAVAILABLE = (
+    errno.ENOLCK,
+    getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+    errno.EOPNOTSUPP,
+    errno.EINVAL,
+)
+
+
+def flock_unavailable(exc: OSError) -> bool:
+    """Whether ``exc`` means this filesystem has no ``flock`` support."""
+    return exc.errno in _FLOCK_UNAVAILABLE
+
+
 class ProfileLock:
     """An advisory ``flock`` guarding mutating operations on one profile.
 
@@ -840,8 +863,14 @@ class ProfileLock:
         self._fd: int | None = None
 
     def acquire(self) -> ProfileLock:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as exc:
+            raise ProfileLockError(
+                f"cannot use the lock folder {self.path.parent}: {exc.strerror or exc}",
+                unusable=True,
+            ) from None
         deadline = time.monotonic() + max(self.wait, 0.0)
         while True:
             try:
@@ -891,6 +920,16 @@ class OperationLock(ProfileLock):
     suffix = ".ops.lock"
 
 
+class PredownloadLock(ProfileLock):
+    """Marks that a predownload is running, so Play may still start the game.
+
+    The predownload also holds the OperationLock (install/update/Move/Remove stay away),
+    but this second, independent lock lets a launch tell a predownload apart from them.
+    """
+
+    suffix = ".predl.lock"
+
+
 #: What the user sees when an :class:`OperationLock` is already held.
 OPERATION_BUSY = (
     "Another Nadare window or command is installing, updating or removing {name}. "
@@ -903,14 +942,14 @@ OPERATION_IN_PROGRESS = (
 )
 
 
-def operation_in_progress(profile: str) -> bool:
-    """Whether an :class:`OperationLock` for ``profile`` is currently held.
+def _lock_in_progress(profile: str, lock_class: type[ProfileLock]) -> bool:
+    """Whether ``lock_class`` for ``profile`` is currently held.
 
     A launch may run for hours, so it must not take the lock itself; it only
     probes it without blocking. The probe opens the existing lock file, tries
     the lock and releases or closes it immediately, so it never keeps the lock.
     """
-    lock = OperationLock(profile)
+    lock = lock_class(profile)
     try:
         fd = os.open(lock.path, os.O_RDWR)
     except OSError:
@@ -921,6 +960,8 @@ def operation_in_progress(profile: str) -> bool:
         except OSError as exc:
             # Only "somebody holds it" counts. A filesystem that cannot lock at all
             # (ENOLCK, ENOTSUP...) must not make every launch look refused forever.
+            if flock_unavailable(exc):
+                return False
             return exc.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK)
         fcntl.flock(fd, fcntl.LOCK_UN)
         return False
@@ -928,8 +969,30 @@ def operation_in_progress(profile: str) -> bool:
         os.close(fd)
 
 
+def operation_in_progress(profile: str) -> bool:
+    """Whether an :class:`OperationLock` for ``profile`` is currently held."""
+    return _lock_in_progress(profile, OperationLock)
+
+
+def predownload_in_progress(profile: str) -> bool:
+    """Whether a :class:`PredownloadLock` for ``profile`` is currently held."""
+    return _lock_in_progress(profile, PredownloadLock)
+
+
+def launch_blocked(profile: str) -> bool:
+    """A launch is only blocked by an operation other than a predownload.
+
+    A predownload holds both locks; seeing the predownload lock means the game may still start.
+    """
+    return operation_in_progress(profile) and not predownload_in_progress(profile)
+
+
 class ProfileLockError(RuntimeError):
-    """Another Nadare operation already holds the profile lock."""
+    """Another Nadare operation already holds the profile lock, or it cannot be taken."""
+
+    def __init__(self, message: str, *, unusable: bool = False) -> None:
+        super().__init__(message)
+        self.unusable = unusable
 
 
 def _safe(name: str) -> str:

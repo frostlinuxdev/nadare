@@ -35,9 +35,10 @@ arch="$(dpkg --print-architecture 2>/dev/null || uname -m | sed -e 's/x86_64/amd
 pkg="dist/nadare_${version}_${arch}"
 
 echo "[*] Nadare ${version}: building PyInstaller onedir bundle"
-# The bundle embeds src/nadare/assets/7zzs through the spec; fetch the pinned
-# binary first, or the .deb silently ships without it (#599).
+# The bundle embeds src/nadare/assets/7zzs through the spec; build the pinned
+# RAR-free binary first, or the .deb silently ships without it (#599).
 bash scripts/fetch_7zip.sh
+bash scripts/fetch_umu.sh
 "$PY" -m PyInstaller --clean -y packaging/nadare.spec
 
 # The real glibc floor is the newest GLIBC_x.y symbol any shipped ELF needs.

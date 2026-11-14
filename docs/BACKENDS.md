@@ -279,10 +279,12 @@ two launcher API calls, fetches the public game-file list, and publishes plain
 manifests; the backends then download the listed files directly from the public
 CDN.
 
-* `arknights-yostar` runs in two modes: **official** (the Yostar installer runs
-the launcher, which then downloads the game) and **direct** (the manifest is
-synced into `install_dir` and `Arknights.exe` is launched). Direct mode is
-selected whenever a manifest is configured.
+* `arknights-yostar` downloads directly by default, like Stella Sora: the
+manifest from Nadare's published index is synced into `install_dir` and
+`Arknights.exe` is launched (**direct** mode). Only when no manifest source is
+left (the index disabled with an empty `NADARE_INDEX_BASE` and no
+`manifest_index`/`manifest_file`) does it fall back to **official** mode, where
+the Yostar installer runs the launcher, which then downloads the game.
 * `stellasora-yostar` is **direct only**. It uses Nadare's published manifest
 index by default, and errors with an actionable message when that index is
 disabled and no manifest is configured.

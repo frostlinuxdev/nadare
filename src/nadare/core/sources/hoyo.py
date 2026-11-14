@@ -23,6 +23,16 @@ _SOPHON_GAME_IDS: dict[str, str] = {
     "hk4e_global": "gopR6Cufr3",
     "nap_global": "U5hbdsT9W7",
     "hkrpg_global": "4ziysqXOQ8",
+    "bh3_global": "5TIVvvcwtM",
+}
+
+#: Manifest fields beyond ``game``, per game. ``"audio"`` means the chosen language;
+#: other names are literal fields (Hi3's assets are one ``asb`` manifest, not audio).
+_SOPHON_EXTRA_MANIFESTS: dict[str, tuple[str, ...]] = {
+    "hk4e_global": ("audio",),
+    "nap_global": ("audio",),
+    "hkrpg_global": ("audio",),
+    "bh3_global": ("asb",),
 }
 
 _BRANCHES_URL = (
@@ -31,8 +41,11 @@ _BRANCHES_URL = (
 )
 _BUILD_URL = (
     "https://sg-public-api.hoyoverse.com/downloader/sophon_chunk/api/getBuild"
-    "?branch=main&package_id={package_id}&password={password}"
+    "?branch={branch}&package_id={package_id}&password={password}"
 )
+
+#: A predownload version tag ("3.4.0"); it becomes part of file and folder names.
+_SAFE_TAG = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,31}")
 
 _TITLES: dict[str, tuple[str, str]] = {
     "hk4e_global": ("genshin", "GenshinImpact.exe"),
@@ -101,8 +114,49 @@ def resolve(
     )
 
 
-def _sophon_plan(biz: str, fetch: Fetch, language: str) -> directdl.Plan:
-    """Build a plan from the live Sophon chunk manifests for ``biz``."""
+def resolve_predownload(
+    biz: str, fetch: Fetch | None = None, language: str = "en-us"
+) -> directdl.Plan | None:
+    """The plan for the next version when the publisher offers one, else ``None``."""
+    if biz not in _SOPHON_GAME_IDS:
+        return None
+    fetch = fetch or default_fetch
+    branch = _load_from(_BRANCHES_URL + _SOPHON_GAME_IDS[biz], fetch, "hoyo branches")
+    branches = _items(branch.get("game_branches"), "game_branches")
+    if not branches or not isinstance(branches[0], Mapping):
+        return None
+    main = branches[0].get("main")
+    pre = branches[0].get("pre_download")
+    if not isinstance(pre, Mapping):
+        return None
+    if isinstance(main, Mapping) and pre.get("tag") == main.get("tag"):
+        return None
+    tag = pre.get("tag")
+    if not isinstance(tag, str) or not _SAFE_TAG.fullmatch(tag):
+        # The tag names the package and the cache folder on disk: refuse anything path-like.
+        raise directdl.DirectError(f"invalid hoyo predownload version: {tag!r}")
+    branch_name = pre.get("branch") or "predownload"
+    if not isinstance(branch_name, str) or not re.fullmatch(
+        r"[a-z][a-z0-9_]{0,31}", branch_name
+    ):
+        raise directdl.DirectError(f"invalid hoyo predownload branch: {branch_name!r}")
+    return _sophon_plan(
+        biz, fetch, language, branch_key="pre_download", branch_name=branch_name
+    )
+
+
+def _sophon_plan(
+    biz: str,
+    fetch: Fetch,
+    language: str,
+    branch_key: str = "main",
+    branch_name: str = "main",
+) -> directdl.Plan:
+    """Build a plan from the live Sophon chunk manifests for ``biz``.
+
+    ``branch_key`` names the object in the branch reply (``main`` or ``pre_download``);
+    ``branch_name`` is the branch the getBuild endpoint is asked for.
+    """
     game_tag, exe = _TITLES[biz]
     branch = _load_from(
         _BRANCHES_URL + _SOPHON_GAME_IDS[biz], fetch, "hoyo branches"
@@ -110,42 +164,67 @@ def _sophon_plan(biz: str, fetch: Fetch, language: str) -> directdl.Plan:
     branches = _items(branch.get("game_branches"), "game_branches")
     if not branches:
         raise directdl.DirectError(f"no hoyo branch for {biz}")
-    main = branches[0].get("main") if isinstance(branches[0], Mapping) else None
-    if not isinstance(main, Mapping):
-        raise directdl.DirectError(f"hoyo branch for {biz} has no main build")
-    version = _text(main.get("tag"), "version")
-    package_id = _text(main.get("package_id"), "package_id")
-    password = _text(main.get("password"), "password")
+    selected = branches[0].get(branch_key) if isinstance(branches[0], Mapping) else None
+    if not isinstance(selected, Mapping):
+        if branch_key == "main":
+            raise directdl.DirectError(f"hoyo branch for {biz} has no main build")
+        raise directdl.DirectError(f"hoyo branch for {biz} has no {branch_key} build")
+    version = _text(selected.get("tag"), "version")
+    package_id = _text(selected.get("package_id"), "package_id")
+    password = _text(selected.get("password"), "password")
 
     build = _load_from(
-        _BUILD_URL.format(package_id=package_id, password=password), fetch, "hoyo builds"
+        _BUILD_URL.format(
+            branch=branch_name, package_id=package_id, password=password
+        ),
+        fetch,
+        "hoyo builds",
     )
     manifests = _items(build.get("manifests"), "manifests")
+    extra_fields = _SOPHON_EXTRA_MANIFESTS[biz]
     game_entry: Mapping[str, Any] | None = None
-    audio_entry: Mapping[str, Any] | None = None
+    extra_entries: dict[str, Mapping[str, Any]] = {}
     for entry in manifests:
         field = entry.get("matching_field")
         if field == "game" and game_entry is None:
             game_entry = entry
-        elif field == language and audio_entry is None:
-            audio_entry = entry
+            continue
+        for required in extra_fields:
+            wanted = language if required == "audio" else required
+            if field == wanted and required not in extra_entries:
+                extra_entries[required] = entry
+                break
     if game_entry is None:
         raise directdl.DirectError(f"no hoyo game manifest for {biz}")
-    if audio_entry is None:
-        raise directdl.DirectError(f"no hoyo audio manifest for language {language}")
+    for required in extra_fields:
+        if required not in extra_entries:
+            if required == "audio":
+                raise directdl.DirectError(
+                    f"no hoyo audio manifest for language {language}"
+                )
+            raise directdl.DirectError(f"no hoyo {required} manifest for {biz}")
 
-    game = _sophon_package(
-        game_entry, f"{game_tag}-{version}", _supersedes(game_tag, None)
-    )
-    audio = _sophon_package(
-        audio_entry, f"{game_tag}-{version}-audio-{language}", _supersedes(game_tag, language)
-    )
+    packages = [
+        _sophon_package(
+            game_entry, f"{game_tag}-{version}", _supersedes(game_tag, None)
+        )
+    ]
+    for required in extra_fields:
+        if required == "audio":
+            name = f"{game_tag}-{version}-audio-{language}"
+            supersedes = _supersedes(game_tag, language)
+        else:
+            name = f"{game_tag}-{version}-{required}"
+            supersedes = _supersedes(game_tag, None, extra=required)
+        packages.append(
+            _sophon_package(extra_entries[required], name, supersedes)
+        )
     return directdl.Plan(
         game_tag=game_tag,
         version=version,
         archives=(),
         exe=exe,
-        sophon=(game, audio),
+        sophon=tuple(packages),
     )
 
 
@@ -178,13 +257,17 @@ def _sophon_package(entry: Mapping[str, Any], name: str, supersedes: str = "") -
     )
 
 
-def _supersedes(game_tag: str, language: str | None) -> str:
-    """The names of earlier versions of a package: ``zzz-<version>`` or its audio twin.
+def _supersedes(
+    game_tag: str, language: str | None, extra: str | None = None
+) -> str:
+    """The names of earlier versions of a package: ``zzz-<version>`` or one of its extras.
 
-    A version has no dash, so the game pattern never matches an audio package and one
-    language never matches another.
+    An extra (``audio-<language>`` or Hi3's ``asb``) has a dash, so the game pattern never
+    matches one and one extra never matches another.
     """
     tag = re.escape(game_tag)
+    if extra is not None:
+        return rf"{tag}-[^-/]+-{re.escape(extra)}"
     if language is None:
         return rf"{tag}-[^-/]+"
     return rf"{tag}-[^-/]+-audio-{re.escape(language)}"

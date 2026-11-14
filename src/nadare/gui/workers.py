@@ -31,11 +31,16 @@ from ..core.process import (
     OPERATION_BUSY,
     OPERATION_IN_PROGRESS,
     OperationLock,
+    PredownloadLock,
     ProfileLockError,
-    operation_in_progress,
+    launch_blocked,
 )
 
 log = logging.getLogger(__name__)
+
+#: Operations nobody asked for; a removed game may drop them at once (the same set as the
+#: window's SILENT_OPERATIONS).
+_BACKGROUND_OPERATIONS = frozenset({"status", "news", "media", "check_update"})
 
 #: Operations a worker understands.
 OPERATIONS = (
@@ -54,6 +59,7 @@ OPERATIONS = (
     "news",
     "media",
     "check_update",
+    "predownload",
 )
 
 #: Operations that exclude each other (and Remove) per profile across processes.
@@ -209,15 +215,29 @@ class BackendWorker(QThread):
         started = time.monotonic()
         code: int | None = None
         lock = None
+        predownload_lock = None
         reservation = None
         try:
-            if self._operation in LOCKED_OPERATIONS:
+            if self._operation == "predownload":
                 lock = OperationLock(self._profile)
                 try:
                     lock.acquire()
                 except ProfileLockError:
                     raise BackendError(OPERATION_BUSY.format(name=self._profile)) from None
-            elif self._operation == "launch" and operation_in_progress(self._profile):
+                predownload_lock = PredownloadLock(self._profile)
+                try:
+                    predownload_lock.acquire()
+                except ProfileLockError:
+                    lock.release()
+                    lock = None
+                    raise BackendError(OPERATION_BUSY.format(name=self._profile)) from None
+            elif self._operation in LOCKED_OPERATIONS:
+                lock = OperationLock(self._profile)
+                try:
+                    lock.acquire()
+                except ProfileLockError:
+                    raise BackendError(OPERATION_BUSY.format(name=self._profile)) from None
+            elif self._operation == "launch" and launch_blocked(self._profile):
                 # Launch itself does not hold the lock (a game runs for hours).
                 raise BackendError(OPERATION_IN_PROGRESS.format(name=self._profile))
             backend = create(
@@ -258,6 +278,8 @@ class BackendWorker(QThread):
         finally:
             if reservation is not None:
                 reservation.release()
+            if predownload_lock is not None:
+                predownload_lock.release()
             if lock is not None:
                 lock.release()
             self._close_log()
@@ -306,6 +328,11 @@ class BackendWorker(QThread):
             self.result.emit(self._load_media(backend))
         elif op == "check_update":
             backend.check_update()
+        elif op == "predownload":
+            method = getattr(backend, "predownload", None)
+            if not callable(method):
+                raise BackendError("this game has no predownload")
+            method()
         else:  # pragma: no cover - guarded in __init__
             raise BackendError(f"unsupported operation: {op}")
         return 0
@@ -387,23 +414,18 @@ class BackendWorker(QThread):
         A skip, cancel or hang is remembered per prefix so launches do not keep asking; the user
         asking for a repair is the signal to forget it. Best effort: it never breaks the repair.
         """
-        for attr in ("prefix", "_prefix"):
-            getter = getattr(backend, attr, None)
-            if not callable(getter):
-                continue
-            try:
-                forgotten = vcredist.forget_failure(Path(getter()))
-            except Exception:  # noqa: BLE001 - no prefix configured, or anything else
-                return
-            if forgotten:
-                self._on_event(
-                    Event(
-                        "status",
-                        "The Windows component (Visual C++ runtime) will be tried again at "
-                        "the next launch.",
-                    )
-                )
+        try:
+            forgotten = vcredist.retry_after_repair(backend)
+        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
             return
+        if forgotten:
+            self._on_event(
+                Event(
+                    "status",
+                    "The Windows component (Visual C++ runtime) will be tried again at "
+                    "the next launch.",
+                )
+            )
 
     def _on_event(self, event: Event) -> None:
         if self._worth_logging(event):
@@ -867,12 +889,20 @@ class BackendController(QObject):
         return True
 
     def forget(self, profile: str) -> None:
-        """Drop a paused (or pausing) operation: the game was removed, nothing may resume it."""
+        """Drop everything a removed game could still resume or keep occupied."""
         self._pausing.discard(profile)
         self._requeue.discard(profile)
         self._paused.pop(profile, None)
+        self._pending.pop(profile, None)
         if self._waiting.pop(profile, None) is not None:
             self.queue_changed.emit()
+        worker = self._workers.get(profile)
+        if worker is not None and worker.operation in _BACKGROUND_OPERATIONS:
+            # A pending status probe must not keep the name busy for a re-added game.
+            # Only background work: a launch's slot must still reach _finish/launch_ended.
+            self._workers.pop(profile, None)
+            if worker.isRunning():
+                worker.cancel()
 
     def resume(self, profile: str) -> bool:
         """Run the operation paused for ``profile`` again with its payload."""

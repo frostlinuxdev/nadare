@@ -43,6 +43,7 @@ from urllib.parse import quote, urljoin, urlparse
 
 from . import artindex, paths
 from .logging import get_logger
+from .profilenames import GENERIC_TITLES
 
 log = get_logger("artwork")
 
@@ -791,6 +792,34 @@ def download_compat(
 # ---------------------------------------------------------------------------
 # sources
 # ---------------------------------------------------------------------------
+def _profile_art_identity(profile: dict) -> str:
+    """A stable key inside a generic profile, so advanced games do not share one cover."""
+    from . import steamstore
+
+    for key in ("steam_app_id", "app_id", "steam_appid"):
+        value = steamstore.normalise_app_id(str(profile.get(key) or "").strip())
+        if value is not None:
+            return f"steam-{value}"
+    for key in ("sgdb", "anilist", "context", "name", "id", "profile"):
+        value = profile.get(key)
+        if value not in (None, ""):
+            return str(value)
+    extra = profile.get("extra")
+    sources = (profile, extra if isinstance(extra, dict) else {})
+    for key in ("install_dir", "prefix", "wineprefix"):
+        for source in sources:
+            value = source.get(key)
+            if value in (None, ""):
+                continue
+            path = Path(str(value))
+            # ``<profile>/install`` and ``<profile>/prefix`` name the profile, not the game.
+            if path.name in ("install", "prefix"):
+                path = path.parent
+            if path.name:
+                return path.name
+    return ""
+
+
 def slug(profile: dict, title: str | None = None) -> str:
     """A stable filename slug for a profile's cached art."""
     source = (
@@ -801,6 +830,10 @@ def slug(profile: dict, title: str | None = None) -> str:
         or profile.get("name")
         or "artwork"
     )
+    # A fixed wizard title ("Steam game") cannot identify a game on its own: key the new cache
+    # file by the app id / profile folder instead (#W10-F1).
+    if str(source) in GENERIC_TITLES:
+        source = _profile_art_identity(profile) or source
     text = str(source)
     # Accents fold to their letters; what is left outside ASCII (Japanese, Chinese, ...) would
     # vanish and make different titles share one cache file, so it adds a short hash (#622).
@@ -841,11 +874,13 @@ def _steam_profile_appid(profile: dict) -> int | None:
     """The app id of a ``steam`` profile (as the Steam backend and Store tiles store it)."""
     if str(profile.get("backend") or "") != "steam":
         return None
+    from . import steamstore
+
     extra = profile.get("extra")
     for source in (profile, extra if isinstance(extra, dict) else {}):
         for key in ("steam_app_id", "app_id"):
-            value = str(source.get(key) or "").strip()
-            if value.isascii() and value.isdigit():
+            value = steamstore.normalise_app_id(str(source.get(key) or "").strip())
+            if value is not None:
                 return int(value)
     return None
 
@@ -1597,13 +1632,28 @@ __all__ = [
 ]
 
 
-def keep_custom_image(path: str, profile: str) -> str:
+def _managed_custom_image(path: str, profile: str) -> str:
+    """``path`` when it is an existing copy in this profile's ``custom-art`` folder, else ``""``."""
+    if not path:
+        return ""
+    folder = paths.data_dir() / "custom-art" / profile
+    try:
+        candidate = Path(path)
+        if candidate.is_file() and candidate.resolve().parent == folder.resolve():
+            return path
+    except (OSError, ValueError):
+        pass
+    return ""
+
+
+def keep_custom_image(path: str, profile: str, *, previous: str = "") -> str:
     """A picked custom image, copied into Nadare's own folder; the path to store (#1244).
 
     The Flatpak sees only its own folders and ~/Games, and a document-portal path is fragile, so
     an image from anywhere else is copied to ``<data>/custom-art/<profile>/`` under a name from its
     content (the same image twice is one copy). An image already in Nadare's folders, an empty
-    path, or one that cannot be read or copied is returned unchanged.
+    path, or one that cannot be read or copied is returned unchanged. ``previous`` keeps the
+    managed copy when the picked source has since been deleted.
     """
     import hashlib
     import shutil
@@ -1615,7 +1665,7 @@ def keep_custom_image(path: str, profile: str) -> str:
     try:
         resolved = source.resolve()
         if not resolved.is_file():
-            return text
+            return _managed_custom_image(previous, profile) or text
         for own in (paths.data_dir(), paths.cache_dir(), paths.config_dir()):
             own_real = own.resolve()
             if own_real in resolved.parents:

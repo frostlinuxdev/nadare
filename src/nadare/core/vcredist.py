@@ -171,6 +171,20 @@ def forget_failure(prefix: Path) -> bool:
     return True
 
 
+def retry_after_repair(backend: object) -> bool:
+    """Forget a runtime failure on the prefix ``backend`` uses; True when one was forgotten.
+
+    Repair (GUI and CLI) is the user asking for the runtime step again. A backend without a
+    prefix, or whose prefix lookup fails, simply has nothing to forget.
+    """
+    for attr in ("prefix", "_prefix"):
+        getter = getattr(backend, attr, None)
+        if not callable(getter):
+            continue
+        return forget_failure(Path(getter()))
+    return False
+
+
 def installed(prefix: Path) -> bool:
     """Whether the real (not Wine-builtin) VC++ runtime is in ``prefix``.
 
@@ -895,5 +909,6 @@ __all__ = [
     "installed",
     "overridden",
     "resolve_pin",
+    "retry_after_repair",
     "verify",
 ]

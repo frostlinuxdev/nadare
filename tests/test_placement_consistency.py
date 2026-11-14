@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Placement rules shared by every kind: the library layout, absolute paths, validation and CZN."""
 
 from __future__ import annotations

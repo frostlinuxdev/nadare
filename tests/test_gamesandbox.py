@@ -82,7 +82,7 @@ def test_available_follows_which(monkeypatch):
 
 def test_the_original_command_follows_the_double_dash(layout):
     argv, _env = _wrap(layout)
-    assert argv[0] == "bwrap"
+    assert Path(argv[0]).name == "bwrap"
     assert argv[argv.index("--") + 1 :] == ["umu-run", "game.exe"]
 
 
@@ -368,7 +368,8 @@ def test_a_blocked_runtime_copy_falls_back_to_the_system_one(tmp_path, monkeypat
 
     monkeypatch.setattr(gamesandbox, "works", works)
     found = gamesandbox.locate()
-    assert found.binary == "bwrap" and found.source == "system"
+    assert Path(found.binary).name == "bwrap" and Path(found.binary).is_absolute()
+    assert found.source == "system"
 
 
 def test_with_only_the_system_copy_that_is_used(tmp_path, monkeypatch):
@@ -376,7 +377,8 @@ def test_with_only_the_system_copy_that_is_used(tmp_path, monkeypatch):
     monkeypatch.setattr(gamesandbox.shutil, "which", lambda name, *_a, **_k: "/usr/bin/bwrap")
     monkeypatch.setattr(gamesandbox, "works", lambda binary=gamesandbox.BINARY: (True, ""))
     found = gamesandbox.locate()
-    assert (found.binary, found.source) == ("bwrap", "system")
+    assert (Path(found.binary).name, found.source) == ("bwrap", "system")
+    assert Path(found.binary).is_absolute()
 
 
 def test_when_every_copy_is_blocked_the_first_reason_is_kept(tmp_path, monkeypatch):
@@ -501,7 +503,8 @@ def test_an_unrecorded_copy_gives_way_to_the_system_bubblewrap(tmp_path, monkeyp
     planted = _another_copy(tmp_path, "steamrt-new")
     tried.clear()
     found = gamesandbox.locate()
-    assert found.binary == "bwrap" and found.source == "system"
+    assert Path(found.binary).name == "bwrap" and Path(found.binary).is_absolute()
+    assert found.source == "system"
     assert str(planted) not in tried
 
 
@@ -537,4 +540,4 @@ def test_a_game_folder_that_is_a_whole_drive_is_refused(layout, monkeypatch):
 
 def test_ordinary_game_folders_are_still_bound(layout):
     argv, _env = _wrap(layout)
-    assert argv[0] == "bwrap"
+    assert Path(argv[0]).name == "bwrap"

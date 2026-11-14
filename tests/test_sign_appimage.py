@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """scripts/sign_appimage.py: embed and check an AppImage signature after the build.
 
 The release key must never enter the build container, so the AppImage is built unsigned

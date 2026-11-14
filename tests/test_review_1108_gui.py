@@ -76,7 +76,15 @@ def test_close_is_enabled_during_a_re_check(qapp):  # noqa: F811
         _close(dialog, qapp)
 
 
-def test_a_wuwa_quality_change_is_sent_as_a_notice_not_a_box(tmp_path, qapp):  # noqa: F811
+def test_a_wuwa_quality_change_is_sent_as_a_notice_not_a_box(
+    tmp_path, qapp, monkeypatch  # noqa: F811
+):
+    # #1335 asks "Download now?" once; answering Later still leaves the notice, no extra box.
+    from PyQt6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No
+    )
     config = Config.load(tmp_path / "config.json")
     config.add_profile(
         "w", backend="direct-wuwa", install_dir=str(tmp_path / "wuwa"), wuwa_quality="hd"
@@ -114,3 +122,32 @@ def test_settings_and_the_launcher_agree_on_what_a_runner_folder_is(tmp_path):
     assert runners.looks_like_runner(files_bin)
     assert _is_runner_folder(str(proton))
     assert runners.looks_like_runner(proton)
+
+
+def test_download_now_after_a_quality_change_sends_no_notice(
+    tmp_path, qapp, monkeypatch  # noqa: F811
+):
+    """#1335: Now hands over to the Update; the "next Update downloads" notice would be wrong."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes
+    )
+    config = Config.load(tmp_path / "config.json")
+    config.add_profile(
+        "w", backend="direct-wuwa", install_dir=str(tmp_path / "wuwa"), wuwa_quality="hd"
+    )
+    page = SettingsPage()
+    notices: list[tuple[str, str]] = []
+    requested: list[str] = []
+    page.notice.connect(lambda profile, text: notices.append((profile, text)))
+    page.download_requested.connect(requested.append)
+    try:
+        page.load(config, "w")
+        combo = page.option_widget("wuwa_quality")
+        combo.setCurrentIndex(combo.findData("sd"))
+        page.save()
+        assert requested == ["w"] and notices == []
+    finally:
+        page.deleteLater()
+        qapp.processEvents()

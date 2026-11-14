@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from . import flatpakfs, paths, prefixguard
-from .libraries import game_folder_name
+from .libraries import default_root, game_folder_name
 
 
 class RelinkError(ValueError):
@@ -306,18 +306,31 @@ def prefix_destination(profile: Mapping[str, Any], old: Path, parent: str | Path
     return candidate
 
 
+def free_folder(root: str | Path, name: str, profiles: Mapping[str, Any]) -> Path:
+    """``root/name``, or ``... 2``, ``... 3``: the first neither on disk nor claimed.
+
+    The one rule Add Game and Move use. A dangling symlink is not free: creating through it
+    would write outside the library, and a profile may already record the path.
+    """
+    base = _absolute(root)
+    candidate = base / name
+    index = 2
+    while (
+        candidate.exists()
+        or candidate.is_symlink()
+        or _claimed(profiles, candidate)
+    ):
+        candidate = base / f"{name} {index}"
+        index += 1
+    return candidate
+
+
 def free_home(library: str | Path, name: str, profiles: Mapping[str, Any]) -> Path:
     """``<library>/Nadare/<name>``, or ``... 2``, ``... 3``: the first neither on disk nor claimed.
 
     The same naming Add Game uses, so a game moved into a library lands where a new one would.
     """
-    root = _absolute(library) / "Nadare"
-    candidate = root / name
-    index = 2
-    while candidate.exists() or candidate.is_symlink() or _claimed(profiles, candidate):
-        candidate = root / f"{name} {index}"
-        index += 1
-    return candidate
+    return free_folder(_absolute(library) / "Nadare", name, profiles)
 
 
 def check_place(path: str | Path, *, library: bool = False) -> None:
@@ -334,6 +347,19 @@ def check_place(path: str | Path, *, library: bool = False) -> None:
         raise RelinkError(out_of_reach)
 
 
+def check_library_target(library: str | Path) -> None:
+    """Refuse Nadare's own folder as the library a game moves or is planned into.
+
+    The default library keeps a game as ``profiles/<name>``; ``free_home`` would make
+    ``profiles/Nadare/<Game>`` there, a layout Find games never reads (disjoint audit W1-1).
+    """
+    if _same(_absolute(library), default_root()):
+        raise RelinkError(
+            "That is Nadare's own folder for games; it cannot take a moved game. "
+            "Pick another library."
+        )
+
+
 def check_home_target(
     profile: dict[str, Any],
     library: str | Path,
@@ -348,6 +374,7 @@ def check_home_target(
     if home is None:
         raise RelinkError("This game's folders were not laid out by Nadare.")
     chosen = _absolute(library)
+    check_library_target(chosen)
     check_place(chosen, library=True)
     if _same(chosen / "Nadare" / home_name(profile, home), home):
         raise RelinkError("The game is already there. Pick a different folder.")

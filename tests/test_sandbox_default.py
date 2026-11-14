@@ -104,7 +104,7 @@ def test_the_settings_option_defaults_to_on(kind):
 def test_an_unset_profile_plays_in_the_sandbox(tmp_path, default_on, has_bwrap):
     events: list = []
     argv, _env, _target = _backend(tmp_path, events).build_launch()
-    assert argv[0] == "bwrap"
+    assert Path(argv[0]).name == "bwrap"
     assert _sandbox_reports(events) == [True]
 
 

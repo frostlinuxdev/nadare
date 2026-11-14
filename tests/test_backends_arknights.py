@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
 from nadare.backends import winegame as wg
@@ -64,7 +65,7 @@ class TestStatus:
     def test_running_when_process_matches(self, tmp_path, monkeypatch):
         backend = _backend(tmp_path)
         _install_launcher(backend.prefix())
-        monkeypatch.setattr(wg, "scan_pids", lambda patterns: [4242])
+        patch_everywhere(monkeypatch, wg, "scan_pids", lambda patterns: [4242])
         status = backend.status()
         assert status.state == "running"
         assert status.running is True
@@ -238,12 +239,14 @@ class TestBuildLaunch:
         monkeypatch.setattr(wg.sandbox, "in_flatpak", lambda: False)
         return _backend(tmp_path, {"prefix": str(prefix), "runner": "MyProton"}), proton
 
-    def test_proton_runner_without_umu_runs_proton_directly(self, tmp_path, monkeypatch):
-        backend, proton = self._proton_without_umu(tmp_path, monkeypatch)
+    def test_proton_runner_without_umu_never_runs_proton_directly(self, tmp_path, monkeypatch):
+        """#1338 (user): with the 32-bit libraries and no umu this ran `proton run`, which
+        skipped every per-game fix. Now Nadare's own umu is set up, or the launch explains."""
+        backend, _proton = self._proton_without_umu(tmp_path, monkeypatch)
         monkeypatch.setattr(wg.hostlibs, "missing_32bit", lambda: [])
-        argv, env, _target = backend.build_launch()
-        assert argv[:2] == [str(proton / "proton"), "run"]
-        assert env["STEAM_COMPAT_DATA_PATH"] == str(tmp_path / "prefix")
+        monkeypatch.setattr(wg.umu, "resolve", lambda *a, **k: None)
+        with pytest.raises(BackendError, match="umu"):
+            backend.build_launch()
 
     def test_proton_without_umu_and_without_host_libs_explains_what_to_install(
         self, tmp_path, monkeypatch
@@ -290,14 +293,18 @@ class TestBuildLaunch:
         assert target == exe
         assert argv[1] == str(exe)
 
-    def test_whitespace_wine_binary_falls_back(self, tmp_path, monkeypatch):
-        """05-9: a whitespace-only wine_binary must not become the name "None"."""
+    def test_whitespace_wine_binary_means_the_default_proton(self, tmp_path, monkeypatch):
+        """05-9: a whitespace-only wine_binary is "no custom Wine", so the default Proton is
+        wanted. It must never reach a random plain Wine (#1338, stress round 3 u2)."""
         prefix = tmp_path / "prefix"
         _install_launcher(prefix)
-        monkeypatch.setattr(wg, "first_wine", lambda: Path("/opt/wine/bin/wine"))
+        patch_everywhere(
+            monkeypatch, wg, "first_wine", lambda: pytest.fail("ran a random plain Wine")
+        )
         backend = _backend(tmp_path, {"prefix": str(prefix), "wine_binary": "   "})
-        argv, *_ = backend.build_launch()
-        assert argv[0] == "/opt/wine/bin/wine"
+        assert backend._wanted_family() is not None
+        with pytest.raises(BackendError, match="Proton"):
+            backend.build_launch()  # no runner installed here: Play downloads it
 
     def test_discovery_finds_nested_launcher(self, tmp_path):
         prefix = tmp_path / "prefix"
@@ -324,7 +331,7 @@ class TestInstall:
             captured.append((list(argv), dict(env)))
             return 0
 
-        monkeypatch.setattr(wg, "stream", fake_stream)
+        patch_everywhere(monkeypatch, wg, "stream", fake_stream)
         monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
         monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer)
 
@@ -348,7 +355,7 @@ class TestInstall:
     def test_installer_nonzero_exit_raises(self, tmp_path, monkeypatch):
         prefix = tmp_path / "prefix"
         installer = write_exe(tmp_path / "Arknights-setup.exe", "MZ")
-        monkeypatch.setattr(wg, "stream", lambda *a, **k: 3)
+        patch_everywhere(monkeypatch, wg, "stream", lambda *a, **k: 3)
         monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
         monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer)
         backend = _backend(
@@ -673,7 +680,7 @@ class TestArknightsVcredist:
             (prefix / "drive_c").mkdir(parents=True, exist_ok=True)
             return 0
 
-        monkeypatch.setattr(wg, "stream", fake_stream)
+        patch_everywhere(monkeypatch, wg, "stream", fake_stream)
         backend._ensure_prefix()
         assert len(calls) == 1
         assert callable(calls[0]["run_in_prefix"])
@@ -714,7 +721,7 @@ class TestArknightsVcredist:
         installer = write_exe(tmp_path / "Arknights-setup.exe", "MZ")
         monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
         monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer)
-        monkeypatch.setattr(wg, "stream", lambda *a, **k: 0)
+        patch_everywhere(monkeypatch, wg, "stream", lambda *a, **k: 0)
         monkeypatch.setattr("urllib.request.urlopen", _offline)
         monkeypatch.setattr(wg.vcredist, "ensure", _REAL_VCREDIST_ENSURE)
         backend = _backend(
@@ -753,7 +760,7 @@ class TestStellaSoraVcredist:
             (prefix / "drive_c").mkdir(parents=True, exist_ok=True)
             return 0
 
-        monkeypatch.setattr(wg, "stream", fake_stream)
+        patch_everywhere(monkeypatch, wg, "stream", fake_stream)
         backend._ensure_prefix()
         assert len(calls) == 1
 
@@ -826,7 +833,7 @@ class TestUninstallSafety:
     def test_uninstall_refuses_while_the_game_is_running(self, tmp_path, monkeypatch):
         backend = _backend(tmp_path)
         _install_launcher(backend.prefix())
-        monkeypatch.setattr(wg, "scan_pids", lambda patterns: [1234])
+        patch_everywhere(monkeypatch, wg, "scan_pids", lambda patterns: [1234])
 
         with pytest.raises(BackendError) as exc:
             backend.uninstall()

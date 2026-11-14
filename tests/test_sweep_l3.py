@@ -7,9 +7,11 @@ import errno
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from _backend_helpers import make_context
+from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
 from nadare.backends import winegame as wg
@@ -240,9 +242,13 @@ def test_official_install_runs_vcredist_once_on_a_fresh_prefix(
         lambda *a, **k: "https://example.invalid/setup.exe",
     )
     monkeypatch.setattr(WineGameBackend, "_download_installer", lambda *a, **k: installer)
-    monkeypatch.setattr(wg, "stream", lambda *a, **k: 0)
-    # CI runners have no wine; the test must not depend on one being installed.
-    monkeypatch.setattr(wg, "first_wine", lambda: Path("/usr/bin/wine"))
+    patch_everywhere(monkeypatch, wg, "stream", lambda *a, **k: 0)
+    # No runner is installed here; stand in a Proton and umu (a Proton game never falls back to
+    # a plain Wine, #1338) so the test does not depend on the host.
+    monkeypatch.setattr(WineGameBackend, "resolve_runner", lambda self: (str(tmp_path), "proton"))
+    patch_everywhere(monkeypatch, wg, "umu", SimpleNamespace(
+        system=lambda *a, **k: "/usr/bin/umu-run", resolve=lambda *a, **k: "/usr/bin/umu-run",
+        managed=lambda: None, note_first_runtime=lambda emit: None))
     monkeypatch.setattr(WineGameBackend, "find_launcher", lambda self: installer)
     backend.ctx.emit = lambda _e: None
 

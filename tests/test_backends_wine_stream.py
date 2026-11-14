@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
 from nadare.backends import wine as wine_mod
@@ -322,7 +323,7 @@ def _installer_backend(tmp_path: Path) -> tuple[ArknightsBackend, list]:
 
 
 def _wire_install(monkeypatch, backend: ArknightsBackend, installer: Path, code: int) -> None:
-    monkeypatch.setattr(wg, "stream", lambda *a, **k: code)
+    patch_everywhere(monkeypatch, wg, "stream", lambda *a, **k: code)
     monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
     monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer)
     backend.ctx.profile["installer_url"] = (
@@ -432,6 +433,6 @@ def test_a_fresh_install_that_leaves_a_launcher_still_counts_whatever_the_exit_c
         write_exe(backend.install_dir() / "game launcher.exe", "MZ")
         return 3010  # some installers report "restart needed" while having worked
 
-    monkeypatch.setattr(wg, "stream", installer_run)
+    patch_everywhere(monkeypatch, wg, "stream", installer_run)
     backend.install()
     assert any(e.kind == "done" for e in events)

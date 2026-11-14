@@ -19,6 +19,8 @@ try:  # pragma: no cover - only when PyQt6 is missing
 except Exception:  # noqa: BLE001
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
+from _parts_patch import patch_everywhere
+
 from nadare.core.config import Config
 from nadare.gui import settings as settings_mod
 from nadare.gui.settings import SettingsPage
@@ -32,9 +34,9 @@ def qapp():
     yield app
 
 
-def _config(tmp_path, name="sample", **profile):
+def _config(tmp_path, name="sample", backend="stove-czn", **profile):
     config = Config.load(tmp_path / "config.json")
-    config.add_profile(name, backend="stove-czn", prefix=str(tmp_path / "pfx"), **profile)
+    config.add_profile(name, backend=backend, prefix=str(tmp_path / "pfx"), **profile)
     return config
 
 
@@ -54,7 +56,7 @@ def _fake_backend(monkeypatch, status):
 
         return SimpleNamespace(status=probe)
 
-    monkeypatch.setattr(settings_mod, "create_backend", create_backend)
+    patch_everywhere(monkeypatch, settings_mod, "create_backend", create_backend)
     return seen
 
 
@@ -77,10 +79,11 @@ def test_loading_settings_does_not_wait_for_the_probe(tmp_path, qapp, monkeypatc
 
 
 def test_a_not_installed_answer_unlocks_the_prefix(tmp_path, qapp, monkeypatch):
+    # A custom Wine game: a catalog game's prefix never unlocks (#1293).
     _fake_backend(monkeypatch, SimpleNamespace(state="not_installed"))
     page = SettingsPage()
     try:
-        page.load(_config(tmp_path), "sample")
+        page.load(_config(tmp_path, backend="wine"), "sample")
         _settle(qapp)
         assert not page.option_widget("prefix").isReadOnly()
     finally:
@@ -118,7 +121,7 @@ def test_a_late_answer_for_a_previous_profile_is_ignored(tmp_path, qapp, monkeyp
     _fake_backend(monkeypatch, status)
     page = SettingsPage()
     try:
-        config = _config(tmp_path)
+        config = _config(tmp_path, backend="wine")  # a catalog prefix never unlocks (#1293)
         page.load(config, "sample")
         page.load(config, "sample")  # a second load while the first probe is still blocked
         gate.set()

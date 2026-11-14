@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Default profile names are short, written-down names, not slugs of long titles (#1134).
 
 The profile name is the folder under ``profiles/`` (prefix, install, logs), the config key and

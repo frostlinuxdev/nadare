@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """PRIVACY.md names every host Nadare can contact, and says what really goes there (#810)."""
 
 from __future__ import annotations

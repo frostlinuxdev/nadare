@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _parts_patch import patch_everywhere
 
 from nadare.backends import winegame as wg
 from nadare.backends.arknights import ArknightsBackend
@@ -49,7 +50,7 @@ def _hermetic(monkeypatch):
         raise wg.runners.RunnerError("offline (no downloads in tests)")
 
     monkeypatch.setattr(wg.runners, "ensure_pinned", offline)
-    monkeypatch.setattr(wg, "scan_pids", lambda patterns: [])
+    patch_everywhere(monkeypatch, wg, "scan_pids", lambda patterns: [])
     # The host's Vulkan support must never decide a test.
     monkeypatch.setattr(wg.graphics, "vulkan_note", lambda: "")
 
@@ -228,7 +229,7 @@ class TestStatusInstalled:
     def test_running_when_pids_are_found(self, tmp_path, name, cls, direct, monkeypatch):
         backend = _backend(tmp_path, name, cls, direct)
         exe = _install(backend)
-        monkeypatch.setattr(wg, "scan_pids", lambda patterns: [4242])
+        patch_everywhere(monkeypatch, wg, "scan_pids", lambda patterns: [4242])
 
         status = backend.status()
 

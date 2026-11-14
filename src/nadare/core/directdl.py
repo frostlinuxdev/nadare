@@ -21,10 +21,10 @@ Nothing is written outside ``dest``; every path is relative and traversal-free.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import io
 import json
+import logging
 import os
 import shutil
 import stat
@@ -36,20 +36,22 @@ import zlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import CancelledError as FutureCancelled
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from . import archivepins, diskspace, paths, sevenz, sophon
+from . import archivepins, diskspace, installlock, paths, sevenz, sophon
 from . import download as download_module
 from .download import DownloadError, download, remote_size
 from .events import Cancel, Cancelled, Emitter, Event, emitter
+from .gameversion import versions_equal
 from .rangefile import BlockMismatch, RangeError, RangePart, RangeReader
 
 if TYPE_CHECKING:
     from .archivepins import ArchivePin, PinPart
+
+log = logging.getLogger(__name__)
 
 #: Cache directory (under the install dir) for in-flight archive downloads.
 #: Most files fetched in parallel. A game with tens of thousands of small files is latency-bound
@@ -519,16 +521,8 @@ def _done_record(
 
 
 def _same_version(recorded: object, current: str) -> bool:
-    """Whether an archive recorded at ``recorded`` is current for ``current``.
-
-    A plan version may carry a ``+client-<version>`` suffix that older installs never recorded
-    (#866). The archive's URL, which names that client version, is compared separately, so a
-    record made before the suffix existed still counts when everything else matches.
-    """
-    if recorded == current:
-        return True
-    base, sep, _client = current.partition("+client-")
-    return bool(sep) and recorded == base
+    """Whether an archive recorded at ``recorded`` is current for ``current`` (#866)."""
+    return versions_equal(recorded, current)
 
 
 def _archive_done(plan: Plan, archive: Archive, dest: Path, *, hashes: bool = False) -> bool:
@@ -637,7 +631,7 @@ def _extract_zip_to(
             entries = _zip_entries(zf)
             target.mkdir(parents=True, exist_ok=True)
             for info, relative in entries:
-                out = target / relative
+                out = _safe_destination_path(target, relative, directory=info.is_dir())
                 if info.is_dir():
                     out.mkdir(parents=True, exist_ok=True)
                     continue
@@ -652,13 +646,21 @@ def _extract_zip_to(
         raise DirectError(f"cannot extract {zip_path.name}: {exc}") from exc
 
 
-def _safe_destination_path(dest: Path, relative: str) -> Path:
-    """Return a destination path that has no symlinked components below ``dest``."""
+def _safe_destination_path(
+    dest: Path, relative: str, *, directory: bool | None = None
+) -> Path:
+    """Return a destination path that has no symlinked components below ``dest``.
+
+    ``directory`` says what the caller is about to write there: a file may not replace an
+    existing folder (or a folder an existing file), so a hostile plan gets a clear error and
+    the item already on disk stays untouched.
+    """
     relative = safe_relative_path(relative)
     dest_real = Path(os.path.realpath(dest))
     target = dest / relative
+    parts = relative.split("/")
     current = dest
-    for part in relative.split("/"):
+    for index, part in enumerate(parts):
         current = current / part
         try:
             mode = current.lstat().st_mode
@@ -668,6 +670,15 @@ def _safe_destination_path(dest: Path, relative: str) -> Path:
             raise DirectError(f"cannot inspect install path {relative!r}: {exc}") from exc
         if stat.S_ISLNK(mode):
             raise DirectError(f"symlink in install path {relative!r}")
+        if index < len(parts) - 1:
+            if not stat.S_ISDIR(mode):
+                raise DirectError(
+                    f"cannot install {relative!r}: {part!r} is not a folder"
+                )
+        elif directory is True and not stat.S_ISDIR(mode):
+            raise DirectError(f"cannot install folder {relative!r}: a file is in the way")
+        elif directory is False and not stat.S_ISREG(mode):
+            raise DirectError(f"cannot install file {relative!r}: a folder is in the way")
     try:
         parent_real = Path(os.path.realpath(target.parent))
         if os.path.commonpath((str(dest_real), str(parent_real))) != str(dest_real):
@@ -678,15 +689,20 @@ def _safe_destination_path(dest: Path, relative: str) -> Path:
 
 
 def _merge_tree(source: Path, dest: Path) -> None:
+    items = [
+        (path, path.relative_to(source).as_posix(), path.is_dir())
+        for path in sorted(source.rglob("*"))
+    ]
+    # Check every item before moving any: a collision must not leave a half-merged install.
+    for _path, relative, is_dir in items:
+        _safe_destination_path(dest, relative, directory=is_dir)
     dest.mkdir(parents=True, exist_ok=True)
-    for path in sorted(source.rglob("*")):
-        relative = path.relative_to(source).as_posix()
-        target = _safe_destination_path(dest, relative)
-        if path.is_dir():
+    for path, relative, is_dir in items:
+        target = _safe_destination_path(dest, relative, directory=is_dir)
+        if is_dir:
             target.mkdir(parents=True, exist_ok=True)
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target = _safe_destination_path(dest, relative)
             try:
                 os.replace(path, target)
             except OSError as exc:
@@ -728,7 +744,7 @@ def _extract_slices_into_dest(
     try:
         for member in members:
             relative = safe_relative_path(member.path)
-            out = staging / relative
+            out = _safe_destination_path(staging, relative, directory=False)
             out.parent.mkdir(parents=True, exist_ok=True)
             hashers = {}
             if member.md5:
@@ -1108,13 +1124,17 @@ def _install_streamed_zip(
     """Write the members of an already-open remote zip into ``dest``."""
     for info, relative in entries:
         if info.is_dir():
-            _safe_destination_path(dest, relative).mkdir(parents=True, exist_ok=True)
+            _safe_destination_path(dest, relative, directory=True).mkdir(
+                parents=True, exist_ok=True
+            )
 
     todo: list[tuple[zipfile.ZipInfo, str]] = []
     for info, relative in entries:
         if info.is_dir():
             continue
-        if not _stream_member_current(_safe_destination_path(dest, relative), info):
+        if not _stream_member_current(
+            _safe_destination_path(dest, relative, directory=False), info
+        ):
             todo.append((info, relative))
 
     total = sum(info.file_size for info, _ in todo)
@@ -1155,9 +1175,9 @@ def _install_streamed_zip(
                         break
                     dst.write(block)
                     add_progress(len(block))
-            out = _safe_destination_path(dest, relative)
+            out = _safe_destination_path(dest, relative, directory=False)
             out.parent.mkdir(parents=True, exist_ok=True)
-            out = _safe_destination_path(dest, relative)
+            out = _safe_destination_path(dest, relative, directory=False)
             os.replace(temporary, out)
         except Cancelled:
             _remove_file(temporary)
@@ -1364,13 +1384,15 @@ def _stream_7z_archive(
             raise DirectError(f"cannot open {archive.name}: {exc}") from exc
 
         for entry in entries:
-            _safe_destination_path(dest, entry.path)
+            _safe_destination_path(dest, entry.path, directory=entry.is_dir)
         wanted: set[str] = set()
         total = 0
         for entry in entries:
             relative = safe_relative_path(entry.path)
             if entry.is_dir:
-                _safe_destination_path(dest, relative).mkdir(parents=True, exist_ok=True)
+                _safe_destination_path(dest, relative, directory=True).mkdir(
+                    parents=True, exist_ok=True
+                )
                 continue
             if entry.size == 0 and not (dest / relative).is_file():
                 wanted.add(entry.path)
@@ -1612,6 +1634,10 @@ def safe_relative_path(path: str) -> str:
             message = f"path must not contain '..': {path!r}"
         elif exc.code == "empty-normalised":
             message = f"path is empty after normalisation: {path!r}"
+        elif exc.code == "nul":
+            message = f"path must not contain a NUL: {path!r}"
+        elif exc.code == "nadare-owned":
+            message = f"path is inside a Nadare-owned folder: {path!r}"
         else:
             message = f"unsafe path: {path!r}"
         raise DirectError(message) from None
@@ -1684,10 +1710,43 @@ def plan_missing(
     return files, archives
 
 
+def _archive_record_for_game(plan: Plan, root: Path) -> bool:
+    """Whether an earlier archive install of this game left a ``.done`` record."""
+    state = root / STATE_DIR
+    try:
+        candidates = sorted(state.rglob("*.done"))
+    except OSError:
+        return False
+    for record_path in candidates:
+        record = _read_done(record_path)
+        if record is None:
+            continue
+        game = record.get("game")
+        if game == plan.game_tag:
+            return True
+        if game is None and record_path.relative_to(state).as_posix().startswith(
+            f"{plan.game_tag}-"
+        ):
+            return True
+    return False
+
+
 def sophon_missing(plan: Plan, dest: Path | str) -> list[sophon.SophonPackage]:
-    """Sophon packages with no ``.done`` marker for their manifest id."""
+    """Sophon packages with no ``.done`` marker for their manifest id.
+
+    An install an earlier release made from an archive has an archive record but no Sophon
+    markers. Its files are verified chunk by chunk by the next sync, not reported missing. That
+    excuse ends once Sophon has run for the game (any marker exists): the archive record stays on
+    disk for good and must not hide a package that is really missing later.
+    """
     root = Path(dest)
-    return [pkg for pkg in plan.sophon if not sophon.is_done(pkg, root)]
+    missing = [pkg for pkg in plan.sophon if not sophon.is_done(pkg, root)]
+    never_synced = len(missing) == len(plan.sophon) and not any(
+        (root / STATE_DIR).glob("sophon-*.done")
+    )
+    if missing and never_synced and _archive_record_for_game(plan, root):
+        return []
+    return missing
 
 
 def default_workers(file_count: int) -> int:
@@ -1709,6 +1768,140 @@ def default_workers(file_count: int) -> int:
 _SOPHON_WORKERS = 24
 
 
+_MD5_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def cached_file(cache: Path | str, rf: RemoteFile) -> Path:
+    """Where a predownload keeps ``rf``: ``cache/files/<md5>``."""
+    md5 = str(rf.md5 or "")
+    if len(md5) != 32 or any(char not in _MD5_HEX for char in md5):
+        raise DirectError(f"{rf.path} has no md5 to cache it by")
+    return Path(cache) / "files" / md5.lower()
+
+
+def _cached_regular(cache: Path | str, rf: RemoteFile) -> Path | None:
+    """The cache path when it is a regular file, never following a planted link."""
+    try:
+        path = cached_file(cache, rf)
+        info = os.lstat(path)
+    except (OSError, DirectError):
+        return None
+    return path if stat.S_ISREG(info.st_mode) else None
+
+
+def _take_cached_file(cached: Path, target: Path) -> None:
+    """Move a verified cached file into place, copying when the cache is on another filesystem."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.replace(cached, target)
+    except OSError:
+        temporary = target.with_name(target.name + ".nadare-cache")
+        try:
+            shutil.copyfile(cached, temporary)
+            os.replace(temporary, target)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def predownload(
+    plan: Plan,
+    dest: Path | str,
+    cache: Path | str,
+    *,
+    emit: Emitter | None = None,
+    cancel: Cancel | None = None,
+    workers: int = 4,
+    files: Sequence[RemoteFile] | None = None,
+) -> dict[str, int]:
+    """Fetch what ``plan`` needs ahead of its release into ``cache``.
+
+    One cache folder holds every Sophon package of the plan. A file plan keeps each file at
+    ``cache/files/<md5>``. The installed game is only read; the update that follows takes
+    verified files from this cache before the network.
+    """
+    cache_dir = Path(cache)
+    if plan.sophon:
+        root = Path(dest).expanduser()
+        downloaded = 0
+        for pkg in plan.sophon:
+            try:
+                downloaded += sophon.predownload_package(
+                    pkg, root, cache_dir, emit=emit, cancel=cancel, workers=workers
+                )
+            except sophon.SophonError as exc:
+                raise DirectError(str(exc)) from exc
+        return {"bytes": downloaded, "packages": len(plan.sophon)}
+
+    if files is None and not plan.files and not plan.archives:
+        raise DirectError("this game's download cannot be fetched ahead")
+    selected = list(files) if files is not None else plan_missing(plan, dest)[0]
+    for rf in selected:  # refuse the whole plan before writing anything
+        cached_file(cache_dir, rf)
+    (cache_dir / "files").mkdir(parents=True, exist_ok=True)
+    stop = Cancel()
+    combined = _CombinedCancel(cancel, stop)
+    overall = _OverallProgress(selected, emit)
+
+    def fetch(rf: RemoteFile) -> int:
+        combined.raise_if_cancelled()
+        target = cached_file(cache_dir, rf)
+        cached = _cached_regular(cache_dir, rf)
+        if cached is not None and _verify_remote(cached, rf, cancel=combined):
+            overall.finished(rf)
+            return 0
+        _download_remote(
+            rf, target, emit=overall.sink(rf), cancel=combined
+        )
+        overall.finished(rf)
+        return int(rf.size or target.stat().st_size)
+
+    downloaded = 0
+    first_error: BaseException | None = None
+    max_workers = max(1, min(workers, MAX_WORKERS))
+    if selected:
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = [pool.submit(fetch, rf) for rf in selected]
+                for future in as_completed(futures):
+                    try:
+                        downloaded += future.result()
+                    except BaseException as exc:
+                        if first_error is None:
+                            first_error = exc
+                            stop.cancel()
+                            for other in futures:
+                                other.cancel()
+        finally:
+            if first_error is None:
+                overall.flush()
+    if first_error is not None:
+        raise first_error
+    (cache_dir / "ready.json").write_text(
+        json.dumps({"version": plan.version, "files": len(selected)}), encoding="utf-8"
+    )
+    return {"bytes": downloaded, "files": len(selected)}
+
+
+def predownload_ready(plan: Plan, cache: Path | str) -> bool:
+    """True when ``cache`` holds everything ``plan`` recorded as ready."""
+    cache_dir = Path(cache)
+    if plan.sophon:
+        return all(sophon.predownload_ready(pkg, cache_dir) for pkg in plan.sophon)
+    path = cache_dir / "ready.json"
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode):
+            return False
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("version") == plan.version
+
+
+
 def plan_workers(plan: Plan) -> int:
     """The default number of parallel downloads for ``plan``."""
     if plan.sophon:
@@ -1716,23 +1909,13 @@ def plan_workers(plan: Plan) -> int:
     return default_workers(len(plan.files))
 
 
-@contextmanager
 def _install_lock(install_dir: Path) -> Iterator[None]:
     """Refuse to run two direct syncs into one install tree (they share ``.part`` files)."""
-    key = hashlib.sha256(str(install_dir.resolve()).encode()).hexdigest()[:16]
-    lock_path = paths.state_dir() / "locks" / f"directdl-{key}.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise DirectError(
-                f"another install or update is already running for {install_dir}"
-            ) from None
-        yield
-    finally:
-        os.close(fd)
+    return installlock.hold(
+        install_dir,
+        DirectError,
+        f"another install or update is already running for {install_dir}",
+    )
 
 
 def _read_done(record_path: Path) -> dict[str, Any] | None:
@@ -1902,6 +2085,7 @@ def sync(
     workers: int = 4,
     check_workers: int | None = None,
     changed: threading.Event | None = None,
+    chunk_cache: Path | None = None,
 ) -> dict[str, int]:
     """Install ``plan`` into ``dest``. Returns ``{"downloaded": n, "skipped": m}``
     counting files plus archives. Idempotent: a second run fetches nothing.
@@ -1922,6 +2106,7 @@ def sync(
             workers=workers,
             check_workers=check_workers,
             changed=changed,
+            chunk_cache=chunk_cache,
         )
 
 
@@ -1934,6 +2119,7 @@ def _sync(
     workers: int,
     check_workers: int | None = None,
     changed: threading.Event | None = None,
+    chunk_cache: Path | None = None,
 ) -> dict[str, int]:
     say = emitter(emit)
     if cancel is not None:
@@ -1964,9 +2150,18 @@ def _sync(
 
         def fetch(rf: RemoteFile) -> None:
             combined.raise_if_cancelled()
+            target = _safe_destination_path(root, rf.path, directory=False)
+            if chunk_cache is not None:
+                cached = _cached_regular(chunk_cache, rf)
+                if cached is not None and _verify_remote(cached, rf, cancel=combined):
+                    _take_cached_file(cached, target)
+                    if changed is not None:
+                        changed.set()
+                    overall.finished(rf)
+                    return
             _download_remote(
                 rf,
-                _safe_destination_path(root, rf.path),
+                target,
                 emit=overall.sink(rf),
                 cancel=combined,
                 pool=connections,
@@ -2013,7 +2208,9 @@ def _sync(
         if changed is not None:
             changed.set()  # chunks are written into the files as they arrive
         try:
-            sophon.sync_package(pkg, root, emit=emit, cancel=cancel, workers=workers)
+            sophon.sync_package(
+                pkg, root, emit=emit, cancel=cancel, workers=workers, chunk_cache=chunk_cache
+            )
         except sophon.SophonError as exc:
             raise DirectError(str(exc)) from exc
         downloaded += 1

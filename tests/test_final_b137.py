@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # repo/tests/test_core_yostar_keeps_part.py
 from __future__ import annotations
 

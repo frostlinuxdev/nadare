@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Guards for the parallel-friendly test suite and the font-change refresh."""
 
 from __future__ import annotations

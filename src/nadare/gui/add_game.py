@@ -36,13 +36,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import backends, flatpakfs, libraries, paths, prefixguard
+from ..core import backends, flatpakfs, libraries, paths, prefixguard, relink
 from ..core.backends import BackendError
 from ..core.config import MAX_PROFILE_NAME, Config, valid_profile_name
 from ..core.directkinds import (
     CATALOG_KINDS,
     DIRECT_WIZARD,
     HOYO_KINDS,
+    LAUNCHER_KINDS,
     LAUNCHER_WIZARD,
     TIER_HELP,
     hoyo_visible,
@@ -337,37 +338,6 @@ def _holds_game(game: GameType, folder: Path) -> bool:
 def _inside(path: Path, root: Path) -> bool:
     """True when ``path`` is ``root`` or lies below it (no symlink resolution needed here)."""
     return path == root or root in path.parents
-
-
-def _claimed(profiles: dict[str, Any], folder: Path) -> bool:
-    """True when a profile already records ``folder`` or something inside it."""
-    text = str(folder)
-    for profile in profiles.values():
-        if not isinstance(profile, dict):
-            continue
-        recorded = [
-            *(profile.get("owned_dirs") or ()),
-            profile.get("install_dir"),
-            profile.get("prefix"),
-        ]
-        for value in recorded:
-            if isinstance(value, str) and (value == text or value.startswith(text + "/")):
-                return True
-    return False
-
-
-def _free_folder(root: Path, name: str, profiles: dict[str, Any]) -> Path:
-    """``root/name``, or ``root/name 2``, ``name 3``... the first neither on disk nor claimed.
-
-    A game folder is only created when its install starts, so two profiles added before
-    that must be told apart by what the config records, not by the disk alone.
-    """
-    candidate = root / name
-    index = 2
-    while candidate.exists() or _claimed(profiles, candidate):
-        candidate = root / f"{name} {index}"
-        index += 1
-    return candidate
 
 
 def _drive_c_prefix(folder: Path) -> Path | None:
@@ -818,6 +788,13 @@ class AddGameDialog(QDialog):
     def set_profile_name(self, name: str) -> None:
         self.name.setText(name)
         self._name_touched = True
+        game = self._selected_game()
+        # A chosen profile key names the default-library game folder (one rule with
+        # libraries._game_folder): <root>/<key>/install and <root>/<key>/prefix.
+        if not self._folder_touched:
+            self.folder.setText(str(self._root() / self._slug() / "install"))
+        if not self._prefix_touched and game is not None and game.kind in PREFIX_KINDS:
+            self.prefix.setText(str(self._root() / self._slug() / "prefix"))
 
     # ---- defaults / detection ---------------------------------------------
     def _default_name(self, title: str, kind: str = "") -> str:
@@ -836,9 +813,12 @@ class AddGameDialog(QDialog):
             index += 1
 
     def _slug(self) -> str:
+        current = self.name.text().strip()
+        if current:
+            # Use the profile key, not the game title, so a second profile of
+            # the same game gets its own install folder and prefix.
+            return current
         game = self._selected_game()
-        # Use the unique profile name, not the game title, so a second profile
-        # of the same game gets its own install folder and prefix.
         return self._default_name(game.title if game else "game", game.kind if game else "")
 
     def _root(self) -> Path:
@@ -1242,7 +1222,7 @@ class AddGameDialog(QDialog):
                 if reuse is not None:
                     game_dir = reuse.game_dir
                 else:
-                    game_dir = _free_folder(
+                    game_dir = relink.free_folder(
                         library / "Nadare", _folder_name(game.title), self.config.profiles
                     )
                 self.reused = reuse
@@ -1275,7 +1255,7 @@ class AddGameDialog(QDialog):
                     prefix_value = str(reuse.prefix)
                     self.reused = reuse
                 else:
-                    game_dir = _free_folder(
+                    game_dir = relink.free_folder(
                         library / "Nadare", _folder_name(game.title), self.config.profiles
                     )
                     prefix_value = str(game_dir / "prefix")
@@ -1292,7 +1272,7 @@ class AddGameDialog(QDialog):
             # it: give such a place Nadare's own sub-tree, as a picked game folder gets (#851).
             reason = prefixguard.unsafe_reason(prefix_value, as_prefix=True)
             if reason:
-                game_dir = _free_folder(
+                game_dir = relink.free_folder(
                     Path(prefix_value) / "Nadare", _folder_name(game.title), self.config.profiles
                 )
                 owned_dirs.append(str(game_dir))
@@ -1386,6 +1366,9 @@ class AddGameDialog(QDialog):
         if kind in PREFIX_ONLY_KINDS:
             # The prefix is the whole install; never persist a duplicate path.
             install_dir = ""
+        if not importing and kind in LAUNCHER_KINDS and not self._folder_touched:
+            # Launchers install inside the prefix; a default folder would be ignored.
+            install_dir = ""
 
         install_dir, prefix_value, owned, owned_dirs = self._plan_paths(
             game, install_dir, prefix_value, importing
@@ -1448,10 +1431,10 @@ class AddGameDialog(QDialog):
                 # A picked folder is a library (<folder>/Nadare/<Game>): remember it, as Steam
                 # does when a library is made in its install dialog. An unsafe or known one is
                 # simply not added.
-                wrapper = Path(game_dir).parent
-                if wrapper.name == libraries.NADARE_DIR:
+                library = libraries.library_root_for(Path(game_dir))
+                if library is not None:
                     try:
-                        libraries.add_library(self.config, wrapper.parent)
+                        libraries.add_library(self.config, library)
                     except libraries.LibraryError:
                         pass
             try:

@@ -6,8 +6,10 @@ and what we explicitly do not claim. It is not legal advice.
 
 ## How the code was made
 
-Most of Nadare's implementation code was written with an AI assistant (Claude),
-working from human direction. The human maintainers designed the architecture,
+Most of Nadare's implementation code was written with AI assistants, working
+from human direction: mostly Anthropic's Claude (commits carry a
+`Co-Authored-By: Claude` trailer), a few early changes by OpenAI's Codex, and
+DeepSeek models as read-only reviewers that never commit. The human maintainers designed the architecture,
 chose the backends, specified behaviour, reviewed the output, and tested it
 against real game installs. The model typed; people decided.
 
@@ -48,8 +50,11 @@ Two facts force v3-only:
 
 | Constraint | Consequence |
 | --- | --- |
-| `src/nadare/backends/czn/auth.py` is `GPL-3.0-only` (inherited from czn-linux) | The combined work cannot be offered under "v3 or later", because we do not hold the right to grant a future v4 for that file. |
-| PyQt6 is GPLv3 | A Python application importing PyQt6 is a combined work and must be GPLv3-compatible regardless of anything else. |
+| `src/nadare/backends/czn/auth.py` is `GPL-3.0-only`: it derives from yporoc/ChaosZeroNightmareLauncher-Lite, licensed "version 3" with no "or later" grant | The combined work cannot be offered under "v3 or later", because we do not hold the right to grant a future v4 for that file. |
+| PyQt6 is GPL v3 only (no "or later") | A Python application importing PyQt6 is a combined work with it, so it can be offered under v3 only. |
+
+The other CZN files say they were ported from czn-linux: that was the maintainer's own earlier
+project, so their `GPL-3.0-or-later` headers are the maintainer's own offer and stand.
 
 So, for packaging metadata:
 
@@ -58,10 +63,9 @@ License: GPL-3.0-only
 ```
 
 Source-level SPDX is mixed (`GPL-3.0-or-later` for most files, `GPL-3.0-only`
-for `czn/auth.py`). `pyproject.toml` and the README said
-`GPL-3.0-or-later` for the whole project at the time of writing; that is
-inaccurate for the combined work. If you are packaging Nadare, use
-`GPL-3.0-only` and do not "fix" it back.
+for `czn/auth.py`). `pyproject.toml`, the README and the notices shipped in the
+builds all say `GPL-3.0-only` for the whole project. If you are packaging
+Nadare, use `GPL-3.0-only` and do not "fix" it back.
 
 ## Copyright, and what we are not claiming
 
@@ -72,19 +76,21 @@ human authorship is not copyrightable, and we do not pretend otherwise.
 What that means in practice:
 
 - **We grant the GPL over the project as a whole** because we can grant the
-  rights we hold (the human-authored parts, the selection and arrangement, and
-  the rights Anthropic's terms assign to us over model output). We do not
+  rights we hold: the human-authored parts, the selection and arrangement, and
+  whatever rights (if any) the model providers' terms assign to us over model
+  output. Those terms give no warranty that the output is free of other
+  people's rights. We do not
   warrant that every individual line is protectable, or that we would be the
   one enforcing it.
 - **Copyleft is not a revenue strategy here.** Nobody is going to get rich
   forking this. GPLv3 was chosen because it is compatible with PyQt6 and with
   the GPL-only code we build on, and because it matches the project's stance:
   the source ships, the game files do not.
-- **If a file turns out to reproduce third-party code**, the project is
-  GPLv3-compatible by construction, so the failure mode is a licensing mismatch,
-  not silent infringement of an incompatible license. We will rewrite the
-  offending file rather than argue about it. We cannot audit model weights, and
-  we are not going to claim we did.
+- **If a file turns out to reproduce third-party code**, the GPL does not make
+  that acceptable: copying code under an incompatible licence is infringement,
+  and copying permissive code without its notice breaks that licence. We will
+  remove or rewrite the offending file rather than argue about it. We cannot
+  audit model weights, and we are not going to claim we did.
 
 ## Why not MIT or Apache-2.0
 
@@ -107,7 +113,7 @@ planned.
   only.
 - Expect review to focus on behaviour, not style: does it run on real hardware,
   does it touch credentials correctly, does it fail safely.
-- New files need an SPDX header, same as existing ones.
+- New files need an SPDX header, same as existing ones (a test checks it).
 
 ## For packagers and distributors
 

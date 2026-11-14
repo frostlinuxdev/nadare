@@ -278,14 +278,21 @@ def test_system_umu_is_used_without_downloading(tmp_path, monkeypatch) -> None:
     assert argv == ["/opt/umu-run", str(exe)]
 
 
-def test_working_32bit_libs_run_proton_directly_without_downloading(tmp_path, monkeypatch) -> None:
-    backend, proton, exe = _ak_backend(tmp_path, monkeypatch, [])
-    monkeypatch.setattr(wg.shutil, "which", lambda name, *a, **k: None)
-    monkeypatch.setattr(umu, "ensure_managed", lambda **k: pytest.fail("downloaded"))
+def test_working_32bit_libs_still_go_through_the_managed_umu(tmp_path, monkeypatch) -> None:
+    """#1338 (user): this ran `proton run`, which skipped every per-game fix."""
+    backend, _proton, exe = _ak_backend(tmp_path, monkeypatch, [])
+    calls: list = []
+    _fake_download(monkeypatch, _payload(), calls)
+    _fake_smoke(monkeypatch)
+    monkeypatch.setattr(
+        wg.shutil,
+        "which",
+        lambda name, *a, **k: "/usr/bin/python3" if name == "python3" else None,
+    )
 
     argv, _env, _target = backend.build_launch()
-    assert argv[:2] == [str(proton / "proton"), "run"]
-    assert argv[-1] == str(exe)
+    assert argv == [str(umu.managed_path()), str(exe)]
+    assert len(calls) == 1
 
 
 def test_missing_libs_and_no_system_umu_downloads_once_and_uses_managed(
@@ -306,7 +313,7 @@ def test_missing_libs_and_no_system_umu_downloads_once_and_uses_managed(
     assert len(calls) == 1
 
 
-def test_download_failure_falls_back_to_the_host_libs_hint(tmp_path, monkeypatch) -> None:
+def test_download_failure_explains_how_to_get_umu(tmp_path, monkeypatch) -> None:
     backend, _proton, _exe = _ak_backend(tmp_path, monkeypatch, ["libfreetype.so.6"])
 
     def offline(*_a, **_k):
@@ -322,7 +329,8 @@ def test_download_failure_falls_back_to_the_host_libs_hint(tmp_path, monkeypatch
 
     with pytest.raises(BackendError) as excinfo:
         backend.build_launch()
-    assert "libfreetype.so.6" in str(excinfo.value)
+    # umu brings its own libraries, so the host's missing ones no longer matter (#1338).
+    assert "umu-launcher" in str(excinfo.value)
 
 
 def test_flatpak_runs_an_unsandboxed_game_through_the_managed_umu(tmp_path, monkeypatch) -> None:

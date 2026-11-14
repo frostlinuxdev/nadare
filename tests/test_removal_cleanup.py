@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from _parts_patch import patch_everywhere
 
 from nadare.core import paths, process, removal
 from nadare.core.backends import Status
@@ -442,7 +443,7 @@ def test_removing_a_czn_profile_also_drops_its_live_login(env, monkeypatch):
     cfg.add_profile("czn", backend="stove-czn", title="CZN")
     czn._reset_process_state()
     czn._live_set("czn", "refresh-token", "123")
-    monkeypatch.setattr(czn, "forget_saved_credential", lambda profile: None)
+    patch_everywhere(monkeypatch, czn, "forget_saved_credential", lambda profile: None)
     _backend(monkeypatch)
     monkeypatch.setattr(removal.backends, "get", lambda kind: czn.CznBackend)
 

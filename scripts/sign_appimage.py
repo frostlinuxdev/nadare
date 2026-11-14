@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Embed and check an AppImage signature after the build.
 
 The release key stays on the signing host and never enters the build container, so the

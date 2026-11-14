@@ -15,8 +15,7 @@ Every catalog game carries a support tier, shown on its card in the **Store** (t
 | **Experimental** | The install path is covered by tests and fixtures, but nobody has played it end to end yet, or it needs a workaround (an anti-cheat, a publisher launcher, a login). It can break when a publisher changes something. |
 
 The HoYo games (Genshin Impact, Honkai: Star Rail, Honkai Impact 3rd, Zenless Zone Zero) are offered
-like the others. All four are Verified; Genshin Impact, Honkai: Star Rail and Zenless Zone Zero
-install through HoYo's chunked "Sophon" downloads.
+like the others. All four are Verified and install through HoYo's chunked "Sophon" downloads.
 `NADARE_HIDE_HOYO=1` hides all four from the Store and the Add Game dialog.
 When a Sophon update changes a file, Nadare stages its verified replacement beside the installed
 file before swapping it in; allow free space for the largest changed file during an update.
@@ -42,7 +41,7 @@ publisher API  ->  nadare.core.sources.<game>.resolve()  ->  directdl.Plan  ->  
   extraction (no `..`, no symlinks, nothing half-extracted), idempotent re-runs. Split zips
   are read as one virtual file, so they never take twice the disk.
 * An archive is unwrapped in one of four ways (`Archive.unwrap`): `("zip",)`, `("zip", "zip")`
-  (a zip holding one zip, as Brown Dust 2 ships), `("7z",)` (Honkai titles, via
+  (a zip holding one zip, as Brown Dust 2 ships), `("7z",)` (older HoYo archives, via
   `nadare/core/sevenz.py`, a streaming 7z reader on the standard `lzma` module) and
   `("slices",)` (small files cut out of a downloaded pack by offset and size, as Neverness to
   Everness ships). Any of them can be split into ordered `parts`, which are read as one virtual

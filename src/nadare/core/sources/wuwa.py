@@ -43,7 +43,9 @@ _HINT = (
 )
 
 
-def resolve_legacy(fetch: Fetch | None = None, token: str | None = None) -> directdl.Plan:
+def resolve_legacy(
+    fetch: Fetch | None = None, token: str | None = None, *, predownload: bool = False
+) -> directdl.Plan | None:
     """The older single-list index (HD only), with the profile, published or built-in token."""
     return kuro.resolve_with_tokens(
         game_tag="wuwa",
@@ -54,6 +56,7 @@ def resolve_legacy(fetch: Fetch | None = None, token: str | None = None) -> dire
         exe=EXE,
         fetch=fetch,
         refused_hint=_HINT,
+        predownload=predownload,
     )
 
 
@@ -76,3 +79,26 @@ def resolve(
         if tier != DEFAULT_QUALITY:
             raise  # the older index has HD only: never hand out a different quality silently
     return resolve_legacy(fetch, token)
+
+
+def resolve_predownload(
+    fetch: Fetch | None = None, token: str | None = None, quality: str = DEFAULT_QUALITY
+) -> directdl.Plan | None:
+    """The next version when Kuro offers a predownload window, else ``None``."""
+    tier = quality_of(quality)
+    if token and tier == DEFAULT_QUALITY:
+        return resolve_legacy(fetch, token, predownload=True)
+    try:
+        return kuro.resolve_bundle(
+            BUNDLE_INDEX_URL,
+            game_tag="wuwa",
+            exe=EXE,
+            tier=tier,
+            fetch=fetch,
+            refused_hint=_HINT,
+            predownload=True,
+        )
+    except directdl.DirectError:
+        if tier != DEFAULT_QUALITY:
+            raise  # the older index has HD only: never hand out a different quality silently
+    return resolve_legacy(fetch, token, predownload=True)

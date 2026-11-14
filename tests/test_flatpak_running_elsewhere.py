@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _parts_patch import patch_everywhere
 
 from nadare.backends import winegame as wg
 from nadare.backends.winegame import WineGameBackend
@@ -178,7 +179,7 @@ def test_in_flatpak_launch_holds_the_lock_and_obeys_a_stop_request(tmp_path, mon
         seen["cancelled"] = cancel.cancelled
         return 0
 
-    monkeypatch.setattr(wg, "stream", fake_stream)
+    patch_everywhere(monkeypatch, wg, "stream", fake_stream)
     try:
         backend.launch()
     except Exception:  # a cancelled launch may raise Cancelled; either way it must stop
@@ -215,7 +216,7 @@ def _proton_backend(tmp_path, monkeypatch, *, flatpak: bool):
             (tmp_path / "prefix" / "drive_c").mkdir(parents=True, exist_ok=True)
         return 0
 
-    monkeypatch.setattr(wg, "stream", fake_stream)
+    patch_everywhere(monkeypatch, wg, "stream", fake_stream)
     return backend, record
 
 
@@ -266,7 +267,7 @@ def test_a_direct_download_game_holds_the_lock_too(tmp_path, monkeypatch):
         seen["held"] = runlock.running(backend.prefix())
         return 0
 
-    monkeypatch.setattr(wg, "stream", fake_stream)
+    patch_everywhere(monkeypatch, wg, "stream", fake_stream)
     backend.launch()
     assert seen.get("held") is True
     assert runlock.running(backend.prefix()) is False

@@ -17,6 +17,8 @@ try:  # pragma: no cover - only when PyQt6 is missing
 except Exception:  # noqa: BLE001
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
+from _parts_patch import patch_everywhere
+
 from nadare.core import gamefolders, libraries
 from nadare.core.config import Config
 from nadare.gui import settings as settings_mod
@@ -38,8 +40,7 @@ def _settle(qapp):
 
 @pytest.fixture
 def rig(tmp_path, qapp, monkeypatch):
-    monkeypatch.setattr(
-        settings_mod, "create_backend",
+    patch_everywhere(monkeypatch, settings_mod, "create_backend",
         lambda profile, config: SimpleNamespace(
             status=lambda: SimpleNamespace(state="installed", data={})
         ),

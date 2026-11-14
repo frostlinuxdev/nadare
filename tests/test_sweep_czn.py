@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context
+from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
 from nadare.backends import winegame as wg
@@ -232,7 +233,7 @@ class TestArknightsPrefixCleanup:
             (prefix / "drive_c").mkdir(parents=True, exist_ok=True)
             raise Cancelled()
 
-        monkeypatch.setattr(wg, "stream", fake_stream)
+        patch_everywhere(monkeypatch, wg, "stream", fake_stream)
         with pytest.raises(Cancelled):
             backend._ensure_prefix()
         assert not prefix.exists(), "a half-built prefix must not look complete"
@@ -243,7 +244,7 @@ class TestArknightsPrefixCleanup:
             (prefix / "drive_c").mkdir(parents=True, exist_ok=True)
             return 0
 
-        monkeypatch.setattr(wg, "stream", succeeding_stream)
+        patch_everywhere(monkeypatch, wg, "stream", succeeding_stream)
         backend._ensure_prefix()
         assert calls == [1, 1]
         assert (prefix / "drive_c").is_dir()
@@ -258,7 +259,7 @@ class TestArknightsPrefixCleanup:
             (prefix / "drive_c").mkdir(parents=True, exist_ok=True)
             raise Cancelled()
 
-        monkeypatch.setattr(wg, "stream", fake_stream)
+        patch_everywhere(monkeypatch, wg, "stream", fake_stream)
         with pytest.raises(Cancelled):
             backend._ensure_prefix()
         assert (prefix / "keep-me").read_text() == "user data"

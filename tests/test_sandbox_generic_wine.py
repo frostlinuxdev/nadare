@@ -58,7 +58,7 @@ def test_generic_wine_offers_the_sandbox():
 
 def test_it_is_off_unless_chosen_even_with_the_default_on(tmp_path, default_on, has_bwrap):
     argv, _env, _prefix, _target = _backend(tmp_path).build()
-    assert argv[0] != "bwrap"
+    assert Path(argv[0]).name != "bwrap"
     assert gamesandbox.wanted({}, supported=True, default=backends.sandbox_default("wine")) is False
 
 
@@ -73,7 +73,7 @@ def test_the_sandbox_default_per_kind():
 def test_chosen_it_wraps_the_launch_and_binds_the_game_folder(tmp_path, has_bwrap):
     events: list = []
     argv, _env, _prefix, target = _backend(tmp_path, events, secure_mode=True).build()
-    assert argv[0] == "bwrap"
+    assert Path(argv[0]).name == "bwrap"
     assert argv[argv.index("--") + 1 :][-1] == str(target)
     binds = _binds(argv)
     # The whole game folder, not only the exe's bin/ subfolder (data usually sits beside it).
@@ -131,4 +131,4 @@ def test_a_script_profile_never_sandboxes_its_batch_file(tmp_path, has_bwrap):
     (tmp_path / "prefix" / "drive_c").mkdir(parents=True, exist_ok=True)
     delegate = _BatchWine(make_context(tmp_path, "script", values), bat)
     argv, *_ = delegate.build()
-    assert argv[0] != "bwrap"
+    assert Path(argv[0]).name != "bwrap"

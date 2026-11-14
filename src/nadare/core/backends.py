@@ -520,6 +520,15 @@ def install_choice_label(kind: str, profile: Mapping[str, Any]) -> str:
     return f"{option.label}: {shown}"
 
 
+def supports_remake_prefix(kind: str) -> bool:
+    """Whether ``kind`` implements Rebuild prefix (safe for unknown kinds)."""
+    try:
+        cls = get(kind)
+    except BackendError:
+        return False
+    return getattr(cls, "remake_prefix", None) is not GameBackend.remake_prefix
+
+
 def supports_update(kind: str) -> bool:
     """Whether ``kind`` can update its game (safe for unknown kinds)."""
     try:

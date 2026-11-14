@@ -14,6 +14,7 @@ import signal
 import time
 
 from _backend_helpers import make_context, write_exe
+from _parts_patch import patch_everywhere
 
 from nadare.backends import wine as wine_mod
 from nadare.backends import winegame as wg
@@ -52,9 +53,11 @@ def test_a_stop_request_ends_the_game_processes_not_only_the_wait(tmp_path, monk
         )
     )
     monkeypatch.setattr(backend, "_ensure_default_runner", lambda strict=False: None)
-    monkeypatch.setattr(wg, "scan_pids", lambda *_a, **_k: [4242, 4343])
+    patch_everywhere(monkeypatch, wg, "scan_pids", lambda *_a, **_k: [4242, 4343])
     stopped: list[list[int]] = []
-    monkeypatch.setattr(wg, "stop_pids", lambda pids, *_a, **_k: stopped.append(list(pids)))
+    patch_everywhere(
+        monkeypatch, wg, "stop_pids", lambda pids, *_a, **_k: stopped.append(list(pids))
+    )
 
     def fake_stream(argv, env, on_line=None, cancel=None, **_kw):
         runlock.request_stop(backend.prefix())
@@ -63,7 +66,7 @@ def test_a_stop_request_ends_the_game_processes_not_only_the_wait(tmp_path, monk
             time.sleep(0.05)
         return 0
 
-    monkeypatch.setattr(wg, "stream", fake_stream)
+    patch_everywhere(monkeypatch, wg, "stream", fake_stream)
     try:
         backend.launch()
     except Exception:  # a cancelled launch may raise; the processes must be stopped either way
@@ -87,14 +90,14 @@ def test_stop_sweeps_again_for_wine_helpers_that_come_back(tmp_path, monkeypatch
         )
     )
     rounds = iter([[1, 2], [3], [], []])
-    monkeypatch.setattr(wg, "scan_pids", lambda *_a, **_k: next(rounds, []))
+    patch_everywhere(monkeypatch, wg, "scan_pids", lambda *_a, **_k: next(rounds, []))
     stopped: list[tuple[list[int], int]] = []
 
     def record(pids, signal_=signal.SIGTERM):
         stopped.append((list(pids), signal_))
 
-    monkeypatch.setattr(wg, "stop_pids", record)
-    monkeypatch.setattr(wg, "stop_runner_wineserver", lambda **_k: None)
+    patch_everywhere(monkeypatch, wg, "stop_pids", record)
+    patch_everywhere(monkeypatch, wg, "stop_runner_wineserver", lambda **_k: None)
     monkeypatch.setattr(wg.time, "sleep", lambda _s: None)
     backend.stop()
     # Measured: winedevice.exe ignores SIGTERM, and the app's wineserver -k cannot reach the

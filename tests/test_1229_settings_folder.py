@@ -18,6 +18,8 @@ try:  # pragma: no cover - only when PyQt6 is missing
 except Exception:  # noqa: BLE001
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
+from _parts_patch import patch_everywhere
+
 from nadare.core import flatpakfs, libraries
 from nadare.core.config import Config
 from nadare.gui import settings as settings_mod
@@ -38,9 +40,7 @@ def _settle(qapp):
 @pytest.fixture
 def rig(tmp_path, qapp, monkeypatch):
     state = {"value": "installed"}
-    monkeypatch.setattr(
-        settings_mod,
-        "create_backend",
+    patch_everywhere(monkeypatch, settings_mod, "create_backend",
         lambda profile, config: SimpleNamespace(
             status=lambda: SimpleNamespace(state=state["value"], data={})
         ),
@@ -87,12 +87,14 @@ def test_an_installed_games_folder_is_locked_like_its_prefix(rig, qapp, tmp_path
     assert not rig.page._install_dir_browse.isEnabled()
 
 
-def test_a_game_not_installed_yet_can_still_change_folder(rig, qapp, tmp_path):
+def test_a_game_not_installed_changes_folder_only_by_change_location(rig, qapp, tmp_path):
+    """#1293: free text let install and prefix drift apart; see test_1293_settings_location."""
     _library_game(rig, tmp_path / "Games")
     rig.state["value"] = "not_installed"
     _load(rig, qapp)
-    assert not rig.page.install_dir.isReadOnly()
-    assert rig.page._install_dir_browse.isEnabled()
+    assert rig.page.install_dir.isReadOnly()
+    assert not rig.page._install_dir_browse.isEnabled()
+    assert not rig.page.change_location_button.isHidden()
 
 
 def test_a_library_game_says_which_library(rig, qapp, tmp_path):
@@ -141,7 +143,12 @@ def test_custom_wine_games_show_no_placement(rig, qapp, tmp_path):
 
 
 def test_saving_a_folder_the_flatpak_cannot_reach_is_refused(rig, qapp, tmp_path, monkeypatch):
-    _library_game(rig, tmp_path / "Games")
+    # A custom Wine game: catalog games have no free folder field any more (#1293).
+    rig.config.add_profile(
+        "bd2", backend="wine", title="Mine", exe_name="game.exe",
+        install_dir=str(tmp_path / "mine"), prefix=str(tmp_path / "pfx"),
+    )
+    rig.config.save()
     rig.state["value"] = "not_installed"
     _load(rig, qapp)
     target = tmp_path / "unreachable"

@@ -13,6 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from _backend_helpers import make_context
+from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
 from nadare.backends import winegame as wg
@@ -152,7 +153,7 @@ def test_arknights_remake_uses_a_fresh_prefix_and_restores_the_game_folder(tmp_p
     events: list = []
     backend.ctx.emit = events.append
     calls: list[str] = []
-    monkeypatch.setattr(wg, "scan_pids", lambda patterns: [])
+    patch_everywhere(monkeypatch, wg, "scan_pids", lambda patterns: [])
     monkeypatch.setattr(WineGameBackend, "_ensure_default_runner", lambda self, strict=True: None)
 
     def fake_ensure() -> bool:
@@ -180,7 +181,7 @@ def test_arknights_remake_skips_vcredist_when_ensure_already_ran_it(tmp_path, mo
     backend = _arknights(tmp_path)
     (backend.prefix() / "drive_c").mkdir(parents=True, exist_ok=True)
     calls: list[str] = []
-    monkeypatch.setattr(wg, "scan_pids", lambda patterns: [])
+    patch_everywhere(monkeypatch, wg, "scan_pids", lambda patterns: [])
     monkeypatch.setattr(WineGameBackend, "_ensure_default_runner", lambda self, strict=True: None)
     monkeypatch.setattr(backend, "_ensure_prefix", lambda: calls.append("ensure") or True)
     monkeypatch.setattr(
@@ -198,7 +199,7 @@ def test_arknights_remake_leaves_an_external_game_folder_alone(tmp_path, monkeyp
     (external / "Arknights.exe").write_text("outside")
     backend = _arknights(tmp_path, install_dir=str(external))
     (backend.prefix() / "drive_c").mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(wg, "scan_pids", lambda patterns: [])
+    patch_everywhere(monkeypatch, wg, "scan_pids", lambda patterns: [])
     monkeypatch.setattr(WineGameBackend, "_ensure_default_runner", lambda self, strict=True: None)
     monkeypatch.setattr(backend, "_ensure_prefix", lambda: True)
     monkeypatch.setattr(backend, "_run_vcredist", lambda created=True: None)
@@ -215,7 +216,7 @@ def test_arknights_remake_rolls_back_on_failure(tmp_path, monkeypatch):
     install_dir.mkdir(parents=True)
     (install_dir / "Arknights.exe").write_text("old game")
     (prefix / "drive_c").mkdir(exist_ok=True)
-    monkeypatch.setattr(wg, "scan_pids", lambda patterns: [])
+    patch_everywhere(monkeypatch, wg, "scan_pids", lambda patterns: [])
     monkeypatch.setattr(WineGameBackend, "_ensure_default_runner", lambda self, strict=True: None)
 
     def failing_ensure() -> bool:
@@ -233,7 +234,7 @@ def test_arknights_remake_rolls_back_on_failure(tmp_path, monkeypatch):
 def test_arknights_remake_refuses_while_the_game_is_running(tmp_path, monkeypatch):
     backend = _arknights(tmp_path)
     backend.prefix().mkdir()
-    monkeypatch.setattr(wg, "scan_pids", lambda patterns: [1234])
+    patch_everywhere(monkeypatch, wg, "scan_pids", lambda patterns: [1234])
 
     with pytest.raises(BackendError) as exc:
         backend.remake_prefix()
@@ -488,7 +489,7 @@ def test_a_direct_sync_refuses_while_the_game_is_running(tmp_path, monkeypatch):
 
     from nadare.backends import direct
 
-    monkeypatch.setattr(wg, "scan_pids", lambda patterns: [1234])
+    patch_everywhere(monkeypatch, wg, "scan_pids", lambda patterns: [1234])
     for backend in (
         _arknights(tmp_path),
         direct.MongilBackend(
@@ -520,7 +521,7 @@ def test_remake_refuses_a_prefix_another_profile_also_uses(tmp_path, monkeypatch
     (backend.prefix() / "drive_c" / "OtherGame").mkdir(parents=True)
     (backend.prefix() / "drive_c" / "OtherGame" / "other.exe").write_text("theirs")
     _share_the_prefix(backend, tmp_path)
-    monkeypatch.setattr(wg, "scan_pids", lambda patterns: [])
+    patch_everywhere(monkeypatch, wg, "scan_pids", lambda patterns: [])
     if kind == "czn":
         monkeypatch.setattr(backend, "_game_running", lambda: False)
     moved: list[str] = []

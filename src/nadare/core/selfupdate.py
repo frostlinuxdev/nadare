@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from . import download, indexfetch, sandbox
+from . import channel, download, indexfetch, sandbox
 from .updatecheck import UpdateInfo
 
 log = logging.getLogger(__name__)
@@ -107,7 +107,7 @@ NO_ASSET = "no-asset"
 def why_not_replaceable(env: Mapping[str, str] | None = None) -> str:
     """Why the running AppImage cannot be replaced by Nadare ("" when it can)."""
     env = os.environ if env is None else env
-    if env.get("NADARE_MANAGED_UPDATES") == "1" or sandbox.in_flatpak():
+    if env.get("NADARE_MANAGED_UPDATES") == "1" or sandbox.in_flatpak() or channel.is_unstable():
         return MANAGED
     if platform.machine() != "x86_64":
         return NOT_APPIMAGE
@@ -199,7 +199,21 @@ def _index_document() -> Any:
 
 
 def _looks_like_release_doc(data: Any) -> bool:
-    return isinstance(data, dict) and isinstance(data.get("releases"), dict)
+    """True only for a document whose x86_64 hashes :func:`_index_hash` can use."""
+    if not isinstance(data, dict) or not isinstance(data.get("releases"), dict):
+        return False
+    for release in data["releases"].values():
+        if not isinstance(release, dict):
+            return False
+        entry = release.get("x86_64")
+        if entry is None:
+            continue
+        if not isinstance(entry, dict):
+            return False
+        digest = entry.get("sha256")
+        if digest is not None and (not isinstance(digest, str) or not _SHA256.match(digest)):
+            return False
+    return True
 
 
 def _fetch_sums(url: str) -> str:
@@ -424,6 +438,11 @@ def restart_command(
     hand over to it and exit, leaving no window at all.
     """
     clean = {key: value for key, value in env.items() if key not in _APPIMAGE_ENV}
+    # Started with --appimage-extract-and-run (no FUSE): the runtime consumes the flag, so only
+    # the extracted APPDIR shows it. Start the new file the same way, or it cannot mount itself
+    # and the restart ends with no window and no error.
+    if Path(env.get("APPDIR", "")).name.startswith("appimage_extracted_"):
+        clean["APPIMAGE_EXTRACT_AND_RUN"] = "1"
     waiting_for = os.getpid() if pid is None else pid
     argv = ["/bin/sh", "-c", _RESTART_SCRIPT, str(new), str(waiting_for), "gui"]
     return argv, clean

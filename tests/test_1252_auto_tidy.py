@@ -25,7 +25,8 @@ def wuwa(tmp_path, monkeypatch):
     backend._load_manifest = lambda: plan
     calls = []
     monkeypatch.setattr(
-        kuropatch, "retired_on_disk", lambda *a: calls.append("scan") or ("Client/dead.pak",)
+        kuropatch, "retired_scan",
+        lambda *a: calls.append("scan") or kuropatch.RetiredScan(("Client/dead.pak",), ()),
     )
     monkeypatch.setattr(backend, "_game_running", lambda: False)
     return backend, root, calls
@@ -70,12 +71,12 @@ def test_not_while_another_operation_holds_the_game(wuwa):
         backend.check_update()
     finally:
         lock.release()
-    assert (root / "Client" / "dead.pak").exists() and calls == []
+    assert (root / "Client" / "dead.pak").exists() and calls == ["scan"]
 
 
 def test_a_failing_tidy_never_breaks_the_check(wuwa, monkeypatch):
     backend, root, calls = wuwa
-    monkeypatch.setattr(kuropatch, "retired_on_disk", lambda *a: (_ for _ in ()).throw(OSError()))
+    monkeypatch.setattr(kuropatch, "retired_scan", lambda *a: (_ for _ in ()).throw(OSError()))
     backend.check_update()  # no exception
     assert (root / "Client" / "dead.pak").exists()
 
@@ -87,5 +88,5 @@ def test_other_games_never_tidy(tmp_path, monkeypatch):
     backend._write_version_file("2.0", "bd2")
     backend._load_manifest = lambda: dd.Plan(game_tag="bd2", version="2.0", extra=EXTRA)
     monkeypatch.setattr(backend, "_game_running", lambda: False)
-    monkeypatch.setattr(kuropatch, "retired_on_disk", lambda *a: pytest.fail("scanned"))
+    monkeypatch.setattr(kuropatch, "retired_scan", lambda *a: pytest.fail("scanned"))
     backend._tidy_retired_once()

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 # Ruff configuration for Nadare.
 # Kept separate from pyproject.toml so lint config is discoverable and
 # consistent across source, tests, packaging, and scripts.

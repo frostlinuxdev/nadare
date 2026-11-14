@@ -29,22 +29,33 @@ from ..core import userns
 _COPIED = "Copied. Paste it into a terminal, then try again."
 _WAITING = "Waiting for your password…"
 
+#: What runs the blocked operation again once the permission is given (#1338: the block is now
+#: caught before Play, so the dialog itself can start the game).
+_RETRY_LABELS = {"launch": "Play now", "install": "Install now", "update": "Update now"}
+_RETRY_DEFAULT = "Try again"
+_DONE_NO_RETRY = "Done. Try again now."
+
 
 class UsernsDialog(QDialog):
     """Explain the AppArmor block and offer a one-click fix."""
 
     fixed = pyqtSignal(bool, str)  # ok, message from the background fix
 
-    def __init__(self, message: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, message: str, parent: QWidget | None = None, *, retry_op: str | None = None
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Permission needed")
         self.setMinimumWidth(560)
         self._message = message
+        self._retry_op = retry_op
+        #: True when the player pressed the retry button after a successful fix.
+        self.retry_requested = False
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
 
-        self.summary = QLabel(userns.SHORT_MESSAGE)
+        self.summary = QLabel(userns.SHORT_MESSAGE + "\n\n" + userns.WITHOUT_IT)
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
 
@@ -77,6 +88,11 @@ class UsernsDialog(QDialog):
         self.fix_button.clicked.connect(self._start_fix)
         self.fix_button.setVisible(userns.can_fix())
         footer.addWidget(self.fix_button)
+
+        self.retry_button = QPushButton(_RETRY_LABELS.get(retry_op or "", _RETRY_DEFAULT))
+        self.retry_button.clicked.connect(self._retry)
+        self.retry_button.hide()
+        footer.addWidget(self.retry_button)
 
         self.close_button = QPushButton("Close")
         self.close_button.setObjectName("GhostButton")
@@ -117,9 +133,23 @@ class UsernsDialog(QDialog):
             return  # the dialog closed while the prompt was open
 
     def _on_fixed(self, ok: bool, message: str) -> None:
-        self.status.setText(message)
         if not ok:
+            self.status.setText(message)
             self.fix_button.setEnabled(True)
+            return
+        self.fix_button.hide()
+        self.copy_button.hide()
+        if self._retry_op:
+            self.status.setText(message)
+            self.retry_button.show()
+            self.retry_button.setDefault(True)
+            self.retry_button.setFocus()
+        else:
+            self.status.setText(_DONE_NO_RETRY)
+
+    def _retry(self) -> None:
+        self.retry_requested = True
+        self.accept()
 
 
 __all__ = ["UsernsDialog"]

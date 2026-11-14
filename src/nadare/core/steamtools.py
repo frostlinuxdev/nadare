@@ -57,6 +57,18 @@ def _is_client(argv: list[str]) -> bool:
     return Path(argv[0]).name in {"steam", "steam.sh", "steamwebhelper"}
 
 
+def _comm(entry: Path) -> str:
+    try:
+        return (entry / "comm").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def _is_client_process(entry: Path, argv: list[str]) -> bool:
+    """The native client, its helpers, or a Flatpak/Snap invocation of it."""
+    return (bool(argv) and _is_client(argv)) or _comm(entry) == "steam"
+
+
 def steam_pids(*, proc_root: str | os.PathLike[str] = "/proc") -> list[int]:
     """PIDs of this user's Steam client (or helpers); empty when it is closed."""
     me = os.getpid()
@@ -75,7 +87,7 @@ def steam_pids(*, proc_root: str | os.PathLike[str] = "/proc") -> list[int]:
         except OSError:
             continue
         argv = _argv(entry)
-        if argv and _is_client(argv):
+        if _is_client_process(entry, argv or []):
             found.append(int(entry.name))
     return sorted(found)
 

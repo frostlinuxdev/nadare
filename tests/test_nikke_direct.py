@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _parts_patch import patch_everywhere
 from _rail_fixtures import Repo
 
 from nadare.backends import arknights as ak
@@ -253,7 +254,7 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setattr(source, "client_info", fake_client_info)
     monkeypatch.setattr(source, "fetch_object", fake_fetch)
     monkeypatch.setattr(ak, "stream", fake_stream)
-    monkeypatch.setattr(wg, "stream", fake_stream)
+    patch_everywhere(monkeypatch, wg, "stream", fake_stream)
     monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
     monkeypatch.setattr(WineGameBackend, "_run_vcredist", lambda self, created=False: None)
     monkeypatch.setattr(WineGameBackend, "_download_installer", fake_download_installer)

@@ -13,13 +13,138 @@ cancelled, and :func:`commit` records the new places.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import libraries, relink, relocate, removal
 from .events import Cancel
+
+log = logging.getLogger(__name__)
+
+
+def _journal_path(config) -> Path:
+    path = Path(os.path.realpath(getattr(config, "path", "config.json")))
+    return path.with_name(f".{path.name}.importmove.json")
+
+
+def _write_journal(move: ImportMove) -> None:
+    if move.journal is None:
+        return
+    payload = {
+        "profile": move.name,
+        "library": str(move.library) if move.library is not None else "",
+        "home": str(move.home),
+        "install_inside": str(move.install_inside) if move.install_inside is not None else None,
+        "trees": [
+            {"key": key, "source": str(source), "destination": str(destination)}
+            for key, source, destination in move.trees
+        ],
+    }
+    move.journal.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        dir=str(move.journal.parent), prefix=".importmove-", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, move.journal)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def _clear_journal(move: ImportMove) -> None:
+    if move.journal is None:
+        return
+    try:
+        move.journal.unlink(missing_ok=True)
+    except OSError:
+        log.debug("could not clear import-move journal %s", move.journal)
+
+
+def _read_journal(config) -> dict | None:
+    path = _journal_path(config)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve() == b.resolve()
+    except OSError:
+        return Path(os.path.abspath(a)) == Path(os.path.abspath(b))
+
+
+def _recover_move(config, name: str, library: str | Path) -> ImportMove | None:
+    """The half-done move recorded before a crash, if it belongs to this profile/library."""
+    journal = _read_journal(config)
+    if journal is None or journal.get("profile") != name:
+        return None
+    root = relink._absolute(library)  # noqa: SLF001 - same package's path rule
+    stored_library = journal.get("library")
+    home_text = journal.get("home")
+    if not isinstance(stored_library, str) or not stored_library:
+        return None
+    if not _same_path(relink._absolute(stored_library), root):
+        return None  # the interrupted move went to another library
+    if not isinstance(home_text, str) or not home_text:
+        return None
+    home = Path(home_text)
+    if not home.is_absolute():
+        return None
+    raw_trees = journal.get("trees")
+    if not isinstance(raw_trees, list) or not raw_trees:
+        return None
+    profile = config.profiles.get(name, {})
+    trees: list[tuple[str, Path, Path]] = []
+    done: list[str] = []
+    for item in raw_trees:
+        if not isinstance(item, dict):
+            return None
+        key, source_text, destination_text = (
+            item.get("key"),
+            item.get("source"),
+            item.get("destination"),
+        )
+        if key not in ("install_dir", "prefix", "wineprefix"):
+            return None
+        if not isinstance(source_text, str) or not isinstance(destination_text, str):
+            return None
+        source, destination = Path(source_text), Path(destination_text)
+        if not source.is_absolute() or not destination.is_absolute():
+            return None
+        if relink._under(destination, home) is None:  # noqa: SLF001 - journal from this move
+            return None
+        current = str(profile.get(key) or "")
+        if current and not _same_path(Path(current).expanduser(), source):
+            return None  # the profile changed since the journal was written
+        if destination.exists() or destination.is_symlink():
+            done.append(str(key))
+        elif not source.is_dir():
+            return None  # neither half is there: not a move this journal can finish
+        trees.append((str(key), source, destination))
+    inside_text = journal.get("install_inside")
+    inside = Path(inside_text) if isinstance(inside_text, str) and inside_text else None
+    return ImportMove(
+        home,
+        tuple(trees),
+        inside,
+        name=name,
+        library=root,
+        journal=_journal_path(config),
+        done=tuple(done),
+    )
 
 
 @dataclass(frozen=True)
@@ -29,6 +154,12 @@ class ImportMove:
     trees: tuple[tuple[str, Path, Path], ...]
     #: Where the game folder ends up when it sits inside the prefix (launcher games).
     install_inside: Path | None = None
+    #: Profile and library this move belongs to, plus its crash journal.
+    name: str = ""
+    library: Path | None = None
+    journal: Path | None = None
+    #: Trees an earlier, killed run already put in place.
+    done: tuple[str, ...] = ()
 
 
 def plan(config, name: str, library: str | Path) -> ImportMove:
@@ -40,6 +171,10 @@ def plan(config, name: str, library: str | Path) -> ImportMove:
         raise relink.RelinkError(
             "This game is not an existing install you added; use Move to move it."
         )
+    recovered = _recover_move(config, name, library)
+    if recovered is not None:
+        return recovered
+    relink.check_library_target(library)
     relink.check_place(library, library=True)
     root = relink._absolute(library)
     prefix_text = str(profile.get("prefix") or "")
@@ -75,7 +210,14 @@ def plan(config, name: str, library: str | Path) -> ImportMove:
     who = relink._inside_other(config.profiles, name, root)
     if who:
         raise relink.RelinkError(f"That folder is inside {who}'s files. Pick another one.")
-    return ImportMove(home, tuple(trees), home / "prefix" / inside if inside is not None else None)
+    return ImportMove(
+        home,
+        tuple(trees),
+        home / "prefix" / inside if inside is not None else None,
+        name=name,
+        library=root,
+        journal=_journal_path(config),
+    )
 
 
 def run(
@@ -85,17 +227,33 @@ def run(
     progress: Callable[[int, int], None] | None = None,
 ) -> list[relocate.Moved]:
     """Move every folder; on any failure put the ones already moved back, then re-raise."""
-    done: list[tuple[Path, Path, relocate.Moved]] = []
     try:
-        for _, source, destination in move.trees:
+        _write_journal(move)
+    except OSError as exc:
+        raise relocate.RelocateError(
+            f"Could not record the move before starting it: {exc}"
+        ) from exc
+    done: list[tuple[Path, Path, relocate.Moved]] = []
+    results: list[relocate.Moved] = []
+    try:
+        for key, source, destination in move.trees:
+            if key in move.done:
+                # A killed earlier run already finished this tree; finish the rest.
+                results.append(relocate.Moved(renamed=True, kept_old=None))
+                continue
             result = relocate.move_tree(source, destination, cancel=cancel, progress=progress)
             done.append((source, destination, result))
+            results.append(result)
     except BaseException:
         for source, destination, result in reversed(done):
             _undo(source, destination, result)
         _remove_if_empty(move.home)
+        if not move.done:
+            _clear_journal(move)  # everything was rolled back
         raise
-    return [result for _, _, result in done]
+    # The journal stays until commit() has recorded the new places: a kill between the
+    # last move and commit must still be finishable.
+    return results
 
 
 def _undo(source: Path, destination: Path, result: relocate.Moved) -> None:
@@ -137,6 +295,7 @@ def commit(config, name: str, move: ImportMove) -> None:
     """Record the new places, write the manifest and list the library. The caller saves."""
     relink.apply(config.profiles[name], relink_plan(config.profiles[name], move))
     libraries.sync_game(config, name, remember_library=True)
+    _clear_journal(move)
 
 
 __all__ = ["ImportMove", "commit", "plan", "relink_plan", "run"]

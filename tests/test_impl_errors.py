@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 from _backend_helpers import make_context
+from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
 from nadare.backends import winegame as wg
@@ -26,7 +27,7 @@ def test_webview2_mismatch_gives_a_gui_action_not_an_env_var(tmp_path, monkeypat
     inst = tmp_path / "installer.exe"
     inst.write_bytes(b"MZ")
     monkeypatch.delenv("NADARE_WEBVIEW2_SHA256", raising=False)
-    monkeypatch.setattr(czn_backend, "WEBVIEW2_SHA256", "0" * 64)
+    patch_everywhere(monkeypatch, czn_backend, "WEBVIEW2_SHA256", "0" * 64)
     monkeypatch.setattr(CznBackend, "_webview2_index_pins", staticmethod(lambda: set()))
 
     with pytest.raises(BackendError) as exc:
@@ -43,7 +44,7 @@ def test_webview2_unpinned_message_has_no_internal_setting(tmp_path, monkeypatch
     inst = tmp_path / "installer.exe"
     inst.write_bytes(b"MZ")
     monkeypatch.delenv("NADARE_WEBVIEW2_SHA256", raising=False)
-    monkeypatch.setattr(czn_backend, "WEBVIEW2_SHA256", None)
+    patch_everywhere(monkeypatch, czn_backend, "WEBVIEW2_SHA256", None)
 
     with pytest.raises(BackendError) as exc:
         backend._verify_webview2(inst)
@@ -246,7 +247,7 @@ def test_arknights_install_runner_failure_is_not_a_wine_binary_hint(tmp_path, mo
         raise wg.runners.RunnerError("offline")
 
     monkeypatch.setattr(wg.runners, "ensure_pinned", offline)
-    monkeypatch.setattr(wg, "stream", lambda *a, **k: pytest.fail("must not start Wine"))
+    patch_everywhere(monkeypatch, wg, "stream", lambda *a, **k: pytest.fail("must not start Wine"))
 
     with pytest.raises(BackendError) as exc:
         backend.install()
@@ -272,7 +273,7 @@ def test_arknights_installer_failure_offers_a_gui_runner_choice(tmp_path, monkey
     installer_exe.write_bytes(b"MZ")
     monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
     monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer_exe)
-    monkeypatch.setattr(wg, "stream", lambda *a, **k: 0)
+    patch_everywhere(monkeypatch, wg, "stream", lambda *a, **k: 0)
 
     with pytest.raises(BackendError) as exc:
         backend.install()
@@ -313,7 +314,7 @@ def test_webview2_install_fails_fast_without_a_display(tmp_path, monkeypatch):
     backend = CznBackend(make_context(tmp_path, "stove-czn", {"prefix": str(tmp_path / "p")}))
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-    monkeypatch.setattr(czn_backend, "WEBVIEW2_SHA256", "0" * 64)
+    patch_everywhere(monkeypatch, czn_backend, "WEBVIEW2_SHA256", "0" * 64)
     monkeypatch.setattr(backend, "_webview2_installed", lambda: False)
 
     def _no_download(*a, **k):

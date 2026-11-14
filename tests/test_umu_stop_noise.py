@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """umu-run's Stop traceback does not land in the launch log (#675).
 
 When a game is stopped, umu-run's SIGTERM handler kills its process tree with ``os.kill``; a

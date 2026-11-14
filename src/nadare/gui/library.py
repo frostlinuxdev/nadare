@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..core.backends import Status
 from ..core.directkinds import (
     DIRECT_KINDS,
     DIRECT_LABEL,
@@ -36,6 +37,8 @@ from ..core.directkinds import (
     LAUNCHER_LABEL,
     RETIRED_KINDS,
 )
+from ..core.gamefacts import InstallFacts, display_state, update_available
+from ..core.profilenames import profile_display
 from .images import ImageLoader
 from .theme import ACCENT, badge_style, cover_pixmap, repolish
 
@@ -56,17 +59,8 @@ def profile_title(name: str, profile: dict[str, Any]) -> str:
 
 
 def display_title(name: str, profiles: dict[str, dict[str, Any]]) -> str:
-    """Like :func:`profile_title`, plus the profile id when another profile shares it.
-
-    Two profiles of the same game would otherwise be indistinguishable
-    (``"Arknights · arknights-2"``); a unique title is shown unchanged.
-    """
-    title = profile_title(name, profiles.get(name) or {})
-    folded = title.casefold()
-    for other, data in profiles.items():
-        if other != name and profile_title(other, data or {}).casefold() == folded:
-            return f"{title} · {name}"
-    return title
+    """Like :func:`profile_title`, plus the profile id when another profile shares it."""
+    return profile_display(name, profiles.get(name) or {}, profiles)
 
 
 #: Friendly descriptions for the internal backend kinds shown on cards and pages.
@@ -288,15 +282,24 @@ class GameCard(QFrame):
         footer_layout.addLayout(meta_row)
         layout.addWidget(footer)
 
-    def set_state(self, state: str, running: bool = False) -> None:
-        """Update the state pill from a backend state."""
+    def set_state(self, state: str | Status, running: bool = False) -> None:
+        """Update the state pill from a backend state (or its whole Status)."""
+        status = state if isinstance(state, Status) else None
+        if status is not None:
+            facts = InstallFacts.from_status(status)
+            state = display_state(status)
+            running = bool(status.running or state == "running")
+            ready = (
+                facts.state() == "complete" and not running and not update_available(status)
+            )
+        else:
+            ready = state == "installed" and not running
         pill_state, label = badge_style(state)
         self.badge.setText(label)
         self.badge.setProperty("state", pill_state)
         repolish(self.badge)
         self.setProperty("running", bool(running))
         repolish(self)
-        ready = state == "installed" and not running
         # Like the game page: an idle, installed game is "ready" by its Play button.
         self.badge.setVisible(not ready)
         self.play_button.setVisible(ready)
@@ -570,7 +573,7 @@ class LibraryPage(QWidget):
                 widget.deleteLater()
 
     # ---- state -------------------------------------------------------------
-    def set_state(self, profile: str, state: str, running: bool = False) -> None:
+    def set_state(self, profile: str, state: str | Status, running: bool = False) -> None:
         card = self._cards.get(profile)
         if card is not None:
             card.set_state(state, running)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -23,6 +24,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import hostlibs, linkrelay, paths, prefixguard, process, sandbox, userns
+from .config import as_bool
+
+log = logging.getLogger(__name__)
 
 BINARY = "bwrap"
 
@@ -41,6 +45,11 @@ _RUNTIME_KEEP = ("pulse", "pipewire-0", "pipewire-0-manager")
 #: (pressure-vessel) would try to bind them and stop.
 _HIDDEN_ENV = ("DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK", "GPG_AGENT_INFO")
 
+
+def _is_loader_env(name: str) -> bool:
+    """A dynamic loader variable, which must not apply to bwrap or the host shell."""
+    return name.startswith("LD_")
+
 #: Where a Sandboxed game's shader caches go: its own folder inside Nadare's cache folder, so
 #: they survive between launches without showing the game the rest of ``~/.cache``.
 _CACHE_FOLDER = "sandbox-cache"
@@ -50,21 +59,9 @@ class BroadBindError(ValueError):
     """A game folder is so broad that binding it would give the hidden home folder back."""
 
 
-_TRUE = frozenset({"1", "true", "yes", "on"})
-_FALSE = frozenset({"0", "false", "no", "off"})
-
-
 def _as_bool(value: object) -> bool | None:
     """A real boolean, or a hand-edited string that clearly means one (``"false"``)."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in _TRUE:
-            return True
-        if text in _FALSE:
-            return False
-    return None
+    return as_bool(value)
 
 
 def choice(profile: Mapping[str, object]) -> bool | None:
@@ -183,7 +180,12 @@ def _sha256(path: str) -> str | None:
 
 
 def _read_pins() -> dict[str, str] | None:
-    """The recorded copies, ``None`` when nothing was recorded yet, ``{}`` when it is damaged."""
+    """The recorded copies, ``None`` when nothing was recorded yet, ``{}`` when it is damaged.
+
+    An empty record (``{}``) is "nothing recorded yet": an older Nadare wrote one when the
+    Sandbox first started before umu had downloaded its runtime, and then never trusted the copy
+    that arrived (Ubuntu VM, 2026-11-14). A damaged file still trusts nothing.
+    """
     try:
         text = pins_path().read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -196,11 +198,17 @@ def _read_pins() -> dict[str, str] | None:
         return {}
     if not isinstance(value, dict):
         return {}
+    if not value:
+        return None
     return {str(k): str(v) for k, v in value.items() if isinstance(v, str)}
 
 
 def _record_runtime_copies() -> dict[str, str]:
     pins = {copy: digest for copy in runtime_copies() if (digest := _sha256(copy))}
+    if not pins:
+        # Nothing on disk yet (umu has not downloaded its runtime): record nothing, so the copy
+        # that arrives is recorded at the next start instead of being refused forever.
+        return pins
     target = pins_path()
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -259,8 +267,11 @@ def locate(*, record: bool = True) -> Located:
     """
     trusted = trusted_runtime_copies() if record else recorded_runtime_copies()
     candidates = [(path, "runtime") for path in trusted]
-    if shutil.which(BINARY) is not None:
-        candidates.append((BINARY, "system"))
+    system = shutil.which(BINARY)
+    if system is not None:
+        # Run the absolute path that was probed: a bare name would be resolved again through
+        # the launch environment's PATH, which the game can control.
+        candidates.append((system, "system"))
     first_why = ""
     unrecorded = [copy for copy in runtime_copies() if copy not in trusted]
     for binary, source in candidates:
@@ -324,9 +335,42 @@ def _inside(path: Path, parent: Path) -> bool:
     return path == parent or parent in path.parents
 
 
-def _broad_reason(folder: Path, home: Path) -> str:
+def _broad_reason(folder: Path, home: Path, *, allow_drive_top: bool = False) -> str:
     """Why binding ``folder`` would give the hidden home folder back, or an empty string."""
-    return prefixguard.place_reason(folder, home=home)  # the shared rule (#1229)
+    return prefixguard.place_reason(  # the shared rule (#1229)
+        folder, home=home, allow_drive_top=allow_drive_top
+    )
+
+
+def _bind_target(
+    path: str | Path | None,
+    home: Path,
+    *,
+    directory: bool = False,
+    regular: bool = False,
+    allow_drive_top: bool = True,
+) -> tuple[Path | None, str]:
+    """The resolved path if it may be bound, and why not (``""`` when it may).
+
+    One rule for every path taken from the environment. A missing optional path is skipped
+    quietly; a path that is too broad, or the wrong kind, is returned with its reason so the
+    caller can log it or refuse the launch.
+    """
+    if not path:
+        return None, ""
+    target = _existing(path)
+    reason = _broad_reason(
+        target if target is not None else Path(path),
+        home,
+        allow_drive_top=allow_drive_top,
+    )
+    if target is None:
+        return None, reason
+    if not reason and directory and not target.is_dir():
+        reason = "not a folder"
+    if not reason and regular and not target.is_file():
+        reason = "not a regular file"
+    return (None, reason) if reason else (target, "")
 
 
 def wrap(
@@ -359,7 +403,15 @@ def wrap(
             hidden.append(target)
             flags += ["--tmpfs", target]
 
-    runtime = _existing(env.get("XDG_RUNTIME_DIR"))
+    runtime, runtime_why = _bind_target(
+        env.get("XDG_RUNTIME_DIR"), real_home, directory=True
+    )
+    if runtime_why:
+        log.warning(
+            "Sandbox: not using XDG_RUNTIME_DIR %s: %s",
+            env.get("XDG_RUNTIME_DIR"),
+            runtime_why,
+        )
     if runtime is not None:
         flags += ["--tmpfs", str(runtime)]
         # Wayland and gamescope sockets (gamescope's Vulkan layer needs its own: without it a game
@@ -401,16 +453,23 @@ def wrap(
         if any(_inside(written, root) for root in hidden_roots):
             flags.extend(["--ro-bind" if read_only else "--bind", str(target), str(written)])
 
-    for folder in (prefix, install_dir):
+    resolved: dict[str, Path | None] = {}
+    for folder, label in (
+        (prefix, "prefix"),
+        (install_dir, "game folder"),
+        (runner_dir, "runner folder"),
+    ):
+        target, why = _bind_target(folder, real_home, allow_drive_top=False)
         # Binding the home folder, a folder holding it, or a whole drive after hiding it would
-        # put it straight back: the Sandbox would look on and protect nothing (#850).
-        reason = _broad_reason(folder, real_home) if folder is not None else ""
-        if reason:
-            raise BroadBindError(f"{folder} is {reason}")
-    resolved_prefix = _existing(prefix)
+        # put it straight back: the Sandbox would look on and protect nothing (#850). The runner
+        # folder comes from PROTONPATH, so the same rule applies to it too.
+        if why:
+            raise BroadBindError(f"the {label} {folder} is {why}")
+        resolved[label] = target
+    resolved_prefix = resolved["prefix"]
     bind(resolved_prefix)
-    bind(_existing(install_dir))
-    bind(_existing(runner_dir), read_only=True)
+    bind(resolved["game folder"])
+    bind(resolved["runner folder"], read_only=True)
     alias(prefix)
     alias(install_dir)
     alias(runner_dir, read_only=True)
@@ -418,19 +477,31 @@ def wrap(
     # install dir (above) and nothing else of Nadare's. The umu runtime is writable because umu
     # keeps the runtime and its lock files there, but the runtime's bubblewrap, which Nadare runs
     # outside the Sandbox, is bound read-only on top so a game cannot replace it.
-    bind(_existing(real_home / ".local/share/umu"))
+    data_home = env.get("XDG_DATA_HOME", "")
+    if not data_home or not os.path.isabs(data_home):
+        data_home = str(real_home / ".local/share")
+    # Older umu builds ignore XDG_DATA_HOME: bind the default place too when they differ.
+    umu_places = dict.fromkeys([Path(data_home) / "umu", real_home / ".local/share/umu"])
+    for place in umu_places:
+        umu, umu_why = _bind_target(place, real_home, directory=True)
+        if umu_why:
+            log.warning("Sandbox: not binding the umu runtime %s: %s", place, umu_why)
+        bind(umu)
     for copy in runtime_copies():
         copy_path = _existing(copy)
         if copy_path is not None:
             flags.extend(["--ro-bind", str(copy_path), str(copy_path)])
     cache_root = env.get("XDG_CACHE_HOME")
-    cache = Path(cache_root) / paths.APP / _CACHE_FOLDER if cache_root else None
+    cache = Path(cache_root) / paths.app_name() / _CACHE_FOLDER if cache_root else None
     if cache is not None:
         try:
             cache.mkdir(parents=True, exist_ok=True)
         except OSError:
             cache = None
-    bind(_existing(cache))
+    cache_target, cache_why = _bind_target(cache, real_home, directory=True)
+    if cache_why:
+        log.warning("Sandbox: not binding the cache folder %s: %s", cache, cache_why)
+    bind(cache_target)
     # The program being started may itself live in the home (umu-run or a wine build in
     # ~/.local/bin): without this it would vanish with the home and bwrap could not start it.
     program = _existing(argv[0]) if argv and Path(argv[0]).is_absolute() else None
@@ -445,7 +516,12 @@ def wrap(
         flags.extend(["--bind", str(link_pipe), str(real_home / linkrelay.PIPE_RELATIVE)])
 
     # X11 needs its authority file, which usually sits in the home or the runtime folder.
-    bind(_existing(env.get("XAUTHORITY")), read_only=True)
+    xauthority, xauthority_why = _bind_target(
+        env.get("XAUTHORITY"), real_home, regular=True
+    )
+    if xauthority_why:
+        log.warning("Sandbox: not binding XAUTHORITY %s: %s", env.get("XAUTHORITY"), xauthority_why)
+    bind(xauthority, read_only=True)
 
     # Files Nadare downloaded itself (the installer): visible inside the hidden home, never
     # writable by the program that runs them.
@@ -458,6 +534,12 @@ def wrap(
     wrapped_env = {k: v for k, v in env.items() if k not in _HIDDEN_ENV}
     if cache is not None:
         wrapped_env["XDG_CACHE_HOME"] = str(cache)
+    # bwrap itself is dynamically linked and starts before the Sandbox exists: a loader variable
+    # from the game's environment would run its library on the host. Pass it to the game only.
+    for key, value in list(wrapped_env.items()):
+        if _is_loader_env(key):
+            flags.extend(["--setenv", key, value])
+            del wrapped_env[key]
     return [bwrap, *flags, "--", *argv], wrapped_env
 
 
@@ -543,18 +625,22 @@ def wrap_flatpak(
     empty home and no ``/mnt``: only the prefix, game folder, runner and installer paths are
     exposed, and the child gets no session bus. The environment is not inherited, so the child's
     copy is written to a private file and read through ``--env-fd``; values never appear in a
-    command line. The returned env is the caller's, unchanged: ``flatpak-spawn`` itself needs the
-    app's session bus to reach the Flatpak portal.
+    command line. The returned env is the caller's, minus loader variables that would apply to
+    the host shell: ``flatpak-spawn`` itself needs the app's session bus to reach the portal.
 
     ``link_pipe`` is Nadare's link relay (see linkrelay.py). Wine opens a link by running
     ``xdg-open <link>``; without a bus the runtime's own ``xdg-open`` cannot, so a stand-in next
     to the pipe, first on the game's PATH, writes the link to the relay instead.
     """
     real_home = Path(home or Path.home()).resolve()
-    for folder in (prefix, install_dir):
-        reason = _broad_reason(folder, real_home) if folder is not None else ""
-        if reason:
-            raise BroadBindError(f"{folder} is {reason}")
+    for folder, label in (
+        (prefix, "prefix"),
+        (install_dir, "game folder"),
+        (runner_dir, "runner folder"),
+    ):
+        _target, why = _bind_target(folder, real_home, allow_drive_top=False)
+        if why:
+            raise BroadBindError(f"the {label} {folder} is {why}")
 
     wrapped_env = {k: v for k, v in env.items() if k not in _HIDDEN_ENV}
     wrapped_env.pop("XDG_RUNTIME_DIR", None)
@@ -571,18 +657,28 @@ def wrap_flatpak(
         # did exactly that, and the game saw the whole home and /mnt).
     ]
     exposed: list[Path] = []
+    # A new game's prefix does not exist before its first launch; a missing path is not exposed,
+    # and Proton then could not create it inside the Sandbox (Ubuntu 26.04 VM, 2026-11-14). The
+    # folder is Nadare's own and already passed the too-broad check above.
+    try:
+        Path(prefix).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass  # exposed only if it exists; Proton then reports the real problem
     _expose(flags, exposed, prefix)
     _expose(flags, exposed, install_dir)
     _expose(flags, exposed, runner_dir, read_only=True)
 
     cache_root = env.get("XDG_CACHE_HOME")
-    cache = Path(cache_root) / paths.APP / _CACHE_FOLDER if cache_root else None
+    cache = Path(cache_root) / paths.app_name() / _CACHE_FOLDER if cache_root else None
     if cache is not None:
         try:
             cache.mkdir(parents=True, exist_ok=True)
         except OSError:
             cache = None
-    _expose(flags, exposed, cache)
+    cache_target, cache_why = _bind_target(cache, real_home, directory=True)
+    if cache_why:
+        log.warning("Sandbox: not exposing the cache folder %s: %s", cache, cache_why)
+    _expose(flags, exposed, cache_target)
     if cache is not None:
         wrapped_env["XDG_CACHE_HOME"] = str(cache)
 
@@ -637,7 +733,7 @@ def wrap_flatpak(
         "--",
         *argv,
     ]
-    return command, dict(env)
+    return command, {key: value for key, value in env.items() if not _is_loader_env(key)}
 
 
 __all__ = [
