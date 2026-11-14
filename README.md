@@ -6,14 +6,19 @@ NIKKE, Brown Dust 2, Chaos Zero Nightmare and more. Pick a game in the Store, pr
 Install, press Play. Nadare downloads the game from the publisher, sets up the Wine/Proton
 environment, and keeps it updated, one profile per game.
 
-**Download:** the latest AppImage is on the
-[releases page](https://github.com/frostlinuxdev/nadare/releases). Source code and the
-issue tracker are at [github.com/frostlinuxdev/nadare](https://github.com/frostlinuxdev/nadare).
+> **⬇ Download:** open the **[latest release](https://github.com/frostlinuxdev/nadare/releases/latest)**
+> and, under **Assets**, download the file **`Nadare-<version>-x86_64.AppImage`**.
+> That one file is the whole app: no installer, nothing else to download. (Not the
+> "Source code" zip files: those are for developers.)
+
+Source code and the issue tracker are at
+[github.com/frostlinuxdev/nadare](https://github.com/frostlinuxdev/nadare).
 
 ## Get started
 
-1. Download `Nadare-<version>-x86_64.AppImage` from the releases page and check its
-   SHA-256 against the sum published there.
+1. Download `Nadare-<version>-x86_64.AppImage` from the
+   [latest release](https://github.com/frostlinuxdev/nadare/releases/latest) (under **Assets**)
+   and check its SHA-256 against the sum published there.
 2. Start it. A downloaded AppImage is not allowed to run yet, so double-clicking it does
    nothing at all on Mint or Ubuntu (KDE asks "Launch?" and then also does nothing).
    Pick one:
