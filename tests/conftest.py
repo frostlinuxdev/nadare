@@ -98,6 +98,20 @@ def _isolated_environment(
 
 
 @pytest.fixture(autouse=True)
+def _host_userns_unrestricted(monkeypatch, request):
+    """The host's AppArmor userns sysctl must not decide a test (GitHub runs Ubuntu 24.04).
+
+    Tests of the Ubuntu path patch ``userns.restricted`` (or the probe) themselves;
+    ``test_userns`` reads real files through its ``path`` argument.
+    """
+    if request.module.__name__ == "test_userns":
+        return
+    from nadare.core import userns
+
+    monkeypatch.setattr(userns, "restricted", lambda *a, **k: False)
+
+
+@pytest.fixture(autouse=True)
 def _sandbox_default_off(monkeypatch):
     """Older tests expect no bubblewrap; tests of the default turn it back on.
 
