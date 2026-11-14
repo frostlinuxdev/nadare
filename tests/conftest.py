@@ -57,6 +57,10 @@ def _isolated_environment(
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     monkeypatch.delenv("XDG_SESSION_TYPE", raising=False)
 
+    # The support report redacts $USER: a runner logged in as "runner" (GitHub) must not
+    # change what the report tests see.
+    monkeypatch.setenv("USER", "nadare-tester")
+
     # Never talk to a real keyring during tests; use the documented fallback.
     monkeypatch.setenv("NADARE_NO_KEYRING", "1")
 
