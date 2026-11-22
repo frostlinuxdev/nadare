@@ -316,9 +316,10 @@ def _obtain_games(
             hint=_report_hint(),
         )
     if pin_check is None:
+        pin = installerpins.require(INSTALLER_PIN_TAG, url, entry="Endfield")
 
         def pin_check(url: str, path: Path) -> None:
-            installerpins.check(INSTALLER_PIN_TAG, url, path, info=log.info)
+            installerpins.verify_file(path, pin)
 
     cache.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix="launcher-", suffix=".exe", dir=cache.parent)

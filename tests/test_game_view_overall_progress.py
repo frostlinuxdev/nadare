@@ -49,7 +49,7 @@ def _sync_into(view, tmp_path, monkeypatch, sizes, workers=6):
     plan = dd.Plan("T", "1", files=files)
     monkeypatch.setattr(dd, "plan_missing", lambda *a, **k: (list(files), []))
 
-    def fake(rf, dest, *, emit=None, cancel=None, pool=None):
+    def fake(rf, dest, *, emit=None, cancel=None, pool=None, redirect_allowed=None):
         done = 0
         step = max(1, rf.size // 20)
         while done < rf.size:

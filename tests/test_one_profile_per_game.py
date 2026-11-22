@@ -22,10 +22,8 @@ except Exception:  # noqa: BLE001
 
 from nadare.core import backends
 from nadare.core.config import Config
-from nadare.core.storecatalog import StoreEntry, entries
 from nadare.gui.add_game import AddGameDialog
 from nadare.gui.main_window import MainWindow
-from nadare.gui.store_detail import StoreDetail
 
 
 @pytest.fixture(scope="module")
@@ -79,42 +77,6 @@ def test_add_game_refuses_a_second_copy_and_names_the_first(tmp_path, qapp):
         qapp.processEvents()
 
 
-def test_add_game_refuses_an_import_of_a_game_already_there(tmp_path, qapp):
-    prefix = tmp_path / "prefix"
-    install = prefix / "drive_c" / "YostarGames" / "Arknights_EN"
-    install.mkdir(parents=True)
-    (install / "Arknights.exe").write_text("MZ")
-    config = _config(tmp_path, arknights={"backend": "arknights-yostar", "title": "Arknights"})
-    dialog = AddGameDialog(config, data_root=tmp_path / "data")
-    try:
-        dialog.set_backend("arknights-yostar")
-        dialog.set_mode(True)
-        dialog.set_install_dir(prefix)
-        dialog.set_prefix(prefix)
-        assert dialog.create_profile() is None
-        assert set(config.profiles) == {"arknights"}
-    finally:
-        dialog.deleteLater()
-        qapp.processEvents()
-
-
-def test_add_game_still_adds_a_second_wine_game(tmp_path, qapp):
-    exe = tmp_path / "two" / "two.exe"
-    exe.parent.mkdir()
-    exe.write_text("MZ")
-    config = _config(tmp_path, one={"backend": "wine", "title": "One"})
-    dialog = AddGameDialog(config, data_root=tmp_path / "data")
-    try:
-        dialog.set_backend("wine")
-        dialog.name.setText("two")
-        created = dialog.create_profile()
-        assert created and created != "one"
-        assert len(config.profiles) == 2
-    finally:
-        dialog.deleteLater()
-        qapp.processEvents()
-
-
 def test_existing_duplicates_are_left_alone(tmp_path, qapp):
     config = _config(
         tmp_path,
@@ -132,30 +94,36 @@ def test_existing_duplicates_are_left_alone(tmp_path, qapp):
 
 
 # ---- the Store -----------------------------------------------------------------------------
-def _entry(kind: str, **changes) -> StoreEntry:
-    base = next(item for item in entries() if item.kind == kind)
-    values = {field: getattr(base, field) for field in StoreEntry.__dataclass_fields__}
-    values.update(changes)
-    return StoreEntry(**values)
-
-
 def test_an_installed_game_offers_play_and_no_second_copy(qapp):
-    widget = StoreDetail(_entry("direct-pgr", installed=True))
+    """#1536: the card of an installed game plays it; it never asks to install a copy."""
+    from nadare.gui.store_flow import StoreFlow
+
+    flow = StoreFlow()
+    asked: list[str] = []
+    played: list[str] = []
+    flow.install_requested.connect(asked.append)
+    flow.play_requested.connect(played.append)
     try:
-        assert not widget.play_button.isHidden()
-        assert widget.install_button.isHidden()
+        flow.set_installed_kinds(frozenset({"direct-pgr"}))
+        flow.activate("direct-pgr")
+        assert played == ["direct-pgr"] and asked == []
     finally:
-        widget.deleteLater()
+        flow.deleteLater()
 
 
-def test_the_install_button_comes_back_when_the_game_is_removed(qapp):
-    widget = StoreDetail(_entry("direct-pgr", installed=True))
+def test_install_comes_back_when_the_game_is_removed(qapp):
+    from nadare.gui.store_flow import StoreFlow
+
+    flow = StoreFlow()
+    asked: list[str] = []
+    flow.install_requested.connect(asked.append)
     try:
-        widget.set_entry(_entry("direct-pgr", installed=False))
-        assert not widget.install_button.isHidden()
-        assert widget.install_button.text() == "Install"
+        flow.set_installed_kinds(frozenset({"direct-pgr"}))
+        flow.set_installed_kinds(frozenset())
+        flow.activate("direct-pgr")
+        assert asked == ["direct-pgr"]
     finally:
-        widget.deleteLater()
+        flow.deleteLater()
 
 
 def test_store_install_of_a_game_already_there_opens_it(tmp_path, qapp):

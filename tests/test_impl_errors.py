@@ -5,11 +5,11 @@ from __future__ import annotations
 
 import pytest
 from _backend_helpers import make_context
+from _official_route import OfficialRouteBackend
 from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
 from nadare.backends import winegame as wg
-from nadare.backends.arknights import ArknightsBackend
 from nadare.backends.czn import backend as czn_backend
 from nadare.backends.czn import update as czn_update
 from nadare.backends.czn.backend import CznBackend
@@ -233,7 +233,7 @@ def test_yostar_download_failure_is_plain_not_raw_urllib(tmp_path, monkeypatch):
 
 
 def test_arknights_install_runner_failure_is_not_a_wine_binary_hint(tmp_path, monkeypatch):
-    backend = ArknightsBackend(
+    backend = OfficialRouteBackend(
         make_context(
             tmp_path,
             ak.KIND,
@@ -259,7 +259,7 @@ def test_arknights_install_runner_failure_is_not_a_wine_binary_hint(tmp_path, mo
 
 
 def test_arknights_installer_failure_offers_a_gui_runner_choice(tmp_path, monkeypatch):
-    backend = ArknightsBackend(
+    backend = OfficialRouteBackend(
         make_context(
             tmp_path,
             ak.KIND,

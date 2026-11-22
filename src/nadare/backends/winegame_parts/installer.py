@@ -116,6 +116,14 @@ class InstallerMixin:
     def _download_installer(self, url: str) -> Path:
         dest = self.cache_dir() / self._installer_filename(url)
         pinned = self._installer_sha256()
+        index_pin = None
+        if pinned is None and not self._profile_installer_url():
+            if not self.installer_pin_tag:
+                raise BackendError(
+                    f"the index entry for {self.display_name} has no checksum; "
+                    "Nadare will not run an unpinned installer"
+                )
+            index_pin = installerpins.require(self.installer_pin_tag, url, entry=self.display_name)
         # An unpinned installer is only trusted by its host, so a redirect must
         # stay on Yostar's hosts; a pinned one is verified by its digest.
         redirect_allowed = None if pinned else self._installer_host_trusted
@@ -133,10 +141,11 @@ class InstallerMixin:
             emit=self.ctx.emit,
             cancel=self.ctx.cancel,
         )
-        if pinned is None and self.installer_pin_tag:
+        if index_pin is not None:
             try:
-                installerpins.check(self.installer_pin_tag, url, result.path, info=self.info)
+                installerpins.verify_file(result.path, index_pin)
             except installerpins.InstallerPinError as exc:
+                result.path.unlink(missing_ok=True)
                 raise BackendError(
                     f"{self.display_name}: the downloaded installer does not match Nadare's "
                     f"published checksum list ({exc}). Try again later, and report it if it "

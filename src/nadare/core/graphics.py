@@ -34,13 +34,12 @@ from . import process, vkprobe
 RENDERER_CHOICES: tuple[tuple[str, str], ...] = (
     ("Auto (Vulkan if available)", "auto"),
     ("Vulkan (DXVK)", "vulkan"),
-    ("OpenGL (WineD3D, old GPUs)", "opengl"),
+    ("OpenGL (WineD3D, GPUs without Vulkan)", "opengl"),
 )
 
 RENDERER_HELP = (
-    "Graphics backend. Auto picks Vulkan when the machine supports it and falls "
-    "back to OpenGL (WineD3D) otherwise. OpenGL is slower but works on old GPUs "
-    "without Vulkan 1.3."
+    "Graphics backend. Auto uses Vulkan (DXVK) on every GPU that has Vulkan, and "
+    "OpenGL (WineD3D) only on a GPU without Vulkan, where it is slower but works."
 )
 
 #: DLLs DXVK/VKD3D replace and the Wine builtin override that forces WineD3D.
@@ -245,8 +244,10 @@ def _query_vulkan() -> VulkanInfo:
                 return info
             if "deviceType" in text:  # devices listed, all CPU/software
                 return VulkanInfo(available=False, driver="software")
-            if proc.returncode != 0:  # "Found no drivers": a loader alone is not a GPU
-                return VulkanInfo(available=False)
+            if proc.returncode != 0 and "no drivers" in text.lower():
+                return VulkanInfo(available=False)  # a loader alone is not a GPU
+            # Any other failure (it segfaults when it cannot reach the X server) says
+            # nothing about the GPU: ask the driver probe below instead.
         except (OSError, subprocess.SubprocessError):
             pass
     # No usable vulkaninfo (the Flatpak never has it, most distros do not install it): ask the
@@ -346,8 +347,8 @@ def dxvk_ok() -> bool:
 
 _LOADER_ONLY_NOTE = (
     "Vulkan version could not be read from the driver (vulkan-tools is missing); "
-    "DXVK was assumed to work. If the game shows a black screen, set Renderer to OpenGL "
-    "(Settings → Game, Show advanced options)."
+    "DXVK was assumed to work. If the game shows a black screen, install vulkan-tools "
+    "or update your graphics driver."
 )
 
 
@@ -355,11 +356,18 @@ def vulkan_note() -> str:
     """One-line warning for game status when DXVK cannot work, or was only assumed."""
     if dxvk_ok():
         return _LOADER_ONLY_NOTE if vulkan_info().loader_only else ""
+    info = vulkan_info()
+    if not info.available:
+        return (
+            "No Vulkan GPU was found, so games run on OpenGL (WineD3D), which is slower. "
+            "Install or update your GPU's Vulkan driver."
+        )
+    # A GPU that has Vulkan stays on Vulkan (user decision 2026-11-19): the fix is
+    # the driver, never OpenGL.
+    found = f"Vulkan {info.api_version}" if info.api_version else "an unknown Vulkan version"
     return (
-        # Renderer is an advanced row: say how to reach it, not just "open Settings".
-        "Your graphics driver looks old for Vulkan games. If the game will not "
-        "start, open Settings → Game, tick Show advanced options and set Renderer "
-        "to OpenGL."
+        f"Your graphics driver reports {found}; Vulkan games need 1.3. "
+        "If the game will not start, update your graphics driver."
     )
 
 
@@ -377,15 +385,16 @@ def renderer_choice(profile: Mapping[str, Any] | None) -> str:
 def effective_renderer(profile: Mapping[str, Any] | None) -> tuple[str, str | None]:
     """Resolve ``auto`` to ``vulkan``/``opengl`` and explain a fallback.
 
-    Returns ``(renderer, note)`` where the note is non-``None`` only when
-    ``auto`` had to fall back to OpenGL, or picked Vulkan on a version that was
-    only assumed (no ``vulkaninfo``, #781).
+    ``auto`` keeps every GPU that has Vulkan on Vulkan, whatever its version
+    (user decision 2026-11-19); OpenGL only when there is no Vulkan GPU at all.
+    Returns ``(renderer, note)`` where the note is non-``None`` when ``auto`` fell
+    back to OpenGL, or picked Vulkan on an old or only assumed version (#781).
     """
     choice = renderer_choice(profile)
     if choice == "auto":
-        if dxvk_ok():
+        if vulkan_info().available:
             return "vulkan", vulkan_note() or None
-        return "opengl", "Vulkan < 1.3; falling back to OpenGL (WineD3D) for this launch"
+        return "opengl", "No Vulkan GPU found; using OpenGL (WineD3D) for this launch"
     return choice, None
 
 

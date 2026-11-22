@@ -49,6 +49,11 @@ def cache_dir() -> Path:
     return _xdg("XDG_CACHE_HOME", "~/.cache")
 
 
+def shader_cache_dir() -> Path:
+    """Shared Mesa and per-profile VKD3D caches, inside the existing sandbox bind."""
+    return cache_dir() / "sandbox-cache" / "shader-cache"
+
+
 def config_file() -> Path:
     return config_dir() / "config.json"
 
@@ -199,3 +204,19 @@ def check_relative(path: object, policy: RelativePolicy) -> str:
     if norm.startswith("/"):
         raise PathProblem("absolute")
     return _reject_nadare_owned(norm)
+
+
+def real(value: str | os.PathLike[str]) -> Path:
+    """``value`` with ``~`` expanded and every symlink resolved (#1455 R4-10).
+
+    A hand-edited path with a NUL byte cannot name a folder: it becomes ``/dev/null``, which is
+    never one, instead of a ValueError out of a scan or Settings (chaos FS-6)."""
+    try:
+        return Path(os.path.realpath(os.path.expanduser(str(value))))
+    except ValueError:
+        return Path(os.devnull)
+
+
+def inside(path: Path, folder: Path) -> bool:
+    """True when ``path`` is ``folder`` or lies below it (lexically; resolve first if needed)."""
+    return path == folder or folder in path.parents

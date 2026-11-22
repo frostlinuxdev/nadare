@@ -113,6 +113,43 @@ _UNDO_LABELS = {
 #: The checklist row each undoable step belongs to.
 _UNDO_ITEMS = {"set_runner": "runner", "set_wayland": "wayland"}
 
+#: Short names for the "N steps left" line, one phrase per checklist step.
+_STEP_WORDS = {
+    "installed": "install in Steam",
+    "h264": "unlock H.264",
+    "wayland": "use native Wayland",
+}
+
+
+def _step_phrase(item: steamsetup.SetupItem) -> str:
+    if item.key in _STEP_WORDS:
+        return _STEP_WORDS[item.key]
+    if item.key == "runner":
+        return f"use {item.label.removesuffix(' runner')}"
+    if item.key.startswith("prefix:"):
+        return f"install {item.label}"
+    return item.label.lower()
+
+
+def _status_line(plan: steamsetup.SetupPlan | None) -> str:
+    """The one line that says what is enough: ready, or how many needed steps are left."""
+    if plan is None:
+        return ""
+    if plan.ready:
+        return "Ready to play - the steps below are optional."
+    left = [
+        item
+        for item in plan.items
+        if item.state in (steamsetup.STATE_TODO, steamsetup.STATE_RECOMMENDED)
+    ]
+    if not left:  # nothing to run yet: a blocked step still waits on the user
+        left = [item for item in plan.items if item.state == steamsetup.STATE_BLOCKED]
+    if not left:
+        return ""
+    count = len(left)
+    words = ", then ".join(_step_phrase(item) for item in left)
+    return f"{count} step{'s' if count != 1 else ''} left: {words}"
+
 
 class SteamSetupDialog(QDialog):
     """A checklist for one Steam game, with one action running at a time."""
@@ -166,6 +203,12 @@ class SteamSetupDialog(QDialog):
         self.title_label = QLabel("Set up")
         self.title_label.setObjectName("Title")
         layout.addWidget(self.title_label)
+
+        self.status_label = QLabel("")
+        self.status_label.setObjectName("Accent")
+        self.status_label.setWordWrap(True)
+        self.status_label.setVisible(False)
+        layout.addWidget(self.status_label)
 
         intro = QLabel("Steam stays the downloader; nothing changes before you confirm a step.")
         intro.setObjectName("Hint")
@@ -285,6 +328,9 @@ class SteamSetupDialog(QDialog):
         title = f"Set up {plan.game}" if plan is not None else "Set up"
         self.title_label.setText(title)
         self.setWindowTitle(title)
+        status = _status_line(plan)
+        self.status_label.setText(status)
+        self.status_label.setVisible(bool(status))
         note = self._note_text()
         self.note_label.setText(note)
         self.note_label.setVisible(bool(note))
@@ -302,8 +348,10 @@ class SteamSetupDialog(QDialog):
                 self._rows_layout.addWidget(self.rows[item.key])
 
         next_item = plan.next_item if plan is not None else None
+        # Nothing left to do: the primary button closes, so the footer one would be a twin (#1627).
+        self.close_button.setVisible(plan is None or next_item is not None)
         if next_item is None:
-            self.next_button.setText("Do next step")
+            self.next_button.setText("Close")
         else:
             self.next_button.setText(
                 next_item.action_label or f"Do next step: {next_item.label}"
@@ -356,8 +404,7 @@ class SteamSetupDialog(QDialog):
 
     def _apply_enabled(self) -> None:
         enabled = not self._busy
-        has_next = self._plan is not None and self._plan.next_item is not None
-        self.next_button.setEnabled(has_next and enabled)
+        self.next_button.setEnabled(enabled and self._plan is not None)
         self.check_button.setEnabled(enabled)
         self.close_button.setEnabled(enabled or self._plan is None or self._rechecking)
         self.undo_button.setVisible(self._can_undo and self._undo_fn is not None)
@@ -392,8 +439,11 @@ class SteamSetupDialog(QDialog):
     # ---- running -----------------------------------------------------------
     def _run_next(self) -> None:
         item = self._plan.next_item if self._plan is not None else None
-        if item is not None:
-            self._run_item(item)
+        if item is None:
+            if self._plan is not None:
+                self.accept()  # nothing needed is left: the button says Close
+            return
+        self._run_item(item)
 
     def _run_item(self, item: steamsetup.SetupItem) -> None:
         if self._busy or not item.action:

@@ -98,3 +98,23 @@ def test_real_clients_reject_the_forged_emudhra_chains():
         assert "certificate" in str(info.value).lower() or "ssl" in str(info.value).lower(), (
             f"curl_cffi failed for {host} but not on certificate verification: {info.value}"
         )
+
+
+def test_urlopen_never_retries_without_the_context(monkeypatch):
+    """#621: a TypeError about ``context`` must not quietly fall back to the system store."""
+    import urllib.request
+
+    from nadare.core import tls
+
+    calls: list[dict] = []
+
+    def old_signature(url, timeout=60, **kwargs):
+        calls.append(kwargs)
+        if "context" in kwargs:
+            raise TypeError("urlopen() got an unexpected keyword argument 'context'")
+        return object()
+
+    monkeypatch.setattr(urllib.request, "urlopen", old_signature)
+    with pytest.raises(TypeError, match="context"):
+        tls.urlopen("https://example.invalid/", timeout=1, context=tls.ssl_context())
+    assert calls == [{"context": calls[0]["context"]}]  # one call, always with the context

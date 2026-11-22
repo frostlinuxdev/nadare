@@ -11,6 +11,8 @@ A plan has two parts:
 
 ``files``
     individual files, each with a URL and an md5, crc32 or sha256 (or none).
+    A file may come compressed (:class:`Packed`, gzip): it is unpacked next to its target and
+    checked against the file's own size and hash before it replaces anything.
 ``archives``
     a game shipped as one zip, as a zip containing a zip, or as a zip split into
     ordered parts. They are downloaded into ``<dest>/.nadare-dl``, verified,
@@ -21,6 +23,8 @@ Nothing is written outside ``dest``; every path is relative and traversal-free.
 
 from __future__ import annotations
 
+import contextlib
+import gzip
 import hashlib
 import io
 import json
@@ -41,7 +45,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from . import archivepins, diskspace, installlock, paths, sevenz, sophon
+from . import archivepins, crc64, diskspace, hdiffsf, installlock, paths, sevenz, sophon
 from . import download as download_module
 from .download import DownloadError, download, remote_size
 from .events import Cancel, Cancelled, Emitter, Event, emitter
@@ -76,10 +80,37 @@ _STREAM_READAHEAD = 4 << 20
 _MAX_7Z_WORKERS = 8
 #: Size of the chunks copied out of a zip member (and counted for progress).
 _STREAM_CHUNK = 1 << 20
+#: Codecs a :class:`Packed` file may come in (#1557: CZN's dpms chunks are gzip).
+PACKED_CODECS = frozenset({"gzip"})
+#: Suffix of a packed file's compressed copy next to its target (its resumable download is
+#: ``<target>.nadare-gz.part``). Only Nadare uses the name, so a finished sync removes leftovers.
+PACKED_SUFFIX = ".nadare-gz"
+#: Most bytes a packed file may unpack to when the plan declares no size (a bomb guard).
+MAX_UNPACKED_BYTES = 8 << 30
 
 
 class DirectError(RuntimeError):
     """The plan is invalid, a download failed, or a hash/size did not match."""
+
+
+class InstallBusy(DirectError):
+    """Another install or update already syncs this folder; nothing was touched."""
+
+
+@dataclass(frozen=True)
+class Packed:
+    """The server sends a file compressed (#1557).
+
+    The bytes at ``RemoteFile.url`` are the file compressed with ``codec``; ``size``, ``md5`` and
+    ``sha256`` describe those compressed bytes (``None``: not declared). The ``RemoteFile``'s own
+    ``size`` and hashes stay the unpacked file's, so every check of an installed tree is the same
+    as for a plain file.
+    """
+
+    codec: str = "gzip"
+    size: int | None = None
+    md5: str | None = None
+    sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +120,9 @@ class RemoteFile:
     ``path`` is relative to the install dir (for a plain file) or a cache file
     name (for an archive part). ``md5``/``sha256`` are lowercase-insensitive hex,
     ``crc32`` is 8 hex digits. ``headers`` are sent with the request (e.g. Referer).
+    ``crc64`` is the whole-file CRC-64/XZ Yostar's manifests list (#1452); ``None`` means
+    not declared (0 is a real value: the empty file's). ``packed``: the server sends the file
+    compressed (see :class:`Packed`).
     """
 
     path: str
@@ -98,6 +132,8 @@ class RemoteFile:
     sha256: str | None = None
     crc32: str | None = None
     headers: tuple[tuple[str, str], ...] = ()
+    crc64: int | None = None
+    packed: Packed | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +192,12 @@ class Plan:
     extra: Mapping[str, Any] = field(default_factory=dict)
     #: HoYo-style chunked packages, installed after the files and archives.
     sophon: tuple[sophon.SophonPackage, ...] = ()
+    #: Per-hop redirect allow-list for every download of this plan's files and archives
+    #: (Yostar keeps downloads on its own hosts, #1452). ``None``: redirects as
+    #: :mod:`download` allows them. Not part of equality: two plans that install the same
+    #: files are the same plan. A plan with a guard and a streamed archive or Sophon
+    #: packages is refused, because those paths could not apply it.
+    redirect_allowed: Callable[[str], bool] | None = field(default=None, compare=False)
 
 
 class _OverallProgress:
@@ -170,7 +212,7 @@ class _OverallProgress:
     def __init__(self, files: Sequence[RemoteFile], emit: Emitter | None) -> None:
         self._say = emitter(emit)
         self._lock = threading.Lock()
-        self._file_total = {rf.path: int(rf.size or 0) for rf in files}
+        self._file_total = {rf.path: int(_transfer_size(rf) or 0) for rf in files}
         self._file_done = dict.fromkeys(self._file_total, 0)
         self._total = sum(self._file_total.values())
         self._done = 0
@@ -337,12 +379,15 @@ def _hash_parts(paths: list[Path], rf: RemoteFile, name: str) -> None:
     algorithms = tuple(alg for alg in ("md5", "sha256") if getattr(rf, alg))
     hashers = {alg: hashlib.new(alg) for alg in algorithms}
     crc = 0
+    wide = crc64.Crc64() if rf.crc64 is not None else None
     for path in paths:
         with open(path, "rb") as fh:
             while block := fh.read(1 << 20):
                 for hasher in hashers.values():
                     hasher.update(block)
                 crc = zlib.crc32(block, crc)
+                if wide is not None:
+                    wide.update(block)
     mismatch = rf.size is not None and size != rf.size
     if not mismatch:
         for alg, hasher in hashers.items():
@@ -350,6 +395,8 @@ def _hash_parts(paths: list[Path], rf: RemoteFile, name: str) -> None:
                 mismatch = True
                 break
     if not mismatch and rf.crc32 and f"{crc & 0xFFFFFFFF:08X}" != rf.crc32.upper():
+        mismatch = True
+    if not mismatch and wide is not None and wide.value != rf.crc64:
         mismatch = True
     if mismatch:
         raise DirectError(f"archive hash/size mismatch for {name}")
@@ -364,8 +411,12 @@ def _crc32_file(path: Path) -> str:
 
 
 def _digest_pass(
-    path: Path, algorithms: tuple[str, ...], want_crc: bool, cancel: Cancel | None
-) -> tuple[dict[str, str], str]:
+    path: Path,
+    algorithms: tuple[str, ...],
+    want_crc: bool,
+    cancel: Cancel | None,
+    want_crc64: bool = False,
+) -> tuple[dict[str, str], str, int | None]:
     """One read pass over ``path`` for every wanted digest, checking ``cancel`` per block.
 
     A resumed install re-hashes every file on disk (tens of GB on a NAS), so Cancel has to be
@@ -373,6 +424,7 @@ def _digest_pass(
     """
     hashers = {name: hashlib.new(name) for name in algorithms}
     crc = 0
+    wide = crc64.Crc64() if want_crc64 else None
     with open(path, "rb") as fh:
         while True:
             if cancel is not None:
@@ -384,7 +436,10 @@ def _digest_pass(
                 hasher.update(block)
             if want_crc:
                 crc = zlib.crc32(block, crc)
-    return {name: hasher.hexdigest() for name, hasher in hashers.items()}, f"{crc & 0xFFFFFFFF:08X}"
+            if wide is not None:
+                wide.update(block)
+    digests = {name: hasher.hexdigest() for name, hasher in hashers.items()}
+    return digests, f"{crc & 0xFFFFFFFF:08X}", (wide.value if wide is not None else None)
 
 
 def _verify_remote(
@@ -400,17 +455,142 @@ def _verify_remote(
         if not hashes:
             return True
         algorithms = tuple(name for name in ("md5", "sha256") if getattr(rf, name))
-        if not algorithms and not rf.crc32:
+        if not algorithms and not rf.crc32 and rf.crc64 is None:
             return True
-        digests, crc = _digest_pass(path, algorithms, bool(rf.crc32), cancel)
+        digests, crc, wide = _digest_pass(
+            path, algorithms, bool(rf.crc32), cancel, want_crc64=rf.crc64 is not None
+        )
         for name in algorithms:
             if digests[name].lower() != getattr(rf, name).lower():
                 return False
         if rf.crc32 and crc != rf.crc32.upper():
             return False
+        if rf.crc64 is not None and wide != rf.crc64:
+            return False
     except OSError:
         return False
     return True
+
+
+def _transfer_size(rf: RemoteFile) -> int | None:
+    """The bytes a download of ``rf`` moves: the compressed size for a packed file."""
+    return rf.packed.size if rf.packed is not None else rf.size
+
+
+def _packed_view(rf: RemoteFile) -> RemoteFile:
+    """``rf``'s compressed bytes as a file of their own, for :func:`_verify_remote`."""
+    packed = rf.packed
+    assert packed is not None
+    return RemoteFile(
+        rf.path, rf.url, packed.size, md5=packed.md5, sha256=packed.sha256, headers=rf.headers
+    )
+
+
+def _declares_hash(rf: RemoteFile) -> bool:
+    return bool(rf.md5 or rf.sha256 or rf.crc32 or rf.crc64 is not None)
+
+
+def _unpack(codec: str, source: Path, target: Path, *, limit: int, cancel: Cancel | None) -> None:
+    """Decompress ``source`` into ``target``; more than ``limit`` bytes is refused."""
+    if codec != "gzip":  # _validate_plan refuses others; this is the last line
+        raise DirectError(f"unsupported packing: {codec!r}")
+    written = 0
+    with gzip.open(source, "rb") as stream, open(target, "wb") as out:
+        while True:
+            if cancel is not None:
+                cancel.raise_if_cancelled()
+            block = stream.read(_STREAM_CHUNK)
+            if not block:
+                break
+            written += len(block)
+            if written > limit:
+                raise DirectError(f"unpacked file is larger than {limit} bytes")
+            out.write(block)
+        out.flush()
+        os.fsync(out.fileno())
+
+
+def _download_packed(
+    rf: RemoteFile,
+    path: Path,
+    *,
+    emit: Emitter | None,
+    cancel: Cancel | None,
+    pool: download_module.HttpClientPool | None = None,
+    redirect_allowed: Callable[[str], bool] | None = None,
+) -> None:
+    """Fetch a :class:`Packed` file: download the compressed bytes (resumable), check them,
+    unpack next to the target, check the file, then replace the target.
+
+    The installed file is never touched until the new one checked out. A cancelled run keeps
+    the compressed copy (or its ``.part``) so the next run does not fetch it again.
+    """
+    packed = rf.packed
+    assert packed is not None
+    if path.exists() and _declares_hash(rf) and _verify_remote(path, rf, cancel=cancel):
+        return
+    view = _packed_view(rf)
+    staged = path.with_name(path.name + PACKED_SUFFIX)
+    output = path.with_name(path.name + ".nadare-new.part")
+    staged_ok = staged.is_file() and _declares_hash(view) and _verify_remote(
+        staged, view, cancel=cancel
+    )
+    need = int(rf.size or 0)
+    if not staged_ok and packed.size:
+        try:
+            have = min(packed.size, Path(f"{staged}.part").stat().st_size)
+        except OSError:
+            have = 0
+        need += packed.size - have
+    if need:
+        diskspace.check_space(path.parent, need)
+    for attempt in range(2):
+        if staged_ok:
+            break
+        try:
+            download(
+                rf.url,
+                staged,
+                expected_size=packed.size,
+                expected_sha256=packed.sha256,
+                headers=dict(rf.headers),
+                emit=emit,
+                cancel=cancel,
+                resume=True,
+                pool=pool,
+                redirect_allowed=redirect_allowed,
+            )
+        except DownloadError as exc:
+            raise DirectError(f"download failed for {rf.path}: {exc}") from exc
+        if _verify_remote(staged, view):
+            break
+        # A wrong resume base (an older .part) or a bad transfer: once more from scratch.
+        _remove_file(staged)
+        if attempt:
+            raise DirectError(f"hash mismatch for {rf.path} (as downloaded)")
+    limit = rf.size if rf.size is not None else MAX_UNPACKED_BYTES
+    try:
+        _unpack(packed.codec, staged, output, limit=limit, cancel=cancel)
+    except Cancelled:
+        _remove_file(output)
+        raise
+    except DirectError:
+        _remove_file(output)
+        _remove_file(staged)
+        raise
+    except (OSError, EOFError, zlib.error) as exc:
+        _remove_file(output)
+        _remove_file(staged)
+        raise DirectError(f"cannot unpack {rf.path}: {exc}") from exc
+    except BaseException:
+        _remove_file(output)
+        raise
+    if not _verify_remote(output, rf):
+        _remove_file(output)
+        _remove_file(staged)
+        raise DirectError(f"hash mismatch for {rf.path}")
+    os.replace(output, path)
+    _remove_file(staged)
 
 
 def _download_remote(
@@ -420,18 +600,24 @@ def _download_remote(
     emit: Emitter | None,
     cancel: Cancel | None,
     pool: download_module.HttpClientPool | None = None,
+    redirect_allowed: Callable[[str], bool] | None = None,
 ) -> None:
     if cancel is not None:
         cancel.raise_if_cancelled()
+    if rf.packed is not None:
+        _download_packed(
+            rf, path, emit=emit, cancel=cancel, pool=pool, redirect_allowed=redirect_allowed
+        )
+        return
     size = rf.size
     if size is None:
         # Some APIs report 0 for a multi-GB archive; ask the server instead of
         # falling back to the downloader's cap for undeclared sizes.
-        size = remote_size(rf.url, headers=dict(rf.headers))
+        size = remote_size(rf.url, headers=dict(rf.headers), redirect_allowed=redirect_allowed)
     preserve_existing = path.exists()
     if (
         preserve_existing
-        and (rf.md5 or rf.sha256 or rf.crc32)
+        and (rf.md5 or rf.sha256 or rf.crc32 or rf.crc64 is not None)
         and _verify_remote(path, rf, cancel=cancel)
     ):
         # Already here and verified against a declared hash (e.g. the archive kept after a
@@ -461,8 +647,9 @@ def _download_remote(
             cancel=cancel,
             resume=True,
             pool=pool,
+            redirect_allowed=redirect_allowed,
         )
-        if (rf.md5 or rf.crc32) and not _verify_remote(destination, rf):
+        if (rf.md5 or rf.crc32 or rf.crc64 is not None) and not _verify_remote(destination, rf):
             raise DirectError(f"hash mismatch for {rf.path}")
         if preserve_existing:
             os.replace(temporary, path)
@@ -806,6 +993,25 @@ def _extract_7z_into_dest(
         shutil.rmtree(staging, ignore_errors=True)
 
 
+def _extract_hdiff_into_dest(
+    source: Path | _JoinedFile, dest: Path, dl_dir: Path, cancel: Cancel | None
+) -> list[str]:
+    """A full-install HDiffPatch diff (Duet Night Abyss), unpacked by :mod:`hdiffsf`."""
+    if not isinstance(source, Path):
+        raise DirectError("a full-install diff in parts is not supported")
+    staging = Path(tempfile.mkdtemp(prefix="extract-", dir=dl_dir))
+    try:
+        members = hdiffsf.extract(source, staging, cancel=cancel)
+        _merge_tree(staging, dest)
+        return members
+    except hdiffsf.HDiffError as exc:
+        raise DirectError(f"cannot unpack {source.name}: {exc}") from exc
+    except OSError as exc:
+        raise DirectError(f"cannot unpack {source.name}: {exc}") from exc
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
 def _unwrap(
     archive: Archive,
     source: Path | _JoinedFile,
@@ -813,6 +1019,8 @@ def _unwrap(
     dl_dir: Path,
     cancel: Cancel | None = None,
 ) -> list[str]:
+    if archive.unwrap == ("hdiff",):
+        return _extract_hdiff_into_dest(source, dest, dl_dir, cancel)
     if archive.unwrap == ("7z",):
         return _extract_7z_into_dest(source, dest, dl_dir, cancel)
     if archive.unwrap == ("slices",):
@@ -1230,7 +1438,11 @@ def _install_streamed_zip(
                         local_reader.close()
 
         errors: list[BaseException] = []
-        with ThreadPoolExecutor(max_workers=len(runs)) as pool:
+        with ThreadPoolExecutor(
+            initializer=download_module.inherit_transfer,
+            initargs=(download_module.current_transfer(),),
+            max_workers=len(runs),
+        ) as pool:
             futures = [
                 pool.submit(work, run, index > 0) for index, run in enumerate(runs)
             ]
@@ -1502,14 +1714,42 @@ def _sync_archive(
 
     try:
         if archive.parts:
-            for index, (part, part_path) in enumerate(
-                zip(archive.parts, part_paths, strict=False)
-            ):
-                if cancel is not None:
-                    cancel.raise_if_cancelled()
-                _download_remote(part, part_path, emit=emit, cancel=cancel)
+            stop = Cancel()
+            combined = _CombinedCancel(cancel, stop)
+            overall = _OverallProgress(archive.parts, emit)
+
+            def fetch_part(item):
+                index, part, part_path = item
+                combined.raise_if_cancelled()
+                _download_remote(
+                    part, part_path, emit=overall.sink(part), cancel=combined,
+                    pool=connections, redirect_allowed=plan.redirect_allowed,
+                )
                 if pin is not None:
                     _verify_pinned_file(archive, pin.parts[index], part_path, pin)
+                overall.finished(part)
+
+            with download_module.HttpClientPool() as connections:
+                with ThreadPoolExecutor(
+                    initializer=download_module.inherit_transfer,
+                    initargs=(download_module.current_transfer(),),
+                    max_workers=max(1, min(workers, MAX_WORKERS)),
+                ) as executor:
+                    futures = [
+                        executor.submit(fetch_part, (i, part, path))
+                        for i, (part, path) in enumerate(
+                            zip(archive.parts, part_paths, strict=True)
+                        )
+                    ]
+                    try:
+                        for future in as_completed(futures):
+                            future.result()
+                    except BaseException:
+                        stop.cancel()
+                        for future in futures:
+                            future.cancel()
+                        raise
+            overall.flush()
             _hash_parts(part_paths, archive.source, archive.name)
             if changed is not None:
                 changed.set()
@@ -1519,7 +1759,13 @@ def _sync_archive(
             finally:
                 joined.close()
         else:
-            _download_remote(archive.source, source_path, emit=emit, cancel=cancel)
+            _download_remote(
+                archive.source,
+                source_path,
+                emit=emit,
+                cancel=cancel,
+                redirect_allowed=plan.redirect_allowed,
+            )
             if pin is not None:
                 _verify_pinned_file(archive, pin.parts[0], source_path, pin)
             if changed is not None:
@@ -1543,7 +1789,7 @@ def _sync_archive(
         raise
 
 
-_UNWRAPS = frozenset({("zip",), ("zip", "zip"), ("7z",), ("slices",)})
+_UNWRAPS = frozenset({("zip",), ("zip", "zip"), ("7z",), ("slices",), ("hdiff",)})
 
 
 def _is_https_or_loopback(url: Any) -> bool:
@@ -1558,12 +1804,17 @@ def _is_https_or_loopback(url: Any) -> bool:
 def _remove_stale_parts(root: Path, keep: set[str], managed: set[str]) -> None:
     """Best-effort removal of abandoned ``*.part`` files Nadare itself staged in ``root``.
 
-    Only three kinds go: anything inside the download cache, a ``*.nadare-new.part`` (a name
-    only Nadare uses), and the ``.part`` of a file the plan manages. Any other ``*.part`` may be
-    an archive member or the user's own file, so it stays.
+    Only these go: anything inside the download cache, a ``*.nadare-new.part`` or a packed
+    file's compressed copy (``*.nadare-gz`` and its ``.part``; names only Nadare uses), and the
+    ``.part`` of a file the plan manages. Any other ``*.part`` may be an archive member or the
+    user's own file, so it stays.
     """
     for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
         for name in filenames:
+            if name.endswith(PACKED_SUFFIX):
+                with contextlib.suppress(OSError):
+                    (Path(dirpath) / name).unlink()
+                continue
             if not name.endswith(".part"):
                 continue
             path = Path(dirpath) / name
@@ -1573,7 +1824,7 @@ def _remove_stale_parts(root: Path, keep: set[str], managed: set[str]) -> None:
             staged = rel[: -len(".part")]
             ours = (
                 rel.startswith(DL_DIR + "/")
-                or staged.endswith(".nadare-new")
+                or staged.endswith((".nadare-new", PACKED_SUFFIX))
                 or staged in managed
             )
             if not ours:
@@ -1591,6 +1842,8 @@ def _validate_plan(plan: Plan) -> None:
         if normalised in seen:
             raise DirectError(f"duplicate path in plan: {normalised!r}")
         seen.add(normalised)
+        if rf.packed is not None and rf.packed.codec not in PACKED_CODECS:
+            raise DirectError(f"unsupported packing for {rf.path}: {rf.packed.codec!r}")
     for archive in plan.archives:
         if archive.unwrap not in _UNWRAPS:
             raise DirectError(f"unsupported archive unwrap for {archive.name}: {archive.unwrap!r}")
@@ -1611,11 +1864,30 @@ def _validate_plan(plan: Plan) -> None:
             raise DirectError(
                 f"archive {archive.name!r} has members but is not a slices archive"
             )
+    if plan.redirect_allowed is not None:
+        if plan.sophon:
+            raise DirectError("a redirect allow-list cannot be applied to Sophon packages")
+        for archive in plan.archives:
+            if archive.stream:
+                raise DirectError(
+                    f"a redirect allow-list cannot be applied to streamed archive {archive.name!r}"
+                )
     for pkg in plan.sophon:
         safe_relative_path(pkg.name)
         for label, url in (("manifest", pkg.manifest_url), ("chunk", pkg.chunk_url)):
             if not _is_https_or_loopback(url):
                 raise DirectError(f"sophon {label} URL is not https: {url!r}")
+
+
+def require_https(url: Any, what: str = "URL") -> str:
+    """``url`` when it is an https URL with a host; else :class:`DirectError` (#1455 R4-7).
+
+    The one check every publisher source uses for the URLs it is handed."""
+    if isinstance(url, str) and url:
+        parts = urlsplit(url)
+        if parts.scheme.lower() == "https" and parts.netloc:
+            return url
+    raise DirectError(f"{what} is not an https URL: {url!r}")
 
 
 def safe_relative_path(path: str) -> str:
@@ -1853,7 +2125,11 @@ def predownload(
             overall.finished(rf)
             return 0
         _download_remote(
-            rf, target, emit=overall.sink(rf), cancel=combined
+            rf,
+            target,
+            emit=overall.sink(rf),
+            cancel=combined,
+            redirect_allowed=plan.redirect_allowed,
         )
         overall.finished(rf)
         return int(rf.size or target.stat().st_size)
@@ -1863,7 +2139,11 @@ def predownload(
     max_workers = max(1, min(workers, MAX_WORKERS))
     if selected:
         try:
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            with ThreadPoolExecutor(
+                initializer=download_module.inherit_transfer,
+                initargs=(download_module.current_transfer(),),
+                max_workers=max_workers,
+            ) as pool:
                 futures = [pool.submit(fetch, rf) for rf in selected]
                 for future in as_completed(futures):
                     try:
@@ -1902,10 +2182,26 @@ def predownload_ready(plan: Plan, cache: Path | str) -> bool:
 
 
 
+def worker_cap(plan: Plan, value: Any = None) -> int:
+    """A profile limits the plan default; historically it replaced it."""
+    default = plan_workers(plan)
+    try:
+        return min(default, max(1, min(32, int(value)))) if value not in (None, "") else default
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def plan_workers(plan: Plan) -> int:
-    """The default number of parallel downloads for ``plan``."""
+    """The default number of parallel downloads for ``plan``.
+
+    A source whose CDN caps each connection can ask for more with ``extra["workers"]`` (Snowbreak,
+    #1611); a bad hint is ignored, a big one capped at :data:`MAX_WORKERS`.
+    """
     if plan.sophon:
         return _SOPHON_WORKERS
+    hint = plan.extra.get("workers") if isinstance(plan.extra, Mapping) else None
+    if isinstance(hint, int) and not isinstance(hint, bool) and hint > 0:
+        return min(hint, MAX_WORKERS)
     return default_workers(len(plan.files))
 
 
@@ -1915,7 +2211,15 @@ def _install_lock(install_dir: Path) -> Iterator[None]:
         install_dir,
         DirectError,
         f"another install or update is already running for {install_dir}",
+        busy=InstallBusy,
     )
+
+
+def install_lock(install_dir: Path | str) -> Iterator[None]:
+    """The lock :func:`sync` takes, for a caller that must hold it over more than the sync
+    (CZN: the plan check, the sync and its version marker, #1557). Such a caller passes
+    ``lock=False`` to :func:`sync`. :class:`InstallBusy` when another sync holds it."""
+    return _install_lock(Path(install_dir).expanduser())
 
 
 def _read_done(record_path: Path) -> dict[str, Any] | None:
@@ -2086,18 +2390,28 @@ def sync(
     check_workers: int | None = None,
     changed: threading.Event | None = None,
     chunk_cache: Path | None = None,
+    lock: bool = True,
 ) -> dict[str, int]:
     """Install ``plan`` into ``dest``. Returns ``{"downloaded": n, "skipped": m}``
     counting files plus archives. Idempotent: a second run fetches nothing.
 
     ``changed`` is set as soon as a file in ``dest`` was replaced or an archive started
     to unpack, so a caller whose sync fails can tell an untouched install from a half-updated
-    one (replacements are per file, there is no rollback)."""
+    one (replacements are per file, there is no rollback). ``lock=False`` only for a caller
+    that already holds :func:`install_lock` for ``dest``."""
     _validate_plan(plan)
     root = Path(dest).expanduser()
     if root.exists() and not root.is_dir():
         raise DirectError(f"install path is not a folder: {root}")
-    with _install_lock(root):
+    with (
+        download_module.transfer.measure(workers, emit),
+        _install_lock(root) if lock else contextlib.nullcontext(),
+    ):
+        measurement = download_module.current_transfer()
+        concurrent_files = max([len(plan.files), *(len(a.parts) for a in plan.archives)])
+        measurement.range_workers = max(
+            1, min(workers, MAX_WORKERS) // max(1, min(concurrent_files, workers))
+        )
         return _sync(
             plan,
             root,
@@ -2165,6 +2479,7 @@ def _sync(
                 emit=overall.sink(rf),
                 cancel=combined,
                 pool=connections,
+                redirect_allowed=plan.redirect_allowed,
             )
             if changed is not None:
                 changed.set()
@@ -2172,7 +2487,11 @@ def _sync(
 
         first_error: BaseException | None = None
         try:
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            with ThreadPoolExecutor(
+                initializer=download_module.inherit_transfer,
+                initargs=(download_module.current_transfer(),),
+                max_workers=max_workers,
+            ) as pool:
                 futures = [pool.submit(fetch, rf) for rf in missing_files]
                 for future in as_completed(futures):
                     try:
@@ -2192,10 +2511,17 @@ def _sync(
             raise first_error
         overall.flush()
 
-    for archive in missing_archives:
+    if missing_files and missing_archives:
+        # The loose files may have been most of the bytes (NTE: 89 GB, then 7 packs); say that
+        # more follows, so the pack downloads do not read as a surprise (#1612).
+        size = sum(a.source.size or 0 for a in missing_archives)
+        packs = f"{len(missing_archives)} pack{'s' if len(missing_archives) != 1 else ''}"
+        total = f" ({diskspace.human_size(size)})" if size else ""
+        say(Event("step", f"Second pass: {packs}{total}"))
+    for number, archive in enumerate(missing_archives, 1):
         if cancel is not None:
             cancel.raise_if_cancelled()
-        say(Event("step", f"installing {archive.name}"))
+        say(Event("step", f"installing pack {number} of {len(missing_archives)}: {archive.name}"))
         _sync_archive(
             plan, archive, root, emit=emit, cancel=cancel, workers=workers, changed=changed
         )
@@ -2218,17 +2544,12 @@ def _sync(
     keep_parts = {safe_relative_path(rf.path) for rf in plan.files}
     can_prune_parts = True
     for pkg in plan.sophon:
-        ledger = sophon._ledger_path(pkg, root)
-        try:
-            raw = ledger.read_text(encoding="utf-8")
-            keep_parts.update(
-                sophon._validate_ledger_entry(line, ledger)
-                for line in raw.splitlines()
-                if line
-            )
-        except (OSError, UnicodeError, sophon.SophonError):
+        # Sophon owns its receipt (#1464); an unsure answer keeps every part.
+        owned = sophon.owned_files(pkg, root)
+        if not owned.certain:
             can_prune_parts = False
             break
+        keep_parts.update(owned.paths)
     if can_prune_parts:
         _remove_stale_parts(root, keep_parts, {safe_relative_path(rf.path) for rf in plan.files})
     try:

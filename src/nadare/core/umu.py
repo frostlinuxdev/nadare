@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Nadare contributors
-"""A Nadare-managed ``umu-run`` for hosts without one.
+"""Nadare's own pinned ``umu-run``, used before any system copy (see :func:`resolve`).
 
 umu-launcher ships its own Steam Linux Runtime container, so it can run a Proton
 build on a host that lacks the 32-bit libraries that Proton needs when it is
@@ -12,15 +12,17 @@ launch/install path via :func:`resolve`.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import logging
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from . import download, hosting, paths, process
@@ -43,12 +45,15 @@ SUPPORTED_RUNTIME_APPIDS: dict[int, str] = {
 }
 
 #: Oldest system umu-run that understands Steam Runtime 4 (the recommended Proton
-#: builds need it; 1.2.x, as shipped by Bazzite, fails with "Failed to match ...
-#: with a container runtime").
+#: builds need it; 1.2.x, as older Bazzite images shipped, fails with "Failed to match ...
+#: with a container runtime"). Bazzite 45.20261112 ships 1.4.4 (checked 2026-11-14, #1341).
 MIN_SYSTEM_VERSION = (1, 3, 0)
 
 #: The interpreter the zipapp's shebang names (and the one it will run under).
 SHEBANG_PYTHON = "/usr/bin/python3"
+
+#: Hidden entry point that runs the managed zipapp with Nadare's own interpreter (#1341).
+SUBCOMMAND = "--umu-run"
 
 #: The pinned archive the AppImage carries (``scripts/fetch_umu.sh``): the managed copy is
 #: installed from it with no network (#1338). Source installs have none and download.
@@ -119,20 +124,174 @@ def managed_path() -> Path:
     return paths.data_dir() / "umu" / UMU_VERSION / "umu-run"
 
 
+def runtime_base() -> Path:
+    """The UMU_FOLDERS_PATH base, separate from the versioned zipapps."""
+    return paths.data_dir() / "umu-runtime"
+
+
+def shared_runtime_roots() -> list[Path]:
+    roots = [Path.home() / ".local/share/umu"]
+    xdg = os.environ.get("XDG_DATA_HOME", "")
+    if os.path.isabs(xdg):
+        roots.append(Path(xdg) / "umu")
+    return list(dict.fromkeys(roots))
+
+
+def runtime_roots() -> list[Path]:
+    return [runtime_base() / "umu", *shared_runtime_roots()]
+
+
+def uses_owned_runtime(executable: str) -> bool:
+    from . import userns
+
+    return Path(executable) == managed_path() and not userns.runtime_profile_outdated()
+
+
+def _has_runtime(root: Path) -> bool:
+    return any(root.glob("*/pressure-vessel/libexec/steam-runtime-tools-0/srt-bwrap"))
+
+
+def _migrate_runtime(emit: Emitter | None = None) -> None:
+    """Copy once while holding destination and source locks. Never remove shared data.
+
+    Called on launch workers, never a status poll. A failed attempt leaves umu to download.
+    The marker and lock live outside umu's tree so its updates cannot replace them.
+    """
+    from . import diskspace
+
+    base = runtime_base()
+    temporary = None
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        fd = os.open(base / ".migration.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            destination = base / "umu"
+            marker = base / ".migration-attempted"
+            if _has_runtime(destination) or marker.exists():
+                return
+            marker.touch()
+            for source in shared_runtime_roots():
+                if source.is_symlink() or not _has_runtime(source):
+                    continue
+                source_fd = os.open(
+                    source / "umu.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
+                )
+                try:
+                    fcntl.flock(source_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    needed = diskspace.tree_bytes(source)
+                    if shutil.disk_usage(base).free < needed * 1.05:
+                        return
+                    emitter(emit)(Event(
+                        "step", "Copying the shared Steam Runtime for Nadare (one time)…"
+                    ))
+                    temporary = Path(tempfile.mkdtemp(prefix=".copy-", dir=base))
+                    result = subprocess.run(
+                        ["cp", "-a", "--reflink=auto", "--", str(source) + "/.", str(temporary)],
+                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL, check=False, env=process.child_environ(),
+                    )
+                    if result.returncode != 0 or not _has_runtime(temporary):
+                        return
+                    # An empty destination is harmless; a nonempty one is never overwritten.
+                    os.replace(temporary, destination)
+                    temporary = None
+                    return
+                finally:
+                    os.close(source_fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        log.info("Could not copy the shared umu runtime; umu will download it", exc_info=True)
+    finally:
+        if temporary is not None:
+            shutil.rmtree(temporary, ignore_errors=True)
+
+
+def prepare_runtime(
+    executable: str, env: dict[str, str], emit: Emitter | None = None
+) -> bool:
+    """Route only Nadare's umu to its runtime; slow work belongs on a launch worker.
+
+    Returns True when the executable is Nadare's own copy (its runtime was routed here).
+    """
+    if not uses_owned_runtime(executable):
+        return False
+    _migrate_runtime(emit)
+    env["UMU_FOLDERS_PATH"] = str(runtime_base())
+    if not runtime_downloaded(executable):
+        emitter(emit)(Event("step", FIRST_RUNTIME_NOTE))
+    return True
+
+
+def shebang_python_ok() -> bool:
+    """Whether the interpreter the zipapp's shebang names (:data:`SHEBANG_PYTHON`) can run.
+
+    NixOS has none, not even inside ``appimage-run``'s environment (#1599).
+    """
+    return os.path.isfile(SHEBANG_PYTHON) and os.access(SHEBANG_PYTHON, os.X_OK)
+
+
+def command() -> list[str]:
+    """How to start this build's hidden ``--umu-run`` (frozen bundle or source)."""
+    if getattr(sys, "frozen", False):
+        return [sys.executable, SUBCOMMAND]
+    return [sys.executable, "-m", "nadare", SUBCOMMAND]
+
+
+def run_argv(executable: str | Path, args: Iterable[str]) -> list[str]:
+    """The argv that runs umu with ``args``.
+
+    Normally the zipapp itself. When its shebang interpreter is missing (NixOS), Nadare's
+    own copy runs it in-process through the hidden ``--umu-run`` instead (#1341 item 3).
+    """
+    if Path(executable) == managed_path() and not shebang_python_ok():
+        return [*command(), *args]
+    return [str(executable), *args]
+
+
+def _run_zipapp(zipapp: Path, args: list[str]) -> None:
+    """Run the zipapp's ``__main__`` in this process, with ``sys.argv`` as a script gets it."""
+    import runpy
+
+    saved = sys.argv
+    saved_path = list(sys.path)
+    sys.argv = [str(zipapp), *args]
+    try:
+        runpy.run_path(str(zipapp), run_name="__main__")
+    finally:
+        sys.argv = saved
+        sys.path[:] = saved_path
+
+
+def main(argv: list[str] | None = None, *, _zipapp: Path | None = None) -> int:
+    """Run the managed umu zipapp with Nadare's interpreter (hidden :data:`SUBCOMMAND`)."""
+    zipapp = managed_path() if _zipapp is None else _zipapp
+    if not (zipapp.is_file() and os.access(zipapp, os.X_OK)):
+        print("nadare: umu is not set up yet", file=sys.stderr)
+        return 1
+    args = list(sys.argv[1:] if argv is None else argv)
+    try:
+        _run_zipapp(zipapp, args)
+    except SystemExit as exc:
+        code = exc.code
+        if code is None:
+            return 0
+        if isinstance(code, int):
+            return code
+        print(code, file=sys.stderr)
+        return 1
+    return 0
+
+
 def managed() -> Path | None:
     """The installed managed umu, or ``None``. Pure lookup, never downloads.
 
-    The zipapp has a ``#!/usr/bin/python3`` shebang, so a copy is only usable
-    when the interpreter named by that shebang (:data:`SHEBANG_PYTHON`) exists
-    and is executable. A venv/version-manager shim on ``PATH`` is not enough:
-    the game environment strips those from ``PATH`` (see
-    :func:`process.sanitize_game_env`), which is why only the absolute shebang
-    path counts.
+    A copy is usable without the interpreter its shebang names: :func:`run_argv` then
+    starts Nadare's own ``--umu-run`` instead (#1341 item 3).
     """
     path = managed_path()
     if not (path.is_file() and os.access(path, os.X_OK)):
-        return None
-    if not (os.path.isfile(SHEBANG_PYTHON) and os.access(SHEBANG_PYTHON, os.X_OK)):
         return None
     return path
 
@@ -185,10 +344,17 @@ def _extract_member(
                 pass
 
 
-def _smoke_test(python: str, executable: Path) -> None:
+def _smoke_test(python: str | None, executable: Path) -> None:
+    # Keep imports, environment changes and a hung probe out of the GUI process. The frozen
+    # entry point also supports ``-m``; this checks the private candidate before publishing it.
+    argv = (
+        [sys.executable, "-m", "nadare.core.umu", str(executable)]
+        if python is None
+        else [python, str(executable), "--version"]
+    )
     try:
         result = subprocess.run(
-            [python, str(executable), "--version"],
+            argv,
             env=process.sanitize_game_env(process.child_environ()),
             capture_output=True,
             text=True,
@@ -220,21 +386,16 @@ def ensure_managed(
 ) -> Path:
     """Return an installed managed umu, downloading and verifying it once.
 
-    Raises :class:`UmuError` when the shebang interpreter or ``python3`` is
-    unavailable, the download fails its pinned hash, the archive is malformed, or
-    the resulting zipapp cannot run. A failed install leaves nothing at
-    :func:`managed_path`.
+    Raises :class:`UmuError` when the download fails its pinned hash, the archive is
+    malformed, or the resulting zipapp cannot run. A failed install leaves nothing at
+    :func:`managed_path`. Without ``python3`` the zipapp is checked with Nadare's own
+    interpreter (#1341 item 3), which is also how the launch runs it.
     """
     existing = managed()
     if existing is not None:
         return existing
 
-    if not (os.path.isfile(SHEBANG_PYTHON) and os.access(SHEBANG_PYTHON, os.X_OK)):
-        raise UmuError(f"python3 is needed to run umu ({SHEBANG_PYTHON} is missing)")
-
-    python = shutil.which("python3")
-    if python is None:
-        raise UmuError("python3 is needed to run umu")
+    python = shutil.which("python3") if shebang_python_ok() else None
 
     say = emitter(emit)
     destination = managed_path()
@@ -354,24 +515,45 @@ def resolve(
 ) -> str | None:
     """Resolve a usable umu argv[0].
 
-    A usable system copy (or the profile's configured binary) wins; a system copy
-    older than :data:`MIN_SYSTEM_VERSION` does not. Otherwise an
-    already-installed managed copy is used. Only when ``allow_download`` is true
-    do we try to install the managed copy; any failure is logged and reported as
-    ``None`` so the caller can fall back to its previous behaviour.
+    Order (user, 2026-11-16: one tested umu everywhere; a system umu-run is uncommon):
+
+    1. a umu-run the profile names explicitly (anything but the default ``umu-run``);
+    2. Nadare's own pinned copy: already installed, or unpacked from the AppImage's
+       bundled archive (no network);
+    3. a usable system ``umu-run`` (not older than :data:`MIN_SYSTEM_VERSION`), so a source
+       or AUR install with umu-launcher does not download a second copy;
+    4. Nadare's own copy, downloaded once.
+
+    Steps that write files (2's unpack, 4) run only when ``allow_download`` is true. Any
+    failure is logged and reported as ``None`` so the caller can explain it.
     """
-    found = system(configured)
-    if found:
-        return found
+    if configured and configured != "umu-run":
+        found = system(configured)
+        if found:
+            return found
 
     existing = managed()
     if existing is not None:
         return str(existing)
 
+    global _last_setup_error
+    if allow_download and _bundled_archive() is not None:
+        try:
+            found = str(ensure_managed(emit=emit, cancel=cancel))
+        except UmuError as exc:
+            log.info("bundled umu could not be set up: %s", exc)
+            _last_setup_error = str(exc)
+        else:
+            _last_setup_error = ""
+            return found
+
+    found = system("umu-run")
+    if found:
+        return found
+
     if not allow_download:
         return None
 
-    global _last_setup_error
     try:
         found = str(ensure_managed(emit=emit, cancel=cancel))
     except UmuError as exc:
@@ -397,24 +579,28 @@ def unavailable_message() -> str:
 #: Shown before a launch through umu when its Steam Runtime is not on disk yet: umu downloads
 #: it before the game starts, and the page otherwise said only "launching" for minutes.
 FIRST_RUNTIME_NOTE = (
-    "First Proton launch on this computer: umu downloads the Steam Runtime once (a few "
+    "umu needs to download the Steam Runtime once (a few "
     "hundred MB). The game starts when it is done; this can take a few minutes."
 )
 
 
-def runtime_downloaded() -> bool:
+def runtime_downloaded(executable: str | None = None) -> bool:
     """Whether umu's Steam Runtime is already on disk (any variant). Never raises."""
     from . import userns
 
     try:
+        if executable is not None:
+            roots = ([runtime_base() / "umu"] if uses_owned_runtime(executable)
+                     else shared_runtime_roots())
+            return any(_has_runtime(root) for root in roots)
         return bool(userns._srt_bwrap_paths())
     except Exception:  # noqa: BLE001 - unknown: say nothing rather than fail a launch
         return True
 
 
-def note_first_runtime(emit: Emitter | None) -> None:
+def note_first_runtime(emit: Emitter | None, executable: str | None = None) -> None:
     """Emit :data:`FIRST_RUNTIME_NOTE` when the launch about to run will download the runtime."""
-    if not runtime_downloaded():
+    if not runtime_downloaded(executable):
         emitter(emit)(Event("step", FIRST_RUNTIME_NOTE))
 
 
@@ -424,17 +610,77 @@ __all__ = [
     "RUNTIME_MISMATCH_HINT",
     "SUPPORTED_RUNTIME_APPIDS",
     "SETUP_HINT",
+    "SUBCOMMAND",
     "UMU_TAR_SHA256",
     "UMU_VERSION",
     "UmuError",
+    "command",
     "ensure_managed",
     "is_runtime_mismatch_line",
     "is_setup_failure_line",
+    "main",
     "managed",
     "managed_path",
     "note_first_runtime",
     "parse_version",
     "resolve",
+    "run_argv",
+    "shebang_python_ok",
     "runtime_downloaded",
     "system",
 ]
+
+
+def runtime_storage() -> list[tuple[Path, int]]:
+    """Measure on the Disk space worker, never while drawing Settings."""
+    from . import diskspace
+
+    return [(root, diskspace.tree_bytes(root)) for root in
+            [runtime_base(), *shared_runtime_roots()]
+            if root.is_dir() and not root.is_symlink()]
+
+
+def remove_runtime(root: Path) -> bool:
+    """Ask-first storage removal: recheck the path, processes and update locks."""
+    from . import uninstall_all
+
+    if root not in [runtime_base(), *shared_runtime_roots()] or root.is_symlink():
+        return False
+    if not root.is_dir() or uninstall_all._running_from(root):
+        return False
+    lock_paths = ([root / ".migration.lock", root / "umu/umu.lock"]
+                  if root == runtime_base() else [root / "umu.lock"])
+    descriptors = []
+    try:
+        # Open the runtime folder and every folder below it without following links, then
+        # open each lock relative to them: O_NOFOLLOW on a lock alone cannot protect its
+        # parents. Folders above the runtime may be links (/home -> /var/home, a data
+        # folder moved to another disk); only a link from the runtime on is refused.
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        root_fd = os.open(root, directory_flags)
+        descriptors.append(root_fd)
+        for lock in lock_paths:
+            parent_fd = root_fd
+            for part in lock.relative_to(root).parts[:-1]:
+                try:
+                    parent_fd = os.open(part, directory_flags, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    break
+                descriptors.append(parent_fd)
+            else:
+                fd = os.open(lock.name, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+                             0o600, dir_fd=parent_fd)
+                descriptors.append(fd)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        shutil.rmtree(root)
+        return True
+    except OSError:
+        return False
+    finally:
+        for fd in descriptors:
+            os.close(fd)
+
+
+if __name__ == "__main__":
+    # Private pre-install check. Both CPython and packaging/nadare_entry.py support -m.
+    raise SystemExit(main(["--version"], _zipapp=Path(sys.argv[1])))

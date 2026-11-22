@@ -161,12 +161,20 @@ class TestPins:
 
     def test_index_source_accepts_a_microsoft_url(self, monkeypatch):
         url = "https://download.visualstudio.microsoft.com/download/x/vc_redist.x64.exe"
-        payload = json.dumps({"url": url}).encode()
+        payload = json.dumps({"url": url, "sha256": ["ab" * 32]}).encode()
         monkeypatch.setattr(indexfetch, "open_bytes", _serve_index(payload))
         assert vcredist.index_source() == url
 
+    def test_index_source_without_a_checksum_is_ignored(self, monkeypatch):
+        url = "https://download.visualstudio.microsoft.com/download/x/vc_redist.x64.exe"
+        payload = json.dumps({"url": url}).encode()
+        monkeypatch.setattr(indexfetch, "open_bytes", _serve_index(payload))
+        assert vcredist.index_source() == ""
+
     def test_index_source_rejects_an_off_microsoft_url(self, monkeypatch):
-        payload = json.dumps({"url": "https://evil.example/vc_redist.x64.exe"}).encode()
+        payload = json.dumps(
+            {"url": "https://evil.example/vc_redist.x64.exe", "sha256": ["ab" * 32]}
+        ).encode()
         monkeypatch.setattr(indexfetch, "open_bytes", _serve_index(payload))
         assert vcredist.index_source() == ""
 
@@ -336,13 +344,17 @@ def test_index_source_host_suffix_is_label_bounded(monkeypatch):
     ok = ["https://aka.ms/vs/17/release/vc_redist.x64.exe", "https://www.aka.ms/x.exe"]
     for url in ok:
         monkeypatch.setattr(
-            indexfetch, "open_bytes", _serve_index(json.dumps({"url": url}).encode())
+            indexfetch,
+            "open_bytes",
+            _serve_index(json.dumps({"url": url, "sha256": ["ab" * 32]}).encode()),
         )
         assert vcredist.index_source() == url
     monkeypatch.setattr(
         indexfetch,
         "open_bytes",
-        _serve_index(json.dumps({"url": "https://evilaka.ms/x.exe"}).encode()),
+        _serve_index(
+            json.dumps({"url": "https://evilaka.ms/x.exe", "sha256": ["ab" * 32]}).encode()
+        ),
     )
     assert vcredist.index_source() == ""
 

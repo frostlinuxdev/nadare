@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from ..core import safetycheck
 from .theme import DIM, MUTED, TEXT, TEXT_SOFT, WARN
 
 log = logging.getLogger(__name__)
@@ -200,6 +201,10 @@ class SystemCheckDialog(QDialog):
         )
         self.intro.setWordWrap(True)
         layout.addWidget(self.intro)
+        self.safety_label = QLabel(safetycheck.system_check_line())
+        self.safety_label.setObjectName("Muted")
+        self.safety_label.setWordWrap(True)
+        layout.addWidget(self.safety_label)
         self._raw = ""
         self.text = QTextBrowser()
         self.text.setObjectName("Report")  # the dark panel of the log viewer, set out as a list
@@ -222,6 +227,7 @@ class SystemCheckDialog(QDialog):
         """Start the check (again) in the background."""
         self._raw = ""
         self.text.setPlainText("Checking your system…")
+        self.safety_label.setText(safetycheck.system_check_line())
         self.again_button.setEnabled(False)
         QThreadPool.globalInstance().start(_CheckTask(self._config_data, self._signals))
 

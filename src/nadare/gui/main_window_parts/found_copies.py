@@ -20,7 +20,7 @@ from ...core import process as process_core
 from ...core import relink as relink_core
 from ...core.backends import create as create_backend
 from ...core.config import Config
-from ..found_copies import FoundCopiesDialog
+from ..found_copies import FoundCopiesDialog, SpareCopiesDialog
 
 log = logging.getLogger("nadare.gui.main_window")
 
@@ -147,6 +147,9 @@ class FoundCopiesMixin:
 
         self._found_copies.pop(name, None)
         self._found_copies_ignored.add(name)
+        # The other copies are offered once the status says the chosen one works (#1300).
+        if any(item is not choice for item in copies):
+            self._spare_pending[name] = (list(copies), choice)
         self._render_found_offer()
         self.refresh_library()
         self._start(name, "status", silent=True)
@@ -165,3 +168,97 @@ class FoundCopiesMixin:
         self._found_copies.pop(name, None)
         self._found_copies_ignored.add(name)
         self._render_found_offer()
+
+    # ---- the copies not chosen (#1300 item 5) -------------------------------------------------
+    def _maybe_offer_spare_copies(self, name: str, status: object) -> None:
+        """After a re-point, the first status that says installed offers the other copies."""
+        pending = self._spare_pending.get(name)
+        if pending is None:
+            return
+        if getattr(status, "state", "") != "installed" or getattr(status, "running", False):
+            return
+        del self._spare_pending[name]
+        copies, chosen = pending
+        snapshot = self._config_snapshot()
+
+        def run() -> None:
+            try:
+                found = gamefinder.spares(snapshot, name, copies, chosen)
+            except Exception:  # noqa: BLE001 - an offer must never break the window
+                log.warning("could not list the other copies of %s", name, exc_info=True)
+                return
+            if not found:
+                return
+            try:
+                self.spare_copies_ready.emit(name, found, chosen)
+            except RuntimeError:
+                pass  # the window closed meanwhile
+
+        threading.Thread(target=run, name="nadare-spare-copies", daemon=True).start()
+
+    def _config_snapshot(self) -> Config:
+        with self.config.locked():
+            data = copy.deepcopy(self.config.data)
+        return Config(path=self.config.path, data=data)
+
+    def _ask_spare_copies(self, title: str, spares: list) -> list:
+        """The real dialog plus one last Yes/No (No is the default); tests stub this."""
+        dialog = SpareCopiesDialog(title, spares, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return []
+        picked = dialog.ticked()
+        if not picked:
+            return []
+        names = "\n".join(f"  • {spare.path}" for spare in picked)
+        answer = QMessageBox.question(
+            self,
+            "Delete folders",
+            f"Delete these folders?\n\n{names}\n\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,  # a destructive action never defaults to Yes
+        )
+        return picked if answer == QMessageBox.StandardButton.Yes else []
+
+    def _offer_spare_copies(self, name: str, found: object, chosen: object) -> None:
+        spares = list(found) if isinstance(found, list) else []
+        if not spares or name not in self.config.profiles:
+            return
+        picked = self._ask_spare_copies(self._game_title(name), spares)
+        if not picked:
+            return
+        # The games as they are NOW: every check runs again before each folder goes.
+        snapshot = self._config_snapshot()
+
+        def run() -> None:
+            results = []
+            for spare in picked:
+                try:
+                    problem = gamefinder.remove_spare(snapshot, name, spare, chosen)
+                except OSError as exc:
+                    problem = str(exc)
+                results.append((spare, problem))
+            try:
+                self.spare_copies_done.emit(name, results)
+            except RuntimeError:
+                pass
+
+        threading.Thread(target=run, name="nadare-spare-delete", daemon=True).start()
+
+    def _spare_copies_finished(self, name: str, results: object) -> None:
+        from ...core import diskspace
+        from ..library import count_text
+
+        done = [(s, p) for s, p in (results if isinstance(results, list) else [])]
+        gone = [spare for spare, problem in done if not problem]
+        kept = [(spare, problem) for spare, problem in done if problem]
+        freed = sum(spare.size for spare in gone)
+        text = (
+            f"Deleted {count_text(len(gone), 'folder')} of other copies, "
+            f"freed {diskspace.human_size(freed)}"
+        )
+        for spare, problem in kept:
+            text += f" • kept {spare.path}: {problem}"
+            log.info("kept the spare folder %s: %s", spare.path, problem)
+        self._set_side_status(text)
+        if name == self._current_profile:
+            self.game.append_line(text, "error" if kept else "done")

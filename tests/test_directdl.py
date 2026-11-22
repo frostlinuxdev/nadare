@@ -711,7 +711,7 @@ def test_cancel_with_many_queued_files_returns_promptly(tmp_path, monkeypatch):
     cancel = Cancel()
     monkeypatch.setattr(dd, "plan_missing", lambda *a, **k: (list(files), []))
 
-    def fake_download(rf, dest, *, emit=None, cancel=None, pool=None):
+    def fake_download(rf, dest, *, emit=None, cancel=None, pool=None, redirect_allowed=None):
         time.sleep(0.001)
         user.cancel()
         raise Cancelled("cancelled")

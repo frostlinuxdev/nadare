@@ -3,8 +3,8 @@
 """Native Wayland for a Steam game: the launch option, and whether the runner can honour it.
 
 Valve's own Proton ships only the X11 driver of Wine (``winex11.so``), so a game on it always
-runs through XWayland, which flickers in some windows. DW-Proton also ships ``winewayland.so`` and
-switches to it when the game's launch option sets ``PROTON_ENABLE_WAYLAND=1``.
+runs through XWayland. DW-Proton also ships ``winewayland.so`` and switches to it when the
+game's launch option sets ``PROTON_ENABLE_WAYLAND=1``.
 """
 
 from __future__ import annotations

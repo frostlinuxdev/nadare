@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import base64 as _b64
 import io
+import json as _json
 import zipfile
 from pathlib import Path
 
@@ -156,3 +158,101 @@ def test_plan_from_xml_rejects_malformed_input(broken):
 def test_plan_from_xml_refuses_non_https_roots():
     with pytest.raises(dd.DirectError):
         nte.plan_from_xml(xml(), "http://ntecdn1.perfectworld.com/clientRes/PC_140", "9")
+
+
+# --- the branch chain: a branch config can point the client at the next branch ---
+# Live 2026-11-21: publish_PC -> PC_140 (1.4.11), whose own ResConfig names PC_150 (1.5.5)
+# with PreReleaseStatus "end". Stopping at PC_140 left 1.4 installs that the game server
+# turns away after Start ("Update failed, please try again").
+
+
+RES150 = "https://ntecdn1.perfectworld.com/clientRes/PC_150"
+CDNS = ["https://ntecdn1.perfectworld.com/clientRes", "https://ntecdn2.perfectworld.com/clientRes"]
+
+
+def _resconfig(branch: str) -> str:
+    body = {"gameResUrl": CDNS, "branchName": branch, "appId": "3000001"}
+    return _b64.b64encode(_json.dumps(body).encode()).decode()
+
+
+def branch_cfg(
+    version: str, next_branch: str | None = None, pre: tuple[str, str] | None = None
+) -> bytes:
+    parts = [f"<ResVersion>{version}</ResVersion>"]
+    if pre:
+        parts.append(
+            f"<PreReleaseBranch>{pre[0]}</PreReleaseBranch><PreReleaseStatus>{pre[1]}</PreReleaseStatus>"
+        )
+    if next_branch:
+        parts.append(f"<ResConfig>{_resconfig(next_branch)}</ResConfig>")
+    return ('<?xml version="1.0" ?><config>' + "".join(parts) + "</config>").encode()
+
+
+def chain_routes(pc140: bytes, pc150: bytes | None = None) -> dict:
+    r = {
+        nte.ENTRY_CONFIG_URL: fx("nte_config_entry.xml"),
+        RES + "/Version/Windows/config.xml": pc140,
+        RES + "/Version/Windows/version/1.4.11/ResList.bin.zip": fx("nte_ResList.bin.zip"),
+    }
+    if pc150 is not None:
+        r[RES150 + "/Version/Windows/config.xml"] = pc150
+        r[RES150 + "/Version/Windows/version/1.5.5/ResList.bin.zip"] = fx("nte_ResList.bin.zip")
+    return r
+
+
+def test_a_branch_that_names_the_next_branch_is_followed():
+    f = FakeFetch(
+        chain_routes(branch_cfg("1.4.11", "PC_150", ("PC_150", "end")), branch_cfg("1.5.5"))
+    )
+    plan = nte.resolve(f)
+    assert plan.version == "1.5.5"
+    assert all(x.url.startswith(RES150 + "/Res/") for x in plan.files)
+    assert all(a.source.url.startswith(RES150 + "/Res/") for a in plan.archives)
+    assert RES + "/Version/Windows/version/1.4.11/ResList.bin.zip" not in f.calls
+
+
+def test_the_next_branch_is_followed_without_any_pre_release_fields():
+    plan = nte.resolve(FakeFetch(chain_routes(branch_cfg("1.4.11", "PC_150"), branch_cfg("1.5.5"))))
+    assert plan.version == "1.5.5"
+
+
+@pytest.mark.parametrize("status", ["start", "predownload", ""])
+def test_a_running_pre_release_is_not_installed_early(status):
+    f = FakeFetch(
+        chain_routes(branch_cfg("1.4.11", "PC_150", ("PC_150", status)), branch_cfg("1.5.5"))
+    )
+    plan = nte.resolve(f)
+    assert plan.version == "1.4.11"
+    assert RES150 + "/Version/Windows/config.xml" not in f.calls
+
+
+def test_a_branch_naming_itself_stays_put():
+    f = FakeFetch(chain_routes(branch_cfg("1.4.11", "PC_140")))
+    assert nte.resolve(f).version == "1.4.11"
+
+
+def test_a_branch_loop_fails_cleanly():
+    with pytest.raises(dd.DirectError, match="loop"):
+        nte.resolve(
+            FakeFetch(chain_routes(branch_cfg("1.4.11", "PC_150"), branch_cfg("1.5.5", "PC_140")))
+        )
+
+
+def test_a_long_branch_chain_is_refused():
+    r = {nte.ENTRY_CONFIG_URL: fx("nte_config_entry.xml")}
+    names = [f"PC_{n}" for n in range(140, 160)]
+    for here, nxt in zip(names[:-1], names[1:], strict=True):
+        r[f"https://ntecdn1.perfectworld.com/clientRes/{here}/Version/Windows/config.xml"] = (
+            branch_cfg("1.4.11", nxt)
+        )
+    with pytest.raises(dd.DirectError, match="too many"):
+        nte.resolve(FakeFetch(r))
+
+
+def test_a_damaged_branch_resconfig_fails_cleanly():
+    bad = (
+        b'<?xml version="1.0" ?><config>'
+        b"<ResVersion>1.4.11</ResVersion><ResConfig>%%%</ResConfig></config>"
+    )
+    with pytest.raises(dd.DirectError):
+        nte.resolve(FakeFetch(chain_routes(bad)))

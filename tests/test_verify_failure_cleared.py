@@ -30,11 +30,13 @@ def test_fresh_files_clear_a_failed_check(tmp_path, qapp, monkeypatch, operation
     monkeypatch.setattr(window, "_start", lambda *a, **k: True)
     try:
         window.open_game("alpha")
-        window._on_result("alpha", Status("installed"))
-        window._on_result("alpha", {"verified": False, "message": "integrity check failed"})
+        window._on_result("alpha", "status", Status("installed"))
+        window._on_result(
+            "alpha", "verify", {"verified": False, "message": "integrity check failed"}
+        )
         assert window._snapshots["alpha"]["status"].state == "error"
         window._on_succeeded("alpha", operation, 0)
-        window._on_result("alpha", Status("installed"))
+        window._on_result("alpha", "status", Status("installed"))
         assert window._snapshots["alpha"]["status"].state == "installed"
     finally:
         window.controller._workers.clear()

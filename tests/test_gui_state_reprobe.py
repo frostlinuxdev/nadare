@@ -77,7 +77,7 @@ def test_failed_operation_reprobes_and_drops_stale_ready(
     )
     monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
     try:
-        window._on_result("alpha", Status("installed"))
+        window._on_result("alpha", "status", Status("installed"))
         window.open_game("alpha")
         assert window.game.badge.text() == "READY"
         started.clear()
@@ -104,7 +104,7 @@ def test_failed_status_probe_is_kept_and_can_be_retried(tmp_path, qapp, monkeypa
         lambda profile, op, payload=None: started.append((profile, op)) or True,
     )
     try:
-        window._on_result("alpha", Status("running", running=True))
+        window._on_result("alpha", "status", Status("running", running=True))
         window._on_failed("alpha", "status", "could not check the game")
 
         assert window._snapshots["alpha"]["status"].state == "error"

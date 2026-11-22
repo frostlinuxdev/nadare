@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _official_route import OfficialRouteBackend
 from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
@@ -316,7 +317,7 @@ def test_stop_uses_the_runner_local_wineserver(tmp_path, monkeypatch):
 # Arknights installer honesty
 # ---------------------------------------------------------------------------
 def _installer_backend(tmp_path: Path) -> tuple[ArknightsBackend, list]:
-    backend = ArknightsBackend(make_context(tmp_path, ak.KIND, {}, "ak"))
+    backend = OfficialRouteBackend(make_context(tmp_path, ak.KIND, {}, "ak"))
     events: list = []
     backend.ctx.emit = events.append
     return backend, events

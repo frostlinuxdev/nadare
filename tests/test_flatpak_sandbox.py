@@ -134,6 +134,22 @@ def test_the_game_gets_its_own_cache_folder(layout):
     assert entries["XDG_CACHE_HOME"] == str(cache)
 
 
+def test_owned_shader_paths_reach_the_flatpak_child(layout, monkeypatch):
+    from nadare.core import shadercache
+
+    monkeypatch.setenv("XDG_CACHE_HOME", layout["env"]["XDG_CACHE_HOME"])
+    shadercache.prepare("My Game", layout["env"], lambda line: None)
+    argv, _env = _wrap(layout)
+    env_file = next(layout["envdir"].iterdir())
+    entries = dict(c.split("=", 1) for c in env_file.read_text().split("\0") if c)
+    cache = Path(entries["XDG_CACHE_HOME"])
+    assert f"--sandbox-expose-path={cache.resolve()}" in _spawn_args(argv)
+    for key in ("MESA_SHADER_CACHE_DIR", "VKD3D_SHADER_CACHE_PATH"):
+        folder = Path(entries[key])
+        assert entries[key] == layout["env"][key]
+        assert folder.is_absolute() and folder.is_dir() and folder.is_relative_to(cache)
+
+
 def test_a_missing_folder_is_skipped_not_fatal(layout):
     layout["game"].rmdir()
     spawn = _spawn_args(_wrap(layout)[0])
@@ -193,6 +209,9 @@ def test_the_wrapped_command_reads_and_deletes_the_environment_file(layout, tmp_
     argv, env = _wrap(layout, ["/bin/true"])
     env_file = next(layout["envdir"].iterdir())
     run_env = dict(env, PATH=f"{fake_bin}:{env.get('PATH', '')}")
+    # From source the helper module (``-m``) needs this checkout on the path; the frozen
+    # binary carries it inside.
+    run_env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
     done = subprocess.run(argv, env=run_env, capture_output=True, text=True, timeout=30)
     assert done.returncode == 0, done.stderr
     assert f"NMAUTH_TOKEN={TOKEN}" in done.stdout

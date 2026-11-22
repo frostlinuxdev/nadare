@@ -88,13 +88,15 @@ MIN_SPEED_SPAN = 0.2
 
 
 class SpeedMeter:
-    """Bytes per second over the last :data:`SPEED_WINDOW` seconds of a growing byte counter.
+    """Bytes per second over the last ``window`` seconds of a growing byte counter.
 
     Starts over when the counter drops (a new phase) or goes quiet for :data:`GAP_RESET`, and
-    says nothing until two samples exist.
+    says nothing until two samples exist. The window defaults to :data:`SPEED_WINDOW`; the
+    Downloads page asks for a shorter one (#1623).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, window: float = SPEED_WINDOW) -> None:
+        self._window = float(window)
         self.reset()
 
     def reset(self) -> None:
@@ -110,7 +112,7 @@ class SpeedMeter:
         # was busy arrive microseconds apart; measuring them against each other alone turned
         # a 70 MiB/s download into "6 GiB/s" (#1133). The sample from before the pause keeps
         # the span honest.
-        while len(self._points) > 2 and now - self._points[1][0] >= SPEED_WINDOW:
+        while len(self._points) > 2 and now - self._points[1][0] >= self._window:
             self._points.pop(0)
         first_time, first_done = self._points[0]
         span = now - first_time

@@ -21,6 +21,7 @@ from _czn_test_helpers import (  # noqa: F401  # noqa: F401 - pytest fixtures, f
     _no_vcredist_network,
     _no_webview2_index,
     _reset_czn_process_state,
+    _webview2_ready,
     fake_keyring,
     make_backend_context,
 )
@@ -189,6 +190,18 @@ class TestGameTerms:
         with pytest.raises(BackendError) as exc:
             backend.accept_terms()
         assert exc.value.code == 2
+
+    def test_accept_terms_stove_not_confirming_asks_the_user_to_try_play_again(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        backend = self._logged_in(make_backend_context, tmp_path)
+        monkeypatch.setattr(backend, "_run_module", _terms_runner([], [], code=6))
+        with pytest.raises(BackendError) as exc:
+            backend.accept_terms()
+        assert exc.value.code == 6
+        assert exc.value.message == (
+            "STOVE did not confirm the terms yet. Try Play again in a minute."
+        )
 
     def test_accept_terms_needs_a_login(self, make_backend_context, tmp_path, monkeypatch):
         backend = _cred_backend(make_backend_context, tmp_path)
@@ -862,12 +875,15 @@ class TestEphemeralSession:
     def _launchable(self, backend: CznBackend, tmp_path, monkeypatch) -> None:
         prefix = backend.prefix()
         _install_game(prefix)
+        _webview2_ready(prefix)
         (prefix / "drive_c").mkdir(parents=True, exist_ok=True)
         stub = backend._stub()
         stub.parent.mkdir(parents=True, exist_ok=True)
         stub.write_bytes(b"MZ")
         monkeypatch.setenv("CZN_SKIP_UPDATE", "1")
-        monkeypatch.setattr(backend, "_prefix_command", lambda args, extra=None: (["stub"], {}))
+        monkeypatch.setattr(
+            backend, "_prefix_command", lambda args, extra=None, **_kw: (["stub"], {})
+        )
         monkeypatch.setattr(backend, "_stub_result", lambda log: "ok")
 
     def test_launch_writes_session_right_before_launch_and_deletes_it(

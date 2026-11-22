@@ -28,7 +28,7 @@ def test_an_incomplete_install_is_shown_as_not_installed_and_hidden(tmp_path, qa
     window = MainWindow(config)
     try:
         status = Status("installed", data={"incomplete": True})
-        window._on_result("alpha", status)
+        window._on_result("alpha", "status", status)
         card = window.library._cards["alpha"]
         seen = {
             "sidebar_installed": is_installed(status),
@@ -40,7 +40,7 @@ def test_an_incomplete_install_is_shown_as_not_installed_and_hidden(tmp_path, qa
             "page_primary": window.game.primary.text(),
         }
         window.open_game("alpha")
-        window._on_result("alpha", status)
+        window._on_result("alpha", "status", status)
         seen["page_badge"] = window.game.badge.text()
         seen["page_badge_hidden"] = window.game.badge.isHidden()
         seen["page_primary"] = window.game.primary.text()

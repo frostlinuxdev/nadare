@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import inspect
+import re
 from pathlib import Path
 
 import pytest
@@ -165,3 +166,21 @@ def test_a_failing_cache_dir_is_a_mapped_error_not_a_raw_oserror(tmp_path, monke
     with pytest.raises(BackendError, match="cannot access the WebView2 cache") as caught:
         webview2.ensure(tmp_path, profile={}, cache_dir_fn=_raising_cache, **kwargs)
     assert caught.value.code == webview2.EXIT_WEBVIEW2_FAILED
+
+
+def test_the_built_in_pin_is_a_lowercase_sha256():
+    pin = webview2.PINNED_SHA256
+    assert isinstance(pin, str), "a shipped build must carry a pin"
+    assert re.fullmatch(r"[0-9a-f]{64}", pin), pin
+
+
+def test_the_steam_docs_name_this_pin_and_explain_the_index_fallback():
+    """#1550: the docs pointed at the wrong file and called the pin stale."""
+    docs = (Path(__file__).resolve().parents[1] / "docs" / "STEAM-SETUP.md").read_text(
+        encoding="utf-8"
+    )
+    section = docs.split("### WebView2 installer pin", 1)[1].split("\n## ", 1)[0]
+    assert "core/webview2.py" in section
+    assert "backends/czn/backend.py" not in section
+    assert "stale" not in section.lower()
+    assert "webview2/latest.json" in section

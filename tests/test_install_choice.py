@@ -84,7 +84,6 @@ def test_store_install_stores_the_picked_quality_before_the_install_starts(
 
     monkeypatch.setattr(QuickInstallDialog, "exec", fake_exec)
     monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
-    monkeypatch.setattr(window, "_confirm_notice_text", lambda text: True)
     try:
         window._store_install(KIND)
         assert [s for s in started if s[1] == "install"][-1][2] == "uhd"

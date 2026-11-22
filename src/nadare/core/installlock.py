@@ -22,11 +22,13 @@ def hold(
     install_dir: str | os.PathLike[str],
     error: type[Exception],
     message: str,
+    busy: type[Exception] | None = None,
 ) -> Iterator[None]:
     """Refuse a second sync into ``install_dir`` while the block runs.
 
     Direct downloads and Yostar manifests write the same ``.part`` files, so they
-    must agree on the lock file. ``error`` is the caller's user-facing exception.
+    must agree on the lock file. ``error`` is the caller's user-facing exception;
+    ``busy`` (default ``error``) is raised instead when another sync holds the lock.
     """
     resolved = Path(install_dir).expanduser().resolve()
     key = hashlib.sha256(str(resolved).encode()).hexdigest()[:16]
@@ -47,7 +49,7 @@ def hold(
                 # A filesystem without flock must not block every sync (#1307 I4).
                 log.warning("file locking is unsupported on %s: %s", lock_path, exc)
             else:
-                raise error(message) from None
+                raise (busy or error)(message) from None
         yield
     finally:
         os.close(fd)

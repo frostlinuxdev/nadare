@@ -10,7 +10,7 @@ from _backend_helpers import make_context, write_exe
 
 from nadare.backends import arknights as ak
 from nadare.backends.arknights import ArknightsBackend
-from nadare.core import yostar
+from nadare.core import directdl, yostar
 from nadare.core.backends import BackendError
 
 
@@ -41,9 +41,9 @@ def test_a_lock_busy_refusal_keeps_the_other_syncs_marker(tmp_path, monkeypatch)
         # The other process's sync is running now: it wrote its marker (recording
         # the update it is doing) and it holds the install lock that refuses us.
         backend._write_install_marker(("1.0", "2.0"))
-        raise yostar.SyncBusy("another install or update is already running")
+        raise directdl.InstallBusy("another install or update is already running")
 
-    monkeypatch.setattr(ak.yostar, "sync", busy)
+    monkeypatch.setattr(ak.directdl, "sync", busy)
     with pytest.raises(BackendError):
         backend.update()
 

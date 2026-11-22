@@ -248,7 +248,7 @@ def _notice_window(tmp_path, monkeypatch, kind, **profile):
     return window, cfg, started
 
 
-def test_unofficial_notice_is_asked_once_per_game_type(tmp_path, qapp, monkeypatch):
+def test_unofficial_notice_is_asked_once_for_the_whole_app(tmp_path, qapp, monkeypatch):
     from PyQt6.QtWidgets import QMessageBox
 
     window, cfg, started = _notice_window(tmp_path, monkeypatch, "stove-czn")
@@ -261,8 +261,13 @@ def test_unofficial_notice_is_asked_once_per_game_type(tmp_path, qapp, monkeypat
         window._on_game_action("launch")
         assert started == ["launch", "launch"]
         assert len(answers) == 1 and "publisher" in answers[0].lower()
-        assert cfg.data["unofficial_notice_ack"] == ["stove-czn"]
-        assert Config.load(tmp_path / "config.json").data["unofficial_notice_ack"] == ["stove-czn"]
+        assert cfg.data["unofficial_notice_ack"] is True
+        assert Config.load(tmp_path / "config.json").data["unofficial_notice_ack"] is True
+        # Another game type does not ask again: the answer counts for the whole app.
+        cfg.add_profile("other", backend="stellasora-yostar", title="Other")
+        window._current_profile = "other"
+        window._on_game_action("launch")
+        assert len(answers) == 1 and started == ["launch"] * 3
     finally:
         window.close()
 
@@ -273,29 +278,30 @@ def test_declining_the_unofficial_notice_blocks_the_operation(tmp_path, qapp, mo
     window, cfg, started = _notice_window(tmp_path, monkeypatch, "stove-czn")
     monkeypatch.setattr(QMessageBox, "exec", lambda self: 4194304)  # Cancel
     try:
-        window._on_game_action("install")
+        window._on_game_action("launch")
         assert started == [] and "unofficial_notice_ack" not in cfg.data
     finally:
         window.close()
 
 
-def test_big_fresh_install_asks_for_confirmation_with_the_size(tmp_path, qapp, monkeypatch):
-    from PyQt6.QtWidgets import QMessageBox
+def test_big_fresh_install_asks_once_in_the_sheet(tmp_path, qapp, monkeypatch):
+    from PyQt6.QtWidgets import QDialog
+
+    from nadare.core import diskspace
+    from nadare.gui.quick_install import QuickInstallDialog
 
     window, cfg, started = _notice_window(tmp_path, monkeypatch, "stellasora-yostar")
-    cfg.data["unofficial_notice_ack"] = ["stellasora-yostar"]
-    # The question also refuses when the game does not fit (#1316): give the fake disk room,
+    cfg.data["unofficial_notice_ack"] = True
+    # The sheet also refuses when the game does not fit (#1316): give the fake disk room,
     # or the result depends on the host's /tmp size.
-    from nadare.core import diskspace
-
     monkeypatch.setattr(diskspace, "free_bytes", lambda path: 1 << 50)
-    asked = []
-    answer = [QMessageBox.StandardButton.Cancel]
-    monkeypatch.setattr(QMessageBox, "exec", lambda self: asked.append(self.text()) or answer[0])
+    shown = []
+    answer = [QDialog.DialogCode.Rejected]
+    monkeypatch.setattr(QuickInstallDialog, "exec", lambda self: shown.append(self) or answer[0])
     try:
         window._on_game_action("install")
-        assert started == [] and "21 GiB" in asked[0]
-        answer[0] = QMessageBox.StandardButton.Yes
+        assert started == [] and "21 GiB" in shown[0].summary_text
+        answer[0] = QDialog.DialogCode.Accepted
         window._on_game_action("install")
         assert started == ["install"]
     finally:
@@ -359,7 +365,7 @@ def test_enter_presses_a_focused_main_window_button(qapp):
         window.close()
 
 
-def test_tab_skips_scroll_frames_and_reaches_the_add_game_card(tmp_path, qapp):
+def test_tab_skips_scroll_frames_and_reaches_library_search(tmp_path, qapp):
     from PyQt6.QtCore import Qt
     from PyQt6.QtTest import QTest
 
@@ -376,8 +382,9 @@ def test_tab_skips_scroll_frames_and_reaches_the_add_game_card(tmp_path, qapp):
             qapp.processEvents()
             focus = qapp.focusWidget()
             reached.append(focus.objectName() if focus else "")
-        # Library -> Downloads -> Settings -> the card: one more stop since the Downloads entry.
-        assert "AddGameCard" in reached[:3]
+        # Library -> Downloads -> Settings -> search; the header now owns Add a game.
+        assert "LibrarySearch" in reached[:3]
+        assert "LibraryAdd" in reached
         assert not any("Scroll" in name for name in reached)
     finally:
         window.close()

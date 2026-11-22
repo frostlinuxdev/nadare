@@ -1007,7 +1007,13 @@ def _extract_archive(
                 internal.cancel()
                 raise
 
-        executor = ThreadPoolExecutor(max_workers=pool_size)
+        from . import transfer
+
+        executor = ThreadPoolExecutor(
+            max_workers=pool_size,
+            initializer=transfer.inherit_transfer,
+            initargs=(transfer.current_transfer(),),
+        )
         try:
             futures = [executor.submit(worker) for _ in range(pool_size)]
             for future in futures:

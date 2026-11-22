@@ -66,7 +66,7 @@ def game(tmp_path, monkeypatch):
         fetched.append(url)
         return served[url]
 
-    def download(rf, path, *, emit=None, cancel=None, pool=None):
+    def download(rf, path, *, emit=None, cancel=None, pool=None, redirect_allowed=None):
         data = files[rf.url]
         assert md5(data) == rf.md5
         Path(path).write_bytes(data)

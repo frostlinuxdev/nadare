@@ -44,9 +44,8 @@ def test_empty_library_points_at_add_game(qapp):
         page.refresh({})
         text = page.subtitle.text()
         assert "No games yet" in text
-        assert "Add game" in text
+        assert "Add a game" in text  # the button's own label (#1408)
         assert "backend" not in text.lower()
-        assert page.hint.text() == "0 games"
     finally:
         page.deleteLater()
         qapp.processEvents()
@@ -54,16 +53,16 @@ def test_empty_library_points_at_add_game(qapp):
 
 # ---- #335 F-11 / #342 F-09: raw backend ids become human labels -----------
 def test_backend_ids_are_shown_as_human_labels(qapp):
-    assert backend_label("arknights-yostar") == "Yostar launcher"
+    assert backend_label("arknights-yostar") == "Direct download"
     # Legacy configs may have stored the id in upper case.
-    assert backend_label("ARKNIGHTS-YOSTAR") == "Yostar launcher"
+    assert backend_label("ARKNIGHTS-YOSTAR") == "Direct download"
 
     card = GameCard("p", "P", "ARKNIGHTS-YOSTAR")
     view = GameView()
     try:
-        assert card.meta_label.text() == "Yostar launcher"
+        assert card.meta_label.text() == "Direct download"
         view.set_profile("p", {"backend": "ARKNIGHTS-YOSTAR", "title": "P"})
-        assert view.backend_label.text() == "Yostar launcher"
+        assert view.backend_label.text() == "Direct download"
     finally:
         card.deleteLater()
         view.deleteLater()

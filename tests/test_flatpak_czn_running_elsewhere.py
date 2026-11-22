@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context
+from _czn_test_helpers import _webview2_ready
 
 from nadare.backends.czn.backend import CznBackend
 from nadare.core import runlock, sandbox
@@ -98,6 +99,7 @@ def test_in_flatpak_launch_holds_the_lock_and_obeys_a_stop_request(tmp_path, mon
     monkeypatch.setattr(sandbox, "in_flatpak", lambda: True)
     monkeypatch.setenv("CZN_SKIP_UPDATE", "1")
     backend = _backend(tmp_path)
+    _webview2_ready(backend.prefix())
     monkeypatch.setattr(backend, "installed", lambda: True)
     monkeypatch.setattr(backend, "_game_running", lambda: False)
     monkeypatch.setattr(backend, "_restore_attempted", True)
@@ -106,7 +108,7 @@ def test_in_flatpak_launch_holds_the_lock_and_obeys_a_stop_request(tmp_path, mon
     monkeypatch.setattr(backend, "_cleanup_stale_session", lambda: None)
     monkeypatch.setattr(backend, "_ensure_stub", lambda: tmp_path / "stub")
     monkeypatch.setattr(backend, "_ensure_vcredist", lambda: None)
-    monkeypatch.setattr(backend, "_prefix_command", lambda args, extra=None: (["stub"], {}))
+    monkeypatch.setattr(backend, "_prefix_command", lambda args, extra=None, **_kw: (["stub"], {}))
     monkeypatch.setattr(backend, "_stub_result", lambda log: "ok")
     seen = {}
 

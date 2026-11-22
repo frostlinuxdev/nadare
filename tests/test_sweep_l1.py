@@ -10,7 +10,7 @@ import pytest
 
 from nadare import app
 from nadare.backends.fgo import readiness
-from nadare.core.backends import BackendError
+from nadare.core.backends import BackendError, BackendNotInstalled
 from nadare.core.config import Config
 
 REPO = Path(__file__).resolve().parents[1]
@@ -32,7 +32,7 @@ def _config(tmp_path: Path, *profiles: tuple[str, dict]) -> tuple[Config, Path]:
 
 
 class _Backend:
-    def __init__(self, *, launch_error: str | None = None, verify=None) -> None:
+    def __init__(self, *, launch_error: BackendError | None = None, verify=None) -> None:
         self._launch_error = launch_error
         self._verify = verify
 
@@ -41,7 +41,7 @@ class _Backend:
 
     def launch(self) -> int:
         if self._launch_error:
-            raise BackendError(self._launch_error, 1)
+            raise self._launch_error
         return 0
 
     def verify(self):
@@ -59,8 +59,8 @@ def test_uninstalled_game_names_the_install_command(
 ) -> None:
     _, path = _config(tmp_path, ("game", {"backend": "wine"}))
     backend = _Backend(
-        launch_error="the game is not installed",
-        verify=BackendError("the game is not installed", 1),
+        launch_error=BackendNotInstalled("Game files have not been acquired", 1),
+        verify=BackendNotInstalled("Acquire game files before checking them", 1),
     )
     monkeypatch.setattr(app, "create_backend", lambda *a, **k: backend)
 

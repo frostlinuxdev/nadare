@@ -95,7 +95,7 @@ def test_a_finished_update_clears_the_marker(tmp_path, monkeypatch):
 def test_the_real_sync_sets_changed_once_a_file_is_replaced(tmp_path, monkeypatch):
     seen = {}
 
-    def fake_download(rf, dest, *, emit=None, cancel=None, pool=None):
+    def fake_download(rf, dest, *, emit=None, cancel=None, pool=None, redirect_allowed=None):
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"x")
 
@@ -114,7 +114,7 @@ def test_the_real_sync_sets_changed_once_a_file_is_replaced(tmp_path, monkeypatc
 def test_the_real_sync_leaves_changed_clear_when_nothing_was_replaced(tmp_path, monkeypatch):
     import threading
 
-    def boom(rf, dest, *, emit=None, cancel=None, pool=None):
+    def boom(rf, dest, *, emit=None, cancel=None, pool=None, redirect_allowed=None):
         raise dd.DirectError("HTTP 500")
 
     monkeypatch.setattr(dd, "_download_remote", boom)

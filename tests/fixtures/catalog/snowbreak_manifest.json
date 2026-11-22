@@ -1,0 +1,45 @@
+{
+ "version": "3.6.0.186",
+ "projectVersion": "3.6.0",
+ "pathOffset": "assets",
+ "bUserCache": false,
+ "bOnlyPatches": true,
+ "paks": [
+  {
+   "name": "Game/Binaries/Win64/Game.exe",
+   "hash": "3a0fff84af264037f39a5058890464c8",
+   "sizeInBytes": 131977096,
+   "bPrimary": 0,
+   "base": "",
+   "diff": "",
+   "diffSizeBytes": 0
+  },
+  {
+   "name": "Game/Content/Paks/App_Engine-WindowsNoEditor.pak",
+   "hash": "40cd4fd4d7804224d4fccc29b3f4b54e",
+   "sizeInBytes": 720590177,
+   "bPrimary": 1,
+   "base": "3ce18783213e585c78746d91df5f7fca",
+   "diff": "373e4defa92911970db6ea82e2ff539a",
+   "diffSizeBytes": 504667691
+  },
+  {
+   "name": "Engine/Binaries/ThirdParty/CEF3/Win64/chrome_elf.dll",
+   "hash": "fc626beca1d1051a02b36a4405ef66fb",
+   "sizeInBytes": 547840,
+   "bPrimary": 0,
+   "base": "",
+   "diff": "",
+   "diffSizeBytes": 0
+  },
+  {
+   "name": "Engine/Binaries/ThirdParty/CEF3/Win64/d3dcompiler_43.dll",
+   "hash": "1c9b45e87528b8bb8cfa884ea0099a85",
+   "sizeInBytes": 2106216,
+   "bPrimary": 0,
+   "base": "",
+   "diff": "",
+   "diffSizeBytes": 0
+  }
+ ]
+}

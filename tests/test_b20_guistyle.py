@@ -19,9 +19,7 @@ try:  # pragma: no cover - only when PyQt6 is missing
 except Exception:  # noqa: BLE001
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
-from nadare.core.config import Config
 from nadare.gui import theme
-from nadare.gui.add_game import PREFIX_ONLY_KINDS, AddGameDialog, detect_import
 
 # This file restyles the whole app: end earlier tests' windows first (#1024).
 pytestmark = pytest.mark.usefixtures("restyle_safe")
@@ -143,7 +141,7 @@ def test_remove_help_describes_every_delete_flag():
         for option in action.option_strings
         if option.startswith("--")
     }
-    assert "files are kept unless" in parser.format_help()
+    assert "files are kept unless" in remove.format_help()
     assert "--delete-data" in flags and "profile" in flags["--delete-data"].lower()
     assert "--delete-install-dir" in flags and "game" in flags["--delete-install-dir"].lower()
     assert "--delete-prefix" in flags and "prefix" in flags["--delete-prefix"].lower()
@@ -152,21 +150,6 @@ def test_remove_help_describes_every_delete_flag():
 
 
 # ---- #332 F-09 the verify prompt defaults to No ------------------------------
-def test_check_files_prompt_defaults_to_no(monkeypatch):
-    from nadare.gui import main_window
-
-    calls: list[tuple] = []
-
-    def question(*args, **kwargs):
-        calls.append((args, kwargs))
-        return main_window.QMessageBox.StandardButton.No
-
-    monkeypatch.setattr(main_window.QMessageBox, "question", question)
-    assert main_window._ask_check_files(None, "Game") is False
-    assert calls
-    args, kwargs = calls[0]
-    default = kwargs.get("defaultButton", args[4])
-    assert default == main_window.QMessageBox.StandardButton.No
 
 
 # ---- #338 F-07 login before install ------------------------------------------
@@ -251,43 +234,6 @@ def test_script_backend_offers_an_editable_prefix():
 
 
 # ---- #288 import an existing lepton-fgo prefix --------------------------------
-def _lepton_prefix(root: Path) -> Path:
-    prefix = root / "lepton-nv"
-    (prefix / "lepton-x86_64").mkdir(parents=True)
-    (prefix / "lepton-x86_64" / "lepton-fgo").write_text("#!/bin/sh\n")
-    return prefix
-
-
-def test_detect_import_finds_a_lepton_prefix(tmp_path):
-    prefix = _lepton_prefix(tmp_path)
-    info = detect_import("fgo-lepton", prefix, None)
-    assert info["prefix"] == str(prefix)
-    assert info["install_dir"] == ""
-    assert info["notes"]
-
-
-def test_detect_import_rejects_a_folder_without_lepton(tmp_path):
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    assert detect_import("fgo-lepton", empty, None)["notes"] == []
-    assert "fgo-lepton" in PREFIX_ONLY_KINDS
-
-
-def test_import_existing_fgo_keeps_the_lepton_prefix(tmp_path, qapp):
-    prefix = _lepton_prefix(tmp_path)
-    config = Config.load(tmp_path / "config.json")
-    dialog = AddGameDialog(config, data_root=tmp_path / "data")
-    try:
-        dialog.set_backend("fgo-lepton")
-        dialog.set_mode(True)
-        dialog.set_install_dir(prefix)
-        assert dialog.create_profile() == "fgo"
-        profile = config.profile("fgo")
-        assert profile["prefix"] == str(prefix)
-        assert not profile.get("install_dir")
-    finally:
-        dialog.deleteLater()
-        qapp.processEvents()
 
 
 # ---- #361 F-11 a missing check-host.sh names the real fix ---------------------

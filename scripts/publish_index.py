@@ -386,12 +386,14 @@ def default_catalog_games() -> dict[str, CatalogGame]:
     from nadare.core.sources import (
         aethergazer,
         bd2,
+        dna,
         endfield,
         gfl2,
         hoyo,
         mongil,
         nte,
         pgr,
+        snowbreak,
         wuwa,
     )
 
@@ -405,6 +407,8 @@ def default_catalog_games() -> dict[str, CatalogGame]:
         "gfl2-haoplay": types.SimpleNamespace(resolve=gfl2.resolve_haoplay),
         "endfield": endfield,
         "nte": nte,
+        "dna": dna,
+        "snowbreak": snowbreak,
     }
     games: dict[str, CatalogGame] = {}
     for kind, steam_appid in dk.ART.items():

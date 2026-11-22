@@ -66,3 +66,34 @@ def test_a_profile_extra_env_wins_over_the_display_choice(tmp_path, monkeypatch)
     backend = WineGameBackend(ctx)
     monkeypatch.setattr(backend, "resolve_runner", lambda: (None, "proton"))
     assert "display: x11" in backend._runtime_note()
+
+
+# #1299: the default display is code, not data; a release that flips a game's default changes old
+# profiles without a word. The launch log now says where the display choice came from.
+def test_the_note_says_the_display_is_the_games_default(tmp_path, monkeypatch):
+    backend = _backend(tmp_path, monkeypatch)
+    assert "display from: this game's default" in backend._runtime_note()
+
+
+@pytest.mark.parametrize("choice", ["wayland", "x11", "xwayland"])
+def test_the_note_says_the_display_is_the_players_setting(tmp_path, monkeypatch, choice):
+    backend = _backend(tmp_path, monkeypatch, display=choice)
+    assert "display from: the game's Display setting" in backend._runtime_note()
+
+
+def test_the_note_names_an_exported_variable(tmp_path, monkeypatch):
+    backend = _backend(tmp_path, monkeypatch)
+    monkeypatch.setenv("PROTON_ENABLE_WAYLAND", "0")
+    assert "display from: PROTON_ENABLE_WAYLAND in Nadare's environment" in backend._runtime_note()
+
+
+def test_the_note_names_the_profile_environment(tmp_path, monkeypatch):
+    wine = write_exe(tmp_path / "wine")
+    ctx = make_context(
+        tmp_path,
+        "wine",
+        {"wine_binary": str(wine), "extra": {"extra_env": {"PROTON_ENABLE_WAYLAND": "0"}}},
+    )
+    backend = WineGameBackend(ctx)
+    monkeypatch.setattr(backend, "resolve_runner", lambda: (None, "proton"))
+    assert "display from: the game's Environment setting" in backend._runtime_note()

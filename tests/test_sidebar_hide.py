@@ -137,8 +137,8 @@ def _window(tmp_path, monkeypatch, **values):
 def test_the_window_applies_the_saved_setting_at_start(qapp, tmp_path, monkeypatch):
     window = _window(tmp_path, monkeypatch, sidebar_hide_uninstalled=True)
     try:
-        window._on_result("a", Status("installed"))
-        window._on_result("b", Status("not_installed"))
+        window._on_result("a", "status", Status("installed"))
+        window._on_result("b", "status", Status("not_installed"))
         assert window.sidebar_games.profiles() == ["a"]
     finally:
         window.close()
@@ -149,8 +149,8 @@ def test_the_window_applies_the_saved_setting_at_start(qapp, tmp_path, monkeypat
 def test_saving_the_setting_updates_the_sidebar_at_once(qapp, tmp_path, monkeypatch):
     window = _window(tmp_path, monkeypatch)
     try:
-        window._on_result("a", Status("installed"))
-        window._on_result("b", Status("not_installed"))
+        window._on_result("a", "status", Status("installed"))
+        window._on_result("b", "status", Status("not_installed"))
         assert set(window.sidebar_games.profiles()) == {"a", "b"}
         window.config.data["sidebar_hide_uninstalled"] = True
         window._on_settings_saved("a")

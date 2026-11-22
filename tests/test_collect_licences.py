@@ -293,7 +293,10 @@ def test_the_notice_states_nadares_real_licence(cl, tmp_path):
     )["project"]
     licence = project["license"]
     licence = licence["text"] if isinstance(licence, dict) else licence
-    assert licence == "GPL-3.0-only"
+    # #1549: an SPDX expression; Nadare's own term comes first, the rest covers the
+    # bundled font (OFL-1.1). Never "or later".
+    assert licence.split(" AND ")[0] == "GPL-3.0-only"
+    assert "or-later" not in licence and "+" not in licence
     head = text.split("Python components", 1)[0]
     assert "GPL-3.0-only" in head and "or later" not in head and "or-later" not in head
     qt_part = text.split("Qt (LGPL-3.0)", 1)[1]

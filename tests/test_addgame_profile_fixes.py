@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Add-game path uniqueness, import guards and honest install/update actions."""
+"""Add-game path uniqueness and honest install/update actions."""
 
 from __future__ import annotations
 
@@ -57,56 +57,6 @@ def test_a_second_copy_of_a_catalog_game_is_refused(tmp_path, qapp):
     one = config.profile("arknights")
     assert one["install_dir"] == first_folder
     assert one["prefix"] == first_prefix
-
-
-def test_import_rejects_a_nonexistent_folder(tmp_path, qapp):
-    config = Config.load(tmp_path / "config.json")
-    dialog = AddGameDialog(config, data_root=tmp_path / "data")
-    try:
-        dialog.set_backend("arknights-yostar")
-        dialog.set_mode(True)
-        dialog.set_install_dir(tmp_path / "not-a-game")
-        assert dialog.create_profile() is None
-        assert config.profiles == {}
-        assert dialog.error_label.text()
-    finally:
-        dialog.deleteLater()
-        qapp.processEvents()
-
-
-def test_import_rejects_a_folder_where_nothing_was_detected(tmp_path, qapp):
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    config = Config.load(tmp_path / "config.json")
-    dialog = AddGameDialog(config, data_root=tmp_path / "data")
-    try:
-        dialog.set_backend("arknights-yostar")
-        dialog.set_mode(True)
-        dialog.set_install_dir(empty)
-        assert dialog.detect_label.text() == "Nothing detected yet."
-        assert dialog.create_profile() is None
-        assert config.profiles == {}
-        assert "No Arknights installation" in dialog.error_label.text()
-    finally:
-        dialog.deleteLater()
-        qapp.processEvents()
-
-
-def test_import_generic_existing_folder_still_works(tmp_path, qapp):
-    folder = tmp_path / "steamgame"
-    folder.mkdir()
-    config = Config.load(tmp_path / "config.json")
-    dialog = AddGameDialog(config, data_root=tmp_path / "data")
-    try:
-        dialog.set_backend("steam")
-        dialog.set_mode(True)
-        dialog.set_install_dir(folder)
-        dialog.detect()
-        assert dialog.detect_label.text() != "Nothing detected yet."
-        assert dialog.create_profile() == "steam-game"
-    finally:
-        dialog.deleteLater()
-        qapp.processEvents()
 
 
 def test_script_and_steam_are_not_installable(tmp_path):

@@ -11,7 +11,6 @@ Where a guard has a legitimate side, it is tested too.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import signal
@@ -66,32 +65,6 @@ def test_a_tree_that_is_itself_a_mount_is_left_alone(tmp_path, monkeypatch):
     outcome = removal._rmtree_safely(root)
     assert outcome.mounts == [root]
     assert (root / "game.bin").exists()
-
-
-# ---- CZN: a plain uninstall keeps the login; purge removes it -------------------------------
-def _czn(xdg, name="stove-czn"):
-    from nadare.backends.czn.backend import CznBackend
-    from nadare.core.backends import BackendContext
-
-    cfg = Config.load(xdg / "config.json")
-    cfg.add_profile(name, backend="stove-czn")
-    backend = CznBackend(BackendContext(name=name, profile=cfg.profile(name), config=cfg))
-    data = backend._data_dir()
-    data.mkdir(parents=True, exist_ok=True)
-    (data / "session.json").write_text("{}")
-    (backend.prefix() / "drive_c").mkdir(parents=True, exist_ok=True)
-    backend._running = lambda: False
-    return backend, data
-
-
-def test_czn_plain_uninstall_keeps_the_login_and_purge_removes_it(xdg):
-    backend, data = _czn(xdg)
-    with contextlib.suppress(BackendError):  # what it says about the prefix does not matter here
-        backend.uninstall(purge=False)
-    assert (data / "session.json").exists()
-    with contextlib.suppress(BackendError):
-        backend.uninstall(purge=True)
-    assert not (data / "session.json").exists()
 
 
 # ---- config: a damaged profiles value on disk is not "every profile removed" ------------------

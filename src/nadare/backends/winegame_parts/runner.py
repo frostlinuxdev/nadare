@@ -51,7 +51,7 @@ class RunnerMixin:
         if rid in runners.RUNNERS:
             return rid
         if not rid and self._default_runner_applies():
-            return runners.DEFAULT_FAMILY
+            return runners.default_family(getattr(self, "kind", None))
         return None
 
     def _ensure_default_runner(self, *, strict: bool) -> None:

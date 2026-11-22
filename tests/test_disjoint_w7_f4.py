@@ -17,7 +17,7 @@ def test_the_arknights_publisher_installer_runs_on_xwayland(tmp_path, monkeypatc
     monkeypatch.delenv("PROTON_ENABLE_WAYLAND", raising=False)
     seen: list[dict[str, str]] = []
 
-    def fake_stream(argv, env, on_line=None, cancel=None):
+    def fake_stream(argv, env, on_line=None, cancel=None, before_stop=None):
         seen.append(dict(env))
         return 0
 

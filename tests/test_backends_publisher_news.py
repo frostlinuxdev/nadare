@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from nadare.backends import bd2_news, endfield_news, kuro_news, nikke_news, nte_news
@@ -63,7 +65,15 @@ def test_kuro_item_fields_label_and_article_url():
     item = kuro([article(5668, "Phase II", 57, "2026-10-20 18:00:00")]).items[0]
     assert item["title"] == "Phase II" and item["category"] == "News"
     assert item["url"] == "https://wutheringwaves.kurogames.com/en/main/news/detail/5668"
-    assert item["published_at"] == 1792519200000  # 2026-10-20 18:00:00 UTC
+    assert item["published_at"] == 1792490400000  # 2026-10-20 18:00:00 UTC+8
+
+
+def test_kuro_start_time_is_the_publishers_utc_plus_8_wall_clock():
+    # The CMS writes ArticleMenu.json's startTime in China time: article 5786 has
+    # startTime 2026-11-12 16:30:00 and its CDN file, uploaded when it went live, is
+    # Last-Modified 2026-11-12 08:30:02 GMT; the patch notes state times "(UTC+8)".
+    item = kuro([article(5786, start="2026-11-12 16:30:00")]).items[0]
+    assert item["published_at"] == int(datetime(2026, 11, 12, 8, 30, tzinfo=UTC).timestamp() * 1000)
 
 
 def test_kuro_cover_becomes_a_featured_item_so_the_hero_has_art():

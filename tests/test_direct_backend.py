@@ -116,23 +116,6 @@ def test_catalog_kinds_are_wired_into_the_ui_and_runner_defaults():
             assert library._BACKEND_LABELS[kind] == label
 
 
-def test_importing_an_existing_install_finds_the_catalog_layout(tmp_path):
-    from nadare.gui import add_game
-
-    install = tmp_path / "pfx/drive_c/Games/BrownDust2"
-    install.mkdir(parents=True)
-    (install / "BrownDust II.exe").write_bytes(b"MZ")
-    info = add_game.detect_import("direct-bd2", tmp_path / "pfx", None)
-    assert info["install_dir"] == str(install) and info["prefix"] == str(tmp_path / "pfx")
-    nikke = tmp_path / "p2/drive_c/NIKKE"
-    # An empty NIKKE folder is not an install (#1207 b148): the launcher must be there.
-    (nikke / "Launcher").mkdir(parents=True)
-    (nikke / "Launcher" / "nikke_launcher.exe").write_bytes(b"MZ")
-    assert add_game.detect_import("launcher-nikke", tmp_path / "p2", None)["install_dir"] == str(
-        nikke
-    )
-
-
 def test_no_yostar_options_on_direct_backends():
     keys = {o.key for o in direct.DirectBackend.options}
     assert not keys & {"manifest_index", "manifest_file", "installer_url", "media_file"}
@@ -496,7 +479,8 @@ def test_tiers_mark_only_the_launched_games_as_verified():
     # Every tier is a known one (all catalog games are Verified since the launcher duplicates
     # were retired, 2026-11-10; a new game starts Experimental).
     not_verified = sorted(k for k in dk.CATALOG_KINDS if dk.tier_of(k) != dk.TIER_VERIFIED)
-    assert not_verified == []  # a new Experimental game: list it here on purpose
+    # New Experimental games: list each here on purpose.
+    assert not_verified == ["direct-dna", "direct-snowbreak"]
     assert dk.tier_of("direct-bd2") == "Verified"
     assert dk.tier_of("direct-endfield") == "Verified"
     assert dk.tier_of("direct-nte") == "Verified"
@@ -702,6 +686,22 @@ def test_wuwa_runs_under_its_umu_id_so_the_runner_fixes_apply(tmp_path, monkeypa
     # GAMEID=0 that fix never ran (2026-11-14, flxpc).
     env = _wuwa_env(tmp_path, monkeypatch)
     assert env["GAMEID"] == "umu-3513350" and env["UMU_ID"] == "umu-3513350"
+
+
+@pytest.mark.parametrize("sandboxed", [False, True])
+def test_dna_runs_under_its_umu_id_so_the_cef_fix_applies(tmp_path, monkeypatch, sandboxed):
+    # DW-Proton's gamefixes-umu/umu-3950020.py -> gamefixes-steam/3950020.py disables dcomp
+    # ("CEF tries to use dcomp by default which only has stubs") and sets the INT3 hack. Without
+    # an id DNA ran as umu-default, the fix never loaded and its CEF window stayed white
+    # (2026-11-17, flxpc, RTX 3060). DNA always runs in the Sandbox, so both paths count.
+    from nadare.backends import direct
+
+    ctx = make_context(tmp_path, "direct-dna", {"prefix": str(tmp_path / "pfx")})
+    b = direct.DnaBackend(ctx)
+    monkeypatch.setattr(b, "resolve_runner", lambda: ("/opt/proton", "proton"))
+    monkeypatch.setattr("nadare.core.umu.system", lambda configured="umu-run": "/usr/bin/umu-run")
+    env = b._prefix_command(["x.exe"], sandboxed=sandboxed)[1]
+    assert env["GAMEID"] == "umu-3950020" and env["UMU_ID"] == "umu-3950020"
 
 
 def test_a_profile_gameid_still_wins_for_wuwa(tmp_path, monkeypatch):

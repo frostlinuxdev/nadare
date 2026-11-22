@@ -9,13 +9,19 @@ launch options (``localconfig.vdf``). What is saved is exactly what that undo ne
 from __future__ import annotations
 
 import contextlib
+import errno
+import fcntl
 import json
+import logging
 import os
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from . import paths, steamtools, steamwayland
+
+log = logging.getLogger(__name__)
 
 FILE = "steam-undo.json"
 UNDOABLE = ("set_runner", "set_wayland")
@@ -49,6 +55,31 @@ def _read(state_dir: Path | None) -> dict[str, Any]:
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+@contextlib.contextmanager
+def _transaction(state_dir: Path | None) -> Iterator[None]:
+    """Hold the store's lock across one read-modify-write.
+
+    The undo file is shared by every game and replaced whole, so two Nadare processes that each
+    read it and then write it back would erase each other's undo (#1491). The lock is a separate
+    file because ``os.replace`` swaps the store's inode. A filesystem without ``flock`` still
+    saves (the write stays atomic, only the serialisation is lost); any other lock error is
+    raised before anything is read or written.
+    """
+    lock_path = _path(state_dir).with_name(FILE + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as exc:
+            if exc.errno not in (errno.ENOLCK, errno.ENOTSUP, errno.EOPNOTSUPP):
+                raise
+            log.warning("file locking is unsupported on %s: %s", lock_path, exc)
+        yield
+    finally:
+        os.close(fd)
 
 
 def _write(data: dict[str, Any], state_dir: Path | None) -> None:
@@ -123,11 +154,12 @@ def save(
     encoded = _encode(action, payload) if action in UNDOABLE else None
     if encoded is None:
         return
-    data = _read(state_dir)
-    stack = _stack(data, app_id)
-    stack.append({"action": action, "payload": encoded, "where": str(where or "")})
-    data[str(app_id)] = stack[-KEEP:]
-    _write(data, state_dir)
+    with _transaction(state_dir):
+        data = _read(state_dir)
+        stack = _stack(data, app_id)
+        stack.append({"action": action, "payload": encoded, "where": str(where or "")})
+        data[str(app_id)] = stack[-KEEP:]
+        _write(data, state_dir)
 
 
 def where(app_id: str | int, *, state_dir: Path | None = None) -> str:
@@ -161,12 +193,13 @@ def load(app_id: str | int, *, state_dir: Path | None = None) -> tuple[str, obje
 
 def clear(app_id: str | int, *, state_dir: Path | None = None) -> None:
     """Drop this game's newest undo (it was used or no longer fits); the one before is next."""
-    data = _read(state_dir)
-    if str(app_id) not in data:
-        return
-    stack = _stack(data, app_id)[:-1]
-    if stack:
-        data[str(app_id)] = stack
-    else:
-        del data[str(app_id)]
-    _write(data, state_dir)
+    with _transaction(state_dir):
+        data = _read(state_dir)
+        if str(app_id) not in data:
+            return
+        stack = _stack(data, app_id)[:-1]
+        if stack:
+            data[str(app_id)] = stack
+        else:
+            del data[str(app_id)]
+        _write(data, state_dir)

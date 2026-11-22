@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Nadare contributors
 """Reactions to the backend controller: busy, queue, pause, cancel, events, results and failures.
 
-Split out of :mod:`nadare.gui.main_window`; the code is unchanged.
+Widget adapter for :mod:`nadare.gui.operation_presentation`.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from __future__ import annotations
 import copy
 import logging
 import time
-from collections import deque
 from typing import Any
 
 from PyQt6.QtWidgets import (
@@ -20,25 +19,30 @@ from PyQt6.QtWidgets import (
 from ...core import backends as core_backends
 from ...core import (
     friendly,
+    gamefacts,
+    operation_policy,
+    process,
 )
 from ...core.backends import (
     Status,
 )
 from ...core.config import Config
 from ...core.events import Event
+from ...core.exitcode import STOPPED_EXIT_CODES
 from ...core.news import NewsResult
-from .. import notify
+from ...core.verification import VerifyResult
+from .. import clickguard, notify
 from ..game_view import OPERATION_TITLES, can_pause_kind
+from ..operation_presentation import REPLAY_EVENTS
 from ..terms_dialog import TermsDialog
-from ..workers import CAPPED
+from ..workers import CAPPED, QualityCleanupResult
+
+_REPLAY_EVENTS = REPLAY_EVENTS
 
 log = logging.getLogger("nadare.gui.main_window")
 
-#: Events kept per running operation so a game page can replay its log.
-_REPLAY_EVENTS = 400
-
 #: Background refreshes that must never put the page into the busy state.
-SILENT_OPERATIONS = frozenset({"status", "news", "media", "check_update"})
+SILENT_OPERATIONS = operation_policy.operations_with("background")
 
 
 def _unknown_backend_message(value: str) -> str:
@@ -65,37 +69,95 @@ def _status_error_text(kind: str, message: str) -> str:
     return message
 
 #: Busy operations that cannot stop mid-flight, so their button must not offer CANCEL.
-UNCANCELLABLE_OPERATIONS = frozenset({"verify"})
+UNCANCELLABLE_OPERATIONS = frozenset(operation_policy.POLICIES) - operation_policy.operations_with(
+    "cancellable"
+)
 
 #: Failures after which the install state may have changed: probe it again.
-REPROBE_OPERATIONS = frozenset({"install", "update", "launch", "verify"})
+REPROBE_OPERATIONS = operation_policy.operations_with("reprobe")
 
 #: Side-status wording for operations whose name reads badly as-is.
-_OPERATION_LABELS = {"set_remember": "Saving"}
+#: What each operation's result is (#1458); an operation not listed has no result.
+_RESULT_TYPES: dict[str, type | tuple[type, ...]] = {
+    "status": Status,
+    "verify": (VerifyResult, dict),
+    "news": NewsResult,
+    "media": dict,
+    "remove_qualities": QualityCleanupResult,
+}
+
+_OPERATION_LABELS = {"set_remember": "Saving", "remove_qualities": "Removing old quality files"}
+
+#: The Library card's badge while one of these runs; the status probe keeps saying "not installed"
+#: until an install ends (user sim r2 item 5). Other operations keep the probe's state.
+LIBRARY_BUSY_STATES = {
+    "install": "installing",
+    "update": "updating",
+    "repair": "repairing",
+    "remake_prefix": "repairing",
+    "verify": "verifying",
+}
+
+
+#: The game page's rule (``busy._LAUNCH_EXIT_GRACE_S``): a game that ran this long, or showed
+#: its window, was really played. A non-zero exit after it is a game that closed (Wine games
+#: often exit non-zero on quit), and no later failure undoes its play stamp.
+LAUNCH_EXIT_GRACE_SECONDS = 30.0
 
 
 class OperationsMixin:
     """Mixin for :class:`MainWindow`; see the module text."""
 
+    def _show_launch_sheet(self, profile: str) -> None:
+        from ..launch_sheet import LaunchSheet
+
+        previous = self._launch_sheet
+        if previous is not None:
+            previous.finish()
+            previous.deleteLater()
+        sheet = LaunchSheet(self._game_title(profile), self)
+        self._launch_sheet = sheet
+        self._launch_sheet_profile = profile
+        sheet.stopped.connect(lambda: self._start(profile, "stop"))
+        sheet.finished.connect(lambda: self._forget_launch_sheet(sheet))
+
+    def _forget_launch_sheet(self, sheet) -> None:
+        """The sheet closed itself: it is no longer the live one."""
+        if self._launch_sheet is sheet:
+            self._launch_sheet = None
+            self._launch_sheet_profile = None
+
+    def _finish_launch_sheet(self, profile: str) -> None:
+        if self._launch_sheet_profile == profile and self._launch_sheet is not None:
+            self._launch_sheet.finish()
+
     def _on_busy(self, profile: str, operation: str, active: bool) -> None:
+        if operation == "launch" and not active:
+            self._finish_launch_sheet(profile)
         if operation in SILENT_OPERATIONS:
             # Background status/news/media refreshes never mark the game busy:
             # no CANCEL, no "CHECKING…" and no console expansion.
             return
-        self._waiting.discard(profile)  # a waiting game is told again right after (_on_queued)
+        self._operations.busy_changed(profile, operation, active)
+        if operation in LIBRARY_BUSY_STATES:
+            self.library.set_busy(profile, LIBRARY_BUSY_STATES[operation] if active else None)
+        if operation == "launch" and active:
+            snap = self._snapshot(profile)
+            snap.pop("launch_previous_played", None)
+            snap.pop("launch_running_at", None)
+            snap.pop("launch_failed", None)
         if active:
             self._download_progress.pop(profile, None)
             self._download_eta.pop(profile, None)
-            self._busy[profile] = operation
-            self._snapshot(profile).pop("events", None)  # a new run starts a new log
+            self._reset_download_speed(profile)
         else:
-            self._busy.pop(profile, None)
+            self._end_runner_downloads(profile)
             self._apply_pending_remember(profile)
             if operation == "launch":
                 self.controller.launch_ended(profile)
             self._maybe_finish_background_close()
         if profile == self._current_profile and active:
-            self.game.set_busy(operation)
+            self.game.set_busy(self._operations.view(profile).busy)
             label = _OPERATION_LABELS.get(operation, operation.replace("_", " ").capitalize())
             self._set_side_status(f"{label} · {self._game_title(profile)}")
             if operation in UNCANCELLABLE_OPERATIONS:
@@ -110,7 +172,9 @@ class OperationsMixin:
         """The game's install/update/repair waits for a free slot (#770)."""
         if self._closing:
             return
-        self._waiting.add(profile)
+        self._operations.queued(profile, operation)
+        if operation in LIBRARY_BUSY_STATES:
+            self.library.set_busy(profile, "waiting")
         if profile == self._current_profile:
             self._show_waiting(profile, operation)
             self._set_side_status(f"Waiting · {self._game_title(profile)}")
@@ -192,6 +256,8 @@ class OperationsMixin:
         carry_on = box.addButton("Keep downloading", QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(carry_on)
         box.setEscapeButton(carry_on)
+        # CANCEL opens this under the pointer: a double-click's second click must not answer it.
+        clickguard.hold_clicks(box)
         try:
             box.exec()
             clicked = box.clickedButton()
@@ -218,14 +284,51 @@ class OperationsMixin:
     def _on_paused(self, profile: str, operation: str) -> None:
         if self._closing:
             return
-        self._busy.pop(profile, None)
+        self._operations.paused(profile, operation)
         if profile == self._current_profile:
-            self.game.set_paused(operation)
+            self.game.set_paused(self._operations.view(profile).paused)
 
     # ---- controller fan-out -------------------------------------------------
     def _on_event(self, profile: str, event: Event) -> None:
+        if (
+            event.kind == "error"
+            and self._busy.get(profile) == "launch"
+            and not self._stale_worker_result(profile, "launch")
+        ):
+            self._failed_launch(profile, event.message)
+        if event.kind == "window_seen":
+            # Internal launch feedback, not a backend line for the game console.
+            if not self._stale_worker_result(profile, "launch"):
+                self._finish_launch_sheet(profile)
+                # The game showed its window: this play counts whatever the exit code.
+                self._snapshot(profile).pop("launch_previous_played", None)
+            return
+        if (
+            self._launch_sheet_profile == profile
+            and self._launch_sheet is not None
+            and not self._stale_worker_result(profile, "launch")
+        ):
+            self._launch_sheet.progress(event)
         data = event.data or {}
-        if self.controller.running_operation(profile) in CAPPED:
+        if (
+            event.kind == "game_running"
+            and self._busy.get(profile) == "launch"
+            and not self._snapshot(profile).get("launch_failed")
+            and not self._stale_worker_result(profile, "launch")
+        ):
+            previous = self._snapshot(profile).get("status")
+            self._on_result(
+                profile,
+                "status",
+                Status(
+                    "running",
+                    version=getattr(previous, "version", None),
+                    running=True,
+                    data=dict(getattr(previous, "data", None) or {}),
+                ),
+            )
+        runner_event = self._on_runner_download_event(profile, event)
+        if not runner_event and self.controller.running_operation(profile) in CAPPED:
             self._track_download_progress(profile, event)
         if event.kind == "step" and data.get("png"):
             self._snapshot(profile)["qr"] = data["png"]
@@ -242,12 +345,7 @@ class OperationsMixin:
             )
         ):
             self._remember_notice[profile] = event.message
-        if profile in self._busy:
-            # Kept so switching away and back replays the log and progress
-            # instead of showing an empty console for a running install.
-            self._snapshot(profile).setdefault("events", deque(maxlen=_REPLAY_EVENTS)).append(
-                event
-            )
+        self._operations.event(profile, event)
         if profile == self._current_profile:
             self.game.append_event(event)
 
@@ -260,21 +358,25 @@ class OperationsMixin:
                 return token != generation
         return self._worker_generations.get(profile, generation) != generation
 
-    @staticmethod
-    def _result_operation(result: Any) -> str:
-        """The operation that produced a controller ``result`` value."""
-        if isinstance(result, NewsResult):
-            return "news"
-        if isinstance(result, dict) and result.get("kind") == "media":
-            return "media"
-        if isinstance(result, Status):
-            return "status"
-        return "verify"
+    def _on_result(self, profile: str, operation: str, result: Any) -> None:
+        """A worker's result, routed by the operation that produced it (#1458).
 
-    def _on_result(self, profile: str, result: Any) -> None:
-        if self._stale_worker_result(profile, self._result_operation(result)):
+        The payload must have the shape that operation returns; anything else (an unknown
+        operation, or a payload of the wrong kind) is logged and dropped, never guessed.
+        """
+        if self._stale_worker_result(profile, operation):
             return  # the profile was removed/re-added after this worker started
-        if isinstance(result, NewsResult):
+        expected = _RESULT_TYPES.get(operation)
+        if expected is None or not isinstance(result, expected):
+            log.warning(
+                "dropped a %s result of type %s for %r",
+                operation, type(result).__name__, profile,
+            )
+            return
+        if operation == "remove_qualities":
+            self._quality_cleanup_finished(profile, result)
+            return
+        if operation == "news":
             hero = getattr(result, "hero", None)
             if hero:
                 self._record_official_art(profile, hero)
@@ -283,7 +385,7 @@ class OperationsMixin:
             snap["news_at"] = time.monotonic()
             if profile == self._current_profile:
                 self.game.set_news(result)
-        elif isinstance(result, dict) and result.get("kind") == "media":
+        elif operation == "media":
             hero = result.get("hero")
             if hero:
                 self._record_official_art(profile, hero)
@@ -292,7 +394,7 @@ class OperationsMixin:
             snap["media_at"] = time.monotonic()
             if profile == self._current_profile:
                 self.game.set_media(result.get("hero"), result.get("banners") or [])
-        elif isinstance(result, Status):
+        elif operation == "status":
             probe = result
             failure = self._verify_failures.get(profile)
             if failure is not None and probe.state != "error":
@@ -305,6 +407,7 @@ class OperationsMixin:
                     data={**(probe.data or {}), "verify_failed": True},
                 )
             snap = self._snapshot(profile)
+            self._record_played(profile, snap.get("status"), result)
             snap["status"] = result
             snap["status_at"] = time.monotonic()
             if probe.state == "error":
@@ -313,27 +416,39 @@ class OperationsMixin:
                 self._status_errors.pop(profile, None)
             self.library.set_state(profile, result)
             self.sidebar_games.set_status(profile, result)
+            self._maybe_offer_spare_copies(profile, result)
             if profile == self._current_profile:
+                self.game.set_busy_elsewhere(self._busy_elsewhere(profile))
                 self.game.set_status(result)
                 title = self._game_title(profile)
-                if result.running or result.state == "running":
+                if gamefacts.is_running(result):
                     self._set_side_status(f"Playing {title}")
                 else:
                     self._set_side_status(
                         f"{result.state.replace('_', ' ').title()} · {title}"
                     )
-        elif isinstance(result, dict):
-            msg = result.get("message")
-            if result.get("verified", True):
+        elif operation == "verify":
+            verified = VerifyResult.from_report(result)
+            msg = verified.message
+            if verified.outcome == "passed":
                 self._verify_failures.pop(profile, None)
                 QMessageBox.information(
                     self, "Check game files", str(msg or "All checks passed")
                 )
-            else:
+            elif verified.outcome == "failed":
                 message = str(msg or "File check failed")
                 self._verify_failures[profile] = message
                 QMessageBox.warning(self, "File check failed", message)
                 self._show_verify_failure(profile, message)
+            elif verified.outcome == "nothing_to_verify":
+                # Nothing was checked, so nothing failed: do not outrank a later probe.
+                self._verify_failures.pop(profile, None)
+                QMessageBox.information(
+                    self, "Check game files", str(msg or "nothing to verify")
+                )
+            else:
+                # "not installed" is not a file-check failure; the re-probe shows INSTALL.
+                self._verify_failures.pop(profile, None)
 
     def _show_verify_failure(self, profile: str, message: str) -> None:
         """Put a failed file check on the page at once, before its re-probe lands."""
@@ -353,6 +468,71 @@ class OperationsMixin:
         if profile == self._current_profile:
             self.game.set_status(status)
             self._set_side_status(f"File check failed · {self._game_title(profile)}")
+
+    def _busy_elsewhere(self, profile: str) -> bool:
+        """Whether another process holds ``profile``'s operation lock (r3b05/r3b07 F2).
+
+        This window's own jobs hold the same lock: a worker of ours, or our predownload.
+        """
+        if self._busy.get(profile) not in (None, "status") or self.predownloads.is_busy(profile):
+            return False
+        return process.operation_in_progress(profile)
+
+    def _record_played(self, profile: str, previous: Status | None, status: Status) -> None:
+        """Record running transitions, including external games; undo failed launches.
+
+        A process is provisional evidence: keep its old stamp until the launch ends,
+        so even a failure after a window appeared can restore the previous history.
+        """
+        snap = self._snapshot(profile)
+        if snap.get("launch_failed"):
+            if not gamefacts.is_running(status):
+                snap.pop("launch_failed", None)
+            return  # A surviving process is still shown, but is not a new play.
+        if gamefacts.is_running(status) and not gamefacts.is_running(previous):
+            if self._busy.get(profile) == "launch":
+                data = self.config.profiles.get(profile, {})
+                if "launch_previous_played" not in snap:
+                    had = "last_played" in data
+                    snap["launch_previous_played"] = (had, data.get("last_played"))
+                    snap["launch_running_at"] = time.monotonic()
+            if self.config.mark_played(profile):
+                with self.config.locked():
+                    self.config.save()
+                self.library.refresh(self.config.profiles)
+
+    def _launch_exit_failed(self, profile: str, exit_code: int) -> bool:
+        """A non-zero exit soon after the start; a stop's signal code or a late exit is a quit."""
+        if exit_code == 0 or exit_code in STOPPED_EXIT_CODES:
+            return False
+        running_at = self._snapshot(profile).get("launch_running_at")
+        return running_at is None or time.monotonic() - running_at < LAUNCH_EXIT_GRACE_SECONDS
+
+    def _failed_launch(self, profile: str, message: str) -> None:
+        """Remove provisional play history and stale running UI before showing failure."""
+        snap = self._snapshot(profile)
+        snap["launch_failed"] = True
+        previous = snap.pop("launch_previous_played", None)
+        running_at = snap.pop("launch_running_at", None)
+        if running_at is not None and time.monotonic() - running_at >= LAUNCH_EXIT_GRACE_SECONDS:
+            previous = None  # it ran long enough to be a real play
+        data = self.config.profiles.get(profile)
+        if previous is not None and data is not None:
+            present, value = previous
+            with self.config.locked():
+                if present:
+                    data["last_played"] = value
+                else:
+                    data.pop("last_played", None)
+                try:
+                    self.config.save()
+                except OSError:
+                    log.warning("could not save restored play history", exc_info=True)
+            self.library.refresh(self.config.profiles)
+        self._finish_launch_sheet(profile)
+        self._mark_status_error(profile, message)
+        if profile == self._current_profile:
+            self.game.step_label.setText("")
 
     def _record_official_art(self, profile: str, path: str) -> None:
         """Persist publisher-art provenance on the GUI thread.
@@ -374,8 +554,19 @@ class OperationsMixin:
                     log.warning("could not save official-art provenance", exc_info=True)
 
     def _on_succeeded(self, profile: str, operation: str, exit_code: int) -> None:
+        if operation == "launch":
+            self._finish_launch_sheet(profile)
         if self._closing or self._stale_worker_result(profile, operation):
             return
+        if operation == "launch":
+            if self._launch_exit_failed(profile, exit_code):
+                self._failed_launch(profile, f"Launching did not finish (exit code {exit_code}).")
+            else:
+                self._snapshot(profile).pop("launch_previous_played", None)
+                self._snapshot(profile).pop("launch_running_at", None)
+        self._operations.complete(profile, operation, "succeeded")
+        if operation in LIBRARY_BUSY_STATES:
+            self.library.set_busy(profile, None)  # a queued job that never ran has no busy(False)
         if operation not in SILENT_OPERATIONS:
             self._remove_after_cancel.discard(profile)  # it finished before the stop landed
         if operation == "status":
@@ -393,8 +584,6 @@ class OperationsMixin:
         if operation in ("repair", "install", "update"):
             # Fresh files supersede the failed check (Repair, or an install/update rewrote them).
             self._verify_failures.pop(profile, None)
-        if operation not in SILENT_OPERATIONS:
-            self._busy.pop(profile, None)
         # A background check that ends late (one detached by a pause, say) must not clear the
         # page of an operation that is running now (#895).
         late_check = operation in SILENT_OPERATIONS and profile in self._busy
@@ -442,8 +631,15 @@ class OperationsMixin:
             self._set_side_status(f"Error · {self._game_title(profile)}")
 
     def _on_failed(self, profile: str, operation: str, message: str) -> None:
+        if operation == "launch":
+            self._finish_launch_sheet(profile)
         if self._closing or self._stale_worker_result(profile, operation):
             return
+        if operation == "launch":
+            self._failed_launch(profile, message)
+        self._operations.complete(profile, operation, "failed", message=message)
+        if operation in LIBRARY_BUSY_STATES:
+            self.library.set_busy(profile, None)  # a queued job that never ran has no busy(False)
         if operation not in SILENT_OPERATIONS:
             self._remove_after_cancel.discard(profile)
         if operation == "status":
@@ -464,8 +660,6 @@ class OperationsMixin:
         if operation == "set_remember":
             self._remember_watching.discard(profile)
             self._remember_notice.pop(profile, None)
-        if operation not in SILENT_OPERATIONS:
-            self._busy.pop(profile, None)
         if operation == "status":
             # A status probe is background noise; show it as a badge, never a dialog.
             self._mark_status_error(profile, message)
@@ -473,7 +667,7 @@ class OperationsMixin:
         terms = self._is_terms_failure(profile, operation, message)
         if profile == self._current_profile:
             # The terms dialog below says what to do; a Retry box first only fails again.
-            self.game.fail(message, quiet=terms)
+            self.game.fail(self._operations.view(profile).failure or message, quiet=terms)
         elif not terms:
             # Not the page on screen: say which game this is about.
             operation_title = OPERATION_TITLES.get(operation, operation.capitalize())
@@ -569,12 +763,15 @@ class OperationsMixin:
         self._start(profile, "status", silent=True)
 
     def _on_cancelled(self, profile: str, operation: str) -> None:
+        if operation == "launch":
+            self._finish_launch_sheet(profile)
         if self._closing or self._stale_worker_result(profile, operation):
             return
+        self._operations.complete(profile, operation, "cancelled")
+        if operation in LIBRARY_BUSY_STATES:
+            self.library.set_busy(profile, None)  # a queued job that never ran has no busy(False)
         if operation == "status":
             self._probe_finished(profile)
-        if operation not in SILENT_OPERATIONS:
-            self._busy.pop(profile, None)
         if operation == "set_remember":
             self._remember_watching.discard(profile)
             self._remember_notice.pop(profile, None)

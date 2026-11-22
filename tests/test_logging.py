@@ -11,16 +11,19 @@ import pytest
 from nadare.core import logging as nadare_logging
 
 
-def test_file_handler_writes_inside_test_tmp(tmp_path: Path) -> None:
+def test_file_handler_writes_inside_test_tmp(tmp_path: Path, tmp_path_factory) -> None:
     logger = logging.getLogger(nadare_logging.LOGGER_NAME)
     handlers = [h for h in logger.handlers if isinstance(h, logging.FileHandler)]
     assert handlers, "expected the nadare logger to have a file handler"
     for handler in handlers:
-        assert Path(handler.baseFilename).is_relative_to(tmp_path), handler.baseFilename
+        path = Path(handler.baseFilename)
+        assert path.is_relative_to(tmp_path_factory.getbasetemp()), path
+        assert not path.is_relative_to(tmp_path), path
 
 
-def test_log_path_points_inside_test_tmp(tmp_path: Path) -> None:
-    assert nadare_logging.log_path().is_relative_to(tmp_path)
+def test_log_path_points_inside_test_tmp(tmp_path: Path, tmp_path_factory) -> None:
+    assert nadare_logging.log_path().is_relative_to(tmp_path_factory.getbasetemp())
+    assert not nadare_logging.log_path().is_relative_to(tmp_path)
 
 
 def test_masking_filter_redacts_secret_keyed_args() -> None:

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from dataclasses import replace
@@ -25,14 +26,16 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import artwork
+from ..core import artwork, upcoming
 from ..core.diskspace import human_size
 from ..core.storecatalog import StoreEntry, store_games, unavailable_games
 from .banner import InfoBanner
 from .images import ImageLoader
 from .library import FlowLayout, _drop_shadow
+from .links import open_external
 from .logs_dialog import LogsDialog
 from .theme import ACCENT, cover_pixmap
+from .workers import CallTask
 
 #: Store tiles are landscape: most covers are wide key art, which then fills the tile whole.
 CARD_WIDTH = 330
@@ -80,7 +83,21 @@ class _FetchArt(QRunnable):
 
     def run(self) -> None:
         try:
-            path = artwork.fetch({"backend": self.kind}, self.title, "cover")
+            from ..core import steamstore
+
+            # The catalog kind stays the backend, so the curated index still answers for it;
+            # the Steam app id rides along so the Steam source finds this game's library art.
+            profile = {"backend": self.kind}
+            appid = steamstore.app_id_of(self.kind)
+            if appid:
+                profile["steam_app_id"] = appid
+            # A store tile is landscape: prefer the curated wide key art, then Steam's own
+            # main capsule, and fall back to the portrait cover when neither exists.
+            path = artwork.fetch(profile, self.title, "cover", art="wide")
+            if path is None:
+                path = artwork.fetch(profile, self.title, "tile")
+            if path is None:
+                path = artwork.fetch(profile, self.title, "cover")
         except Exception:  # noqa: BLE001 - missing art degrades to the placeholder
             path = None
         try:
@@ -239,11 +256,68 @@ class StoreCard(QFrame):
         super().mouseReleaseEvent(event)
 
 
+class UpcomingCard(QFrame):
+    """Plain information card; its only action visits the official website."""
+
+    def __init__(self, item: upcoming.Upcoming, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.item = item
+        self._art_source: Any = None
+        #: The *Official page* button, when the entry carries a usable link.
+        self.button: QPushButton | None = None
+        self.setObjectName("StoreCard")
+        self.setAccessibleName(item.title)
+        self._card_width = CARD_WIDTH
+        self.setFixedSize(CARD_WIDTH, CARD_HEIGHT)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(1, 1, 1, 0)
+        layout.setSpacing(0)
+        self.art = QLabel()
+        self.art.setFixedHeight(CARD_ART_H)
+        self.art.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.art)
+        footer = QWidget()
+        content = QVBoxLayout(footer)
+        content.setContentsMargins(14, 10, 14, 12)
+        content.setSpacing(6)
+        for text, name in (
+            (item.title, "CardTitle"),
+            (item.publisher, "CardMeta"),
+            (item.when, "CardMeta"),
+        ):
+            label = QLabel(text)
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setObjectName(name)
+            label.setWordWrap(True)
+            content.addWidget(label)
+        if item.link:
+            button = QPushButton("Official page")
+            button.setObjectName("Link")
+            button.setAccessibleName(f"Official page: {item.title}")
+            button.clicked.connect(lambda: open_external(item.link))
+            content.addWidget(button)
+            self.button = button
+        content.addStretch(1)
+        layout.addWidget(footer)
+        self.set_card_width(CARD_WIDTH)
+
+    def set_art(self, pixmap: Any) -> None:
+        self._art_source = pixmap
+        self.set_card_width(self._card_width)
+
+    def set_card_width(self, width: int) -> None:
+        self._card_width = width
+        self.setFixedSize(width, CARD_HEIGHT)
+        self.art.setFixedSize(width - 2, CARD_ART_H)
+        self.art.setPixmap(
+            cover_pixmap(self._art_source, width - 2, CARD_ART_H, self.item.title, radius=13)
+        )
+
+
 class StorePage(QWidget):
     """Searchable and filterable grid of available built-in catalog games."""
 
     entry_activated = pyqtSignal(str)
-    own_game_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -254,6 +328,11 @@ class StorePage(QWidget):
         self._card_for_kind: dict[str, StoreCard] = {}
         self._art_started = False
         self._built = False
+        self._upcoming_items: list[upcoming.Upcoming] = []
+        self._upcoming_cards: list[UpcomingCard] = []
+        self._upcoming_started = False
+        self._upcoming_art_paths: dict[str, str] = {}
+        self._upcoming_art_requested: set[str] = set()
         self._art_requested: set[str] = set()
         #: When each cover that failed last failed, so it is retried later, not all session.
         self._art_failed_at: dict[str, float] = {}
@@ -299,7 +378,23 @@ class StorePage(QWidget):
         self._container.setObjectName("StoreContainer")
         self._flow = FlowLayout(self._container, margin=2, spacing=18)
         self._container.setLayout(self._flow)
-        self.scroll.setWidget(self._container)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.addWidget(self._container)
+        self.upcoming_row = QWidget()
+        row_layout = QVBoxLayout(self.upcoming_row)
+        row_layout.setContentsMargins(0, 12, 0, 0)
+        coming_heading = QLabel("Coming soon")
+        coming_heading.setObjectName("Section")
+        row_layout.addWidget(coming_heading)
+        self._upcoming_container = QWidget()
+        self._upcoming_flow = FlowLayout(self._upcoming_container, margin=2, spacing=CARD_GAP)
+        row_layout.addWidget(self._upcoming_container)
+        content_layout.addWidget(self.upcoming_row)
+        content_layout.addStretch(1)
+        self.upcoming_row.hide()
+        self.scroll.setWidget(content)
         self.scroll.viewport().installEventFilter(self)
 
         self.empty_label = QLabel("No games match your search.")
@@ -309,12 +404,6 @@ class StorePage(QWidget):
         self.results.addWidget(self.scroll)
         self.results.addWidget(self.empty_label)
         root.addWidget(self.results, 1)
-
-        self.own_game_button = QPushButton("Add your own game…")
-        self.own_game_button.setObjectName("Link")
-        self.own_game_button.setAccessibleName("Add your own game")
-        self.own_game_button.clicked.connect(self.own_game_requested.emit)
-        root.addWidget(self.own_game_button, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.search.textChanged.connect(self.refresh)
         self.tier_filter.currentTextChanged.connect(self.refresh)
@@ -355,7 +444,7 @@ class StorePage(QWidget):
     def _fit_cards(self) -> None:
         """Give every card the width that fills its row, between the minimum and maximum."""
         width = card_width_for(self.scroll.viewport().width() - 4)  # the layout's own margins
-        for card in self._cards.values():
+        for card in [*self._cards.values(), *self._upcoming_cards]:
             card.set_card_width(width)
 
     def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
@@ -363,6 +452,14 @@ class StorePage(QWidget):
         if not self._built:
             self._built = True
             self.refresh()
+        if not self._upcoming_started:
+            self._upcoming_started = True
+            from PyQt6.QtCore import QThreadPool
+
+            task = CallTask(upcoming.load)
+            task.signals.done.connect(self._on_upcoming_loaded)
+            task.signals.failed.connect(self._on_upcoming_failed)
+            QThreadPool.globalInstance().start(task)
         self._art_started = True
         self._request_visible_art()
 
@@ -417,14 +514,97 @@ class StorePage(QWidget):
             for kind in kinds:
                 self._card_for_kind[kind] = card
             self._apply_art(card)
+        self._rebuild_upcoming()
         results = games
         self._flow.invalidate()
-        self.results.setCurrentWidget(self.scroll if results else self.empty_label)
-        if results:
-            QWidget.setTabOrder(self.tier_filter, self._cards[results[0].primary.kind])
-            QWidget.setTabOrder(self._cards[results[-1].primary.kind], self.own_game_button)
+        self.results.setCurrentWidget(
+            self.scroll if results or self._upcoming_cards else self.empty_label
+        )
         if self._art_started:
             self._request_visible_art()
+
+    def _on_upcoming_loaded(self, items) -> None:
+        self._upcoming_items = items
+        self._rebuild_upcoming()
+        self.results.setCurrentWidget(
+            self.scroll if self._cards or self._upcoming_cards else self.empty_label)
+
+    def _on_upcoming_failed(self, _message: str) -> None:
+        self._on_upcoming_loaded([])
+
+    def _rebuild_upcoming(self) -> None:
+        self._upcoming_cards.clear()
+        while self._upcoming_flow.count():
+            widget = self._upcoming_flow.takeAt(0).widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+        # Compare with the whole catalog, regardless of the active search or tier.
+        titles = {title.strip().casefold() for game in store_games()
+                  for title in (game.title, *(entry.title for entry in game.entries))}
+        titles.update(title.strip().casefold() for _, title in unavailable_games())
+        for item in self._upcoming_items:
+            if item.title.strip().casefold() in titles:
+                continue
+            card = UpcomingCard(item, self._upcoming_container)
+            self._upcoming_cards.append(card)
+            self._upcoming_flow.addWidget(card)
+            if item.art:
+                self._request_upcoming_art(card)
+        self.upcoming_row.setVisible(bool(self._upcoming_cards))
+        self._fit_cards()
+        self._order_tabs()
+
+    def _order_tabs(self) -> None:
+        """Follow the screen with Tab: search, filter, catalog cards, then the new row."""
+        tail = self.tier_filter
+        cards = list(self._cards.values())
+        if cards:
+            QWidget.setTabOrder(tail, cards[0])
+            tail = cards[-1]
+        for card in self._upcoming_cards:
+            if card.button is not None:
+                QWidget.setTabOrder(tail, card.button)
+                tail = card.button
+
+    def _request_upcoming_art(self, card: UpcomingCard) -> None:
+        item = card.item
+        if item.art is None:
+            return
+        path = self._upcoming_art_paths.get(item.art)
+        if path is not None:
+            self._show_upcoming_art(card, path)
+            return
+        if item.art in self._upcoming_art_requested:
+            return
+        self._upcoming_art_requested.add(item.art)
+        slug = "upcoming-" + hashlib.sha256(item.art.encode()).hexdigest()[:20]
+        task = CallTask(
+            lambda: (
+                item.art,
+                artwork.download(item.art, slug, "cover", allowed_hosts=upcoming.art_hosts()),
+            )
+        )
+        task.signals.done.connect(self._on_upcoming_art_fetched)
+        from PyQt6.QtCore import QThreadPool
+
+        QThreadPool.globalInstance().start(task)
+
+    def _on_upcoming_art_fetched(self, result) -> None:
+        url, path = result
+        if not path:
+            return
+        self._upcoming_art_paths[url] = str(path)
+        for current in self._upcoming_cards:
+            if current.item.art == url:
+                self._show_upcoming_art(current, str(path))
+
+    def _show_upcoming_art(self, card: UpcomingCard, path: str) -> None:
+        def apply(pixmap) -> None:
+            if card in self._upcoming_cards:
+                card.set_art(pixmap)
+
+        self._images.request([path], card._card_width - 2, CARD_ART_H, apply, cover=True)
 
     def focus_search(self) -> None:
         self.search.setFocus()
@@ -485,7 +665,7 @@ class StorePage(QWidget):
             if card in self._cards.values():
                 card.set_art(pixmap)
 
-        self._images.request([path], CARD_WIDTH - 2, CARD_ART_H, apply, cover=True, fit=True)
+        self._images.request([path], CARD_WIDTH - 2, CARD_ART_H, apply, cover=True)
 
     def _clear_cards(self) -> None:
         self._cards.clear()

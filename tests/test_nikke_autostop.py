@@ -261,9 +261,10 @@ def _nikke(tmp_path, **profile):
     return NikkeBackend(make_context(tmp_path, "launcher-nikke", values))
 
 
-def test_the_option_exists_and_is_off_by_default():
+def test_the_option_exists_and_is_on_by_default():
+    """On by default since 2026-11-15 (b24 reports; the update-download check guards it)."""
     option = next(o for o in get("launcher-nikke").options if o.key == "stop_when_hidden")
-    assert option.kind == "bool" and option.default is False
+    assert option.kind == "bool" and option.default is True
     assert "tray" in option.help
 
 
@@ -296,9 +297,9 @@ def fake_watch(monkeypatch):
     return _FakeWatch
 
 
-def test_off_by_default_no_watch(tmp_path, monkeypatch, fake_watch):
+def test_turned_off_no_watch(tmp_path, monkeypatch, fake_watch):
     monkeypatch.setattr(WineGameBackend, "launch", lambda self: 0)
-    assert _nikke(tmp_path).launch() == 0
+    assert _nikke(tmp_path, stop_when_hidden=False).launch() == 0
     assert fake_watch.made == []
 
 

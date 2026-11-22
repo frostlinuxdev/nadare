@@ -6,9 +6,10 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 from .. import directdl
+from ..directdl import require_https
 from . import Fetch, default_fetch
 
 _GAME_URL = "https://pc.bd2.pmang.cloud/browndust2starter/games/10000001"
@@ -27,17 +28,13 @@ def _json(data: bytes) -> dict[str, Any]:
     return value
 
 
-def _https(url: str) -> str:
-    if not isinstance(url, str) or urlsplit(url).scheme != "https":
-        raise directdl.DirectError(f"bd2: expected an https URL, got {url!r}")
-    return url
 
 
 def resolve(fetch: Fetch | None = None) -> directdl.Plan:
     get = fetch if fetch is not None else default_fetch
     meta = _json(get(_GAME_URL + "/game.json", None))
 
-    base = _https(meta.get("download_url"))
+    base = require_https(meta.get("download_url"))
     version = meta.get("last_version")
     exe = meta.get("exe_file")
     last = meta.get("last_file")
@@ -58,7 +55,7 @@ def resolve(fetch: Fetch | None = None) -> directdl.Plan:
     relative = directdl.safe_relative_path(name.lstrip("/"))
     source = directdl.RemoteFile(
         path=relative,
-        url=_https(base.rstrip("/") + "/" + quote(relative, safe="/")),
+        url=require_https(base.rstrip("/") + "/" + quote(relative, safe="/")),
     )
     archive = directdl.Archive(
         name=relative,

@@ -50,7 +50,9 @@ def test_a_steam_launch_drops_secrets(tmp_path, monkeypatch):
     seen = _capture(monkeypatch, steam_mod)
     binary = write_exe(tmp_path / "steam", "#!/bin/sh\n")
     ctx = make_context(tmp_path, "steam", {"steam_app_id": "12345", "steam_binary": str(binary)})
-    SteamBackend(ctx).launch()
+    backend = SteamBackend(ctx)
+    backend._wait_for_game = lambda app_id: 0  # #1359's wait is tested in test_steam_launch_wait
+    backend.launch()
     env = seen["env"]
     assert "CZN_REFRESH" not in env and "OPENAI_API_KEY" not in env
     assert env.get("HOME") == str(tmp_path)

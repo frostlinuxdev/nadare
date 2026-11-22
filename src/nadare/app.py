@@ -24,9 +24,9 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .core import channel, i18n, paths, process, tls, vcredist, vkprobe
+from .core import channel, flatpakreport, i18n, operation_policy, paths, tls, vkprobe
 from .core import logging as nadare_logging
-from .core.backends import BackendError, BackendUnsupported
+from .core.backends import BackendError, BackendNotInstalled, BackendUnsupported
 from .core.backends import create as create_backend
 from .core.config import Config, ConfigReadError
 from .core.events import Cancel, Cancelled, Event
@@ -90,6 +90,45 @@ COMMANDS = (
     "verify",
 )
 
+#: Commands named in ``--help`` (#1567): what every desktop/Steam shortcut runs, the
+#: app's own entry point, the diagnostics support asks for and the automation the
+#: release matrix, the upgrade gate and the test harness call. The GUI is the product.
+KEEP_COMMANDS = (
+    "launch",
+    "gui",
+    "doctor",
+    "report",
+    "status",
+    "list",
+    "install",
+    "update",
+    "repair",
+    "verify",
+    "stop",
+)
+
+#: Everything else stays callable and unchanged, for scripts and deep support work,
+#: but the help only names it on the ``Advanced:`` line (#1567).
+ADVANCED_COMMANDS = (
+    "predownload",
+    "remake-prefix",
+    "login",
+    "fetch-art",
+    "shortcut",
+    "remove",
+    "move-to-flatpak",
+    "uninstall-all",
+)
+
+
+def _advanced_epilog() -> str:
+    """The one place ``--help`` names the commands it does not list (#1567)."""
+    return (
+        "Advanced: "
+        + ", ".join(ADVANCED_COMMANDS)
+        + " — still available and unchanged, but not part of the supported CLI"
+    )
+
 
 # ---------------------------------------------------------------------------
 # output
@@ -144,6 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="nadare",
         description="Nadare — open-source Linux launcher for anime gacha games",
+        epilog=_advanced_epilog(),
     )
     parser.add_argument(
         "--version", action="version", version=channel.title(f"nadare {__version__}")
@@ -155,7 +195,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-q", "--quiet", action="store_true", help="only show progress, done and errors"
     )
-    sub = parser.add_subparsers(dest="command")
+    # Only the supported commands are advertised. The advanced ones stay in the
+    # subparser map (callable as before) and are named on the epilog line (#1567).
+    sub = parser.add_subparsers(
+        dest="command", metavar="{" + ",".join(KEEP_COMMANDS) + "}"
+    )
 
     main_help = {
         "gui": "open the graphical launcher",
@@ -176,7 +220,12 @@ def build_parser() -> argparse.ArgumentParser:
         "verify": "verify a profile's files",
     }
     for command in COMMANDS:
-        sp = sub.add_parser(command, help=main_help[command])
+        if command in ADVANCED_COMMANDS:
+            # Hidden from ``--help`` (#1567); ``--help`` on the command still
+            # explains what it does, and the command runs exactly as before.
+            sp = sub.add_parser(command, description=main_help[command])
+        else:
+            sp = sub.add_parser(command, help=main_help[command])
         if command not in ("list", "doctor"):
             sp.add_argument(
                 "-p", "--profile", default=None, help="profile name (default: active profile)"
@@ -200,6 +249,12 @@ def build_parser() -> argparse.ArgumentParser:
                 "--accept-account-notice",
                 action="store_true",
                 help="acknowledge the account-safety notice and remember it for this profile",
+            )
+        if command == "launch":
+            sp.add_argument(
+                "--ignore-hold",
+                action="store_true",
+                help="start even when the maintainers marked this game dangerous",
             )
         if command == "remake-prefix":
             sp.add_argument(
@@ -229,7 +284,9 @@ def build_parser() -> argparse.ArgumentParser:
             )
             sp.add_argument("--stdout", action="store_true", help="print only the report")
 
-    art = sub.add_parser("fetch-art", help="download cached cover art for a profile")
+    art = sub.add_parser(
+        "fetch-art", description="download cached cover art for a profile"
+    )
     art.add_argument("-p", "--profile", default=None, help="profile name (default: active profile)")
     art.add_argument("--all", action="store_true", help="fetch art for every profile")
     art.add_argument(
@@ -244,7 +301,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     shortcut = sub.add_parser(
-        "shortcut", help="create or manage launcher and Steam shortcuts for a profile"
+        "shortcut",
+        description="create or manage launcher and Steam shortcuts for a profile",
     )
     shortcut.add_argument(
         "-q",
@@ -285,7 +343,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     remove_cmd = sub.add_parser(
         "remove",
-        help="remove a game from your library (files are kept unless you ask to delete them)",
+        description=(
+            "remove a game from your library (files are kept unless you ask to delete them)"
+        ),
     )
     remove_cmd.add_argument("-p", "--profile", default=None, help="profile name (required)")
     remove_cmd.add_argument(
@@ -323,9 +383,19 @@ def build_parser() -> argparse.ArgumentParser:
         "-v", "--verbose", action="store_true", default=argparse.SUPPRESS, help="debug logging"
     )
 
+    to_flatpak = sub.add_parser(
+        "move-to-flatpak",
+        description=(
+            "move games and settings into the Nadare Flatpak, once (renames, never copies)"
+        ),
+    )
+    to_flatpak.add_argument("--yes", action="store_true", help="confirm the move")
+
     uninstall_cmd = sub.add_parser(
         "uninstall-all",
-        help="uninstall every game and remove Nadare's own folders (show the plan first)",
+        description=(
+            "uninstall every game and remove Nadare's own folders (show the plan first)"
+        ),
     )
     uninstall_cmd.add_argument(
         "--with-games",
@@ -340,7 +410,19 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_cmd.add_argument(
         "--keep-runtimes",
         action="store_true",
-        help="keep downloaded Proton/Wine runners and the managed umu folder",
+        help="keep downloaded Proton/Wine runners, umu-launcher and Nadare's umu runtime",
+    )
+    uninstall_cmd.add_argument(
+        "--with-umu",
+        action="store_true",
+        help="also delete shared umu runtime downloads (other apps may use them, including "
+        "Steam, Lutris, Heroic and other umu apps)",
+    )
+    uninstall_cmd.add_argument(
+        "--remove-selinux-module",
+        action="store_true",
+        help="also remove FGO's SELinux policy module (lepton_binder), if it is loaded; "
+        "this asks for your password",
     )
     uninstall_cmd.add_argument("--yes", action="store_true", help="confirm the uninstall")
     uninstall_cmd.add_argument(
@@ -589,13 +671,21 @@ def _doctor_report(
         ready = "DXVK needs Vulkan >= 1.3"
     print(f"GPU/Vulkan: {detail} [{ready}]")
     if not dxvk_ready:
-        if sandbox.in_flatpak():
+        if info.driver == "software":
+            # No GPU driver is in use at all (a VM without one, or a broken driver):
+            # neither 32-bit packages nor a Flatpak update would help.
+            print(
+                "  fix: no GPU driver is in use. Install or repair your GPU's driver; in a "
+                "virtual machine, games need a GPU passed through"
+            )
+        elif sandbox.in_flatpak():
             print(
                 "  fix: run flatpak update to update its runtimes and graphics extensions; "
                 "also check that the host GPU driver works"
             )
         else:
             family = hostlibs.distro_family()
+            image = hostlibs.image_based()
             fix = {
                 "debian": (
                     "sudo dpkg --add-architecture i386 && sudo apt update && "
@@ -604,8 +694,21 @@ def _doctor_report(
                 "fedora": "sudo dnf install mesa-vulkan-drivers.i686",
                 "arch": "sudo pacman -S --needed lib32-vulkan-icd-loader lib32-vulkan-radeon",
             }.get(family or "")
-            if fix:
+            if image == "nixos":
+                print(
+                    "  fix: set hardware.graphics.enable32Bit = true; in your NixOS "
+                    "configuration, then run sudo nixos-rebuild switch"
+                )
+            elif image == "steamos":
+                print(
+                    "  fix: SteamOS ships its GPU drivers with the system: update SteamOS, "
+                    "or use the Flatpak"
+                )
+            elif fix:
+                fix = hostlibs.for_host(fix, image) or fix
                 print(f"  fix: {fix}")
+                if fix.startswith("rpm-ostree "):
+                    print("  (rpm-ostree packages apply after a restart)")
             else:
                 print(
                     "  fix: install your GPU driver's 32-bit Vulkan support "
@@ -628,10 +731,35 @@ def _doctor_report(
         else:
             print("umu-run: set up at the first launch (games run in the Steam Runtime)")
         print("  Sandboxed games run Proton directly, without the Steam Runtime")
+        print(f"umu runtime: {umu.runtime_base() / 'umu'} (Nadare's own)")
     else:
-        found = umu.system("umu-run", which=process.which)
+        # The order the launch uses (umu.resolve): Nadare's own pinned copy first.
+        own = umu.managed()
+        has_archive = own is None and umu._bundled_archive() is not None
+        # Without /usr/bin/python3 the launch runs Nadare's own copy through the hidden
+        # `nadare --umu-run` (#1341 item 3), so that interpreter is no longer a blocker.
+        no_python = not umu.shebang_python_ok()
+        bundled = has_archive
+        found = (
+            str(own)
+            if own is not None
+            else ("bundled" if bundled else umu.system("umu-run", which=process.which))
+        )
         old_system = None if found else process.which("umu-run")
-        if found:
+        if own is not None:
+            how = (
+                "runs with Nadare's own Python"
+                if no_python
+                else f"umu-launcher {umu.UMU_VERSION}"
+            )
+            print(f"umu-run: Nadare's own copy {own} ({how})")
+        elif bundled:
+            how = "runs with Nadare's own Python" if no_python else "no download"
+            print(
+                "umu-run: Nadare's own copy (set up at the first launch from the bundled "
+                f"umu-launcher {umu.UMU_VERSION}, {how})"
+            )
+        elif found:
             print(f"umu-run: {found}")
         else:
             if old_system:
@@ -649,6 +777,14 @@ def _doctor_report(
             if managed is not None:
                 print(f"umu-run: managed copy {managed}")
         missing_libs = None if found else hostlibs.missing_32bit()
+        outdated = own is not None and userns.runtime_profile_outdated()
+        if outdated:
+            print(userns.RUNTIME_MOVED_MESSAGE)
+            print(userns.install_command())
+        if outdated or (found and own is None and not bundled):
+            print("umu runtime: shared (" + ", ".join(map(str, umu.shared_runtime_roots())) + ")")
+        else:
+            print(f"umu runtime: {umu.runtime_base() / 'umu'} (Nadare's own)")
         # The managed runtime brings its own 32-bit libraries, so missing host
         # libs only matter when that runtime cannot start (#429).
         sandbox_works = None
@@ -675,6 +811,8 @@ def _doctor_report(
             print(
                 f"  or install them: {fix}" if fix else f"  {hostlibs.hint(missing_libs)}"
             )
+            if fix and fix.startswith("rpm-ostree "):
+                print("  (rpm-ostree packages apply after a restart)")
         else:
             print("32-bit libs: OK")
         if not found:
@@ -684,6 +822,8 @@ def _doctor_report(
                 fix = hostlibs.gl_install_command(missing_gl, hostlibs.distro_family())
                 if fix:
                     print(f"  fix: {fix}")
+                    if fix.startswith("rpm-ostree "):
+                        print("  (rpm-ostree packages apply after a restart)")
                 reasons.append("GL libraries missing")
         if not userns.restricted():
             print("user namespaces: OK")
@@ -708,10 +848,15 @@ def _doctor_report(
                     "verified yet (the game's runtime is not downloaded), so its "
                     "sandbox may fail to start"
                 )
-            print("  fix: run these two commands (this also avoids the 32-bit libraries)")
+            print("  fix: run this command (this also avoids the 32-bit libraries)")
             for line in userns.install_command().splitlines():
                 print(f"    {line}")
     _print_sandbox_status()
+    from .core import holds as _holds
+
+    hold_line = _holds.system_check_line()
+    if hold_line:
+        print(hold_line)
     from .core import secrets as _secrets
 
     ok, why = _secrets.keyring_diagnosis()
@@ -765,7 +910,7 @@ def _doctor_report(
         if row.get("recommended"):
             flags.append("RECOMMENDED")
         elif row.get("family"):
-            flags.append("untested")
+            flags.append(runners.standing(path))  # "older" or "untested"
         if row["outdated"]:
             flags.append("OUTDATED")
         suffix = f"  [{', '.join(flags)}]" if flags else ""
@@ -799,42 +944,17 @@ def _doctor_text(config: Config) -> str:
     return capture.getvalue().strip()
 
 
-#: CLI commands that change an installation; they exclude each other per profile.
+#: CLI installation commands; the resource policy itself lives in core.
 _LOCKED_COMMANDS = frozenset(
-    {"install", "update", "predownload", "repair", "remake-prefix"}
+    command for command in COMMANDS
+    if command.replace("-", "_") in operation_policy.POLICIES
+    and operation_policy.policy_for(command).resources
 )
 
 
-@contextlib.contextmanager
 def _operation_lock(command: str, name: str):
-    if command == "launch":
-        # A game runs for hours, so launch never holds the lock; it only refuses
-        # to start while an install/update/repair/etc. holds it (a predownload does not).
-        if process.launch_blocked(name):
-            raise BackendError(process.OPERATION_IN_PROGRESS.format(name=name))
-        yield
-        return
-    if command not in _LOCKED_COMMANDS:
-        yield
-        return
-    lock = process.OperationLock(name)
-    try:
-        lock.acquire()
-    except process.ProfileLockError:
-        raise BackendError(process.OPERATION_BUSY.format(name=name)) from None
-    predownload = process.PredownloadLock(name) if command == "predownload" else None
-    if predownload is not None:
-        try:
-            predownload.acquire()
-        except process.ProfileLockError:
-            lock.release()
-            raise BackendError(process.OPERATION_BUSY.format(name=name)) from None
-    try:
-        yield
-    finally:
-        if predownload is not None:
-            predownload.release()
-        lock.release()
+    """Use the shared profile resource lifetime (CLI spelling is accepted there)."""
+    return operation_policy.operation_lock(command, name)
 
 
 def _run_backend_command(
@@ -855,9 +975,7 @@ def _run_backend_command(
             file=sys.stderr,
         )
         return 2
-    if command in ("install", "update", "repair", "remake-prefix", "launch") and (
-        backend.requires_notice_ack()
-    ):
+    if operation_policy.policy_for(command).cli_notice and backend.requires_notice_ack():
         if getattr(args, "accept_account_notice", False):
             config.profile(name)["accept_account_notice"] = True
             config.save()
@@ -877,29 +995,67 @@ def _run_backend_command(
         refresh = getattr(backend, "refresh_published_version", None)
         if callable(refresh):
             refresh()
-        status = backend.status()
-        if status.state == "not_installed":
+        status = flatpakreport.status_of(backend)
+        from .core.gamefacts import CommonStatus
+
+        facts = CommonStatus.from_status(status)
+        if facts.state == "not_installed":
             print(f"{name}: not installed")
         else:
-            print(f"{name}: {status.state}{' ' + status.version if status.version else ''}")
-        if "logged_in" in status.data:
-            print(f"  login: {'logged in' if status.data['logged_in'] else 'not logged in'}")
+            print(f"{name}: {facts.state}{' ' + facts.version if facts.version else ''}")
+        if facts.logged_in is not None:
+            print(f"  login: {'logged in' if facts.logged_in else 'not logged in'}")
+        from .core import pending
+
+        profiles = getattr(config, "profiles", None)
+        profile = profiles.get(name, {}) if isinstance(profiles, dict) else {}
+        leftovers = pending.removal_leftovers(profile)
+        if leftovers and facts.state == "not_installed":  # a reinstall keeps the old record
+            # r3b01 F1: a crash mid-Uninstall otherwise looks like a game never installed.
+            print("  uninstall did not finish; still on disk: " + ", ".join(leftovers))
+            record = profile.get(pending.REMOVAL)
+            keys = set(record) if isinstance(record, dict) else set()
+            flags = [
+                flag
+                for flag, wanted in (
+                    ("--delete-install-dir", {"install_dir"}),
+                    ("--delete-prefix", {"prefix", "wineprefix"}),
+                )
+                if keys & wanted
+            ]
+            command = " ".join(["nadare remove -p", name, *flags])
+            print(f"  finish it in Settings > Uninstall or remove, or run: {command}")
+        from .core import process
+
+        message = facts.message or facts.state
+        busy = {}
+        if process.operation_in_progress(name):
+            # r3b05/r3b07 F2: a half-downloaded game another process is installing right now
+            # is not "incomplete, click RESUME"; every such advice ends in the busy error.
+            print(
+                "  busy: another Nadare window or command is installing, updating or removing "
+                "it right now"
+            )
+            busy = {"busy_elsewhere": True}
+            if facts.state == "not_installed" or facts.install.offers_resume():
+                message = process.OPERATION_BUSY.format(name=name)
         printer(
             Event(
-                "error" if status.state == "error" else "done",
-                status.message or status.state,
+                "error" if facts.state == "error" else "done",
+                message,
                 data={
-                    "state": status.state,
-                    "version": status.version,
-                    "running": status.running,
-                    **status.data,
+                    **(status.data if isinstance(status.data, dict) else {}),
+                    "state": facts.state,
+                    "version": facts.version,
+                    "running": facts.running,
+                    **busy,
                 },
             )
         )
-        return 1 if status.state == "error" else 0
+        return 1 if facts.state == "error" else 0
     if command == "install":
-        _check_install_space(backend)
-        backend.install()
+        with operation_policy.preflight("install", backend, name=name, adapter="cli"):
+            backend.install()
         return 0
     if command == "update":
         backend.update()
@@ -910,12 +1066,8 @@ def _run_backend_command(
             return 0
         raise BackendError(f"{name}: this game has no predownload")
     if command == "repair":
-        try:
-            # The same as the GUI's Repair: the user asked, so a remembered failure is forgotten.
-            vcredist.retry_after_repair(backend)
-        except (AttributeError, OSError, RuntimeError, TypeError, ValueError, BackendError):
-            pass  # best effort; never stops the repair itself
-        backend.repair()
+        with operation_policy.preflight("repair", backend, name=name, adapter="cli"):
+            backend.repair()
         return 0
     if command == "remake-prefix":
         backend.remake_prefix()
@@ -932,41 +1084,37 @@ def _run_backend_command(
         print(f"{name}: stopped")
         return 0
     if command == "launch":
-        try:
-            return int(backend.launch() or 0)
-        except BackendError as exc:
-            if "not installed" in exc.message.lower():
-                raise BackendError(
-                    f"Not installed. Run: nadare install -p {name}", exc.code
-                ) from exc
-            raise
+        return _launch_backend(backend, name, ignore_hold=getattr(args, "ignore_hold", False))
     if command == "verify":
+        from .core import process
+
+        if process.operation_in_progress(name):
+            # Mid-install files are missing by design; "integrity check failed ... Run: nadare
+            # install" would send the user into the busy error (r3b07 F2).
+            raise BackendError(process.OPERATION_BUSY.format(name=name))
         try:
             report = backend.verify()
         except BackendError as exc:
-            if "not installed" in exc.message.lower():
+            if isinstance(exc, BackendNotInstalled):
                 raise BackendError(
                     f"Not installed. Run: nadare install -p {name}", exc.code
                 ) from exc
             raise
-        message = str(report.get("message", ""))
+        from .core.verification import VerifyResult
+
+        result = VerifyResult.from_report(report)
+        message = result.message
         if not message:
-            message = i18n.translate(
-                "all checks passed" if report.get("verified", True) else "nothing to verify"
-            )
-        if not report.get("verified", True):
-            if "not installed" in message.lower():
-                message = f"Not installed. Run: nadare install -p {name}"
-            elif "integrity check failed" in message.lower():
-                message = f"{message}; Run: nadare install -p {name}"
-        printer(
-            Event(
-                "done",
-                message,
-                data=dict(report),
-            )
-        )
-        return 0 if report.get("verified", True) else 1
+            if result.outcome == "passed":
+                message = i18n.translate("all checks passed")
+            else:
+                message = i18n.translate("nothing to verify")
+        if result.outcome == "not_installed":
+            message = f"Not installed. Run: nadare install -p {name}"
+        elif result.outcome == "failed" and "integrity check failed" in message.lower():
+            message = f"{message}; Run: nadare install -p {name}"
+        printer(Event("done", message, data=result.as_report()))
+        return 0 if result.outcome == "passed" else 1
     raise BackendError(f"unhandled command: {command}")
 
 
@@ -1139,6 +1287,7 @@ def _run_remove(args: argparse.Namespace, config: Config) -> int:
             file=sys.stderr,
         )
         return 1
+    profile = dict(config.profiles[name])
     if not getattr(args, "yes", False):
         print(
             i18n.translate(
@@ -1172,11 +1321,30 @@ def _run_remove(args: argparse.Namespace, config: Config) -> int:
         print(f"  deleted: {path}")
     for warning in result.warnings:
         print(f"  warning: {warning}")
+    from .core import fgo_selinux
+
+    note = fgo_selinux.single_game_note(profile) if not result.profile_kept else ""
+    for line in note.splitlines():
+        print(f"  {line}")
     return 1 if result.profile_kept else 0
 
 
 def _run_uninstall_all(args: argparse.Namespace, config: Config) -> int:
-    from .core import uninstall_all
+    from .core import fgo_selinux, uninstall_all
+
+    remove_selinux = bool(getattr(args, "remove_selinux_module", False))
+    selinux_loaded = fgo_selinux.available()
+    fgo_profile = next(
+        (
+            profile
+            for profile in config.profiles.values()
+            if profile.get("backend") == "fgo-lepton"
+        ),
+        None,
+    )
+    selinux_command = (
+        fgo_selinux.removal_command(fgo_profile) if selinux_loaded else ""
+    )
 
     groups = uninstall_all.plan(config)
     if not getattr(args, "yes", False):
@@ -1185,6 +1353,7 @@ def _run_uninstall_all(args: argparse.Namespace, config: Config) -> int:
             "runtimes": not getattr(args, "keep_runtimes", False),
             "games": getattr(args, "with_games", False),
             "backups": getattr(args, "with_backups", False),
+            "umu": getattr(args, "with_umu", False),
         }
         for group in groups:
             state = "on" if states.get(group.key, group.default) else "off"
@@ -1193,6 +1362,11 @@ def _run_uninstall_all(args: argparse.Namespace, config: Config) -> int:
                 print(f"  ({group.note})")
             for path in group.paths:
                 print(f"  {path}")
+        if selinux_loaded:
+            state = "on" if remove_selinux else "off"
+            print(f"{state} Also remove {fgo_selinux.NOTE}: {selinux_command}")
+        elif remove_selinux:
+            print(f"off {fgo_selinux.NOTE} is not loaded; nothing to remove")
         print("nothing was deleted; add --yes to do it")
         return 0
 
@@ -1202,6 +1376,7 @@ def _run_uninstall_all(args: argparse.Namespace, config: Config) -> int:
         games=getattr(args, "with_games", False),
         backups=getattr(args, "with_backups", False),
         runtimes=not getattr(args, "keep_runtimes", False),
+        umu=getattr(args, "with_umu", False),
         applications_dir=uninstall_all._applications_dir(),
         desktop_dir=uninstall_all._desktop_dir(),
     )
@@ -1212,12 +1387,49 @@ def _run_uninstall_all(args: argparse.Namespace, config: Config) -> int:
     for warning in report.warnings:
         print(f"  warning: {warning}")
     kept = any(name not in report.profiles_removed for name in before)
-    return 1 if report.refused or kept else 0
+    selinux_failed = False
+    if selinux_loaded:
+        if report.refused or kept:
+            kept_command = fgo_selinux.removal_command(fgo_profile)
+            print(f"  kept {fgo_selinux.NOTE}; to remove it, run: {kept_command}")
+        elif remove_selinux:
+            ok, message = fgo_selinux.remove(fgo_profile)
+            if ok:
+                print(f"  {message}")
+            else:
+                print(f"  warning: {message}")
+                selinux_failed = True
+        else:
+            kept_command = fgo_selinux.removal_command(fgo_profile)
+            print(f"  kept {fgo_selinux.NOTE}; to remove it, run: {kept_command}")
+    elif remove_selinux:
+        print(f"  {fgo_selinux.NOTE} is not loaded; nothing to remove")
+    return 1 if report.refused or kept or selinux_failed else 0
+
+
+def _launch_backend(backend, name: str, *, ignore_hold: bool = False) -> int:
+    """``nadare launch``: every pre-Play check, then the backend's own launch (#1451)."""
+    from .core import launchgate
+
+    try:
+        return launchgate.play(backend, ignore_hold=ignore_hold)
+    except BackendError as exc:
+        if isinstance(exc, BackendNotInstalled):
+            raise BackendError(
+                f"Not installed. Run: nadare install -p {name}", exc.code
+            ) from exc
+        raise
 
 
 def run_cli(argv: Sequence[str] | None = None) -> int:
     """Parse ``argv`` and run one command. Returns a process exit code."""
     items = list(argv) if argv is not None else sys.argv[1:]
+    if items[:1] == ["--umu-run"]:
+        # Hidden helper (#1341 item 3): run the managed umu zipapp with Nadare's own
+        # interpreter, for hosts without /usr/bin/python3. Never in ``--help``.
+        from .core import umu
+
+        return umu.main(items[1:])
     if items[:1] == [vkprobe.SUBCOMMAND]:
         # The GPU probe's helper process (core/vkprobe.py): no config, logs or parser.
         return vkprobe.main()
@@ -1239,9 +1451,30 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
         print(f"[error] cannot create data directories: {exc}", file=sys.stderr)
         return 1
     nadare_logging.install_stack_dump()
-    if args.config is not None and not args.config.exists():
-        print(f"[error] config file not found: {args.config}", file=sys.stderr)
-        return 2
+    if args.config is not None:
+        try:
+            found = args.config.exists()
+        except OSError as exc:
+            # exists() raises for some errnos, such as a name over 255 bytes (r3b07 F1).
+            print(
+                f"[error] cannot use config file {args.config}: {exc.strerror or exc}",
+                file=sys.stderr,
+            )
+            return 2
+        if not found:
+            print(f"[error] config file not found: {args.config}", file=sys.stderr)
+            return 2
+    if args.config is None:
+        # Before the settings are read: a move to the Flatpak a crash interrupted (#1353).
+        from .core import flatpakmove
+
+        try:
+            notes = flatpakmove.finish_interrupted()
+        except OSError as exc:
+            notes = [f"An interrupted move to the Flatpak could not be finished: {exc}"]
+        note = flatpakmove.moved_note()
+        for line in [*notes, *([note] if note else [])]:
+            print(f"[note] {line}", file=sys.stderr)
     try:
         config = Config.load(args.config)
     except ConfigReadError as exc:
@@ -1249,8 +1482,8 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
         return 1
     if config.notice:
         print(f"[warn] {config.notice}", file=sys.stderr)
-    language = config.data.get("language", "en")
-    i18n.set_locale(language if isinstance(language, str) else "en")
+    language = config.data.get("language")
+    i18n.set_locale(i18n.resolve_locale(language if isinstance(language, str) else None))
     printer = _make_printer(quiet=getattr(args, "quiet", False))
 
     if args.command == "gui":
@@ -1286,6 +1519,7 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
             config.data,
             profile_name=args.profile,
             doctor_text=_doctor_text(config),
+            config_path=config.path,
         )
         if args.stdout:
             try:
@@ -1368,6 +1602,27 @@ def run_cli(argv: Sequence[str] | None = None) -> int:
                 i18n.translate("operation failed: {message}", message=exc), file=sys.stderr
             )
             return 1
+
+    if args.command == "move-to-flatpak":
+        from .core import flatpakmove
+
+        why = flatpakmove.refusal(config)
+        if why:
+            print(f"[error] {why}", file=sys.stderr)
+            return 1
+        data, _conf = flatpakmove.targets()
+        if not args.yes:
+            print(f"Would move your games and settings to {data.parent.parent} (renames "
+                  "only). Run again with --yes to do it.")
+            return 0
+        try:
+            notes = flatpakmove.move(config)
+        except (flatpakmove.MoveRefused, OSError) as exc:
+            print(f"[error] {exc}", file=sys.stderr)
+            return 1
+        for note in notes:
+            print(note)
+        return 0
 
     if args.command == "uninstall-all":
         try:

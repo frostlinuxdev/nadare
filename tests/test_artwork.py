@@ -67,6 +67,11 @@ class ChunkedResponse(FakeResponse):
 def fake(monkeypatch: pytest.MonkeyPatch) -> FakeRequests:
     requests = FakeRequests({})
     monkeypatch.setattr(artwork, "_curl", lambda: requests)
+    # The fake network answers DNS too (a public address), so the resolution check still runs
+    # but no real resolver is asked (#1411).
+    monkeypatch.setattr(
+        artwork, "_RESOLVER", lambda host, port: [(2, 1, 6, "", ("93.184.216.34", 0))]
+    )
     monkeypatch.delenv("SGDB_API_KEY", raising=False)
     return requests
 
@@ -220,8 +225,11 @@ def test_fetch_prefers_steam_cdn(fake: FakeRequests) -> None:
     assert path is not None
     assert path.name == "counter-strike-cover.jpg"
     assert path.read_bytes() == GIF
-    assert fake.calls[0][1] == base + "library_600x900.jpg"
-    assert fake.calls[1][1] == base + "header.jpg"
+    urls = [call[1] for call in fake.calls]
+    # The store-browse API is asked first: it names the current hashed poster. The fake has no
+    # answer for it, so the fixed CDN paths are still tried, in order, and the header wins.
+    assert urls[0].startswith("https://api.steampowered.com/IStoreBrowseService/GetItems/")
+    assert urls[1:] == [base + "library_600x900.jpg", base + "header.jpg"]
 
 
 def test_fetch_uses_steamgriddb_when_key_present(
@@ -1768,6 +1776,41 @@ def test_an_older_webp_that_would_shadow_the_new_cover_is_removed(fake, tmp_path
     assert artwork._cached("genshin-impact", "cover") == got
 
 
+def test_a_new_gif_cover_replaces_an_older_b24_jpg(fake, tmp_path, monkeypatch):
+    """An old ``-cover.jpg`` must not shadow the newest index cover (sim bug 3)."""
+    from nadare.core import artindex
+
+    covers = tmp_path / "covers"
+    covers.mkdir()
+    monkeypatch.setattr(artwork, "cache_dir", lambda: covers)
+    monkeypatch.setattr(artwork, "_schedule_cover_migration", lambda root: None)
+    old = covers / "genshin-impact-cover.jpg"
+    old.write_bytes(_png_bytes())  # a b24-era file: no .src sidecar
+    gif_url = "https://cdn2.unrealengine.com/egs-genshinimpact-x-s1-cover.gif"
+    doc = {
+        "schema": 1,
+        "games": {
+            "direct-genshin": {
+                "cover": [
+                    {"url": gif_url, "orientation": "portrait", "width": 1200, "height": 1600}
+                ]
+            }
+        },
+    }
+    artindex.reset()
+    artwork._index_failures.clear()
+    artindex.set_loader(lambda: doc)
+    artindex.lookup("direct-genshin", wait=True)
+    monkeypatch.setattr(artwork, "_public_resolution", lambda _url: True)
+    fake.routes[gif_url] = FakeResponse(content=GIF, headers={"Content-Type": "image/gif"})
+
+    got = artwork.fetch({"backend": "direct-genshin"}, "Genshin Impact", "cover")
+
+    assert got is not None and got.suffix == ".gif", f"downloaded {got}"
+    assert not old.exists(), "the older JPG would keep shadowing the new cover"
+    assert artwork.cached("genshin-impact", "cover") == got
+
+
 def test_index_art_counts_as_official_and_can_replace_an_official_cover(
     fake, tmp_path, monkeypatch
 ):
@@ -1839,12 +1882,16 @@ def test_a_steam_game_without_art_at_the_old_paths_uses_the_store_pages_own_imag
         for n in ("library_600x900.jpg", "header.jpg", "hero.jpg")
     ]
     assert urls[-1] == "https://shared.akamai.steamstatic.com/x/header.jpg?t=1"
-    assert asked == ["https://store.steampowered.com/api/appdetails?appids=5019180&filters=basic"]
+    # The browse API is asked first too (it names the hashed poster); this fake answers it with
+    # the appdetails shape, so it yields nothing and the store page is asked as before.
+    assert asked[0].startswith("https://api.steampowered.com/IStoreBrowseService/GetItems/")
+    assert asked[1:] == ["https://store.steampowered.com/api/appdetails?appids=5019180&filters=basic"]
 
 
 def test_the_store_page_is_only_asked_when_the_first_paths_are_not_enough(monkeypatch):
     from nadare.core import artwork
 
+    monkeypatch.setattr(artwork, "steam_library_assets", lambda appid: {})
     monkeypatch.setattr(artwork, "_get_json", lambda *a, **k: pytest.fail("no network yet"))
     first = next(iter(artwork._steam_candidates({"backend": "steam-5019180"}, "cover")))
     assert first.endswith("library_600x900.jpg")

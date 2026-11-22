@@ -51,9 +51,17 @@ def test_shows_only_the_latest_run_until_unticked(qapp, logs):
     assert "old run" in dlg.view.toPlainText()
 
 
+def _settle(qapp, ms: int = 400) -> None:
+    from PyQt6.QtTest import QTest
+
+    QTest.qWait(ms)
+    qapp.processEvents()
+
+
 def test_search_filters_lines(qapp, logs):
     dlg = make(logs, operation="launch")
     dlg.search.setText("boom")
+    _settle(qapp)
     assert dlg.view.toPlainText().strip().splitlines()[-1].startswith("ERROR boom")
     assert "fine" not in dlg.view.toPlainText()
 
@@ -162,3 +170,39 @@ def test_the_suggested_name_is_a_copy_not_the_source_log(qapp, logs, monkeypatch
     dlg._save_as()
     assert asked and asked[0] != str(logs / "G-launch.log")
     assert os.path.basename(asked[0]).endswith("-saved.log")
+
+
+# --- #624: typing in the search box filters once, not on every keystroke ----------------------
+
+
+def test_typing_quickly_filters_once(qapp, logs, monkeypatch):
+    from nadare.gui import logs_dialog
+
+    dlg = make(logs, operation="launch")
+    calls: list[str] = []
+    real = logs_dialog.logview.filter_lines
+
+    def counting(text, query):
+        calls.append(query)
+        return real(text, query)
+
+    monkeypatch.setattr(logs_dialog.logview, "filter_lines", counting)
+    for i in range(1, 6):
+        dlg.search.setText("boom"[:i] if i <= 4 else "boom")
+    assert calls == [], "filtered while still typing"
+    _settle(qapp)
+    assert calls == ["boom"]
+    assert "fine" not in dlg.view.toPlainText()
+
+
+def test_enter_filters_at_once(qapp, logs):
+    dlg = make(logs, operation="launch")
+    dlg.search.setText("boom")
+    dlg.search.returnPressed.emit()
+    assert "fine" not in dlg.view.toPlainText()
+
+
+def test_the_tickboxes_still_render_at_once(qapp, logs):
+    dlg = make(logs, operation="launch")
+    dlg.latest_only.setChecked(False)
+    assert "old run" in dlg.view.toPlainText()

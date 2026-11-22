@@ -83,6 +83,14 @@ def test_a_pin_already_in_steams_tool_dir_is_reused(root, tmp_path, monkeypatch)
     steam = tmp_path / "steam" / "GE-Proton11-7-x86_64"
     steam.mkdir(parents=True)
     (steam / "proton").write_text("#!/bin/sh\n")
+    # A copy Nadare did not install must be the release (test_runner_pin_check.py).
+    (steam / "version").write_text("1789520217 GE-Proton11-7\n")
+    (steam / "files" / "bin").mkdir(parents=True)
+    (steam / "files" / "bin" / "wine").write_text("#!/bin/sh\n")
+    windows = steam / "files" / "lib" / "wine" / "x86_64-windows"
+    windows.mkdir(parents=True)
+    for dll in ("ntdll.dll", "kernel32.dll", "kernelbase.dll"):
+        (windows / dll).write_bytes(b"MZ")
     monkeypatch.setattr(runners, "steam_runners", lambda: [steam])
     monkeypatch.setattr(runners, "install", lambda *a, **k: pytest.fail("downloaded"))
     assert runners.ensure_pinned("ge") == steam

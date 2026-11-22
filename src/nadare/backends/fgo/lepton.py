@@ -207,6 +207,7 @@ class LeptonFgo:
         repo: str | os.PathLike[str] | None = None,
         config_dir: str | os.PathLike[str] | None = None,
         env: dict[str, str] | None = None,
+        profile: dict | None = None,
     ) -> None:
         self.context = _ident(str(context or DEFAULT_CONTEXT), "context")
         self.prefix = Path(os.path.expanduser(str(prefix))) if prefix else default_prefix()
@@ -217,6 +218,7 @@ class LeptonFgo:
         self._repo_arg = (
             os.path.expanduser(str(repo)) if repo else os.environ.get("LEPTON_FGO_REPO")
         )
+        self._profile = profile
         self._env_extra = {str(k): str(v) for k, v in (env or {}).items()}
 
     def set_repo(self, repo: str | os.PathLike[str]) -> None:
@@ -299,7 +301,7 @@ class LeptonFgo:
         return self.conf_path.is_file() and self.lepton_fgo.is_file()
 
     def env(self) -> dict[str, str]:
-        env = process.child_environ()
+        env = process.build_env(self._profile)
         env["LEPTON_CONFIG_DIR"] = str(self.config_dir)
         env.update(self._env_extra)
         return env
@@ -396,24 +398,6 @@ class LeptonFgo:
             cmd += ["--cache", str(cache)]
         return cmd
 
-    def cmd_uninstall(
-        self,
-        ctx: str | None = None,
-        purge: bool = False,
-        all_: bool = False,
-        purge_cache: bool = False,
-        yes: bool = True,
-    ) -> list[str]:
-        cmd = [str(self.lepton_fgo), "uninstall", self._ctx(ctx)]
-        if purge:
-            cmd.append("--purge")
-        if all_:
-            cmd.append("--all")
-        if purge_cache:
-            cmd.append("--purge-cache")
-        if yes:
-            cmd.append("--yes")
-        return cmd
 
     # ---- running -----------------------------------------------------------
     def run(
@@ -423,11 +407,13 @@ class LeptonFgo:
         cancel: Cancel | None = None,
     ) -> subprocess.CompletedProcess[str]:
         argv = list(cmd)
+        env = self.env()
+        host_argv = sandbox.host_argv(argv, env=env)
         if cancel is None:
             try:
                 return subprocess.run(
-                    sandbox.host_argv(argv, env=self.env()),
-                    env=self.env(),
+                    host_argv,
+                    env=env,
                     capture_output=True,
                     text=True,
                     errors="replace",
@@ -454,8 +440,8 @@ class LeptonFgo:
         # even if the tool prints nothing.
         try:
             proc = subprocess.Popen(
-                sandbox.host_argv(argv, env=self.env()),
-                env=self.env(),
+                host_argv,
+                env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -502,11 +488,12 @@ class LeptonFgo:
         stopped on *any* error -- including one raised by ``on_line`` -- so a
         failed log callback never leaks a running installer.
         """
-        argv = sandbox.host_argv(list(cmd), env=self.env())
+        env = self.env()
+        argv = sandbox.host_argv(list(cmd), env=env)
         try:
             proc = subprocess.Popen(
                 argv,
-                env=self.env(),
+                env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

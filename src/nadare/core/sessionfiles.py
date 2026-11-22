@@ -14,6 +14,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from . import location
+
 #: The file names a run writes its live (or expired) session to.
 SESSION_NAMES = frozenset({"session.json", "session.enc.json", "session.json.expired-bak"})
 #: Where they live below a profile's data folder (CZN's stub and auth worker).
@@ -52,8 +54,8 @@ def find_leftovers(profiles: Mapping[str, Any], profiles_root: Path) -> list[Pat
             continue
         for sub in _PROFILE_SUBDIRS:
             found += _session_files_in(root / name / sub)
-        prefix = profile.get("prefix") if isinstance(profile, Mapping) else None
-        if not isinstance(prefix, str) or not prefix.strip():
+        prefix = location._setting(profile, "prefix") if isinstance(profile, Mapping) else None
+        if prefix is None:
             continue
         stage = Path(prefix).joinpath(*_NIKKE_STAGE)
         # Every part down to the stage must be a real folder: a link is not followed.

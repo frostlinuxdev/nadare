@@ -36,6 +36,11 @@ def _stop_path(prefix: str | os.PathLike[str]) -> Path:
     return _lock_path(prefix).with_suffix(".stop")
 
 
+def state_path(prefix: str | os.PathLike[str], suffix: str = ".json") -> Path:
+    """A state file beside the run lock for ``prefix`` (e.g. Stop's saved close request)."""
+    return _lock_path(prefix).with_suffix(suffix)
+
+
 @contextlib.contextmanager
 def hold(prefix: str | os.PathLike[str]) -> Iterator[None]:
     """Hold the run lock for ``prefix`` while the block runs."""

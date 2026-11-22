@@ -5,8 +5,8 @@
 Both sites publish a static ``ArticleMenu.json`` array (``articleId``,
 ``articleTitle``, ``articleType``, ``startTime``) and a ``MainMenu.json`` that
 maps article types to their localised labels and carries the hero cover. The
-list is not sorted, so items are ordered by ``startTime`` (CMS time, treated as
-UTC) before being returned.
+list is not sorted, so items are ordered by ``startTime`` (the CMS wall clock,
+China time ``UTC+8``) before being returned.
 
 Only the publisher's two media CDNs are accepted for images. This module is free
 of launcher/GUI concerns: it returns plain items in the
@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..core.news import NewsError, NewsResult, http_get_json, https_on
@@ -47,6 +47,9 @@ IMAGE_HOSTS: tuple[str, ...] = (
 
 MAX_ITEMS = 12
 
+# Kuro's CMS writes startTime in China time (UTC+8, no DST).
+_CMS_TZ = timezone(timedelta(hours=8))
+
 _ID_RE = re.compile(r"\A[A-Za-z0-9_-]+\Z")
 
 
@@ -64,7 +67,7 @@ def _published_at(value: Any) -> int:
         parsed = datetime.strptime(value.strip(), "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return 0
-    return int(parsed.replace(tzinfo=UTC).timestamp() * 1000)
+    return int(parsed.replace(tzinfo=_CMS_TZ).timestamp() * 1000)
 
 
 def _main_menu(payload: Any) -> tuple[dict[str, str], str | None]:

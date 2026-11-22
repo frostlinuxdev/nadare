@@ -235,7 +235,7 @@ def rig(tmp_path, monkeypatch):
             return repo.fetch(url, size, md5_hex)
         return client.fetch(url, size, md5_hex)
 
-    def fake_stream(argv, env, on_line=None, cancel=None):
+    def fake_stream(argv, env, on_line=None, cancel=None, before_stop=None):
         ran.append(list(argv))
         write_exe(
             tmp_path / "prefix" / "drive_c" / "NIKKE" / "Launcher" / "nikke_launcher.exe", "MZ"

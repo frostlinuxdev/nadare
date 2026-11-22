@@ -502,7 +502,11 @@ def _agreed(result=True, extra=None):
 
 
 def test_accept_terms_posts_the_game_to_the_stove_terms_service(authmod, monkeypatch):
-    stove, fake = _stove(authmod, monkeypatch, [_agreed()])
+    stove, fake = _stove(
+        authmod,
+        monkeypatch,
+        [_agreed(), FakeResponse({"code": 0, "value": {"access_token": "GAT"}})],
+    )
     stove.launcher_access = "LAT"
     stove.accept_terms()
     method, url, kwargs = fake.calls[0]
@@ -561,7 +565,47 @@ def test_accept_terms_http_error_is_reported(authmod, monkeypatch):
         stove.accept_terms()
 
 
-def _cli_auth(authmod, monkeypatch, log, *, fail=False, pending=(1502,)):
+def test_accept_terms_checks_the_game_once_after_stove_agrees(authmod, monkeypatch):
+    stove, fake = _stove(
+        authmod,
+        monkeypatch,
+        [_agreed(), FakeResponse({"code": 0, "value": {"access_token": "GAT"}})],
+    )
+    stove.launcher_access = "LAT"
+    stove.accept_terms()
+    assert [call[1] for call in fake.calls] == [
+        authmod.API + "/stove-terms/v3.0/agree",
+        authmod.API_BASE + "/gc/v1.4/check/" + authmod.GAME_ID,
+    ]
+    assert stove.game_access == "GAT"
+
+
+def test_accept_terms_that_stove_did_not_confirm_is_a_clear_error_without_retrying(
+    authmod, monkeypatch
+):
+    stove, fake = _stove(
+        authmod,
+        monkeypatch,
+        [
+            _agreed(),
+            FakeResponse({"code": authmod.TERMS_NOT_ACCEPTED_CODE, "message": "no"}),
+        ],
+    )
+    stove.launcher_access = "LAT"
+    with pytest.raises(authmod.TermsNotConfirmed, match="not confirm"):
+        stove.accept_terms()
+    assert len(fake.calls) == 2  # the agree and one check; no second agree or check
+
+
+def test_accept_terms_does_not_check_the_game_when_agreeing_fails(authmod, monkeypatch):
+    stove, fake = _stove(authmod, monkeypatch, [_agreed(result=False)])
+    stove.launcher_access = "LAT"
+    with pytest.raises(RuntimeError):
+        stove.accept_terms()
+    assert [call[1] for call in fake.calls] == [authmod.API + "/stove-terms/v3.0/agree"]
+
+
+def _cli_auth(authmod, monkeypatch, log, *, fail=False, pending=(1502,), unconfirmed=False):
     class _Auth:
         launcher_refresh = "RT"
         gds = {"nation": "GB", "timezone": "UTC"}
@@ -582,6 +626,8 @@ def _cli_auth(authmod, monkeypatch, log, *, fail=False, pending=(1502,)):
 
         def accept_terms(self):
             log.append("accept")
+            if unconfirmed:
+                raise authmod.TermsNotConfirmed("not confirmed")
             if fail:
                 raise RuntimeError("no")
 
@@ -667,6 +713,19 @@ def test_cli_accept_terms_failure_is_an_auth_failure(authmod, monkeypatch, tmp_p
     _cli_auth(authmod, monkeypatch, log, fail=True)
     sink = tmp_path / "cred.json"
     assert authmod.main(["accept-terms", "--agree", "--credential-out", str(sink)]) == 2
+    # renew() already rotated the refresh token; losing it would force a new QR sign-in.
+    assert log == ["renew", "accept", "credential"]
+
+
+def test_cli_accept_terms_stove_did_not_confirm_is_its_own_failure(
+    authmod, monkeypatch, tmp_path
+):
+    log: list[str] = []
+    _cli_auth(authmod, monkeypatch, log, unconfirmed=True)
+    sink = tmp_path / "cred.json"
+    assert authmod.main(["accept-terms", "--agree", "--credential-out", str(sink)]) == 6
+    # "Try Play again" only works if the token renew() rotated is handed back.
+    assert log == ["renew", "accept", "credential"]
 
 
 def test_game_check_rotates_caller_detail_on_70702(authmod, monkeypatch):

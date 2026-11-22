@@ -21,7 +21,7 @@ from nadare.core.config import Config
 from nadare.gui.game_view import GameView
 from nadare.gui.main_window import MainWindow
 
-SUPPORTED = ("direct-pgr", "launcher-nikke", "stellasora-yostar")
+SUPPORTED = ("direct-pgr", "launcher-nikke", "stellasora-yostar", "stove-czn")
 
 
 @pytest.fixture(scope="module")
@@ -44,7 +44,8 @@ def test_the_option_is_called_sandbox_and_says_what_it_does(kind):
 def test_supports_sandbox_follows_the_backend_flag():
     for kind in SUPPORTED:
         assert backends.supports_sandbox(kind) is True
-    assert backends.supports_sandbox("stove-czn") is False
+    assert backends.supports_sandbox("stove-czn") is True
+    assert backends.supports_sandbox("steam") is False
     assert backends.supports_sandbox("no-such-kind") is False
 
 
@@ -165,7 +166,7 @@ def test_opening_a_game_shows_its_saved_sandbox_state(qapp, tmp_path, monkeypatc
 
 
 def test_a_game_without_sandbox_shows_no_switch(qapp, tmp_path):
-    window = _window(tmp_path, backend="stove-czn")
+    window = _window(tmp_path, backend="steam")
     try:
         window._sync_sandbox("pgr")
         assert window.game.sandbox.isHidden()

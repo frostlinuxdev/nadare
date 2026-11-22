@@ -381,7 +381,7 @@ def kgame(tmp_path, monkeypatch):
     def fetch(url, headers=None):
         return lists[url]
 
-    def download(rf, path, *, emit=None, cancel=None, pool=None):
+    def download(rf, path, *, emit=None, cancel=None, pool=None, redirect_allowed=None):
         downloads.append(rf.url)
         data = blobs[rf.url]
         Path(path).parent.mkdir(parents=True, exist_ok=True)

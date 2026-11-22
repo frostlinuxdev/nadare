@@ -94,9 +94,7 @@ def test_games_that_cannot_use_it_do_not_offer_it():
     for kind in (
         "steam",
         "script",
-        "stove-czn",
         "fgo-lepton",
-        "arknights-yostar",
     ):
         assert not _offers(kind), kind
         assert not getattr(get(kind), "supports_secure_mode", False), kind
@@ -321,6 +319,12 @@ def test_without_any_bubblewrap_the_message_gives_the_install_command(tmp_path, 
 
 def test_stella_sora_offers_the_option():
     assert _offers("stellasora-yostar")
+
+
+def test_arknights_offers_the_option():
+    """Direct mode is the default install (#1450); the launcher fallback stays unwrapped
+    (``tests/test_arknights_parity_1450.py``)."""
+    assert _offers("arknights-yostar")
 
 
 def _stella_sora(tmp_path: Path, monkeypatch, **profile):

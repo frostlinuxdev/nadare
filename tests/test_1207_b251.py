@@ -31,7 +31,7 @@ def test_a_malformed_media_document_degrades_instead_of_failing(qapp, tmp_path, 
     config = Config.load(tmp_path / "config.json")
 
     class Ctx:
-        profile = {"media_file": str(media), "title": "Game"}
+        profile = {"backend": "arknights-yostar", "media_file": str(media), "title": "Game"}
 
     class FakeBackend:
         game_tag = "game"

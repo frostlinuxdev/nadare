@@ -11,16 +11,19 @@ by string concatenation or uses a shell.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import steamfix, steamtools, steamwayland
+from . import process, steamfix, steamtools, steamwayland, umu
 from .backends import BackendError
 from .events import Cancelled
 from .steamtools import CompatEntry
+
+log = logging.getLogger(__name__)
 
 #: How long the client gets to flush ``config.vdf`` and exit after ``-shutdown``.
 STEAM_CLOSE_TIMEOUT = 60.0
@@ -383,7 +386,69 @@ def proton_run_command(
     env = dict(base_env)
     env["STEAM_COMPAT_DATA_PATH"] = str(compat_data)
     env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = str(client_path)
-    return argv, env
+    log.info("WebView2 installer: running %s directly (proton run)", proton)
+    return argv, process.sanitize_game_env(env)
+
+
+def umu_run_command(
+    *,
+    umu_run: str,
+    proton: Path,
+    compat_data: Path,
+    client_path: Path,
+    args: Iterable[str],
+    base_env: dict[str, str],
+) -> tuple[list[str], dict[str, str]]:
+    """The ``umu-run`` invocation and environment for a command inside one Steam prefix.
+
+    umu runs the game's own Proton inside the Steam Runtime, as Steam does for the game
+    (#1341 item 2). umu takes the ``compatdata`` folder as ``WINEPREFIX`` and keeps Steam's
+    real ``pfx/`` inside it. ``GAMEID`` is ``umu-0``: this is an installer, not the game, so no
+    per-game fixes run.
+    """
+    argv = umu.run_argv(umu_run, args)
+    env = dict(base_env)
+    env["WINEPREFIX"] = str(compat_data)
+    env["STEAM_COMPAT_DATA_PATH"] = str(compat_data)
+    env["PROTONPATH"] = str(Path(proton).parent)
+    env["GAMEID"] = "umu-0"
+    umu.prepare_runtime(str(umu_run), env)
+    env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] = str(client_path)
+    log.info("WebView2 installer: running through umu %s", umu_run)
+    return argv, process.sanitize_game_env(env)
+
+
+def installer_command(
+    *,
+    umu_run: str | None,
+    proton: Path,
+    compat_data: Path,
+    client_path: Path,
+    args: Iterable[str],
+    base_env: dict[str, str],
+) -> tuple[list[str], dict[str, str]]:
+    """The command that runs an installer in one Steam game's prefix.
+
+    Through umu whenever one is usable, like every Play (#1338, #1341 item 2). A ``None``
+    ``umu_run`` means the caller already found that no umu can run here, which is only
+    inside the Flatpak: the same case where a game's Proton runs directly.
+    """
+    if umu_run:
+        return umu_run_command(
+            umu_run=umu_run,
+            proton=proton,
+            compat_data=compat_data,
+            client_path=client_path,
+            args=args,
+            base_env=base_env,
+        )
+    return proton_run_command(
+        proton=proton,
+        compat_data=compat_data,
+        client_path=client_path,
+        args=args,
+        base_env=base_env,
+    )
 
 
 def install_prefix(
@@ -466,7 +531,9 @@ __all__ = [
     "ActionResult",
     "find_proton",
     "install_prefix",
+    "installer_command",
     "proton_run_command",
+    "umu_run_command",
     "request_steam_install",
     "restore_runner",
     "set_runner",

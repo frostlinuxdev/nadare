@@ -10,6 +10,7 @@ index cannot be reached.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -24,7 +25,14 @@ from . import download, hosting, paths
 PREFIXES = {"wuwa": "50004", "pgr": "50015"}
 _TTL = 24 * 60 * 60
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]{8,64}")
-_CACHE_NAME = "kuro-tokens.json"
+_CACHE_NAME = "kuro-tokens.json"  # 0.1.0b24's one cache for every source: no longer read
+
+
+def _cache_path(url: str) -> Path:
+    """The cache for tokens fetched from ``url``: one per source, so a cache never answers for
+    another index (#1472)."""
+    key = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+    return paths.cache_dir() / f"kuro-tokens-{key}.json"
 
 
 def parse(payload: bytes, game: str) -> str | None:
@@ -111,7 +119,10 @@ def published(
     """
     if game not in PREFIXES:
         return None
-    path = paths.cache_dir() / _CACHE_NAME
+    url = hosting.kuro_tokens_url()
+    if not url.startswith("https://"):
+        return None  # the index is switched off: no fetch, and no token cached from before
+    path = _cache_path(url)
     cached = _read(path)
     if cached is not None and not refresh:
         try:
@@ -123,9 +134,6 @@ def published(
             if token is not None:
                 return token
 
-    url = hosting.kuro_tokens_url()
-    if not url.startswith("https://"):
-        return None
     try:
         payload = (opener or _fetch)(url)
     except Exception:  # noqa: BLE001 - a fetch failure falls back to the cache

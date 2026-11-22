@@ -21,15 +21,15 @@ yet (the CZN and Yostar updaters manage their own writes); see PLAN.md.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import posixpath
 import shutil
-import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
+
+from . import atomicfile
 
 JOURNAL_NAME = ".nadare-update-transaction"
 PHASES = ("applying", "files_verified", "committed", "rolled_back")
@@ -44,27 +44,14 @@ class JournalError(RuntimeError):
 
 
 def _sha256_file(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for block in iter(lambda: fh.read(1 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
+    from . import download
+
+    return download.hash_file(path)["sha256"]
 
 
 def _atomic_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".journal-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(value, fh, indent=2, sort_keys=True)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-        _sync_dir(path.parent)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    text = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    atomicfile.write(path, text, make_parent=True, sync_dir=True)
 
 
 def safe_relative(path: str) -> str:

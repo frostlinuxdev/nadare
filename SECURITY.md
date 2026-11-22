@@ -49,6 +49,26 @@ Review logs yourself before sharing.
    `~/.config/nadare/secrets.json` from an older beta, which current versions
    no longer use), then change any account credentials you reused elsewhere.
 
+## How launch holds are issued
+
+A hold is an entry in `holds.json` that makes Nadare ask before a game starts; see
+[The notices feed](docs/NOTICES.md#holds). It is not a remote kill switch: it cannot remove
+files, stop a running game, or turn off install, update or stop.
+
+- The list is signed with the release key whose public half ships in Nadare
+  (`core/releasesig.py`). The app checks that detached signature before reading the list; an
+  unsigned, badly signed or unreadable list is ignored.
+- The private key stays offline with the release key and is used only where releases are
+  signed. It is not available to the running app.
+- Every hold must have an issue in the public tracker that names the game and the evidence.
+- Holds are issued only for a confirmed compromise, or a credible report of one, in something
+  Nadare launches. They are not used for outages, ordinary bugs, policy disagreements or
+  unconfirmed rumours.
+- The list is not published as a separate project file; it lives only in the index and its
+  signed copy. If the key is lost or compromised, treat it as a release-signing incident:
+  publish the rotation, ship a build with the new public key, and withdraw the old index
+  signature.
+
 ## Scope
 
 In scope:

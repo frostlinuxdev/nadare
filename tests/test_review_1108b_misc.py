@@ -333,7 +333,9 @@ def test_the_direct_launch_stops_the_relay_if_it_fails_before_streaming(tmp_path
         return argv, env
 
     def fail_info(*args, **kwargs):
-        raise RuntimeError("could not print the command")
+        # Fail at the exec line, once the relay runs (#1421 logs earlier, before it starts).
+        if getattr(backend, "_link_relay", None) is relay:
+            raise RuntimeError("could not print the command")
 
     backend._secure_wrap = fake_wrap
     backend.info = fail_info

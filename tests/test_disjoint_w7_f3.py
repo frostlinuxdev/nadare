@@ -23,9 +23,11 @@ def test_czn_display_x11_wins_over_an_exported_proton_enable_wayland(
         )
     )
     monkeypatch.setattr(czn_backend.shutil, "which", lambda name, *a, **k: None)
+    # CZN runs through umu like every Proton game (#1449).
+    monkeypatch.setattr("nadare.core.umu.resolve", lambda *a, **k: "/usr/bin/umu-run")
+    monkeypatch.setattr("nadare.core.umu.note_first_runtime", lambda emit: None)
     monkeypatch.setattr(CznBackend, "_download_runner", lambda self, rid, latest: None)
     monkeypatch.setenv("PROTON_ENABLE_WAYLAND", "1")
-    monkeypatch.setenv("NADARE_SKIP_HOSTLIBS_CHECK", "1")
 
     _argv, env = backend._prefix_command(["game.exe"])
 

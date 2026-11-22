@@ -115,3 +115,36 @@ def test_mountinfo_parsing_unescapes_spaces(tmp_path):
         "garbage line\n"
     )
     assert removal._parse_mountinfo(text) == frozenset({"/mnt/with space", "/plain"})
+
+
+def _linked_victim(tmp_path):
+    victim = tmp_path / "victim"
+    (victim / "kept").mkdir(parents=True)
+    (victim / "important.txt").write_text("keep me")
+    link = tmp_path / "link"
+    link.symlink_to(victim)
+    return victim, link
+
+
+def test_a_linked_root_with_keep_deletes_nothing_behind_the_link(env, tmp_path):
+    victim, link = _linked_victim(tmp_path)
+    outcome = removal.delete_tree(link, keep=[victim / "kept"])
+    assert (victim / "important.txt").exists()
+    assert outcome.leftovers and outcome.leftovers[0][0] == link
+
+
+def test_a_linked_root_with_a_mount_below_deletes_nothing_behind_the_link(
+    env, tmp_path, fake_mount
+):
+    victim, link = _linked_victim(tmp_path)
+    fake_mount.path = link / "kept"
+    outcome = removal.delete_tree(link)
+    assert (victim / "important.txt").exists()
+    assert outcome.leftovers and outcome.leftovers[0][0] == link
+
+
+def test_a_linked_root_without_keep_is_reported_not_raised(env, tmp_path):
+    victim, link = _linked_victim(tmp_path)
+    outcome = removal.delete_tree(link)
+    assert (victim / "important.txt").exists() and link.is_symlink()
+    assert outcome.leftovers and outcome.leftovers[0][0] == link

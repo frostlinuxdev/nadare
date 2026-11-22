@@ -115,6 +115,12 @@ heartbeat. Unit files are in `packaging/systemd/nadare-pin-publisher.{service,ti
   `NADARE_PIN_GAMES`, `NADARE_PIN_DEADLINE`, `NADARE_PIN_PUSH=0` (commit but do not push),
   and `NADARE_PIN_HEARTBEAT_URL`, the monitoring heartbeat URL. The URL is a secret and is
   never printed or written to the status file.
+- **Sandboxed unit.** The service runs with `ProtectSystem=strict`, `ProtectHome=read-only`
+  and `ReadWritePaths=%h/nadare-pins`, the one directory that holds its index checkout, the
+  status file (replaced through a temp file beside it) and the job's own `scripts/` copy.
+  Move `status.json` elsewhere and list that directory instead if the scripts themselves
+  should stay read-only. The run lock uses `XDG_RUNTIME_DIR=/tmp` because `/run` is
+  read-only under `strict`; `PrivateTmp=` makes that a private `/tmp`.
 - **Status file** (`~/nadare-pins/status.json`): `ok`, `result` (`published`, `committed`,
   `unchanged` or `failed`), `message`, `games`, `commit`, `host`, `time`.
 - **Heartbeat.** One ping per run, `down` with the reason when the run failed. Configure the

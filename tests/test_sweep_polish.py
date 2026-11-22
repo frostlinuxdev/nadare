@@ -217,7 +217,9 @@ def test_library_and_sidebar_cards_show_the_profile_name(qapp):
     sidebar = SidebarGames()
     try:
         page.refresh(profiles)
-        texts = {name: card.title_label.text() for name, card in page._cards.items()}
+        # The compact title elides; the full disambiguated name remains accessible.
+        texts = {name: card.accessibleName() for name, card in page._cards.items()}
+        assert all(card.title_label.width() <= card.width() for card in page._cards.values())
         assert texts["arknights"] == "Arknights · arknights"
         assert texts["arknights-2"] == "Arknights · arknights-2"
 
@@ -261,11 +263,10 @@ def test_czn_status_never_mentions_vulkan(tmp_path, monkeypatch):
 
 
 def test_vulkan_note_is_plain_language(monkeypatch):
-    monkeypatch.setattr(graphics, "dxvk_ok", lambda: False)
+    monkeypatch.setattr(graphics, "vulkan_info", lambda **k: graphics.VulkanInfo(True, "1.2.199"))
     assert graphics.vulkan_note() == (
-        "Your graphics driver looks old for Vulkan games. If the game will not "
-        "start, open Settings → Game, tick Show advanced options and set Renderer "
-        "to OpenGL."
+        "Your graphics driver reports Vulkan 1.2.199; Vulkan games need 1.3. "
+        "If the game will not start, update your graphics driver."
     )
 
 

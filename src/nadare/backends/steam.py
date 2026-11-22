@@ -28,13 +28,15 @@ import shlex
 import shutil
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 
-from ..core import process, sandbox, steamstore
+from ..core import launchenv, process, sandbox, steamstore
 from ..core.backends import BackendError, GameBackend, Option, Status
 from ..core.config import as_bool
 from ..core.events import Event, mask
 from .wine import (
+    GamePidsMixin,
     ProcessQuery,
     cmdline_argv,
     profile_setting,
@@ -86,6 +88,82 @@ def _has_app_manifest(app_id: str) -> bool:
     """True when Steam has an ``appmanifest_<id>.acf`` in one of its libraries."""
     name = f"appmanifest_{app_id}.acf"
     return any((root / name).is_file() for root in _steamapps_dirs())
+
+
+#: #1359: after the client hands the URI to a running Steam, how long the game may take to appear,
+#: and how often Nadare looks while it waits and while the game runs.
+APPEAR_TIMEOUT = 60.0
+APPEAR_POLL = 1.0
+RUNNING_POLL = 2.0
+#: Patched by the tests.
+_monotonic = time.monotonic
+_sleep = time.sleep
+
+NOTHING_STARTED = "Steam returned without starting the game"
+
+
+def _tokens_match(app_id: str | None, tokens: list[str], line: str, extra: str) -> bool:
+    if extra and extra in line:
+        return True
+    if not app_id:
+        return False
+    if f"AppId={app_id}" in tokens or f"steam://rungameid/{app_id}" in tokens:
+        return True
+    return any(
+        token == "-applaunch" and tokens[i + 1] == app_id for i, token in enumerate(tokens[:-1])
+    )
+
+
+def host_matching_pids(
+    app_id: str | None, *, extra: str = "", run=None
+) -> list[int]:
+    """Inside the Flatpak: this user's host processes that belong to the game (#1359).
+
+    The sandbox's /proc holds only its own processes, so Steam's ``reaper … AppId=<id>`` is
+    invisible there. ``ps`` on the host lists them; the same exact tokens as on /proc are
+    matched (``AppId=<id>``, the launch URI, the ``-applaunch <id>`` pair). Never raises:
+    a failed listing finds nothing, as before.
+    """
+    argv = ["flatpak-spawn", "--host", "ps", "-ww", "-U", str(os.getuid()), "-o", "pid=,args="]
+    run = run or subprocess.run
+    try:
+        result = run(
+            argv,
+            env=process.child_environ(),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    if result.returncode != 0:
+        return []
+    hits: list[int] = []
+    for line in (result.stdout or "").splitlines():
+        parts = line.split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        if _tokens_match(app_id, parts[1].split(), parts[1], extra):
+            hits.append(int(parts[0]))
+    return sorted(set(hits))
+
+
+def host_stop(pids: list[int], *, run=None) -> None:
+    """Signal host processes from inside the Flatpak (their PIDs mean nothing to os.kill here)."""
+    if not pids:
+        return
+    run = run or subprocess.run
+    try:
+        run(
+            ["flatpak-spawn", "--host", "kill", "-TERM", *[str(pid) for pid in pids]],
+            env=process.child_environ(),
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
 
 
 def _applaunch_pids(app_id: str, *, proc_root: str | os.PathLike[str] = "/proc") -> list[int]:
@@ -160,7 +238,7 @@ def _host_client(parts: list[str]) -> list[str]:
         raise BackendError(NO_HOST_STEAM)
     return list(client)
 
-class SteamBackend(GameBackend):
+class SteamBackend(GamePidsMixin, GameBackend):
     kind = "steam"
     supports_update = False  # Steam updates its own games
 
@@ -225,6 +303,17 @@ class SteamBackend(GameBackend):
         app_id = self._app_id()
         return [*self._client(), f"steam://rungameid/{app_id}"], app_id
 
+    def game_pids(self) -> Callable[[], list[int]]:
+        """Use the same native/host process matching as Stop for window evidence."""
+        def current() -> list[int]:
+            try:
+                app_id = self._app_id()
+            except BackendError:
+                return []
+            return self._matching_pids(app_id)
+
+        return current
+
     def _patterns(self, app_id: str | None = None) -> ProcessQuery:
         """Exact argv tokens identifying a launch of ``app_id``.
 
@@ -242,6 +331,9 @@ class SteamBackend(GameBackend):
         self, app_id: str | None, *, proc_root: str | os.PathLike[str] = "/proc"
     ) -> list[int]:
         """PIDs of a running launch of ``app_id`` (URI, ``AppId=`` or ``-applaunch``)."""
+        if sandbox.in_flatpak() and str(proc_root) == "/proc":
+            extra = profile_setting(self.ctx.profile, "process_match")
+            return host_matching_pids(app_id, extra=str(extra) if extra else "")
         pids = set(scan_pids(self._patterns(app_id), proc_root=proc_root))
         if app_id:
             pids.update(_applaunch_pids(app_id, proc_root=proc_root))
@@ -286,13 +378,42 @@ class SteamBackend(GameBackend):
         argv, app_id = self.build()
         self.ctx.emit(Event("step", f"Steam: launching app {app_id}"))
         self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
-        return stream(
+        env = process.drop_secret_env(launchenv.inherit(os.environ, self.ctx.profile))
+        code = stream(
             argv,
-            process.drop_secret_env(process.child_environ()),  # a Steam it starts keeps it (#811)
+            env,
             on_line=lambda line: self.info(mask(line)),
             cancel=self.ctx.cancel,
             stop_wine=False,
         )
+        if code != 0:
+            return code
+        return self._wait_for_game(app_id)
+
+    def _wait_for_game(self, app_id: str) -> int:
+        """#1359: a running Steam takes the URI and the client exits at once; wait for the game.
+
+        Up to :data:`APPEAR_TIMEOUT` for its processes to appear, then as long as they run. Stop
+        (cancel) ends the wait. When nothing appears, Steam opened a store page, an update or a
+        dialog instead: say that, not "game exited normally".
+        """
+        cancel = self.ctx.cancel
+        deadline = _monotonic() + APPEAR_TIMEOUT
+        while True:
+            cancel.raise_if_cancelled()
+            if self._matching_pids(app_id):
+                break
+            if _monotonic() >= deadline:
+                self.info("no game process appeared after Steam took the launch")
+                self.ctx.emit(Event("done", NOTHING_STARTED))
+                return 0
+            _sleep(APPEAR_POLL)
+        self.ctx.emit(Event("step", "Steam: the game is running"))
+        while True:
+            _sleep(RUNNING_POLL)
+            cancel.raise_if_cancelled()
+            if not self._matching_pids(app_id):
+                return 0
 
     def stop(self) -> None:
         try:
@@ -302,7 +423,10 @@ class SteamBackend(GameBackend):
         pids = self._matching_pids(app_id)
         if pids:
             self.info(f"stopping {len(pids)} process(es): {pids}")
-            stop_pids(pids)
+            if sandbox.in_flatpak():
+                host_stop(pids)
+            else:
+                stop_pids(pids)
         else:
             self.info("no matching Steam game process found")
         if as_bool(profile_setting(self.ctx.profile, "stop_steam"), False):

@@ -95,6 +95,17 @@ def _register_webview2(prefix) -> None:
     )
 
 
+def _webview2_ready(prefix) -> None:
+    """A finished WebView2 install: the runtime files plus the registry entry naming them.
+
+    CZN Play refuses without it (the game cannot sign in), so launch tests need it.
+    """
+    folder = prefix / "drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application/1.0.0"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "msedgewebview2.exe").write_bytes(b"MZ")
+    _register_webview2(prefix)
+
+
 def _manifest_files(*rows: str) -> dict:
     return {"version_no": 10, "root_folder": "root", "execution": "game.exe", "files": list(rows)}
 

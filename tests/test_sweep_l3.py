@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 from _backend_helpers import make_context
+from _official_route import OfficialRouteBackend
 from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
@@ -224,7 +225,7 @@ def test_vcredist_ensure_status_is_plain(
 def test_official_install_runs_vcredist_once_on_a_fresh_prefix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    backend = ArknightsBackend(make_context(tmp_path, ak.KIND, {}, "fresh"))
+    backend = OfficialRouteBackend(make_context(tmp_path, ak.KIND, {}, "fresh"))
     calls: list[int] = []
 
     def ensure_prefix(self) -> bool:
@@ -248,7 +249,8 @@ def test_official_install_runs_vcredist_once_on_a_fresh_prefix(
     monkeypatch.setattr(WineGameBackend, "resolve_runner", lambda self: (str(tmp_path), "proton"))
     patch_everywhere(monkeypatch, wg, "umu", SimpleNamespace(
         system=lambda *a, **k: "/usr/bin/umu-run", resolve=lambda *a, **k: "/usr/bin/umu-run",
-        managed=lambda: None, note_first_runtime=lambda emit: None))
+        managed=lambda: None, note_first_runtime=lambda emit: None,
+        run_argv=lambda exe, args: [str(exe), *args]))
     monkeypatch.setattr(WineGameBackend, "find_launcher", lambda self: installer)
     backend.ctx.emit = lambda _e: None
 

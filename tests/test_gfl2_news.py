@@ -10,6 +10,8 @@ Articles open at ``https://gf2exilium.sunborngame.com/NewsInfo?typeId=<Type>&id=
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 
 from nadare.backends import gfl2_news
@@ -50,6 +52,16 @@ def test_items_have_the_news_shape():
     assert item["category"] == "Notices"
     assert item["url"] == "https://gf2exilium.sunborngame.com/NewsInfo?typeId=3&id=452"
     assert item["published_at"] > 0 and item["image"] is None
+
+
+def test_the_date_field_is_the_cms_utc_minus_4_wall_clock():
+    # Event 451 has Date "2026-10-29 09:00:00" and its body reads
+    # "[Duration] 2026/10/29 9:00 ~ 2026/11/18 18:59 (UTC-4)", so the CMS clock is UTC-4.
+    out = gfl2_news.fetch_gfl2_news(
+        get_json=routes([row(nid=451, kind=4, date="2026-10-29 09:00:00")])
+    )
+    (item,) = _news(out)
+    assert item["published_at"] == int(datetime(2026, 10, 29, 13, 0, tzinfo=UTC).timestamp() * 1000)
 
 
 def test_newest_first_deduped_and_capped():

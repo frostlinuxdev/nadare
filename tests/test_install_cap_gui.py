@@ -110,7 +110,7 @@ def test_the_message_goes_when_the_slot_frees_up(tmp_path, qapp, monkeypatch):
         window.controller._on_succeeded("a", "install", 0, worker)
         assert not window.controller.is_waiting("b")
         assert "Waiting" not in window.game.step_label.text()
-        assert "b" not in window._waiting
+        assert not window._operations.view("b").queued  # the model owns the queue state (#1462)
     finally:
         _close(window, qapp)
 
@@ -122,7 +122,7 @@ def test_cancelling_a_waiting_game_clears_the_message(tmp_path, qapp, monkeypatc
         window.open_game("b")
         window.controller.start("b", "install")
         window.controller.cancel("b")
-        assert "b" not in window._waiting
+        assert not window._operations.view("b").queued  # the model owns the queue state (#1462)
         window.open_game("a")
         window.open_game("b")
         assert "Waiting" not in window.game.step_label.text()

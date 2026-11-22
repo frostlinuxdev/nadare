@@ -55,7 +55,9 @@ class UsernsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
 
-        self.summary = QLabel(userns.SHORT_MESSAGE + "\n\n" + userns.WITHOUT_IT)
+        summary = (userns.RUNTIME_MOVED_MESSAGE if userns.RUNTIME_MOVED_MESSAGE in message
+                   else userns.SHORT_MESSAGE + "\n\n" + userns.WITHOUT_IT)
+        self.summary = QLabel(summary)
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
 
@@ -66,8 +68,8 @@ class UsernsDialog(QDialog):
         self.details = QPlainTextEdit()
         self.details.setReadOnly(True)
         self.details.setFont(QFont("monospace"))
-        head, details = userns.split_hint(message)
-        self.details.setPlainText((f"{head}\n\n" if head else "") + (details or userns.hint()))
+        head, _details = userns.split_hint(message)
+        self.details.setPlainText((f"{head}\n\n" if head else "") + userns.hint())
         self.details.hide()
         layout.addWidget(self.details)
 

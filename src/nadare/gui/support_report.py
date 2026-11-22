@@ -28,9 +28,10 @@ class _Signals(QObject):
 
 
 class ReportTask(QRunnable):
-    def __init__(self, config: dict, profile: str) -> None:
+    def __init__(self, config: dict, profile: str, config_path=None) -> None:
         super().__init__()
         self.config = config
+        self.config_path = config_path
         self.profile = profile
         self.signals = _Signals()
 
@@ -45,6 +46,7 @@ class ReportTask(QRunnable):
                 self.config,
                 profile_name=self.profile,
                 doctor_text=_doctor_text(Config(data=self.config)),
+                config_path=self.config_path,
             )
         except Exception as exc:  # noqa: BLE001 - a message beats a crash
             log.debug("support report failed", exc_info=True)

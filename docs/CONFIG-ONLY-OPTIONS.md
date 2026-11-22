@@ -13,9 +13,9 @@ Example (`~/.config/nadare/config.json`, one game under `profiles`):
 
 | key | what it does | used by |
 | --- | --- | --- |
-| `installer_url` | Download this installer instead of the publisher's current one | launcher games, Arknights in official mode (rare: see BACKENDS.md) |
-| `installer_sha256` | Checksum the installer must match | launcher games, Arknights in official mode (rare: see BACKENDS.md) |
-| `installer_args` | Extra arguments given to the installer | launcher games, Arknights in official mode (rare: see BACKENDS.md) |
+| `installer_url` | Download this installer instead of the publisher's current one | launcher games |
+| `installer_sha256` | Checksum the installer must match | launcher games |
+| `installer_args` | Extra arguments given to the installer | launcher games |
 | `manifest_index` | Alternative download list index (Yostar games) | Arknights, Stella Sora |
 | `manifest_file` | Alternative download list file (Yostar games) | Arknights, Stella Sora |
 | `media_file` | Alternative media file list | Arknights |
@@ -34,6 +34,11 @@ Example (`~/.config/nadare/config.json`, one game under `profiles`):
 | `uninstall_all` | Remove every Lepton context on uninstall | Fate/Grand Order |
 | `wine_binary` | Use this Wine when no runner is chosen for the game (an explicit runner wins) | plain Wine games; not Chaos Zero Nightmare |
 | `umu_binary` | Use this umu-run instead of Nadare's own | Wine games that run through umu; not Chaos Zero Nightmare |
-| `download_workers` | Parallel downloads (1-16) | Yostar games and the direct-download games |
+| `sandbox_share_pid` | Give the game this computer's process list instead of its own (PID namespace). Only for a game that cannot start without it | Sandboxed games |
+| `sandbox_host_tmp` | Give the game this computer's `/tmp` instead of a private one. Only for a game that needs a file Nadare cannot put there | Sandboxed games |
 | `exe_name` | The game or launcher executable inside the game folder; shown in Settings for Wine and Script games only | all but Wine and Script |
 | `process_match` | Text used to find the running game; shown in Settings for Script games only, config-only for every other kind | all but Script |
+| `stop_grace_seconds` | How long Stop asks the game to close before it is forced (default 8; `0` skips the request). Only for the games Nadare launches itself (launcher-based and direct); CZN stops at once | launcher-based and direct games |
+
+Download workers is now in Settings (1–32). It caps the plan’s automatic worker count.
+The download speed limit is global, in MB/s; 0 means no limit.

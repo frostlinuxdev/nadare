@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import time
 from collections.abc import Callable, Iterable
@@ -26,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
-from . import download, hosting, paths, updatecheck
+from . import atomicfile, download, hosting, paths, updatecheck
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +62,11 @@ def _clean_text(value: Any) -> str:
     return " ".join(text.split())[:MAX_TEXT]
 
 
-def _link(value: Any, feed: str) -> str | None:
+def link_allowed(value: Any, feed: str) -> str | None:
+    """``value`` when it is an https link on an allowed host, else ``None``.
+
+    Notices and the signed hold list share this one allowlist (#805).
+    """
     if not isinstance(value, str):
         return None
     try:
@@ -75,6 +78,10 @@ def _link(value: Any, feed: str) -> str | None:
     feed_host = (urlparse(feed).hostname or "").lower()
     allowed = {*_LINK_HOSTS, feed_host} - {""}
     return value if (parsed.hostname or "").lower() in allowed else None
+
+
+def _link(value: Any, feed: str) -> str | None:
+    return link_allowed(value, feed)
 
 
 def _one(raw: Any, feed: str) -> Notice | None:
@@ -165,10 +172,7 @@ def _read_cache(url: str) -> dict[str, Any]:
 def _write_cache(entry: dict[str, Any]) -> None:
     path = paths.cache_dir() / CACHE_NAME
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        part = path.with_name(f"{path.name}.{os.getpid()}.part")
-        part.write_text(json.dumps(entry), encoding="utf-8")
-        os.replace(part, path)
+        atomicfile.write(path, json.dumps(entry), make_parent=True)
     except OSError:
         log.debug("could not write the notices cache", exc_info=True)
 
@@ -209,4 +213,4 @@ def load(
     return parse(payload, url=url)
 
 
-__all__ = ["Notice", "applies", "feed_url", "load", "parse", "pick"]
+__all__ = ["Notice", "applies", "feed_url", "link_allowed", "load", "parse", "pick"]

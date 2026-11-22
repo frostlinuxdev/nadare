@@ -46,7 +46,9 @@ class BannersMixin:
         self.graphics_banner.show_message(text, action)
 
     def _on_graphics_action(self) -> None:
-        if self._graphics_refs:
+        if self._graphics_restart:
+            self._restart_for_graphics()
+        elif self._graphics_refs:
             self._install_graphics()
         else:
             self._copy_graphics_fix()
@@ -74,14 +76,34 @@ class BannersMixin:
 
     def _graphics_install_finished(self, ok: bool, message: str) -> None:
         self._installing_graphics = False
-        self._graphics_refs = ()
         self.graphics_banner.message_label.setText(message)
-        self.graphics_banner.action_button.setEnabled(True)
+        button = self.graphics_banner.action_button
+        button.setEnabled(True)
+        button.setVisible(True)
         if ok:
-            self.graphics_banner.action_button.setVisible(False)
+            # Flatpak mounts the new packages only in a fresh instance: offer the restart
+            # rather than telling people to find Quit (most users are not terminal people).
+            self._graphics_refs = ()
+            self._graphics_restart = True
+            button.setText("Restart Nadare")
         else:
-            self.graphics_banner.action_button.setText("Copy command")
-            self.graphics_banner.action_button.setVisible(True)
+            # Keep the refs: a brand-new driver may only be waiting for Flathub.
+            button.setText("Try again")
+
+    def _restart_for_graphics(self) -> None:
+        """Quit and start a fresh Flatpak instance, unless a game or an install runs."""
+        removing = any(operation == "remove" for operation in self._busy.values())
+        if self.controller.mutating_profiles() or self.controller.launching_profiles() or removing:
+            self._inform_busy_restart()
+            return
+        if not self._close_window_for_update():
+            return
+        from .. import single_instance
+
+        socket = str(single_instance._socket_path(single_instance.server_name()))
+        if not flatpakgl.restart_nadare(socket):
+            log.warning("graphics restart: the portal could not start a new Nadare")
+        self._quit_app()
 
     def _copy_graphics_fix(self) -> None:
         QGuiApplication.clipboard().setText(self._graphics_fix)
@@ -102,6 +124,20 @@ class BannersMixin:
                 log.debug("notices check failed", exc_info=True)
 
         threading.Thread(target=run, name="nadare-notices", daemon=True).start()
+
+    def _start_holds_check(self) -> None:
+        """Read the signed hold list once per start, off the GUI thread (#805)."""
+        if not self.config.data.get("check_holds", True):
+            return
+        from ...core import holds
+
+        def run() -> None:
+            try:
+                holds.load()
+            except Exception:  # noqa: BLE001 - a background check must never die
+                log.debug("holds check failed", exc_info=True)
+
+        threading.Thread(target=run, name="nadare-holds", daemon=True).start()
 
     def _show_notice(self, items: Any) -> None:
         from ...core import notices

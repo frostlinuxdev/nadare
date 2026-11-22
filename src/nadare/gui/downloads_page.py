@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QKeyEvent, QMouseEvent
+from PyQt6.QtGui import QKeyEvent, QMouseEvent, QPixmap
 from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -24,7 +24,23 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-_KIND_LABELS = {"install": "Installing", "update": "Updating", "repair": "Repairing"}
+from .i18n import tr_n
+from .images import ImageLoader
+from .theme import cover_pixmap, scaled
+
+_KIND_LABELS = {
+    "install": "Installing",
+    "update": "Updating",
+    "repair": "Repairing",
+    "runner": "Proton runner",
+    "elsewhere": "Busy elsewhere",
+}
+
+#: A game whose operation lock another Nadare window or command holds (C5, r3b05 F2).
+_ELSEWHERE_TEXT = (
+    "Another Nadare window or command is installing, updating or removing this game. "
+    "This row goes away when it is done."
+)
 
 
 def downloads_label(active: int, paused: int) -> tuple[str, str]:
@@ -45,13 +61,16 @@ class DownloadRow:
     profile: str
     title: str
     operation: str  # install, update or repair
-    state: str  # running, waiting or paused
+    state: str  # running, waiting, paused, or elsewhere (another process holds the lock)
     detail: str = ""  # running: the current step, in the app's own words
     fraction: float | None = None  # running: 0..1, or None while nothing is measurable
     eta: str = ""
     ahead: int = 0  # waiting: how many waiting installs come first
     can_pause: bool = False  # running or waiting: the download resumes from what is on disk
     can_now: bool = False  # waiting: the running install can be paused to start this one
+    parent_profile: str = ""  # runner rows: the game it belongs under, if any
+    cancel_tip: str = ""  # a row that needs its own words for what Cancel stops
+    art: tuple[str, ...] = ()  # cover candidates, best first, as the library tries them (#1623)
 
 
 _CANCEL_TIP = "Stop this download and take it off this list."
@@ -83,6 +102,16 @@ class DownloadRowWidget(QFrame):
         outer = QHBoxLayout(self)
         outer.setContentsMargins(16, 12, 16, 12)
         outer.setSpacing(12)
+
+        # The game's cover, so a row is found at a glance (#1623): a placeholder until it decodes.
+        self.thumb = QLabel()
+        self.thumb.setFixedSize(scaled(48), scaled(64))
+        self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumb.setAccessibleName("Game cover")
+        self.art: tuple[str, ...] | None = None  # what the thumb was last asked to show
+        self._seed = profile
+        self.set_art(None)
+        outer.addWidget(self.thumb, 0, Qt.AlignmentFlag.AlignVCenter)
 
         left = QVBoxLayout()
         left.setSpacing(4)
@@ -142,22 +171,47 @@ class DownloadRowWidget(QFrame):
             buttons.addWidget(button)
         outer.addLayout(buttons)
 
+    def set_art(self, pixmap: QPixmap | None) -> None:
+        """Show ``pixmap`` rounded in the thumb, or the game's placeholder when it is ``None``."""
+        size = self.thumb.size()
+        self.thumb.setPixmap(
+            cover_pixmap(pixmap, size.width(), size.height(), self._seed, radius=scaled(6))
+        )
+
     def apply(self, row: DownloadRow) -> None:
+        runner = row.operation == "runner"
+        # A runner a game needs is indented under that game's row and drawn a little smaller.
+        left = scaled(44) if row.parent_profile else 16
+        vertical = 8 if runner else 12
+        self.layout().setContentsMargins(left, vertical, 16, vertical)
+        self.thumb.setVisible(not runner)
+        self.title_label.setStyleSheet(
+            f"font-weight: 700; font-size: {12 if runner else 14}px;"
+        )
+        self._seed = row.title or row.profile
         self.title_label.setText(row.title)
         self.title_label.setToolTip(row.title)
-        self.setAccessibleName(f"{row.title}: open the game page")
+        self.setAccessibleName(
+            f"{row.title}: runner download"
+            if runner
+            else f"{row.title}: open the game page"
+        )
         self.kind_label.setText(_KIND_LABELS.get(row.operation, row.operation.capitalize()))
         running = row.state == "running"
         waiting = row.state == "waiting"
         paused = row.state == "paused"
-        if running:
+        elsewhere = row.state == "elsewhere"
+        if elsewhere:
+            self._set_status(_ELSEWHERE_TEXT)
+        elif row.state == "finished":
+            self._set_status("Finished")
+        elif running:
             self._set_status(row.detail or "Starting…")
         elif waiting:
             if row.ahead <= 0:
                 self._set_status("Next in line")
             else:
-                noun = "install" if row.ahead == 1 else "installs"
-                self._set_status(f"Waiting · {row.ahead} {noun} ahead of this one")
+                self._set_status(tr_n("Waiting · {n} installs ahead of this one", row.ahead))
         else:
             self._set_status("Paused. Everything downloaded so far is kept.")
         self.bar.setVisible(running)
@@ -168,8 +222,12 @@ class DownloadRowWidget(QFrame):
         self.resume_btn.setVisible(paused)
         self.next_btn.setVisible(waiting and row.ahead > 0)
         self.now_btn.setVisible(waiting and row.can_now)
-        self.cancel_btn.setVisible(True)
-        self.cancel_btn.setToolTip(_CANCEL_KEEPS_TIP if (row.can_pause or paused) else _CANCEL_TIP)
+        # Nothing here can stop or resume another process's job; the lock would refuse it.
+        self.cancel_btn.setVisible(row.state not in ("finished", "elsewhere"))
+        self.cancel_btn.setToolTip(
+            row.cancel_tip
+            or (_CANCEL_KEEPS_TIP if (row.can_pause or paused) else _CANCEL_TIP)
+        )
 
     def _set_status(self, text: str) -> None:
         self.status_label.setText(text)
@@ -212,6 +270,7 @@ class DownloadsPage(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._rows: dict[str, DownloadRowWidget] = {}
+        self._images = ImageLoader(capacity=32, parent=self)
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 18)
         root.setSpacing(6)
@@ -222,20 +281,28 @@ class DownloadsPage(QWidget):
         title.setObjectName("Title")
         root.addWidget(title)
         subtitle = QLabel(
-            "Installs, updates and repairs that are running, waiting or paused. "
-            "They run one at a time."
+            "Game downloads and Proton runners. Installs, updates and repairs run one "
+            "at a time."
         )
         subtitle.setObjectName("Subtitle")
         subtitle.setWordWrap(True)
         root.addWidget(subtitle)
         root.addSpacing(10)
 
+        self.empty_title = QLabel("Nothing downloading")
+        self.empty_title.setStyleSheet("font-weight: 700; font-size: 15px;")
+        self.empty_title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self.empty_label = QLabel(
-            "No downloads right now. An install or update shows up here while it runs."
+            "No downloads right now. Install a game from the Store or the Library; installs, "
+            "updates and repairs show up here while they run."
         )
         self.empty_label.setObjectName("Muted")
         self.empty_label.setWordWrap(True)
+        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        root.addSpacing(scaled(40))
+        root.addWidget(self.empty_title)
         root.addWidget(self.empty_label)
+        self._empty_gap = root.itemAt(root.count() - 3)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -268,6 +335,7 @@ class DownloadsPage(QWidget):
                 self._wire(widget, row.profile)
                 self._rows[row.profile] = widget
             widget.apply(row)
+            self._request_art(widget, row.art)
         # Put the (kept) widgets in the order given; the trailing stretch stays last.
         while self._list.count():
             self._list.takeAt(0)
@@ -275,10 +343,36 @@ class DownloadsPage(QWidget):
             self._list.addWidget(self._rows[row.profile])
             self._rows[row.profile].show()
         self._list.addStretch(1)
+        self.empty_title.setVisible(not rows)
         self.empty_label.setVisible(not rows)
+        gap = self._empty_gap.spacerItem() if self._empty_gap is not None else None
+        if gap is not None:
+            gap.changeSize(0, scaled(40) if not rows else 0)
+            self.layout().invalidate()
+
+    def _request_art(self, widget: DownloadRowWidget, art: tuple[str, ...]) -> None:
+        """Decode the row's cover in the background, once per change of its candidates."""
+        if widget.art == art:
+            return  # progress ticks re-apply rows; the cover has not changed
+        widget.art = art
+        if not art:
+            widget.set_art(None)
+            return
+        size = widget.thumb.size()
+
+        def apply(pixmap: QPixmap | None) -> None:
+            if self._rows.get(widget.profile) is widget and widget.art == art:
+                widget.set_art(pixmap)
+
+        self._images.request(list(art), size.width(), size.height(), apply, cover=True)
+
+    def wait_for_art(self, timeout_ms: int = 5000) -> None:
+        """Wait for pending cover decodes (tests)."""
+        self._images.wait(timeout_ms)
 
     def _wire(self, widget: DownloadRowWidget, profile: str) -> None:
-        widget.clicked.connect(lambda: self.open_requested.emit(profile))
+        if not profile.startswith("runner:"):
+            widget.clicked.connect(lambda: self.open_requested.emit(profile))
         for button, signal in (
             (widget.pause_btn, self.pause_requested),
             (widget.resume_btn, self.resume_requested),

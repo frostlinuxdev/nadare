@@ -5,9 +5,33 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+# Installed as a system unit (docs/PACKAGING.md), so set the account that owns the
+# checkouts here: without it the job runs as root and %h is /root. The name is
+# site-specific, which is why the template leaves it empty.
+#User=
 # Adjust the paths if the checkouts live elsewhere.
 Environment=NADARE_INDEX_DIR=%h/nadare-index
 # Optional settings the script documents (catalog, heartbeat, canary toggles, GitHub token).
 EnvironmentFile=-/etc/nadare-index-refresh.env
 ExecStart=%h/nadare/scripts/refresh_index.sh
 TimeoutStartSec=30min
+# Hardening (#1551). The job needs no privileges; it runs as the checkout owner.
+NoNewPrivileges=true
+# A private /tmp and /var/tmp: the refresh lock falls back to /tmp when there is no
+# XDG_RUNTIME_DIR, and the canaries unpack into TemporaryDirectory(). /tmp stays
+# writable under ProtectSystem=strict only because PrivateTmp= is on.
+PrivateTmp=true
+# The whole tree is read-only; write access only through ReadWritePaths= below.
+ProtectSystem=strict
+# Home is readable (git config, ssh keys, yostar.env) but not writable, so the
+# checkout this job runs from stays read-only. Also: an ssh push cannot add a new
+# host key to ~/.ssh/known_hosts, so run the first push by hand.
+ProtectHome=read-only
+# Everything the job writes ("-" = ignore the entry while it does not exist yet):
+#   %h/nadare-index          the index checkout (NADARE_INDEX_DIR): pull, commit, push
+#   %h/.cache                installer-pin canary state and sevenzip.find()'s copy
+#   %h/nadare-index-refresh  runtime canary state; yostar.env here is only read.
+#                            Create it once: install -d -m 700 ~/nadare-index-refresh
+#   %h/.local/state          catalog bookkeeping (only with NADARE_INDEX_CATALOG=1)
+# If NADARE_INDEX_DIR changes, change its entry here too.
+ReadWritePaths=%h/nadare-index -%h/.cache -%h/nadare-index-refresh -%h/.local/state

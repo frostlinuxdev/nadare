@@ -420,6 +420,9 @@ class TestStatusLoginRequired:
 
 
 class TestProtonHostLibPreflight:
+    """With umu the runtime brings its own libraries: no host check (#1449 removed the
+    bare-Proton path that needed one)."""
+
     def _backend(self, make_backend_context, tmp_path):
         proton = tmp_path / "MyProton"
         proton.mkdir()
@@ -427,35 +430,6 @@ class TestProtonHostLibPreflight:
         backend = _make_backend(make_backend_context, tmp_path / "prefix")
         backend.ctx.profile["runner"] = str(proton)
         return backend, proton
-
-    def test_missing_32bit_libs_raise(
-        self, make_backend_context, tmp_path, monkeypatch
-    ):
-        backend, _proton = self._backend(make_backend_context, tmp_path)
-        monkeypatch.setattr(czn_backend.shutil, "which", lambda name, *a, **k: None)
-        monkeypatch.setattr(czn_backend.sandbox, "in_flatpak", lambda: False)
-        monkeypatch.setattr(
-            czn_backend.hostlibs, "missing_32bit", lambda: ["libfreetype.so.6"]
-        )
-        with pytest.raises(BackendError) as exc:
-            backend._prefix_command(["game.exe"])
-        assert "libfreetype.so.6" in exc.value.message
-
-    def test_check_cached_per_backend(self, make_backend_context, tmp_path, monkeypatch):
-        backend, _proton = self._backend(make_backend_context, tmp_path)
-        calls: list[int] = []
-
-        def fake_missing() -> list[str]:
-            calls.append(1)
-            return ["libfreetype.so.6"]
-
-        monkeypatch.setattr(czn_backend.shutil, "which", lambda name, *a, **k: None)
-        monkeypatch.setattr(czn_backend.sandbox, "in_flatpak", lambda: False)
-        monkeypatch.setattr(czn_backend.hostlibs, "missing_32bit", fake_missing)
-        for _ in range(2):
-            with pytest.raises(BackendError):
-                backend._prefix_command(["game.exe"])
-        assert calls == [1]
 
     def test_umu_present_skips_check(self, make_backend_context, tmp_path, monkeypatch):
         backend, _proton = self._backend(make_backend_context, tmp_path)
@@ -472,17 +446,6 @@ class TestProtonHostLibPreflight:
         assert argv == ["/usr/bin/umu-run", "game.exe"]
         assert calls == []
 
-    def test_escape_hatch_skips_check(self, make_backend_context, tmp_path, monkeypatch):
-        backend, _proton = self._backend(make_backend_context, tmp_path)
-        monkeypatch.setenv("NADARE_SKIP_HOSTLIBS_CHECK", "1")
-        monkeypatch.setattr(czn_backend.shutil, "which", lambda name, *a, **k: None)
-        monkeypatch.setattr(czn_backend.sandbox, "in_flatpak", lambda: False)
-        monkeypatch.setattr(
-            czn_backend.hostlibs, "missing_32bit", lambda: ["libfreetype.so.6"]
-        )
-        argv, _env = backend._prefix_command(["game.exe"])
-        assert argv[-1] == "game.exe"
-
 
 class TestStoppedExit:
     def test_sigterm_exit_codes_mean_stopped_not_failed(self):
@@ -490,3 +453,12 @@ class TestStoppedExit:
 
         assert {-15, 143, 241} <= _STOPPED_EXIT_CODES
         assert 1 not in _STOPPED_EXIT_CODES and 0 not in _STOPPED_EXIT_CODES
+
+
+@pytest.fixture(autouse=True)
+def _umu_available(monkeypatch):
+    """CZN runs through umu like every Proton game (#1449): stand in Nadare's own copy."""
+    from nadare.core import umu
+
+    monkeypatch.setattr(umu, "resolve", lambda *a, **k: "/usr/bin/umu-run")
+    monkeypatch.setattr(umu, "note_first_runtime", lambda emit: None)

@@ -44,7 +44,7 @@ def test_a_cancel_before_the_first_write_keeps_the_game_installed(tmp_path, monk
     )
     backend._ensure_default_runner = lambda **kw: None
     backend._ensure_direct_prefix = lambda: None
-    monkeypatch.setattr(ak.yostar, "sync", lambda man, d, **kw: (
+    monkeypatch.setattr(ak.directdl, "sync", lambda man, d, **kw: (
         _write_all(backend.install_dir()), {"downloaded": 2}
     )[1])
     backend.install()
@@ -53,7 +53,7 @@ def test_a_cancel_before_the_first_write_keeps_the_game_installed(tmp_path, monk
     # 1.1 is published.  Cancel at once, before the sync writes anything: like a
     # direct game, the untouched 1.0 install must stay usable.
     _manifest(tmp_path, "1.1.0")
-    monkeypatch.setattr(ak.yostar, "sync", lambda man, d, **kw: (_ for _ in ()).throw(
+    monkeypatch.setattr(ak.directdl, "sync", lambda man, d, **kw: (_ for _ in ()).throw(
         Cancelled("cancelled")
     ))
     with pytest.raises(Cancelled):

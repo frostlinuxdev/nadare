@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
 from ..core import backends, diskspace, gamefinder, libraries, relink
 from ..core.config import Config
 from .add_game import game_specs
+from .i18n import tr_n
 from .workers import CallTask
 
 log = logging.getLogger(__name__)
@@ -417,9 +418,7 @@ class LibrariesPanel(QWidget):
                 return []
         parts = []
         if names:
-            parts.append(
-                f"Added {len(names)} {'game' if len(names) == 1 else 'games'} to your Library."
-            )
+            parts.append(tr_n("Added {n} games to your Library.", len(names)))
         if repaired:
             parts.append(
                 f"Now using the folder found for {len(repaired)} "

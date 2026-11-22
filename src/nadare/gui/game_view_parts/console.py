@@ -82,12 +82,19 @@ class ConsoleMixin:
 
     # ---- dialogs -----------------------------------------------------------
     def show_error(
-        self, title: str, message: str, retry_op: str | None = None, *, failed: bool = False
+        self,
+        title: str,
+        message: str,
+        retry_op: str | None = None,
+        *,
+        failed: bool = False,
+        settings: bool = False,
     ) -> None:
         """Tell the user something went wrong.
 
         ``failed`` is for an operation that ended badly: the box then offers
-        Open logs, and Retry when ``retry_op`` can be run again as it was.
+        Open logs, and Retry when ``retry_op`` can be run again as it was; ``settings`` adds
+        Game settings (a launch on a runner that is not the recommended one, #1732).
         """
         self._set_console_expanded(True)
         if userns.has_hint(message):
@@ -100,20 +107,30 @@ class ConsoleMixin:
         else:
             # What the RETRY button re-runs if this box is closed.
             self._failed_op = retry_op
-            choice = self._failure_choice(title, message, retry_op is not None)
+            if settings:
+                choice = self._failure_choice(title, message, retry_op is not None, settings=True)
+            else:
+                choice = self._failure_choice(title, message, retry_op is not None)
             if choice == "retry" and retry_op is not None:
                 self.action_requested.emit(retry_op)
+            elif choice == "settings":
+                self.settings_requested.emit()
             elif choice == "logs":
                 self._open_logs()
 
-    def _failure_choice(self, title: str, message: str, can_retry: bool) -> str:
-        """Ask what to do about a failure: ``"retry"``, ``"logs"`` or ``"close"``."""
+    def _failure_choice(
+        self, title: str, message: str, can_retry: bool, *, settings: bool = False
+    ) -> str:
+        """Ask what to do about a failure: retry, logs, settings or close (the returned word)."""
         plain, details = friendly.split(message)
         box = QMessageBox(QMessageBox.Icon.Warning, title, plain, parent=self)
         if details:
             box.setDetailedText(details)  # the raw text, behind "Show Details..."
         retry = box.addButton("Retry", QMessageBox.ButtonRole.AcceptRole) if can_retry else None
         logs = box.addButton("Open logs", QMessageBox.ButtonRole.ActionRole)
+        game_settings = (
+            box.addButton("Game settings", QMessageBox.ButtonRole.ActionRole) if settings else None
+        )
         # Missing 32-bit libraries come with a command: copy it instead of retyping (#338 F-08).
         command = hostlibs.install_command_in(message)
         copy = (
@@ -131,6 +148,8 @@ class ConsoleMixin:
             return "close"
         if retry is not None and clicked is retry:
             return "retry"
+        if game_settings is not None and clicked is game_settings:
+            return "settings"
         return "logs" if clicked is logs else "close"
 
     def _open_logs(self) -> None:

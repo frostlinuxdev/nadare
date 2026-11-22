@@ -140,6 +140,105 @@ def test_a_failed_run_pings_down_with_the_node_name(tmp_path):
     assert "SECRET-TOKEN-123" not in result.stdout + result.stderr  # the URL is a secret
 
 
+HEALTHCHECKS = "https://hc.example/ping/SECRET-TOKEN-123"
+
+
+def _clone_with_remote(tmp_path: Path) -> Path:
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    index = tmp_path / "index"
+    subprocess.run(["git", "clone", "-q", str(remote), str(index)], check=True)
+    subprocess.run(["git", "-C", str(index), "config", "user.name", "Test"], check=True)
+    subprocess.run(
+        ["git", "-C", str(index), "config", "user.email", "test@example.invalid"], check=True
+    )
+    (index / "README.md").write_text("index\n")
+    subprocess.run(["git", "-C", str(index), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(index), "commit", "-qm", "initial"], check=True)
+    subprocess.run(["git", "-C", str(index), "push", "-q", "origin", "HEAD"], check=True)
+    return index
+
+
+def test_a_failed_run_posts_the_message_to_the_healthchecks_fail_url(tmp_path):
+    """#1215: Healthchecks reads <url>/fail, not Kuma's ?status=down, and takes the text as body."""
+    import socket
+
+    bin_dir, log = _fake_curl(tmp_path)
+    full = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "HOME": str(tmp_path / "home"),
+        "NADARE_INDEX_DIR": str(tmp_path / "no-such-index"),  # fails at once
+        "NADARE_SKIP_CANARY": "1",
+        "NADARE_HEARTBEAT_URL": HEALTHCHECKS,
+    }
+    (tmp_path / "home").mkdir(exist_ok=True)
+    result = subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True, env=full,
+                            timeout=60, check=False)
+    assert result.returncode != 0
+    pings = log.read_text().splitlines() if log.exists() else []
+    assert len(pings) == 1
+    assert f"{HEALTHCHECKS}/fail" in pings[0]
+    assert "--data-raw" in pings[0]
+    assert "status=down" not in pings[0]
+    assert socket.gethostname().split(".")[0] in pings[0]
+    assert "SECRET-TOKEN-123" not in result.stdout + result.stderr  # the URL is a secret
+
+
+def test_a_run_with_nothing_to_publish_pings_the_healthchecks_url_plainly(tmp_path):
+    """Up = a plain GET of the URL itself; only the down ping gets a /fail suffix."""
+    bin_dir, log = _fake_curl(tmp_path)
+    (bin_dir / "python3").write_text("#!/usr/bin/env bash\nexit 3\n")
+    (bin_dir / "python3").chmod(0o755)
+    index = _clone_with_remote(tmp_path)
+    full = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "HOME": str(tmp_path / "home"),
+        "XDG_RUNTIME_DIR": str(tmp_path),
+        "NADARE_INDEX_DIR": str(index),
+        "NADARE_SKIP_CANARY": "1",
+        "NADARE_HEARTBEAT_URL": HEALTHCHECKS,
+    }
+    (tmp_path / "home").mkdir(exist_ok=True)
+    result = subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True, env=full,
+                            timeout=60, check=False)
+    assert result.returncode == 0, result.stderr
+    pings = log.read_text().splitlines() if log.exists() else []
+    assert len(pings) == 1
+    assert HEALTHCHECKS in pings[0]
+    assert "/fail" not in pings[0]
+
+
+def test_a_kuro_token_canary_posts_to_the_healthchecks_fail_url(tmp_path):
+    """#1215: a canary warning is a "down" too, so it must reach <url>/fail, not read as up."""
+    bin_dir, log = _fake_curl(tmp_path)
+    (bin_dir / "python3").write_text(
+        "#!/usr/bin/env bash\n"
+        'case "$1" in\n'
+        '  */check_kuro_tokens.py) echo "CANARY: kuro token refused"; exit 4 ;;\n'
+        "  */check_*.py) exit 0 ;;\n"
+        "esac\n"
+        "exit 3\n"
+    )
+    (bin_dir / "python3").chmod(0o755)
+    index = _clone_with_remote(tmp_path)
+    full = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "HOME": str(tmp_path / "home"),
+        "XDG_RUNTIME_DIR": str(tmp_path),
+        "NADARE_INDEX_DIR": str(index),
+        "NADARE_HEARTBEAT_URL": HEALTHCHECKS,
+    }
+    (tmp_path / "home").mkdir(exist_ok=True)
+    result = subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True, env=full,
+                            timeout=60, check=False)
+    assert result.returncode == 0, result.stderr
+    pings = log.read_text().splitlines() if log.exists() else []
+    assert len(pings) == 1
+    assert f"{HEALTHCHECKS}/fail" in pings[0]
+    assert "CANARY: kuro token refused" in pings[0]
+    assert "status=down" not in pings[0]
+
+
 def test_a_run_that_finds_another_run_going_pings_nothing(tmp_path):
     bin_dir, log = _fake_curl(tmp_path)
     runtime = tmp_path / "rt"

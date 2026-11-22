@@ -55,15 +55,19 @@ def test_the_hash_comparison_ignores_case(tmp_path):
     assert yostar.load_manifest(source, game_tag="Game_EN").version == "1.0.0"
 
 
-def test_an_index_entry_without_a_hash_still_loads(tmp_path):
+def test_an_index_entry_without_a_hash_is_refused(tmp_path):
+    """#789 F5 (was #602's "still loads"): the manifests carry no signature, so the index's
+    hash is the only thing tying a manifest to Nadare's published index."""
     source = _index(tmp_path, _body(), sha256=None)
-    assert yostar.load_manifest(source, game_tag="Game_EN").version == "1.0.0"
+    with pytest.raises(yostar.ManifestError, match="sha256"):
+        yostar.load_manifest(source, game_tag="Game_EN")
 
 
 @pytest.mark.parametrize("bad", ["not-a-hash", "abc", 5, ""])
-def test_a_malformed_index_hash_is_ignored_not_trusted(tmp_path, bad):
+def test_a_malformed_index_hash_is_refused(tmp_path, bad):
     source = _index(tmp_path, _body(), sha256=bad)
-    assert yostar.load_manifest(source, game_tag="Game_EN").version == "1.0.0"
+    with pytest.raises(yostar.ManifestError, match="sha256"):
+        yostar.load_manifest(source, game_tag="Game_EN")
 
 
 def test_a_manifest_without_a_schema_field_is_schema_one(tmp_path):

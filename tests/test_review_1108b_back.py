@@ -74,7 +74,7 @@ def test_vcredist_output_does_not_make_a_good_launch_look_failed(
     def fake_vcredist(self, created=False):
         self._on_line(BWRAP_FAILURE)  # best effort: they carry on and the game runs
 
-    def fake_stream(argv, env, on_line=None, cancel=None):
+    def fake_stream(argv, env, on_line=None, cancel=None, before_stop=None):
         return 0
 
     monkeypatch.setattr(WineGameBackend, "_run_vcredist", fake_vcredist)
@@ -95,7 +95,7 @@ def test_a_runtime_failure_after_a_long_session_with_exit_0_is_a_status(
     clock = [1000.0]
     monkeypatch.setattr(wg.time, "monotonic", lambda: clock[0])
 
-    def fake_stream(argv, env, on_line=None, cancel=None):
+    def fake_stream(argv, env, on_line=None, cancel=None, before_stop=None):
         on_line(BWRAP_FAILURE)
         clock[0] += 3600  # an hour of play
         return 0
@@ -111,7 +111,7 @@ def test_a_runtime_failure_after_a_long_session_with_exit_0_is_a_status(
 def test_a_runtime_failure_with_a_nonzero_exit_still_fails(launch_rig, monkeypatch):
     backend, _events, _seen = launch_rig
 
-    def fake_stream(argv, env, on_line=None, cancel=None):
+    def fake_stream(argv, env, on_line=None, cancel=None, before_stop=None):
         on_line(BWRAP_FAILURE)
         return 1
 
@@ -124,7 +124,7 @@ def test_a_quick_exit_0_with_a_runtime_failure_still_fails(launch_rig, monkeypat
     """umu exits 0 when it could not set up the runtime: that start never happened."""
     backend, _events, _seen = launch_rig
 
-    def fake_stream(argv, env, on_line=None, cancel=None):
+    def fake_stream(argv, env, on_line=None, cancel=None, before_stop=None):
         on_line(BWRAP_FAILURE)
         return 0
 
@@ -138,7 +138,7 @@ def test_update_by_starting_the_launcher_survives_exit_code_0(launch_rig, monkey
     clock = [1000.0]
     monkeypatch.setattr(wg.time, "monotonic", lambda: clock[0])
 
-    def fake_stream(argv, env, on_line=None, cancel=None):
+    def fake_stream(argv, env, on_line=None, cancel=None, before_stop=None):
         on_line(BWRAP_FAILURE)
         clock[0] += 600  # the launcher downloaded the update and quit
         return 0

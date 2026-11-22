@@ -6,10 +6,10 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
 from urllib.parse import quote, urlsplit
 
 from .. import directdl
+from ..directdl import require_https
 from . import Fetch, default_fetch, ungzip
 
 API_URL = (
@@ -19,10 +19,6 @@ API_URL = (
 _MD5 = re.compile(r"([0-9A-Fa-f]{32})\.zip$", re.IGNORECASE)
 
 
-def _https(url: Any) -> str:
-    if not isinstance(url, str) or urlsplit(url).scheme != "https":
-        raise directdl.DirectError("update URL must be https")
-    return url
 
 
 def resolve(fetch: Fetch | None = None) -> directdl.Plan:
@@ -34,12 +30,13 @@ def resolve(fetch: Fetch | None = None) -> directdl.Plan:
         raise directdl.DirectError("invalid update response") from exc
     if not isinstance(body, dict) or str(body.get("errorCode")) != "0":
         raise directdl.DirectError("update API returned an error")
-    info = (body.get("data") or {}).get("gameUpdateInfo")
+    data = body.get("data")
+    info = data.get("gameUpdateInfo") if isinstance(data, dict) else None  # #812 fuzz
     if not isinstance(info, dict):
         raise directdl.DirectError("missing gameUpdateInfo")
 
     version = str(info.get("currentVersion") or "")
-    url = _https(info.get("downloadUrl"))
+    url = require_https(info.get("downloadUrl"))
     name = info.get("fileName")
     if not isinstance(name, str) or not name:
         name = urlsplit(url).path.rsplit("/", 1)[-1]

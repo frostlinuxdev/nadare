@@ -23,7 +23,7 @@ STEAM_LINE = "'~/.steam/root/ubuntu12_32/steam' 'steam://openurl_external/{url}'
         "http://localhost:8080/callback",
         "https://accounts.google.com/o/oauth2/v2/auth?client_id=1&state=a%20b",
         "https://[::1]:8080/callback",
-        "https://[2001:db8::1]/x",
+        "https://[2606:4700:4700::1111]/x",  # 2001:db8:: is documentation-only (#1593)
         "http://127.0.0.1:53682/?code=abc#frag",
         "https://login.example.co.uk:8443/a/b;c=d/e?x=1&y=2#z",
     ],

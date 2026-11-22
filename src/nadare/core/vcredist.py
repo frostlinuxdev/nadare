@@ -15,7 +15,6 @@ handles. ``ensure`` is deliberately best-effort: any failure becomes a single
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import re
@@ -285,10 +284,17 @@ def index_source() -> str:
     """The immutable per-build installer URL published in the index.
 
     Empty on any problem (https and a Microsoft host are required), so the
-    ``aka.ms`` fwlink remains the fallback.
+    ``aka.ms`` fwlink remains the fallback. A document that names a URL but
+    carries no valid sha256 is not used either: Nadare would have no published
+    checksum for the bytes that URL serves (#1593).
     """
     payload = _index_document()
     if not isinstance(payload, dict):
+        return ""
+    hashes = payload.get("sha256")
+    if not isinstance(hashes, list) or not any(
+        isinstance(h, str) and _SHA256_RE.fullmatch(h.strip().lower()) for h in hashes
+    ):
         return ""
     source = payload.get("url")
     if not isinstance(source, str):
@@ -415,6 +421,13 @@ def install(
             "Downloading a Windows component (Visual C++ runtime, about 25 MB, one time)…",
         )
     )
+    pin = resolve_pin(profile, constant)
+    if not pin or not _SHA256_RE.fullmatch(pin):
+        reason = "no checksum" if not pin else "a malformed checksum"
+        raise BackendError(
+            f"the index entry for Microsoft Visual C++ has {reason}; "
+            "Nadare will not run an unpinned installer"
+        )
     cache_dir.mkdir(parents=True, exist_ok=True)
     inst = cache_dir / _INSTALLER_NAME
     pins_fn = index_pins_fn or index_pins
@@ -880,11 +893,9 @@ def _unpack_instead(
 
 def _sha256_file(path: Path) -> str:
     """Streamed SHA-256 of a file, so large installers are not read at once."""
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    from . import download
+
+    return download.hash_file(path)["sha256"]
 
 
 def _unlink_quietly(path: Path) -> None:

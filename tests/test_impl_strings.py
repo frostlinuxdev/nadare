@@ -76,7 +76,7 @@ def test_game_page_sidebar_says_viewing_until_the_game_runs(tmp_path, qapp):
     try:
         window.open_game("czn")
         assert window.side_status.text() == "Viewing Chaos Zero Nightmare"
-        window._on_result("czn", Status("running", running=True))
+        window._on_result("czn", "status", Status("running", running=True))
         assert window.side_status.text() == "Playing Chaos Zero Nightmare"
     finally:
         window.close()
@@ -124,16 +124,16 @@ def test_settings_and_removal_name_the_game_not_its_profile_key(tmp_path, qapp, 
         qapp.processEvents()
 
 
-def test_wizard_separates_the_supported_games_from_bring_your_own_files(tmp_path, qapp):
+def test_wizard_lists_only_the_supported_games(tmp_path, qapp):
     dialog = AddGameDialog(_config(tmp_path), data_root=tmp_path / "data")
     try:
         texts = [dialog.game_list.item(i).text() for i in range(dialog.game_list.count())]
-        assert "ADVANCED (BRING YOUR OWN GAME FILES)" in texts
+        assert not any(text.startswith("ADVANCED") for text in texts)
         labels = [label.text() for label in dialog.findChildren(QLabel)]
         assert not any("Pick a supported game" in text for text in labels)
         assert any(text.startswith("Choose your game.") for text in labels)
         for title in ("Wine / Proton game", "Steam game", "Script"):
-            assert any(text.startswith(title) for text in texts)
+            assert not any(text.startswith(title) for text in texts)
     finally:
         dialog.deleteLater()
         qapp.processEvents()
@@ -182,9 +182,9 @@ def test_verify_is_called_check_game_files_and_failures_use_plain_words(
         lambda *a: shown.append(("warning", a[1])),
     )
     try:
-        window._on_result("czn", {"verified": False, "message": "one file is wrong"})
+        window._on_result("czn", "verify", {"verified": False, "message": "one file is wrong"})
         assert shown[-1] == ("warning", "File check failed")
-        window._on_result("czn", {"verified": True, "message": "all good"})
+        window._on_result("czn", "verify", {"verified": True, "message": "all good"})
         assert shown[-1] == ("info", "Check game files")
     finally:
         window.close()
@@ -220,7 +220,7 @@ def test_empty_library_and_cards_use_plain_language(qapp):
     try:
         assert card.meta_label.text() == "Windows game via Proton"
         view.set_profile("ak", {"backend": "arknights-yostar", "title": "Arknights"})
-        assert view.backend_label.text() == "Yostar launcher"
+        assert view.backend_label.text() == "Direct download"
     finally:
         card.deleteLater()
         view.deleteLater()

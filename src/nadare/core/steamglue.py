@@ -11,13 +11,25 @@ lives in ``gui/steam_wiring.py`` (core must not import backends).
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
-from . import paths, process, runners, steamfix, steamrun, steamsetup, steamtools, steamwayland
+from . import (
+    graphics,
+    launchenv,
+    paths,
+    process,
+    runners,
+    steamfix,
+    steamrun,
+    steamsetup,
+    steamtools,
+    steamwayland,
+)
 from .backends import BackendError
 from .events import Cancel, Cancelled, Emitter
 
@@ -197,10 +209,11 @@ def run(argv: list[str], *, settle: float = 5.0) -> int:
     (Steam itself stays running when this command is what starts it) counts as started: it is
     left alone and reaped in the background. A program that cannot be started returns 127.
     """
+    env = process.drop_secret_env(launchenv.inherit(os.environ))
     try:
         proc = subprocess.Popen(  # noqa: S603 - argv is a list built by Nadare, no shell
             argv,
-            env=process.child_environ(),
+            env=env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -327,7 +340,11 @@ def make_actions(
                 if root is None:
                     return steamrun.ActionResult(False, NO_STEAM)
                 game = steamsetup.game_for(key)
-                family = game.runner if game is not None else "dwproton"
+                family = (
+                    steamsetup.runner_family_for(game, graphics.vulkan_info().api_version)
+                    if game is not None
+                    else "dwproton"
+                )
                 fetch = ensure_runner_fn or (
                     lambda: runners.ensure_pinned(family, cancel=cancel, emit=emit)
                 )

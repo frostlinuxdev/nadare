@@ -84,7 +84,12 @@ def test_a_driver_newer_than_its_flatpak_package_is_reported_with_the_fix(tmp_pa
         "flatpak install flathub org.freedesktop.Platform.GL.nvidia-615-78-08 "
         "org.freedesktop.Platform.GL32.nvidia-615-78-08"
     )
-    assert "AppImage" in result.summary  # what to do if Flathub has not published it yet
+    # Most users are not terminal people: the words say what to press, never "use the
+    # AppImage" (not a fix; the user, 2026-11-15) and never a command.
+    assert "AppImage" not in result.summary
+    assert "flatpak install" not in result.summary
+    assert "Install" in result.summary and "software center" in result.summary
+    assert "Flathub" in result.summary  # a brand-new driver: Flathub adds it soon
 
 
 def test_a_missing_32_bit_nvidia_package_alone_is_reported(tmp_path):
@@ -260,7 +265,8 @@ def test_install_missing_asks_the_host_flatpak_per_user():
 
 def test_a_failed_install_says_why_and_never_raises():
     ok, message = flatpakgl.install_missing(("x",), run=_Run(codes=(0, 1)))
-    assert not ok and "nvidia-999" in message and "AppImage" in message
+    assert not ok and "nvidia-999" in message
+    assert "AppImage" not in message and "try again later" in message
     ok, message = flatpakgl.install_missing(("x",), run=_Run(raise_on=1))
     assert not ok
 
@@ -279,3 +285,151 @@ def test_the_banner_offers_to_install_when_it_can(monkeypatch):
     )
     text, action = main_window.graphics_banner_text(bad)
     assert action == "Install"
+
+
+# ---------------------------------------------------------------------------
+# Play refuses while the graphics package is missing (2026-11-15)
+# ---------------------------------------------------------------------------
+BAD = flatpakgl.GlCheck(
+    False, "Your NVIDIA driver is 615.78.08 ...", "flatpak install flathub x", ("x",)
+)
+
+
+class _Backend:
+    def __init__(self, kind="wine"):
+        self.kind = kind
+        self.launched = False
+
+    def launch(self):
+        self.launched = True
+        return 0
+
+
+def test_a_launch_is_refused_while_the_graphics_package_is_missing(monkeypatch):
+    from nadare.core.backends import BackendError
+
+    monkeypatch.setattr(flatpakgl, "problem", lambda: BAD)
+    with pytest.raises(BackendError) as caught:
+        flatpakgl.guard_launch(_Backend())
+    assert "615.78.08" in caught.value.message
+    assert "Install" in caught.value.message and "banner" in caught.value.message
+
+
+def test_a_launch_goes_ahead_when_the_graphics_match(monkeypatch):
+    monkeypatch.setattr(flatpakgl, "problem", lambda: None)
+    flatpakgl.guard_launch(_Backend())  # no exception
+
+
+def test_a_steam_game_is_never_refused(monkeypatch):
+    """A Steam game starts the host's Steam (#1224): the Flatpak's packages do not matter."""
+    monkeypatch.setattr(flatpakgl, "problem", lambda: BAD)
+    flatpakgl.guard_launch(_Backend(kind="steam"))  # no exception
+
+
+def test_the_guard_itself_never_breaks_a_launch(monkeypatch):
+    def boom():
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(flatpakgl, "problem", boom)
+    flatpakgl.guard_launch(_Backend())  # no exception
+
+
+def test_the_gui_play_button_does_not_start_the_game(qtbot, monkeypatch):
+    from nadare.core.backends import BackendError
+    from nadare.gui.workers import BackendWorker
+
+    monkeypatch.setattr(flatpakgl, "problem", lambda: BAD)
+    worker = BackendWorker(None, "p", "launch")
+    backend = _Backend()
+    with pytest.raises(BackendError):
+        worker._dispatch(backend)
+    assert not backend.launched
+
+
+def test_the_cli_launch_does_not_start_the_game(monkeypatch):
+    from nadare import app
+    from nadare.core.backends import BackendError
+
+    monkeypatch.setattr(flatpakgl, "problem", lambda: BAD)
+    backend = _Backend()
+    with pytest.raises(BackendError):
+        app._launch_backend(backend, "p")
+    assert not backend.launched
+
+
+# ---------------------------------------------------------------------------
+# "Restart Nadare" after Install (2026-11-15)
+# ---------------------------------------------------------------------------
+def test_the_restart_starts_a_new_flatpak_instance_through_the_portal():
+    """A child inside the old sandbox would never see the new package: the portal starts a
+    fresh instance (``--latest-version``), no host access, once the old one's socket is gone."""
+    argv = flatpakgl.restart_argv("/run/user/1000/nadare.sock")
+    assert argv[:2] == ["flatpak-spawn", "--latest-version"]
+    assert "--host" not in argv
+    script = argv[argv.index("-c") + 1]
+    assert '[ -S "$1" ]' in script  # waits for the old instance to let go of its socket
+    assert "exec nadare gui" in script
+    assert argv[-1] == "/run/user/1000/nadare.sock"
+
+
+def test_restart_never_raises_when_the_portal_cannot_start(monkeypatch):
+    def popen(*args, **kwargs):
+        raise FileNotFoundError("flatpak-spawn")
+
+    assert flatpakgl.restart_nadare("/x.sock", popen=popen) is False
+    calls = []
+    assert flatpakgl.restart_nadare("/x.sock", popen=lambda *a, **k: calls.append(a)) is True
+    assert calls and calls[0][0][0] == "flatpak-spawn"
+
+
+@pytest.fixture
+def window(qtbot, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from nadare.core import artwork
+    from nadare.core.config import Config
+    from nadare.gui.main_window import MainWindow
+
+    monkeypatch.setattr(artwork, "fetch", lambda *args, **kwargs: None)
+    monkeypatch.setattr(flatpakgl, "problem", lambda: BAD)
+    seen = SimpleNamespace(restarts=[], quit=0, busy=0)
+    monkeypatch.setattr(
+        flatpakgl, "restart_nadare", lambda sock, **k: seen.restarts.append(sock) or True
+    )
+    config = Config.load(tmp_path / "config.json")
+    config.add_profile("a", backend="direct-pgr", title="A")
+    config.save()
+    win = MainWindow(config)
+    win._close_window_for_update = lambda: True
+    win._quit_app = lambda: setattr(seen, "quit", seen.quit + 1)
+    win._inform_busy_restart = lambda: setattr(seen, "busy", seen.busy + 1)
+    yield win, seen
+    win.controller._workers.clear()
+    win.close()
+    win.deleteLater()
+
+
+def test_after_install_the_button_restarts_nadare(window):
+    win, seen = window
+    win._graphics_install_finished(True, "Installed. Restart Nadare.")
+    button = win.graphics_banner.action_button
+    assert not button.isHidden() and button.text() == "Restart Nadare"
+    win._on_graphics_action()
+    assert len(seen.restarts) == 1 and seen.quit == 1
+
+
+def test_restart_waits_while_a_game_or_install_runs(window, monkeypatch):
+    win, seen = window
+    win._graphics_install_finished(True, "Installed.")
+    monkeypatch.setattr(win.controller, "mutating_profiles", lambda: ["a"])
+    win._on_graphics_action()
+    assert seen.busy == 1 and seen.restarts == [] and seen.quit == 0
+    monkeypatch.setattr(win.controller, "mutating_profiles", lambda: [])  # let teardown close
+
+
+def test_a_failed_install_offers_to_try_again_not_a_command(window):
+    win, seen = window
+    win._graphics_refs = ("x",)
+    win._graphics_install_finished(False, "The packages could not be installed: ...")
+    assert win.graphics_banner.action_button.text() == "Try again"
+    assert win._graphics_refs == ("x",)  # kept, so Try again installs the same packages

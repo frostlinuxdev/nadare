@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 class _Signals(QObject):
     """Owned by the flow, never by a task: Qt destroys a finished runnable on a pool thread."""
 
-    progress = pyqtSignal(int, int)  # bytes done, bytes total (0 when unknown)
+    progress = pyqtSignal(object, object)  # bytes done, bytes total (0 when unknown); not 32-bit
     installed = pyqtSignal(object)  # Path of the new AppImage
     failed = pyqtSignal(str)
     cancelled = pyqtSignal()
@@ -99,7 +99,7 @@ class _Task(QRunnable):
 class SelfUpdateFlow(QObject):
     """One update at a time: start it, watch its signals, cancel it."""
 
-    progress = pyqtSignal(int, int)
+    progress = pyqtSignal(object, object)
     installed = pyqtSignal(object)
     failed = pyqtSignal(str)
     cancelled = pyqtSignal()

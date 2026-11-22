@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
-__all__ = ["HiddenWindowWatch"]
+__all__ = ["HiddenWindowWatch", "WriteActivity"]
 
 
 class HiddenWindowWatch:
@@ -94,3 +94,53 @@ class HiddenWindowWatch:
         self._stop_event.set()
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=5.0)
+
+
+#: Bytes a launcher must write between two looks to count as updating (logs and cookies stay
+#: far below it; a download writes tens of MB per second).
+UPDATE_WRITE_BYTES = 8 * 1024**2
+
+
+def _write_bytes(pid: int) -> int | None:
+    """``write_bytes`` from ``/proc/<pid>/io``, or ``None`` when it cannot be read."""
+    try:
+        with open(f"/proc/{pid}/io", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith("write_bytes:"):
+                    return int(line.split(":", 1)[1])
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+class WriteActivity:
+    """Whether processes wrote a lot to disk since the last look (an update downloading).
+
+    A launcher that updates itself does it inside its own process, so its name looks idle;
+    its disk writes do not. The first look at a process is its baseline. An unreadable
+    process (another user, a namespace) is ignored, never busy forever.
+    """
+
+    def __init__(
+        self,
+        reader: Callable[[int], int | None] = _write_bytes,
+        threshold: int = UPDATE_WRITE_BYTES,
+    ) -> None:
+        self.reader = reader
+        self.threshold = threshold
+        self._last: dict[int, int] = {}
+
+    def active(self, pids: Iterable[int]) -> bool:
+        busy = False
+        seen: dict[int, int] = {}
+        for pid in pids:
+            value = self.reader(pid)
+            if value is None:
+                continue
+            seen[pid] = value
+            before = self._last.get(pid)
+            if before is not None and value - before >= self.threshold:
+                busy = True
+        self._last = seen
+        return busy
+

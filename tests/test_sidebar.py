@@ -44,9 +44,9 @@ def window(qtbot, tmp_path, monkeypatch):
 
 
 def test_every_library_game_is_listed_installed_ones_first(window):
-    window._on_result("alpha", Status("not_installed"))
-    window._on_result("beta", Status("installed"))
-    window._on_result("gamma", Status("error"))
+    window._on_result("alpha", "status", Status("not_installed"))
+    window._on_result("beta", "status", Status("installed"))
+    window._on_result("gamma", "status", Status("error"))
 
     assert window.sidebar_games.profiles() == ["beta", "alpha", "gamma"]
     assert all(window.sidebar_games.row(name) is not None for name in ("alpha", "beta", "gamma"))
@@ -58,14 +58,14 @@ def test_games_are_listed_before_any_status_is_known(window):
 
 
 def test_status_change_reorders_rows_but_never_drops_one(window):
-    window._on_result("alpha", Status("not_installed"))
-    window._on_result("beta", Status("installed"))
+    window._on_result("alpha", "status", Status("not_installed"))
+    window._on_result("beta", "status", Status("installed"))
     assert window.sidebar_games.profiles() == ["beta", "alpha", "gamma"]
 
-    window._on_result("alpha", Status("installed"))
+    window._on_result("alpha", "status", Status("installed"))
     assert window.sidebar_games.profiles() == ["alpha", "beta", "gamma"]
 
-    window._on_result("alpha", Status("not_installed"))
+    window._on_result("alpha", "status", Status("not_installed"))
     assert window.sidebar_games.profiles() == ["beta", "alpha", "gamma"]
 
 
@@ -87,9 +87,9 @@ def test_removing_a_game_still_removes_its_row(window):
 
 
 def test_running_games_sort_first_then_alphabetically(window):
-    window._on_result("gamma", Status("installed"))
-    window._on_result("alpha", Status("installed"))
-    window._on_result("beta", Status("running", running=True))
+    window._on_result("gamma", "status", Status("installed"))
+    window._on_result("alpha", "status", Status("installed"))
+    window._on_result("beta", "status", Status("running", running=True))
 
     assert window.sidebar_games.profiles() == ["beta", "alpha", "gamma"]
 
@@ -118,13 +118,13 @@ def test_initial_profile_probe_passes_one_shared_proc_round(window, monkeypatch)
 
 
 def test_running_and_update_dots(window):
-    window._on_result("alpha", Status("running", running=True))
+    window._on_result("alpha", "status", Status("running", running=True))
     running = window.sidebar_games.row("alpha")
     assert running is not None
     assert running.dot.property("kind") == "running"
     assert not running.dot.isHidden()
 
-    window._on_result("beta", Status("installed", data={"update_available": True}))
+    window._on_result("beta", "status", Status("installed", data={"update_available": True}))
     update = window.sidebar_games.row("beta")
     assert update is not None
     assert update.dot.property("kind") == "update"
@@ -166,7 +166,7 @@ def test_sidebar_decodes_cover_icons_off_the_gui_thread(window, tmp_path):
 def test_click_opens_the_game_page(window, qtbot):
     window.show()
     window.show_library()
-    window._on_result("alpha", Status("installed"))
+    window._on_result("alpha", "status", Status("installed"))
     qtbot.wait(10)
 
     row = window.sidebar_games.row("alpha")
@@ -181,7 +181,7 @@ def test_click_opens_the_game_page(window, qtbot):
 def test_click_that_rebuilds_rows_does_not_crash(window, qtbot):
     window.show()
     window.show_library()
-    window._on_result("alpha", Status("installed"))
+    window._on_result("alpha", "status", Status("installed"))
     qtbot.wait(10)
 
     row = window.sidebar_games.row("alpha")
@@ -215,8 +215,8 @@ def test_busy_dialog_only_for_foreground_operations(window, monkeypatch):
 
 
 def test_active_row_follows_open_game(window):
-    window._on_result("alpha", Status("installed"))
-    window._on_result("beta", Status("installed"))
+    window._on_result("alpha", "status", Status("installed"))
+    window._on_result("beta", "status", Status("installed"))
     window.open_game("alpha")
     assert window.sidebar_games.row("alpha").property("active") == "true"
     assert window.sidebar_games.row("beta").property("active") == "false"

@@ -6,8 +6,8 @@
  * The game expects its launcher to answer a short start-up exchange. This program
  * plays that part (the same role as czn_pcsdk_stub.c for STOVE): it starts the
  * game, answers the start-up message with the account session read from a JSON
- * file, and stays out of the way. It never creates or changes a sign-in, and the
- * anti-cheat is not touched.
+ * file, and stays out of the way. Optionally it first runs the INTL sign-in host
+ * in the same runner. The anti-cheat is not touched.
  *
  * Build:
  *   x86_64-w64-mingw32-gcc -O2 -mwindows -o sail_host.exe sail_host.c
@@ -408,6 +408,53 @@ int main(int argc, char **argv) {
     }
     logf_("sail_host %s starting", STUB_VERSION);
     if (!g_launch) { logf_("need --launch <game.exe> <cwd>"); return 2; }
+
+    /* Read wide: getenv() goes through the ANSI code page and garbles non-ASCII paths. */
+    DWORD cmd_n = GetEnvironmentVariableW(L"SAIL_SIGNIN_CMD", NULL, 0);
+    const char *session_wait = getenv("SAIL_SESSION_WAIT_MS");
+    if (cmd_n > 1) {
+        wchar_t *cmd = calloc(cmd_n, sizeof(wchar_t));
+        STARTUPINFOW signin_si; PROCESS_INFORMATION signin_pi;
+        ZeroMemory(&signin_si, sizeof signin_si); signin_si.cb = sizeof signin_si;
+        ZeroMemory(&signin_pi, sizeof signin_pi);
+        logf_("starting sign-in helper");
+        if (cmd) GetEnvironmentVariableW(L"SAIL_SIGNIN_CMD", cmd, cmd_n);
+        if (!cmd || !CreateProcessW(NULL, cmd, NULL, NULL, FALSE,
+                                   CREATE_NO_WINDOW, NULL, NULL, &signin_si, &signin_pi)) {
+            DWORD error = cmd ? GetLastError() : ERROR_NOT_ENOUGH_MEMORY;
+            free(cmd);
+            logf_("cannot start sign-in helper");
+            logf_("RESULT no-signin: sign-in helper exit %lu", (unsigned long)error);
+            return 5;
+        }
+        free(cmd);
+        CloseHandle(signin_pi.hThread);
+        logf_("waiting for sign-in helper");
+        WaitForSingleObject(signin_pi.hProcess, INFINITE);
+        DWORD code = 1;
+        GetExitCodeProcess(signin_pi.hProcess, &code);
+        CloseHandle(signin_pi.hProcess);
+        logf_("sign-in helper exited: %lu", (unsigned long)code);
+        if (code != 0) {
+            logf_("RESULT no-signin: sign-in helper exit %lu", (unsigned long)code);
+            return 5;
+        }
+        DWORD timeout = session_wait && *session_wait ? strtoul(session_wait, NULL, 10) : 60000;
+        DWORD start = GetTickCount();
+        logf_("waiting for session file");
+        for (;;) {
+            FILE *f = fopen(g_session_path, "rb");
+            long size = 0;
+            if (f) { fseek(f, 0, SEEK_END); size = ftell(f); fclose(f); }
+            if (size > 0) break;
+            if (GetTickCount() - start >= timeout) {
+                logf_("RESULT no-session: session file never appeared");
+                return 6;
+            }
+            Sleep(100);
+        }
+        logf_("session file ready; starting game");
+    }
 
     /* The launcher publishes its folder in a named mapping before it starts the game
      * (measured 2026-11-10): u32 game id, u32 0, then the folder as a UTF-16 path. The game's

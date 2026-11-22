@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import uuid
 from dataclasses import dataclass
@@ -70,10 +71,27 @@ def mount_point(path: str | os.PathLike[str]) -> str:
 _UNITS = ("B", "KiB", "MiB", "GiB", "TiB")
 
 
-def _three_digits(value: float) -> str:
-    """``value`` with at most three significant digits and no trailing ``.0``."""
-    text = f"{value:.1f}" if value < 10 else f"{value:.0f}"
-    return text[:-2] if text.endswith(".0") else text
+def human_size_parts(size: float) -> tuple[float, int, str]:
+    """The number, decimal places and unit behind :func:`human_size`.
+
+    Keeping the unit choice here lets the GUI format the number with the user's
+    locale without a second size formatter.
+    """
+    value = float(max(0, size))
+    if value < 1024:
+        return float(int(value)), 0, "B"
+    unit = 0
+    decimals = 0
+    while unit < len(_UNITS) - 1:
+        value /= 1024
+        unit += 1
+        decimals = 1 if value < 10 else 0
+        if value < 1024 and round(value, decimals) < 1024:
+            break
+    rounded = round(value, decimals)
+    if rounded == int(rounded):
+        return float(int(rounded)), 0, _UNITS[unit]
+    return rounded, decimals, _UNITS[unit]
 
 
 def human_size(size: float) -> str:
@@ -82,16 +100,10 @@ def human_size(size: float) -> str:
     Binary units, labelled as such; three significant digits; a size that rounds up to 1024
     moves to the next unit (``1 MiB``, never ``1024 KiB``).
     """
-    value = float(max(0, size))
-    if value < 1024:
+    value, decimals, unit = human_size_parts(size)
+    if unit == "B":
         return f"{int(value)} B"
-    unit = 0
-    while unit < len(_UNITS) - 1:
-        value /= 1024
-        unit += 1
-        if value < 1024 and float(_three_digits(value)) < 1024:
-            break
-    return f"{_three_digits(value)} {_UNITS[unit]}"
+    return f"{value:.{decimals}f} {unit}"
 
 
 def human_speed(bytes_per_second: float) -> str:
@@ -208,6 +220,85 @@ def _reservation_file(path: str | os.PathLike[str]) -> Path:
     return paths.state_dir() / "reservations" / f"{digest}.json"
 
 
+#: This process's identity in the shared reservation records (#1473). A pid is not one: every
+#: ``flatpak run`` has its own PID namespace, so two Nadare processes can share a pid, and a
+#: pid from another namespace looks dead. The instance's liveness is a flock on its own file,
+#: which every process on the same filesystem sees, and which the kernel drops when it dies.
+_INSTANCE = uuid.uuid4().hex
+_INSTANCE_RE = re.compile(r"[0-9a-f]{32}")
+_LEASE: tuple[Path, int] | None = None  # (lease file, the descriptor holding its flock)
+
+
+def _lease_path(instance: str) -> Path:
+    return paths.state_dir() / "reservations" / "live" / f"{instance}.lock"
+
+
+def _hold_instance_lease() -> bool:
+    """Hold this process's lease (once, for its whole life); False when it cannot."""
+    global _LEASE
+    path = _lease_path(_INSTANCE)
+    if _LEASE is not None and _LEASE[0] == path:
+        return True
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as exc:
+        log.debug("could not create the reservation lease %s: %s", path, exc)
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        log.debug("could not hold the reservation lease %s: %s", path, exc)
+        return False
+    if _LEASE is not None:  # the state folder moved (a test's HOME): the old lease is moot
+        os.close(_LEASE[1])
+    _LEASE = (path, fd)
+    return True
+
+
+def _instance_alive(instance: str) -> bool | None:
+    """Whether ``instance``'s lease is held; ``None`` when that cannot be told."""
+    path = _lease_path(instance)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return None
+        try:
+            path.unlink()  # a dead instance's file: tidy it up
+        except OSError:
+            pass
+        return False
+    finally:
+        os.close(fd)
+
+
+def _record_alive(record: dict[str, object]) -> bool:
+    instance = record.get("instance")
+    if isinstance(instance, str):
+        alive = _instance_alive(instance)
+        if alive is not None:
+            return alive
+    return _pid_alive(int(record["pid"]))  # a b24 record, or a filesystem without flock
+
+
+def _is_mine(record: dict[str, object]) -> bool:
+    """This process's own record (its in-memory promise already counts it)."""
+    instance = record.get("instance")
+    if isinstance(instance, str):
+        return instance == _INSTANCE
+    return int(record["pid"]) == os.getpid()
+
+
 def _pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -247,7 +338,10 @@ def _read_records(handle) -> list[dict[str, object]]:
             }
         except (KeyError, TypeError, ValueError):
             continue
-        if _pid_alive(int(record["pid"])):
+        instance = item.get("instance")
+        if isinstance(instance, str) and _INSTANCE_RE.fullmatch(instance):
+            record["instance"] = instance
+        if _record_alive(record):
             records.append(record)
     return records
 
@@ -287,9 +381,8 @@ def _close_records(handle) -> None:
 def _file_outstanding(records: list[dict[str, object]], device: int, exclude: str) -> int:
     """Bytes promised by other processes on this install folder."""
     total = 0
-    me = os.getpid()
     for record in records:
-        if int(record["pid"]) == me:  # this process's _PROMISES already counts it
+        if _is_mine(record):  # this process's _PROMISES already counts it
             continue
         if int(record["device"]) != device or str(record["owner"]) == exclude:
             continue
@@ -416,8 +509,10 @@ def reserve(
             _PROMISES[(device, owner)] = promise
             if handle is not None:
                 records = [r for r in records if str(r["owner"]) != owner]
+                mine = {"instance": _INSTANCE} if _hold_instance_lease() else {}
                 records.append(
                     {
+                        **mine,
                         "pid": os.getpid(),
                         "owner": owner,
                         "device": device,
@@ -444,6 +539,7 @@ __all__ = [
     "tree_bytes",
     "free_bytes",
     "human_size",
+    "human_size_parts",
     "human_speed",
     "mount_point",
 ]

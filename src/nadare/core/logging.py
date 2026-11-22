@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import faulthandler
+import fcntl
 import logging
 import logging.handlers
 import os
@@ -54,6 +55,68 @@ class _RotatingFileHandler(logging.handlers.RotatingFileHandler):
             os.chmod(self.baseFilename, 0o600)
         return stream
 
+    _lock_fd: int | None = None
+
+    def _cross_process_lock(self) -> int | None:
+        """A private ``<log>.lock`` beside the log; ``None`` where it cannot be had."""
+        if self._lock_fd is None:
+            try:
+                Path(self.baseFilename).parent.mkdir(parents=True, exist_ok=True)
+                self._lock_fd = os.open(
+                    self.baseFilename + ".lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600
+                )
+            except OSError:
+                return None
+        return self._lock_fd
+
+    def _reopen_if_rotated(self) -> None:
+        """Another process rotated the log: write to the new file, not the renamed one."""
+        if self.stream is None:
+            return
+        try:
+            current = os.stat(self.baseFilename)
+            mine = os.fstat(self.stream.fileno())
+        except OSError:
+            current = None
+            mine = None
+        if current is None or (current.st_dev, current.st_ino) != (mine.st_dev, mine.st_ino):
+            with contextlib.suppress(Exception):
+                self.stream.close()
+            self.stream = self._open()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Write (and rotate) under a lock every Nadare process shares (#622).
+
+        The stdlib only locks within one process: a GUI and a CLI rotating the same log
+        renamed the backups twice and lost lines."""
+        fd = self._cross_process_lock()
+        if fd is None:
+            super().emit(record)
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:  # no flock on this filesystem: the old in-process behaviour
+            super().emit(record)
+            return
+        try:
+            self._reopen_if_rotated()
+            super().emit(record)
+            if self.stream is not None:
+                with contextlib.suppress(Exception):
+                    self.stream.flush()
+        finally:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            if self._lock_fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(self._lock_fd)
+                self._lock_fd = None
+
     def handleError(self, record: logging.LogRecord) -> None:
         # The default prints a full "--- Logging error ---" traceback for every
         # record when the state dir is read-only or full. Switch to stderr once
@@ -77,6 +140,12 @@ class MaskingFilter(logging.Filter):
     """Mask secret-looking values in the message and its arguments."""
 
     def filter(self, record: logging.LogRecord) -> bool:
+        # This record contains variable names only. The generic token heuristic
+        # would shorten long names and make the launch diagnostic unreadable.
+        if record.name == "nadare.core.launchenv" and hasattr(record, "dropped_env_names"):
+            record.msg = "Launch environment dropped names: " + ", ".join(record.dropped_env_names)
+            record.args = ()
+            return True
         # Tracebacks are formatted at emit time, after this filter runs, so a
         # secret in an exception message would otherwise reach the file intact.
         if record.exc_info and not record.exc_text:

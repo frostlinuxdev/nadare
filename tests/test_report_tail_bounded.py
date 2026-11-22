@@ -55,7 +55,9 @@ def test_a_huge_log_is_read_only_at_its_end(tmp_path, counted):
     log.write_text("".join(f"line {i}\n" for i in range(800_000)))  # about 7 MB
     text = report._tail(log)
     assert text.splitlines()[-1] == "line 799999"
-    assert len(text.splitlines()) == 200
+    head, _, tail = text.partition("… (lines cut) …\n")
+    assert head.splitlines() == [f"line {i}" for i in range(report._HEAD_LINES)]
+    assert len(tail.splitlines()) == 200
     assert counted.total <= report._TAIL_BYTES + 64 * 1024
 
 
@@ -63,7 +65,7 @@ def test_the_newest_whole_lines_are_kept(tmp_path):
     log = tmp_path / "a.log"
     log.write_text("".join(f"row {i}\n" for i in range(500)))
     lines = report._tail(log, lines=3).splitlines()
-    assert lines == ["row 497", "row 498", "row 499"]
+    assert lines[-3:] == ["row 497", "row 498", "row 499"]
 
 
 def test_a_cut_in_the_middle_of_a_line_drops_that_partial_line(tmp_path, monkeypatch):

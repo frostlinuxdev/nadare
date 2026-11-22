@@ -17,7 +17,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import events, paths, report, runlog
+from . import atomicfile, events, paths, report, runlog
 
 #: The app's own rotating log and its numbered backups.
 _APP_LOG = re.compile(r"^nadare\.log(?:\.\d+)?$")
@@ -171,6 +171,40 @@ def read_tail(path: Path | str, max_bytes: int = 512 * 1024) -> str:
     return read_tail_with_size(path, max_bytes)[0]
 
 
+def read_head_and_tail(
+    path: Path | str, head_bytes: int = 64 * 1024, tail_bytes: int = 512 * 1024
+) -> str:
+    """Return ``path`` whole, or its start and its end with a line saying how much was cut.
+
+    A launch log starts with what ran (the ``$`` command line, the runner, the env); a crash
+    loop can fill megabytes after it, so a tail alone drops exactly those lines (#1725). Both
+    parts keep whole lines only; neither is read past its budget.
+    """
+    try:
+        with Path(path).open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            if size <= head_bytes + tail_bytes:
+                handle.seek(0)
+                return handle.read(size).decode("utf-8", errors="replace")
+            handle.seek(0)
+            head = handle.read(head_bytes)
+            newline = head.rfind(b"\n")
+            head = head[: newline + 1] if newline >= 0 else b""
+            start = size - tail_bytes
+            handle.seek(start - 1)
+            tail = handle.read(tail_bytes + 1)
+            if tail[:1] == b"\n":
+                tail = tail[1:]
+            else:
+                newline = tail.find(b"\n")
+                tail = b"" if newline < 0 else tail[newline + 1 :]
+    except OSError:
+        return ""
+    cut = size - len(head) - len(tail)
+    notice = f"… {cut} bytes cut …\n"
+    return head.decode("utf-8", errors="replace") + notice + tail.decode("utf-8", errors="replace")
+
+
 def has_session_header(text: str) -> bool:
     """True when ``text`` starts a new run (a ``=====`` header line)."""
     return bool(_HEADER.search(text))
@@ -207,23 +241,7 @@ def filter_lines(text: str, needle: str, case: bool = False) -> str:
 
 def _write_atomic(path: Path, text: str) -> None:
     """Replace ``path`` with ``text`` through a private temporary file."""
-    fd, temp_name = tempfile.mkstemp(
-        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
-    )
-    temp = Path(temp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(temp, 0o600)
-        os.replace(temp, path)
-    except BaseException:
-        try:
-            temp.unlink()
-        except OSError:
-            pass
-        raise
+    atomicfile.write(path, text, mode=0o600)
 
 
 def trim_sessions(path: Path | str, max_bytes: int = 1_048_576) -> bool:
@@ -260,9 +278,11 @@ def redacted(text: str) -> str:
     return events.mask_known(report.redact(text, mask=False))
 
 
-#: Each log in a bundle is cut to its last 2 MiB (read_tail keeps whole lines), so a bundle
-#: stays small enough to attach to an issue.
+#: Each log in a bundle is cut to 2 MiB (whole lines), so a bundle stays small enough to attach
+#: to an issue. A cut log keeps its first 64 KiB (a 32nd of a smaller cap) and then its end, so
+#: it still shows what ran (#1725).
 BUNDLE_FILE_BYTES = 2 * 1024 * 1024
+BUNDLE_HEAD_BYTES = 64 * 1024
 
 
 def bundle(
@@ -277,16 +297,17 @@ def bundle(
     """Write every listed log (see :func:`list_logs`) into one zip at ``dest``.
 
     Returns how many logs went in. Runs keep their game folder in the zip (old flat logs stay
-    flat), each log is cut to its end and, with ``redact``, has the username, paths and
+    flat), a long log keeps its start and its end and, with ``redact``, has the username, paths and
     addresses hidden. A ``README.txt`` says what the bundle holds. The zip is written beside
     ``dest`` and moved into place, so a failure leaves no partial file.
     """
-    import tempfile
     import zipfile
     from datetime import datetime
 
     from .. import __version__
 
+    head_bytes = min(BUNDLE_HEAD_BYTES, max_bytes_per_file // 32)
+    tail_bytes = max_bytes_per_file - head_bytes
     target = Path(dest)
     base = Path(directory) if directory is not None else paths.logs_dir()
     logs = list_logs(profiles, directory, profile=profile)
@@ -299,7 +320,7 @@ def bundle(
             count = 0
             used: set[str] = set()
             for log in logs:
-                text = read_tail(log.path, max_bytes_per_file)
+                text = read_head_and_tail(log.path, head_bytes, tail_bytes)
                 try:  # a run keeps its game folder, so two games' "launch-...log" never collide
                     arcname = log.path.relative_to(base).as_posix()
                 except ValueError:
@@ -329,8 +350,9 @@ def bundle(
                 f"Created: {datetime.now().astimezone().isoformat(timespec='seconds')}\n"
                 f"Nadare version: {__version__}\n"
                 f"{count} {noun}"
-                f"{f' for {shown}' if shown else ''}, each cut to its last "
-                f"{max_bytes_per_file // 1024} KiB.\n"
+                f"{f' for {shown}' if shown else ''}, each cut to its first "
+                f"{head_bytes // 1024} KiB and its last "
+                f"{tail_bytes // 1024} KiB.\n"
                 f"{hidden}\n"
             )
             zf.writestr("README.txt", readme)
@@ -343,10 +365,12 @@ def bundle(
 
 __all__ = [
     "BUNDLE_FILE_BYTES",
+    "BUNDLE_HEAD_BYTES",
     "LogFile",
     "bundle",
     "filter_lines",
     "list_logs",
+    "read_head_and_tail",
     "read_tail",
     "read_tail_with_size",
     "redacted",

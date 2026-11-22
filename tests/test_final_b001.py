@@ -11,7 +11,7 @@ from _backend_helpers import make_context, write_exe
 
 from nadare.backends import arknights as ak
 from nadare.backends.arknights import ArknightsBackend
-from nadare.core import yostar
+from nadare.core import directdl, yostar
 from nadare.core.backends import BackendError
 
 
@@ -38,11 +38,12 @@ def test_a_partial_sync_does_not_say_nothing_was_changed(tmp_path, monkeypatch):
     write_exe(backend.direct_target(), "MZ")
     (backend.install_dir() / "data").mkdir(parents=True, exist_ok=True)
 
-    def half(man, dest, **kw):
+    def half(man, dest, changed=None, **kw):
         (Path(dest) / "data" / "big.pak").write_bytes(b"N")  # a file was replaced
-        raise yostar.ManifestError("crc64 mismatch for data/big.pak")
+        changed.set()  # as the real sync reports it
+        raise directdl.DirectError("hash mismatch for data/big.pak")
 
-    monkeypatch.setattr(ak.yostar, "sync", half)
+    monkeypatch.setattr(ak.directdl, "sync", half)
     with pytest.raises(BackendError) as caught:
         backend.update()
 

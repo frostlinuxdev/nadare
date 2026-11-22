@@ -161,10 +161,7 @@ def test_the_report_stub_hash_matches_the_backend_pin() -> None:
     from nadare.backends.czn import backend
     from nadare.core import report
 
-    assert report.STUB_SHIPPED_SHA256 == (
-        backend.STUB_PREBUILT_SHA256,
-        backend.STUB_C_PREBUILT_SHA256,
-    )
+    assert report.STUB_SHIPPED_SHA256 == (backend.STUB_PREBUILT_SHA256,)
 
 
 def _czn_fixture(tmp_path: Path):
@@ -275,6 +272,39 @@ def test_binary_garbage_in_a_log_does_not_break_the_report(tmp_path: Path) -> No
         proc_root=tmp_path / "proc",
     )
     assert "profile other not found" in text
+
+
+def _report(config, logs, profiles, home, tmp_path):
+    return build_report(
+        config, profile_name="czn", logs_path=logs, profiles_path=profiles, username="fakeuser",
+        home=home, hostname="fakehost", run_command=lambda *a, **k: "unavailable",
+        proc_root=tmp_path / "proc", doctor_text="",
+    )
+
+
+def test_a_sandboxed_run_s_stub_banner_is_read_from_the_prefix(tmp_path: Path) -> None:
+    """A Sandboxed CZN launch writes the stub log in its prefix (#1556)."""
+    config, logs, profiles, home = _czn_fixture(tmp_path)
+    (logs / "czn-czn-stub.log").unlink()
+    prefix = Path(config["profiles"]["czn"]["prefix"])
+    prefix.mkdir(parents=True)
+    (prefix / "czn-czn-stub.log").write_text("stub v2 sandboxed\n", encoding="utf-8")
+    assert "CZN stub banner: stub v2 sandboxed" in _report(config, logs, profiles, home, tmp_path)
+
+
+def test_the_newer_stub_log_wins(tmp_path: Path) -> None:
+    import os
+
+    config, logs, profiles, home = _czn_fixture(tmp_path)
+    prefix = Path(config["profiles"]["czn"]["prefix"])
+    prefix.mkdir(parents=True)
+    old = prefix / "czn-czn-stub.log"
+    old.write_text("stub v0 old sandboxed run\n", encoding="utf-8")
+    os.utime(old, (1, 1))
+    assert "CZN stub banner: stub v1" in _report(config, logs, profiles, home, tmp_path)
+    os.utime(old, None)
+    os.utime(logs / "czn-czn-stub.log", (1, 1))
+    assert "CZN stub banner: stub v0 old" in _report(config, logs, profiles, home, tmp_path)
 
 
 def test_a_non_czn_profile_has_no_stub_lines(tmp_path: Path) -> None:

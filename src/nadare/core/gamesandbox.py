@@ -12,19 +12,20 @@ Not in ``core/sandbox.py``: that one is about running inside Flatpak.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import hostlibs, linkrelay, paths, prefixguard, process, sandbox, userns
+from . import diewithparent, hostlibs, linkrelay, paths, prefixguard, process, sandbox, userns
 from .config import as_bool
+from .paths import inside as _inside
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ _HIDDEN_ENV = ("DBUS_SESSION_BUS_ADDRESS", "SSH_AUTH_SOCK", "GPG_AGENT_INFO")
 def _is_loader_env(name: str) -> bool:
     """A dynamic loader variable, which must not apply to bwrap or the host shell."""
     return name.startswith("LD_")
+
 
 #: Where a Sandboxed game's shader caches go: its own folder inside Nadare's cache folder, so
 #: they survive between launches without showing the game the rest of ``~/.cache``.
@@ -80,16 +82,24 @@ def choice(profile: Mapping[str, object]) -> bool | None:
 
 
 def wanted(
-    profile: Mapping[str, object], *, supported: bool, default: bool | None = None
+    profile: Mapping[str, object],
+    *,
+    supported: bool,
+    default: bool | None = None,
+    required: bool = False,
 ) -> bool:
-    """Whether the Sandbox should run: supported, then the explicit choice, then the default.
+    """Whether the Sandbox should run: supported, then required, then the explicit choice,
+    then the default.
 
     ``default`` is the backend kind's own default. ``False`` keeps a kind off whatever
     ``DEFAULT_ON`` says; ``None`` or ``True`` follows ``DEFAULT_ON`` (so the test suite can
-    turn every such kind off at once).
+    turn every such kind off at once). A ``required`` kind (Duet Night Abyss, #1330) is always
+    on: no saved choice turns it off.
     """
     if not supported:
         return False
+    if required:
+        return True
     answer = choice(profile)
     if answer is not None:
         return answer
@@ -103,7 +113,9 @@ def runtime_copies() -> list[str]:
 
     Every Proton game Nadare runs already has one on disk, so Sandbox needs nothing extra.
     """
-    return [path for path in userns._srt_bwrap_paths() if os.access(path, os.X_OK)]
+    return userns.permitted_runtime_copies(
+        [path for path in userns._srt_bwrap_paths() if os.access(path, os.X_OK)]
+    )
 
 
 def available() -> bool:
@@ -169,12 +181,10 @@ def pins_path() -> Path:
 
 
 def _sha256(path: str) -> str | None:
+    from . import download
+
     try:
-        digest = hashlib.sha256()
-        with open(path, "rb") as handle:
-            for block in iter(lambda: handle.read(1 << 20), b""):
-                digest.update(block)
-        return digest.hexdigest()
+        return download.hash_file(path)["sha256"]
     except OSError:
         return None
 
@@ -247,6 +257,90 @@ def recorded_runtime_copies() -> list[str]:
     return [copy for copy in runtime_copies() if pins.get(copy) and _sha256(copy) == pins[copy]]
 
 
+def untrusted_runtime_copies() -> list[str]:
+    """Runtime copies on disk that the record does not cover (changed, or new), newest first.
+
+    Empty while nothing was recorded yet: the Sandbox's first start records what is there. A
+    non-empty answer is usually umu's runtime update (every few weeks), but a game can write
+    to that folder too, so only the player decides to trust it (:func:`trust_runtime_copies`).
+    Never records anything.
+    """
+    pins = _read_pins()
+    if not pins:
+        return []
+    return [copy for copy in runtime_copies() if not pins.get(copy) or _sha256(copy) != pins[copy]]
+
+
+class RuntimeBusy(RuntimeError):
+    """A program from the game runtime is running, so its files are not trusted right now."""
+
+
+def runtime_in_use(
+    copies: Iterable[str] | None = None, *, proc_root: str | os.PathLike[str] = "/proc"
+) -> bool:
+    """Whether a process of this user runs from a runtime folder (a game, umu, pressure-vessel).
+
+    A game running in the Sandbox can write to the runtime folder, so a copy is never trusted
+    while one runs.
+    """
+    roots = []
+    for copy in runtime_copies() if copies is None else copies:
+        parents = Path(copy).parents
+        if len(parents) > 3:
+            roots.append(str(parents[3]) + os.sep)  # umu/<runtime>/
+    if not roots:
+        return False
+    for record in process.ProcessScanRound(proc_root).records():
+        if any(arg.startswith(root) for arg in record.argv for root in roots):
+            return True
+    return False
+
+
+def trust_runtime_copies(copies: Iterable[str]) -> list[str]:
+    """Record ``copies`` (runtime copies on disk only) as trusted; the ones recorded.
+
+    The player's answer to "the game runtime was updated": other records are kept. Refused with
+    :class:`RuntimeBusy` while a runtime program runs, because a running game could be writing
+    the file being recorded.
+    """
+    on_disk = runtime_copies()
+    wanted = [copy for copy in dict.fromkeys(copies) if copy in on_disk]
+    if not wanted:
+        return []
+    if runtime_in_use(on_disk):
+        raise RuntimeBusy("a game or the game runtime is running")
+    pins = dict(_read_pins() or {})
+    recorded = []
+    for copy in wanted:
+        digest = _sha256(copy)
+        if digest:
+            pins[copy] = digest
+            recorded.append(copy)
+    if not recorded:
+        return []
+    target = pins_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_name(target.name + ".tmp")
+    temp.write_text(json.dumps(pins, indent=1), encoding="utf-8")
+    os.replace(temp, target)
+    _READY_CACHE.clear()
+    return recorded
+
+
+def trust_question() -> list[str]:
+    """The copies to offer for trust: only when the Sandbox has no working bubblewrap left.
+
+    With a working system bubblewrap the Sandbox runs anyway, so nobody is asked. Probes
+    programs: never on the GUI thread.
+    """
+    if sandbox.in_flatpak():
+        return []
+    located = locate(record=False)
+    if located.binary is not None:
+        return []
+    return list(located.untrusted)
+
+
 @dataclass(frozen=True)
 class Located:
     """The bubblewrap Sandbox will use, or why there is none."""
@@ -255,6 +349,8 @@ class Located:
     source: str = ""  # "runtime" or "system"
     found: bool = False  # some copy exists (so a failure is "blocked", not "not installed")
     why: str = ""  # the first reason a copy could not start
+    #: Runtime copies the record does not cover (usually umu updated its runtime).
+    untrusted: tuple[str, ...] = ()
 
 
 def locate(*, record: bool = True) -> Located:
@@ -279,13 +375,20 @@ def locate(*, record: bool = True) -> Located:
         if started:
             return Located(binary, source, True)
         first_why = first_why or why
-    if not first_why and unrecorded:
+    untrusted = tuple(untrusted_runtime_copies())
+    if untrusted:
+        first_why = (
+            "the game runtime was updated and Nadare has not been told to trust its new "
+            "bubblewrap yet (a game could also have put it there); restart Nadare and answer "
+            f'"Trust the new copy", or delete {pins_path()} and start again'
+        )
+    elif not first_why and unrecorded:
         first_why = (
             "the game runtime has a bubblewrap Nadare did not record, so it is not run "
             "(a game could have put it there). If you trust this runtime, delete "
             f"{pins_path()} and start again"
         )
-    return Located(None, "", bool(candidates) or bool(unrecorded), first_why)
+    return Located(None, "", bool(candidates) or bool(unrecorded), first_why, untrusted)
 
 
 def install_hint(family: str | None) -> str:
@@ -331,10 +434,6 @@ def _existing(path: str | Path | None) -> Path | None:
     return resolved if resolved.exists() else None
 
 
-def _inside(path: Path, parent: Path) -> bool:
-    return path == parent or parent in path.parents
-
-
 def _broad_reason(folder: Path, home: Path, *, allow_drive_top: bool = False) -> str:
     """Why binding ``folder`` would give the hidden home folder back, or an empty string."""
     return prefixguard.place_reason(  # the shared rule (#1229)
@@ -373,6 +472,55 @@ def _bind_target(
     return (None, reason) if reason else (target, "")
 
 
+#: Proton verbs that take the program as the next argument.
+_PROTON_VERBS = frozenset({"run", "waitforexitandrun", "runinprefix"})
+
+#: Proton maps the first library path that is part of the game's path as drive S:.
+GAME_DRIVE_ENV = "STEAM_COMPAT_LIBRARY_PATHS"
+
+
+def _proton_program(argv: list[str]) -> Path | None:
+    """The Windows program a umu or ``proton <verb>`` command starts, or None."""
+    for i, arg in enumerate(argv):
+        name = Path(arg).name
+        if name == "umu-run" or arg == "--umu-run":
+            # The hidden `nadare --umu-run` wrapper also starts umu (#1341 item 3).
+            rest = argv[i + 1 : i + 2]
+        elif name == "proton" and argv[i + 1 : i + 2] and argv[i + 1] in _PROTON_VERBS:
+            rest = argv[i + 2 : i + 3]
+        else:
+            continue
+        if rest and os.path.isabs(rest[0]):
+            return Path(rest[0])
+        return None
+    return None
+
+
+def game_drive(
+    argv: list[str],
+    env: Mapping[str, str],
+    *,
+    is_mount: Callable[[str], bool] = os.path.ismount,
+) -> str | None:
+    """The folder Proton maps as drive S: when the game runs outside the Sandbox (#1614).
+
+    umu walks up from the game's folder (``STEAM_COMPAT_INSTALL_PATH``, else the program's
+    folder) to the first mount point below ``/`` and Proton maps it as S:. Inside the Sandbox
+    the bound game folder and the hidden home are mount points of their own, so S: became the
+    game folder and NTE's launcher saw itself "in the root directory of the disk". Asked here,
+    on the host, before the Sandbox starts. ``/`` when nothing below it is a mount: then S:
+    is the same as Z: and every path stays what it is outside the Sandbox.
+    """
+    program = _proton_program(argv)
+    if program is None:
+        return None
+    start = Path(os.path.abspath(env.get("STEAM_COMPAT_INSTALL_PATH") or program.parent))
+    for parent in start.parents:
+        if str(parent) != "/" and is_mount(str(parent)):
+            return str(parent)
+    return "/"
+
+
 def wrap(
     argv: list[str],
     env: Mapping[str, str],
@@ -384,6 +532,8 @@ def wrap(
     link_pipe: Path | None = None,
     read_only: Iterable[Path] = (),
     bwrap: str = BINARY,
+    share_pid: bool = False,
+    host_tmp: bool = False,
 ) -> tuple[list[str], dict[str, str]]:
     """Return ``([bwrap, ...flags, "--", *argv], env)`` with the real home hidden.
 
@@ -392,9 +542,29 @@ def wrap(
     through both paths. Paths that do not exist are skipped rather than failing the launch.
     ``read_only`` files (an installer Nadare downloaded) are bound back read-only after the
     other mounts, so they stay visible inside the hidden home.
+
+    By default the game gets its own ``/tmp`` and PID namespace, and the session runtime is
+    hidden except for the display and sound sockets. ``share_pid`` and ``host_tmp`` are the
+    per-game opt-outs (``sandbox_share_pid`` / ``sandbox_host_tmp`` in the profile): the
+    first is for a game that needs to see host processes, the second for a game that needs
+    something Nadare cannot know about in the host's ``/tmp``.
     """
     real_home = Path(home or Path.home()).resolve()
     flags: list[str] = ["--die-with-parent", "--dev-bind", "/", "/", "--tmpfs", str(real_home)]
+    if not share_pid:
+        # The game (and umu, pressure-vessel, Wine's .wine-UID server before it) lives in its
+        # own PID namespace. The fresh procfs is not optional: the bind above exposes the
+        # host's /proc, where the game's own PID (and /proc/self) would not match its view.
+        flags += ["--unshare-pid", "--proc", "/proc"]
+    if not host_tmp:
+        # umu, pressure-vessel and the game itself start inside this namespace, so their
+        # pressure-vessel-* trees and Wine's .wine-UID server directory are created in this
+        # same private /tmp: the server and its game always meet. Host /tmp is not bound,
+        # except for the X11 socket directory, which must stay connectable, and the X
+        # authority file below (bound back where it lives when that is under /tmp).
+        flags += ["--tmpfs", "/tmp"]
+        if Path("/tmp/.X11-unix").is_dir():
+            flags += ["--ro-bind", "/tmp/.X11-unix", "/tmp/.X11-unix"]
     hidden: list[str] = []
     for mount in _HIDDEN_MOUNTS:
         # bwrap cannot mount on a symlink (/mnt -> var/mnt on Bazzite): use the target.
@@ -403,9 +573,7 @@ def wrap(
             hidden.append(target)
             flags += ["--tmpfs", target]
 
-    runtime, runtime_why = _bind_target(
-        env.get("XDG_RUNTIME_DIR"), real_home, directory=True
-    )
+    runtime, runtime_why = _bind_target(env.get("XDG_RUNTIME_DIR"), real_home, directory=True)
     if runtime_why:
         log.warning(
             "Sandbox: not using XDG_RUNTIME_DIR %s: %s",
@@ -435,8 +603,12 @@ def wrap(
         flags.extend(["--ro-bind" if read_only else "--bind", str(path), str(path)])
 
     hidden_roots = [real_home, *(Path(h) for h in hidden)]
+    if not host_tmp:
+        hidden_roots.append(Path("/tmp"))
     if runtime is not None:
         hidden_roots.append(runtime)
+
+    shown: list[Path] = []  # bound read-only outside `bind` (Nadare's own downloads)
 
     def alias(raw: str | Path | None, *, read_only: bool = False) -> None:
         """Bind a path reached through a symlink in a hidden area at that path too.
@@ -450,8 +622,18 @@ def wrap(
         target = _existing(raw)
         if target is None or written == target:
             return
-        if any(_inside(written, root) for root in hidden_roots):
-            flags.extend(["--ro-bind" if read_only else "--bind", str(target), str(written)])
+        if not any(_inside(written, root) for root in hidden_roots):
+            return
+        # Only show again what the Sandbox already shows: a bound path, or one outside every
+        # hidden area. A link to something `_bind_target` refused (the home itself) stays out.
+        if any(_inside(target, root) for root in hidden_roots) and not any(
+            _inside(target, done) for done in (*bound, *shown)
+        ):
+            log.warning(
+                "Sandbox: not showing %s: its target %s is not in the Sandbox", written, target
+            )
+            return
+        flags.extend(["--ro-bind" if read_only else "--bind", str(target), str(written)])
 
     resolved: dict[str, Path | None] = {}
     for folder, label in (
@@ -482,11 +664,15 @@ def wrap(
         data_home = str(real_home / ".local/share")
     # Older umu builds ignore XDG_DATA_HOME: bind the default place too when they differ.
     umu_places = dict.fromkeys([Path(data_home) / "umu", real_home / ".local/share/umu"])
+    owned_base = env.get("UMU_FOLDERS_PATH")
+    if owned_base:
+        umu_places[Path(owned_base)] = None
     for place in umu_places:
         umu, umu_why = _bind_target(place, real_home, directory=True)
         if umu_why:
             log.warning("Sandbox: not binding the umu runtime %s: %s", place, umu_why)
         bind(umu)
+        alias(place)
     for copy in runtime_copies():
         copy_path = _existing(copy)
         if copy_path is not None:
@@ -502,13 +688,53 @@ def wrap(
     if cache_why:
         log.warning("Sandbox: not binding the cache folder %s: %s", cache, cache_why)
     bind(cache_target)
-    # The program being started may itself live in the home (umu-run or a wine build in
-    # ~/.local/bin): without this it would vanish with the home and bwrap could not start it.
-    program = _existing(argv[0]) if argv and Path(argv[0]).is_absolute() else None
-    if program is not None and program.is_file() and _inside(program, real_home):
-        bind(program, read_only=True)
-    if program is not None and program.is_file():
-        alias(argv[0], read_only=True)
+    # The program being started may itself live in a hidden folder (umu-run or a wine build in
+    # ~/.local/bin, or anything under the private /tmp): bind it back or bwrap cannot start it.
+    programs = argv[:1]
+    if argv and Path(argv[0]).name == "mangohud":
+        # The overlay starts umu, which may also live in the hidden home or /tmp.
+        programs += argv[2:3] if argv[1:2] == ["--dlsym"] else argv[1:2]
+    for executable in programs:
+        program = _existing(executable) if Path(executable).is_absolute() else None
+        if (
+            program is not None
+            and program.is_file()
+            and any(_inside(program, root) for root in hidden_roots)
+        ):
+            # Nadare's own binary (`nadare --umu-run`, #1341) needs its whole AppImage mount,
+            # which lives under /tmp: the one file alone cannot load its bundled libraries.
+            appdir = _existing(os.environ.get("APPDIR") or "")
+            if appdir is not None and appdir.is_dir() and _inside(program, appdir):
+                bind(appdir, read_only=True)
+            else:
+                bind(program, read_only=True)
+        if program is not None and program.is_file():
+            alias(executable, read_only=True)
+
+    if "--umu-run" in argv:
+        from . import umu as umu_helper
+
+        # The wrapper loads the zipapp after entering the Sandbox. Its interpreter also
+        # needs the frozen payload (or the source installation), which can live in the home.
+        resources = [umu_helper.managed_path()]
+        if getattr(sys, "frozen", False):
+            resources.append(Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent)))
+        else:
+            resources.extend(
+                [
+                    Path(sys.prefix),
+                    Path(sys.base_prefix),
+                    Path(umu_helper.__file__).resolve().parents[1],
+                ]
+            )
+        for resource in resources:
+            target = _existing(resource)
+            if target is not None and any(_inside(target, root) for root in hidden_roots):
+                target, why = _bind_target(resource, real_home)
+                if why:
+                    raise BroadBindError(f"the umu helper path {resource} is {why}")
+                bind(target, read_only=True)
+            alias(resource, read_only=True)
 
     # Where the Steam Runtime looks for the Steam client's pipe: Nadare's link relay stands in
     # for it, so "Sign in with Google" can still reach the browser (see linkrelay.py).
@@ -516,12 +742,14 @@ def wrap(
         flags.extend(["--bind", str(link_pipe), str(real_home / linkrelay.PIPE_RELATIVE)])
 
     # X11 needs its authority file, which usually sits in the home or the runtime folder.
-    xauthority, xauthority_why = _bind_target(
-        env.get("XAUTHORITY"), real_home, regular=True
-    )
+    xauthority, xauthority_why = _bind_target(env.get("XAUTHORITY"), real_home, regular=True)
     if xauthority_why:
         log.warning("Sandbox: not binding XAUTHORITY %s: %s", env.get("XAUTHORITY"), xauthority_why)
     bind(xauthority, read_only=True)
+    # XAUTHORITY is often a link in /tmp to a file in the runtime folder. The private /tmp
+    # hides the link, and `bind` above only put the target back: bind it at the path the
+    # game was told, too.
+    alias(env.get("XAUTHORITY"), read_only=True)
 
     # Files Nadare downloaded itself (the installer): visible inside the hidden home, never
     # writable by the program that runs them.
@@ -529,11 +757,16 @@ def wrap(
         target = _existing(path)
         if target is not None:
             flags.extend(["--ro-bind", str(target), str(target)])
+            shown.append(target)
             alias(path, read_only=True)
 
     wrapped_env = {k: v for k, v in env.items() if k not in _HIDDEN_ENV}
     if cache is not None:
         wrapped_env["XDG_CACHE_HOME"] = str(cache)
+    if not host_tmp:
+        # A host TMPDIR such as /tmp/foo does not exist in the game's private /tmp; a
+        # missing temp folder breaks Wine and some launchers.
+        wrapped_env["TMPDIR"] = "/tmp"
     # bwrap itself is dynamically linked and starts before the Sandbox exists: a loader variable
     # from the game's environment would run its library on the host. Pass it to the game only.
     for key, value in list(wrapped_env.items()):
@@ -544,11 +777,30 @@ def wrap(
 
 
 #: Run the program, then wait for Wine's server in the prefix Proton uses; keep the program's exit
-#: code. Arguments: the wineserver, then the program.
+#: code. Arguments: the wineserver, Nadare's PID and start time, then the program.
+#:
+#: While it runs, a watchdog ends the game (``wineserver -k``) once the Nadare process that
+#: started it is gone (#1354): ``--watch-bus`` signals only the sandbox's top process, and with
+#: ``--share-pids`` Wine's processes live on in Nadare's PID namespace (measured on the rig,
+#: 2026-11-15). The start time makes a reused PID never count. Armed only when that process is
+#: visible now, so without shared PIDs nothing changes. Plain ``sh``: no awk in every runtime.
 _WAIT_FOR_WINE = (
-    'w=$1; shift; "$@"; s=$?; '
-    'WINEPREFIX="${STEAM_COMPAT_DATA_PATH:-$WINEPREFIX}/pfx" "$w" -w; exit $s'
+    "w=$1; me=$2; born=$3; shift 3; "
+    'p="${STEAM_COMPAT_DATA_PATH:-$WINEPREFIX}/pfx"; '
+    'alive() { t=$(cat "/proc/$me/stat" 2>/dev/null) || return 1; t=${t##*) }; '
+    'set -- $t; [ "$1" != Z ] && shift 19 && [ "$1" = "$born" ]; }; '
+    "dog=; if alive; then "
+    '( while alive; do sleep 2; done; WINEPREFIX="$p" "$w" -k ) & dog=$!; fi; '
+    '"$@"; s=$?; '
+    'WINEPREFIX="$p" "$w" -w; '
+    '[ -n "$dog" ] && kill "$dog" 2>/dev/null; exit $s'
 )
+
+
+def process_start_time(pid: int) -> str:
+    """The process's start time in clock ticks (``/proc/<pid>/stat`` field 22), or ``""``."""
+    return process._pid_starttime(pid) or ""  # noqa: SLF001 - same package
+
 
 #: The game's ``xdg-open`` inside the Flatpak Sandbox: hand the link to Nadare's relay, in the line
 #: format the relay reads from the Steam Runtime (it checks the link before opening anything).
@@ -605,6 +857,18 @@ def _expose(
     exposed.append(target)
     option = "--sandbox-expose-path-ro" if read_only else "--sandbox-expose-path"
     flags.append(f"{option}={target}")
+
+
+def die_with_parent(argv: list[str], *, parent_pid: int | None = None) -> list[str]:
+    """``argv`` started so that it is sent SIGTERM when this process dies (#1354).
+
+    The kernel ties the signal to the thread that starts the child; Nadare starts a game from
+    a thread that waits for it to end (``process.run``), as bubblewrap's ``--die-with-parent``
+    already needs on the AppImage.
+    """
+    pid = os.getpid() if parent_pid is None else parent_pid
+    # ``-m`` works from source and in the frozen binary alike (see diewithparent.py).
+    return [sys.executable, "-m", diewithparent.__name__, str(pid), *argv]
 
 
 def wrap_flatpak(
@@ -711,28 +975,43 @@ def wrap_flatpak(
     # A publisher launcher (NTE's) starts the game and exits; `proton run` then returns, the
     # sandbox ends and the game with it (measured). umu's container waits for every process;
     # here the sandboxed command waits for Wine's server before it ends.
-    if runner_dir is not None and len(argv) >= 2 and Path(argv[0]).name == "proton":
+    proton_argv = argv
+    if argv and Path(argv[0]).name == "mangohud":
+        proton_argv = argv[2:] if argv[1:2] == ["--dlsym"] else argv[1:]
+    if runner_dir is not None and len(proton_argv) >= 2 and Path(proton_argv[0]).name == "proton":
         wineserver = _to_real(str(Path(runner_dir) / "files" / "bin" / "wineserver"), moved)
-        if argv[1] == "run" and Path(wineserver).is_file():
-            argv = ["/bin/sh", "-c", _WAIT_FOR_WINE, "nadare-wait", wineserver, *argv]
+        if proton_argv[1] == "run" and Path(wineserver).is_file():
+            me = os.getpid()
+            argv = [
+                "/bin/sh",
+                "-c",
+                _WAIT_FOR_WINE,
+                "nadare-wait",
+                wineserver,
+                str(me),
+                process_start_time(me) or "0",
+                *argv,
+            ]
 
     fd, env_file = tempfile.mkstemp(prefix="nadare-sandbox-env-", dir=env_dir)
     with os.fdopen(fd, "wb") as handle:
         for key, value in wrapped_env.items():
             handle.write(f"{key}={value}\0".encode())
 
-    command = [
-        "/bin/sh",
-        "-c",
-        'exec 3<"$1" || exit 127; rm -f -- "$1"; shift; exec "$@"',
-        "nadare-sandbox",
-        env_file,
-        "flatpak-spawn",
-        *flags,
-        "--env-fd=3",
-        "--",
-        *argv,
-    ]
+    command = die_with_parent(
+        [
+            "/bin/sh",
+            "-c",
+            'exec 3<"$1" || exit 127; rm -f -- "$1"; shift; exec "$@"',
+            "nadare-sandbox",
+            env_file,
+            "flatpak-spawn",
+            *flags,
+            "--env-fd=3",
+            "--",
+            *argv,
+        ]
+    )
     return command, {key: value for key, value in env.items() if not _is_loader_env(key)}
 
 
@@ -741,6 +1020,7 @@ __all__ = [
     "DEFAULT_ON",
     "Located",
     "available",
+    "die_with_parent",
     "choice",
     "install_hint",
     "locate",

@@ -84,7 +84,7 @@ def test_ubuntu_blocked_userns_asks_before_the_launch(tmp_path, monkeypatch):
     backend, _proton_dir = _proton(tmp_path, monkeypatch)
     monkeypatch.setattr(umu, "resolve", lambda *a, **k: "/usr/bin/umu-run")
     monkeypatch.setattr(userns, "restricted", lambda: True)
-    monkeypatch.setattr(userns, "profile_installed", lambda: False)
+    monkeypatch.setattr(userns, "profile_installed", lambda *_a: False)
     monkeypatch.setattr(userns, "probe", lambda *a, **k: False)
     with pytest.raises(BackendError) as caught:
         backend.build_launch()
@@ -95,7 +95,7 @@ def test_ubuntu_with_the_profile_installed_launches(tmp_path, monkeypatch):
     backend, _proton_dir = _proton(tmp_path, monkeypatch)
     monkeypatch.setattr(umu, "resolve", lambda *a, **k: "/usr/bin/umu-run")
     monkeypatch.setattr(userns, "restricted", lambda: True)
-    monkeypatch.setattr(userns, "profile_installed", lambda: True)
+    monkeypatch.setattr(userns, "profile_installed", lambda *_a: True)
     argv, _env, _target = backend.build_launch()
     assert argv[0] == "/usr/bin/umu-run"
 
@@ -105,7 +105,7 @@ def test_ubuntu_where_the_probe_works_launches(tmp_path, monkeypatch):
     backend, _proton_dir = _proton(tmp_path, monkeypatch)
     monkeypatch.setattr(umu, "resolve", lambda *a, **k: "/usr/bin/umu-run")
     monkeypatch.setattr(userns, "restricted", lambda: True)
-    monkeypatch.setattr(userns, "profile_installed", lambda: False)
+    monkeypatch.setattr(userns, "profile_installed", lambda *_a: False)
     monkeypatch.setattr(userns, "probe", lambda *a, **k: True)
     argv, _env, _target = backend.build_launch()
     assert argv[0] == "/usr/bin/umu-run"
@@ -234,7 +234,7 @@ def test_generic_status_does_not_call_a_missing_umu_an_error(_generic, monkeypat
 def test_generic_ubuntu_blocked_asks_before_the_launch(_generic, monkeypatch):
     monkeypatch.setattr(umu, "resolve", lambda *a, **k: "/usr/bin/umu-run")
     monkeypatch.setattr(userns, "restricted", lambda: True)
-    monkeypatch.setattr(userns, "profile_installed", lambda: False)
+    monkeypatch.setattr(userns, "profile_installed", lambda *_a: False)
     monkeypatch.setattr(userns, "probe", lambda *a, **k: None)
     with pytest.raises(BackendError) as caught:
         _generic.build()

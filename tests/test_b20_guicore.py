@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import os
-import threading
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -74,71 +73,6 @@ def test_remove_worker_gets_a_detached_config_snapshot(tmp_path, qapp, monkeypat
 
 
 # ---- #102: detection/free-space queries must not run on the GUI thread ------
-def test_import_detection_runs_off_the_gui_thread(tmp_path, qapp, monkeypatch):
-    from nadare.gui import add_game
-
-    dialog = add_game.AddGameDialog(
-        Config.load(tmp_path / "config.json"), data_root=tmp_path / "data"
-    )
-    dialog.set_backend("arknights-yostar")
-    dialog.set_mode(True)
-    game = tmp_path / "game"
-    game.mkdir()
-    (game / "Arknights.exe").write_text("MZ")
-    dialog.set_install_dir(str(game))
-
-    callers: list[threading.Thread] = []
-    gate = threading.Event()
-
-    def fake_detect(kind, folder, prefix):
-        gate.wait(5)  # nothing can have run yet when the GUI thread checks below
-        callers.append(threading.current_thread())
-        return {"install_dir": str(game), "prefix": "", "notes": ["Found it."]}
-
-    monkeypatch.setattr(add_game, "detect_import", fake_detect)
-    try:
-        assert dialog.create_button.isEnabled()
-        dialog._detect_async()
-        assert not callers, "detection ran synchronously on the GUI thread"
-        gate.set()
-        # Add is never disabled while a check runs: a click on a disabled button is lost, and
-        # create_profile() re-checks the folder itself.
-        assert dialog.create_button.isEnabled()
-        assert _wait_until(qapp, lambda: bool(callers))
-        assert callers[0] is not threading.main_thread()
-        assert dialog.create_button.isEnabled()
-    finally:
-        dialog.deleteLater()
-        qapp.processEvents()
-
-
-def test_typing_while_a_check_runs_does_not_strand_the_add_button(tmp_path, qapp, monkeypatch):
-    from nadare.gui import add_game
-
-    dialog = add_game.AddGameDialog(
-        Config.load(tmp_path / "config.json"), data_root=tmp_path / "data"
-    )
-    dialog.set_backend("arknights-yostar")
-    dialog.set_mode(True)
-    game = tmp_path / "game"
-    game.mkdir()
-    (game / "Arknights.exe").write_text("MZ")
-    dialog.set_install_dir(str(game))
-    monkeypatch.setattr(
-        add_game,
-        "detect_import",
-        lambda kind, folder, prefix: {"install_dir": str(game), "prefix": "", "notes": []},
-    )
-    try:
-        dialog._detect_async()
-        dialog.folder.setText(str(game) + "x")  # a keystroke while the worker is still busy
-        qapp.processEvents()
-        assert dialog.create_button.isEnabled()
-        _wait_until(qapp, lambda: False, timeout=0.3)  # let any stale answer arrive
-        assert dialog.create_button.isEnabled()
-    finally:
-        dialog.deleteLater()
-        qapp.processEvents()
 
 
 # ---- #598(a): a status tick must not rebuild an unchanged sidebar ----------
@@ -191,14 +125,6 @@ def test_sidebar_row_is_keyboard_focusable_and_activates(qapp):
 
 
 # ---- #598(c): an empty prefix must not invent an install folder ------------
-def test_importing_an_empty_prefix_does_not_invent_an_install_dir(tmp_path):
-    from nadare.gui.add_game import detect_import
-
-    prefix = tmp_path / "Arknights_EN"
-    prefix.mkdir()
-    info = detect_import("arknights-yostar", None, str(prefix))
-    assert info["install_dir"] == ""
-    assert any("not installed" in note.lower() for note in info["notes"])
 
 
 # ---- #388 F-07: startup probes are capped and continue as they finish ------
@@ -402,36 +328,6 @@ def test_a_steam_shortcut_profile_with_quotes_and_backslashes_round_trips():
         }
         assert shortcuts._steam_shortcut_profile(entry) == profile
     assert shortcuts._steam_shortcut_profile({"LaunchOptions": "something else"}) is None
-
-
-def test_a_free_space_read_does_not_cancel_an_import_check(tmp_path, qapp, monkeypatch):
-    from nadare.gui import add_game
-
-    dialog = add_game.AddGameDialog(
-        Config.load(tmp_path / "config.json"), data_root=tmp_path / "data"
-    )
-    dialog.set_backend("arknights-yostar")
-    dialog.set_mode(True)
-    game = tmp_path / "game"
-    game.mkdir()
-    (game / "Arknights.exe").write_text("MZ")
-    dialog.set_install_dir(str(game))
-    monkeypatch.setattr(
-        add_game,
-        "detect_import",
-        lambda kind, folder, prefix: {
-            "install_dir": str(game),
-            "prefix": "",
-            "notes": ["Found it from the worker."],
-        },
-    )
-    try:
-        dialog._detect_async()
-        dialog._update_free_space_async()  # same text, so only the counter could drop the answer
-        assert _wait_until(qapp, lambda: "Found it from the worker." in dialog.detect_label.text())
-    finally:
-        dialog.deleteLater()
-        qapp.processEvents()
 
 
 # ---- #951: uninstalling is easy to find, and the button says what it will do ---------------

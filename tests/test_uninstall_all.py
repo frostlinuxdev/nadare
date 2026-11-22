@@ -42,10 +42,20 @@ def env(tmp_path):
     theirs.mkdir(parents=True)
     (theirs / "thing.exe").write_text("MZ")
     cfg = Config.load(paths.config_file())
-    cfg.add_profile("pgr", backend="direct-pgr", title="PGR", install_dir=str(inside),
-                    owned_trees=["install_dir"])
-    cfg.add_profile("nikke", backend="launcher-nikke", title="NIKKE", prefix=str(outside),
-                    owned_trees=["prefix"])
+    cfg.add_profile(
+        "pgr",
+        backend="direct-pgr",
+        title="PGR",
+        install_dir=str(inside),
+        owned_trees=["install_dir"],
+    )
+    cfg.add_profile(
+        "nikke",
+        backend="launcher-nikke",
+        title="NIKKE",
+        prefix=str(outside),
+        owned_trees=["prefix"],
+    )
     cfg.add_profile("thing", backend="wine", title="Thing", install_dir=str(theirs))
     cfg.save()
     return cfg, tmp_path, inside, outside, theirs, runner
@@ -59,7 +69,8 @@ def _run(cfg, tmp, **kwargs):
 def test_the_plan_lists_every_group_and_deletes_nothing(env):
     cfg, tmp, inside, outside, theirs, runner = env
     groups = {g.key: g for g in uninstall_all.plan(cfg)}
-    assert set(groups) == {"nadare", "runtimes", "games", "backups"}
+    assert set(groups) == {"nadare", "runtimes", "umu", "games", "kept", "backups"}
+    assert groups["kept"].paths == ()  # nothing removed earlier in this setup (#1498)
     assert groups["nadare"].default is True and groups["runtimes"].default is True
     assert groups["games"].default is False and groups["backups"].default is False
     assert inside in groups["games"].paths and outside in groups["games"].paths
@@ -141,7 +152,8 @@ def test_a_recorded_backup_is_kept_unless_chosen(env):
 def test_a_running_game_stops_everything_before_anything_is_deleted(env, monkeypatch):
     cfg, tmp, inside, outside, theirs, runner = env
     monkeypatch.setattr(
-        removal, "_running_problem",
+        removal,
+        "_running_problem",
         lambda config, name: "NIKKE is running; close it first" if name == "nikke" else None,
     )
     report = _run(cfg, tmp, games=True)
@@ -200,16 +212,13 @@ def test_an_install_in_progress_stops_everything_before_anything_is_deleted(env)
 # ---- review 2026-11-09: a linked Nadare folder and a shared game folder -------------------------
 def test_a_nadare_folder_that_is_a_link_is_never_walked(env):
     """~/.local/share/nadare linked to a big disk: uninstall-all must not empty the link target."""
-    import shutil
-
     cfg, tmp, inside, outside, theirs, runner = env
     target = tmp / "bigdisk"
-    target.mkdir()
-    (target / "family.jpg").write_bytes(b"jpg")  # the user's own file next to Nadare's data
     data = paths.data_dir()
-    for child in list(data.iterdir()):
-        shutil.move(str(child), str(target / child.name))
-    data.rmdir()
+    # One rename, not a move per child and an rmdir: CI once saw "Directory not empty" when
+    # something wrote into the folder between the two (3.12, PR #1619).
+    data.rename(target)
+    (target / "family.jpg").write_bytes(b"jpg")  # the user's own file next to Nadare's data
     data.symlink_to(target, target_is_directory=True)
     report = _run(cfg, tmp)  # the default keeps games, so the game inside is a keep tree
     assert (target / "family.jpg").read_bytes() == b"jpg"
@@ -222,11 +231,96 @@ def test_a_folder_two_games_share_is_not_deleted_when_the_plan_did_not_list_it(e
     shared = tmp / "Games" / "Shared"
     shared.mkdir(parents=True)
     (shared / "keep.dat").write_text("both use it")
-    cfg.add_profile("a", backend="wine", title="A", install_dir=str(shared),
-                    owned_trees=["install_dir"])
+    cfg.add_profile(
+        "a", backend="wine", title="A", install_dir=str(shared), owned_trees=["install_dir"]
+    )
     cfg.add_profile("b", backend="wine", title="B", prefix=str(shared), owned_trees=["prefix"])
     cfg.save()
     groups = {g.key: g for g in uninstall_all.plan(cfg)}
     assert shared not in groups["games"].paths
     _run(cfg, tmp, games=True)
     assert (shared / "keep.dat").read_text() == "both use it"
+
+
+# ---- #1498: a game kept by an earlier Remove survives uninstall-all ----------------------------
+def _remove_keeping_files(cfg, tmp, name):
+    result = removal.remove_game(
+        cfg,
+        name,
+        delete_data=False,
+        delete_trees=[],
+        delete_backups=False,
+        applications_dir=tmp / "apps",
+        desktop_dir=tmp / "desk",
+    )
+    assert not result.profile_kept
+
+
+@pytest.mark.parametrize("layout", ["profiles/<name>", "profiles/Nadare/<Game>"])
+def test_uninstall_without_games_preserves_previously_kept_game(env, monkeypatch, layout):
+    cfg, tmp, *_ = env
+    monkeypatch.setattr(removal, "_running_problem", lambda c, n: None)
+    if layout == "profiles/<name>":
+        home = paths.profiles_dir() / "oldgame"
+    else:
+        home = paths.profiles_dir() / "Nadare" / "Old Game"
+    prefix = home / "prefix"
+    prefix.mkdir(parents=True)
+    (prefix / "save.dat").write_bytes(b"precious")
+    cfg.add_profile(
+        "oldgame", backend="wine", title="Old Game", prefix=str(prefix), owned_trees=["prefix"]
+    )
+    cfg.save()
+    _remove_keeping_files(cfg, tmp, "oldgame")  # Remove, keeping the files
+
+    kept = {g.key: g for g in uninstall_all.plan(cfg)}["kept"]
+    assert home in kept.paths  # the preview says it stays
+    _run(cfg, tmp, games=False, backups=False)
+    assert (prefix / "save.dat").read_bytes() == b"precious"
+
+
+def test_a_kept_game_survives_even_with_games_chosen(env, monkeypatch):
+    """'Games' means the games in the library; a folder kept earlier needs its own explicit
+    deletion (Settings, Disk space), never a side effect."""
+    cfg, tmp, *_ = env
+    monkeypatch.setattr(removal, "_running_problem", lambda c, n: None)
+    home = paths.profiles_dir() / "oldgame"
+    (home / "prefix").mkdir(parents=True)
+    (home / "prefix" / "save.dat").write_bytes(b"precious")
+    _run(cfg, tmp, games=True, backups=True)
+    assert (home / "prefix" / "save.dat").exists()
+
+
+# ---- #1499: a lock held by anyone refuses the run, whatever this config knows ------------------
+def test_an_operation_held_outside_the_config_snapshot_refuses(env):
+    from nadare.core import process
+
+    cfg, tmp, *_ = env
+    lock = process.OperationLock("busy-in-another-config").acquire()
+    try:
+        report = _run(cfg, tmp)
+        assert report.refused
+        assert lock.path.exists()  # the held lock file was not unlinked
+        assert paths.config_file().exists()  # nothing was deleted
+        again = process.OperationLock("busy-in-another-config")
+        with pytest.raises(process.ProfileLockError):
+            again.acquire()  # no second owner on a fresh inode
+    finally:
+        lock.release()
+
+
+def test_a_game_running_from_another_window_refuses(env, tmp_path):
+    from nadare.core import runlock
+
+    cfg, tmp, *_ = env
+    with runlock.hold(tmp_path / "some-other-prefix"):
+        report = _run(cfg, tmp)
+    assert report.refused and paths.config_file().exists()
+
+
+def test_old_unheld_lock_files_do_not_block(env):
+    from nadare.core import process
+
+    cfg, tmp, *_ = env
+    process.OperationLock("old").acquire().release()  # file stays, nobody holds it
+    assert not _run(cfg, tmp).refused

@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -39,12 +40,13 @@ from PyQt6.QtWidgets import (
 
 from ..core import app_uninstall as app_uninstall  # noqa: E402, F401
 from ..core import community as community  # noqa: E402, F401
-from ..core import gamefolders, importmove
+from ..core import flatpakmove, gamefolders, importmove
 from ..core import libraries as core_libraries
 from ..core import relink as relink_core
 from ..core.backends import Option
 from ..core.config import Config
 from . import i18n
+from .disk_space_panel import DiskSpacePanel
 from .libraries_panel import LibrariesPanel
 from .library import FlowLayout
 from .library_picker import LibraryPicker, resolve_other_folder
@@ -125,6 +127,10 @@ class SettingsPage(
     system_check_requested = pyqtSignal()
     games_added = pyqtSignal(list)  # profile names brought back from a library
     games_repaired = pyqtSignal(list)  # profile names pointed at a folder found elsewhere
+
+    def _sync_speed_editors(self, value):
+        for editor in getattr(self, "_speed_editors", ()):
+            editor.setValue(value)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -285,6 +291,14 @@ class SettingsPage(
         self.manage_runners = manage
         files_form.addRow("Runner", runner_row)
         self._runner_row = files_form.rowCount() - 1
+        # A game fixed to one build stays there when the tested pin moves on (#1595).
+        self.runner_behind = QLabel("")
+        self.runner_behind.setObjectName("Muted")
+        self.runner_behind.setWordWrap(True)
+        self.runner_behind.setVisible(False)
+        files_form.addRow("", self.runner_behind)
+        self.runner.currentIndexChanged.connect(lambda _index: self._update_runner_behind())
+        self.runner.editTextChanged.connect(lambda _text: self._update_runner_behind())
         self.remake_prefix_btn = QPushButton("Rebuild Wine prefix…")
         self.remake_prefix_btn.setObjectName("GhostButton")
         self.remake_prefix_btn.setToolTip(
@@ -359,6 +373,13 @@ class SettingsPage(
             "These settings belong to Nadare itself and apply to every game in Nadare, "
             "not only this one.",
         )
+        self.download_speed_limit = QDoubleSpinBox()
+        self.download_speed_limit.setRange(0, 100000)
+        self.download_speed_limit.setDecimals(2)
+        self.download_speed_limit.valueChanged.connect(self._sync_speed_editors)
+        launcher_form.addRow(
+            i18n.tr("Download speed limit (MB/s, 0 = none)"), self.download_speed_limit
+        )
         self.language = QComboBox()
         for code in i18n.available():
             self.language.addItem(LANGUAGE_NAMES.get(code, code), code)
@@ -370,6 +391,14 @@ class SettingsPage(
             "warning about a game launcher. It sends nothing about you. Leave this on "
             "unless you are offline on purpose."
         )
+        self.check_holds = QCheckBox(i18n.tr("Ask before starting a game marked dangerous"))
+        self.check_holds.setToolTip(
+            i18n.tr(
+                "Nadare checks a signed list from the project before a game starts. It only "
+                "asks you to confirm a launch; installs, updates and stopping a game keep "
+                "working. Leave this on."
+            )
+        )
         self.notify_when_done = QCheckBox("Tell me when an install or update finishes")
         self.notify_when_done.setToolTip(
             "Shows a desktop notification when an install, update or repair ends while Nadare "
@@ -379,6 +408,7 @@ class SettingsPage(
         launcher_form.addRow(self.language_label, self.language)
         launcher_form.addRow("", self.check_updates)
         launcher_form.addRow("", self.check_notices)
+        launcher_form.addRow("", self.check_holds)
         launcher_form.addRow("", self.notify_when_done)
         launcher_form.addRow("", self.hide_uninstalled)
         self.default_monitor = QComboBox()
@@ -410,12 +440,6 @@ class SettingsPage(
         self.discord_button.clicked.connect(self._open_discord)
         self.discord_button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         launcher_form.addRow("", self.discord_button)
-        self.open_config_button = QPushButton("Open config file")
-        self.open_config_button.setObjectName("GhostButton")
-        self.open_config_button.setToolTip("Open the file where Nadare keeps all your settings.")
-        self.open_config_button.clicked.connect(self._open_config_file)
-        self.open_config_button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-        launcher_form.addRow("", self.open_config_button)
         self.uninstall_nadare_button = QPushButton("Uninstall Nadare…")
         self.uninstall_nadare_button.setObjectName("GhostButton")
         self.uninstall_nadare_button.setToolTip(
@@ -426,6 +450,31 @@ class SettingsPage(
             QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
         )
         launcher_form.addRow("", self.uninstall_nadare_button)
+        self.remove_fgo_selinux = QCheckBox(
+            i18n.tr("Also remove the FGO SELinux module (asks for your password)")
+        )
+        self.remove_fgo_selinux.setToolTip(
+            i18n.tr(
+                "Removes the policy module FGO's setup added to this computer. It is only "
+                "shown when that module is loaded."
+            )
+        )
+        self.remove_fgo_selinux.setChecked(False)
+        launcher_form.addRow("", self.remove_fgo_selinux)
+        self.remove_fgo_selinux.hide()
+        self._check_fgo_selinux_module()
+        self.move_to_flatpak_button = QPushButton("Move to the Flatpak…")
+        self.move_to_flatpak_button.setObjectName("GhostButton")
+        self.move_to_flatpak_button.setToolTip(
+            "Move your games and settings into the Nadare Flatpak, once (#1353)."
+        )
+        self.move_to_flatpak_button.clicked.connect(self._move_to_flatpak)
+        self.move_to_flatpak_button.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+        )
+        launcher_form.addRow("", self.move_to_flatpak_button)
+        # Only an AppImage/source build on a host where the Flatpak is installed.
+        self.move_to_flatpak_button.setVisible(flatpakmove.probably_installed())
         # With a single shipped locale the picker is meaningless: hide the row
         # until a second catalogue makes it actionable.
         multiple_languages = len(i18n.available()) > 1
@@ -445,6 +494,18 @@ class SettingsPage(
         self.libraries_panel.games_repaired.connect(self.games_repaired)
         libraries_form.addRow(self.libraries_panel)
         launcher_tab_layout.addWidget(libraries_card)
+
+        # ---- disk space (#1417): unused runners and folders of removed games -----------
+        disk_card, disk_form = self._section(
+            "Disk space",
+            "What Nadare keeps on disk. Nothing here is deleted without asking.",
+        )
+        self.disk_space_panel = DiskSpacePanel(self)
+        self.disk_space_panel.runners_requested.connect(self._open_runners_from_card)
+        disk_form.addRow(self.disk_space_panel)
+        launcher_tab_layout.addWidget(disk_card)
+        # Measured only when the all-games tab is shown: it walks the runner folders.
+        self.tabs.currentChanged.connect(self._tab_shown)
         for layout in (general_layout, game_layout, launcher_tab_layout):
             layout.addStretch(1)
         root.addWidget(self.tabs, 1)
@@ -668,8 +729,8 @@ class SettingsPage(
 
     #: Shown under the locked prefix field (the note is reworded while a check is pending/failed).
     _LOCKED_NOTE = (
-        "The game is installed, so this location is locked. Editing it here would make "
-        "Nadare would no longer find the game. Use the Move button to relocate it, or "
+        "The game is installed, so this location is locked: if it changed here, Nadare "
+        "would no longer find the game. Use the Move button below to relocate it, or "
         "'I moved it myself' if you already did."
     )
 
@@ -748,7 +809,8 @@ class SettingsPage(
             self,
             "Move into a library?",
             f"Move\n{sources}\ninto {move.home}?\n\nOn the same disk this is instant. On "
-            "another disk Nadare copies, checks the copy, and keeps your original.\n\n"
+            "another disk Nadare copies and checks the copy, and keeps your original for you "
+            "to delete (Nadare did not make these folders).\n\n"
             "Afterwards Nadare manages the game like one it installed: Uninstall can delete it.",
         )
         if answer != QMessageBox.StandardButton.Yes:

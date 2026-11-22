@@ -100,12 +100,12 @@ def test_restore_resets_int_to_the_option_default(tmp_path, qapp, monkeypatch):
     try:
         page.load(config, "sample")
         spin = page.option_widget("download_workers")
-        assert spin.value() == 6
+        assert spin.value() == 32
         spin.setValue(3)
 
         page.restore_defaults.click()
 
-        assert spin.value() == 6
+        assert spin.value() == 32
     finally:
         _dispose(page, qapp)
 
@@ -142,7 +142,7 @@ def test_saving_a_restored_int_default_does_not_store_the_key(tmp_path, qapp, mo
         page.load(config, "sample")
         page.option_widget("download_workers").setValue(3)
         page.restore_defaults.click()
-        assert page.option_widget("download_workers").value() == 6
+        assert page.option_widget("download_workers").value() == 32
 
         page.save()
 

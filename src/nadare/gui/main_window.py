@@ -48,7 +48,10 @@ from .. import __version__
 from ..core import backends as core_backends  # noqa: E402, F401
 from ..core import (
     channel,
+    gamefacts,
     gamesandbox,
+    pending,
+    safetycheck,
     selfupdate,
     steamstore,
 )
@@ -58,8 +61,8 @@ from ..core import secrets as secrets  # noqa: E402
 from ..core import shortcuts as shortcuts  # noqa: E402
 from ..core.backends import Status as Status  # noqa: E402
 from ..core.backends import (
+    supports_hero,
     supports_login,
-    supports_media,
     supports_news,
     supports_remember_me,
 )
@@ -71,7 +74,7 @@ from . import i18n, notify, steam_setup, steam_wiring
 from .banner import InfoBanner
 from .downloads_page import DownloadRow, DownloadsPage, downloads_label
 from .game_view import GameSnapshot, GameView
-from .library import LibraryPage, profile_title
+from .library import LibraryPage, profile_art_candidates, profile_title
 from .main_window_parts.accounts import (
     AccountsMixin,
 )
@@ -88,6 +91,7 @@ from .main_window_parts.confirm import (
     ConfirmMixin,
     download_folder,
 )
+from .main_window_parts.downloads import RunnerDownloadsMixin
 from .main_window_parts.found_copies import (
     FoundCopiesMixin,
 )
@@ -123,19 +127,20 @@ from .main_window_parts.shared import (
 )
 from .main_window_parts.store_actions import (
     StoreActionsMixin,
-    _ask_check_files,
 )
 from .main_window_parts.window_state import (
     WindowStateMixin,
     _window_minimum,
     _window_size,
 )
+from .operation_presentation import OperationPresentation
+from .safety_check import SafetyCheckSignals, SafetyCheckTask, SafetyResultDialog
 from .selfupdate_flow import SelfUpdateFlow
 from .settings import SettingsPage
 from .sidebar import SidebarGames
 from .store_flow import StoreFlow
 from .terms_dialog import TermsDialog
-from .theme import app_icon, apply_theme, brand_pixmap, repolish
+from .theme import app_icon, apply_theme, brand_pixmap, repolish, scaled
 from .workers import PAUSABLE, BackendController
 
 PAGE_LIBRARY = 0
@@ -163,6 +168,7 @@ class MainWindow(
     BannersMixin,
     CleanupMixin,
     ConfirmMixin,
+    RunnerDownloadsMixin,
     FoundCopiesMixin,
     OperationsMixin,
     ProbesMixin,
@@ -180,7 +186,15 @@ class MainWindow(
     notices_found = pyqtSignal(object)
     #: Unused old runners measured in the background: a list of ``(path, bytes)``.
     runner_cleanup_ready = pyqtSignal(object)
-    runner_cleanup_done = pyqtSignal(int, int, int)  # deleted, bytes freed, failed
+    runner_download_event = pyqtSignal(object, object)
+    #: A signed runner recommendation changed: a list of ``runnerindex.Change``.
+    runner_pin_updated = pyqtSignal(object)
+    #: Games whose folder the Sandbox will refuse (#1299), found off the GUI thread.
+    sandbox_broad_found = pyqtSignal(object)
+    flatpak_reach_found = pyqtSignal(object)
+    sandbox_trust_found = pyqtSignal(object)
+    #: deleted, bytes freed (``object``: a Qt int is 32-bit), failed
+    runner_cleanup_done = pyqtSignal(int, object, int)
     #: Unused WuWa resource tiers measured in the background: ``(profile, items)``.
     quality_cleanup_ready = pyqtSignal(str, object)
     #: Missing Flatpak packages were installed (or failed): ``(ok, message)``.
@@ -189,6 +203,10 @@ class MainWindow(
     sandbox_ready_known = pyqtSignal(bool)
     #: Games found in another folder at start-up: ``{profile: [Copy, ...]}`` (#1293).
     found_copies_ready = pyqtSignal(object)
+    #: The other copies' folders, measured: ``(profile, [Spare], chosen Copy)`` (#1300).
+    spare_copies_ready = pyqtSignal(str, object, object)
+    #: Spare folders deleted: ``(profile, [(Spare, problem or "")])``.
+    spare_copies_done = pyqtSignal(str, object)
 
     def __init__(
         self, config: Config, profile: str | None = None, parent: QWidget | None = None
@@ -199,21 +217,33 @@ class MainWindow(
         self._graphics_fix = ""
         self._graphics_refs: tuple[str, ...] = ()
         self._installing_graphics = False
+        self._graphics_restart = False
         self._settings_return = ""  # the game page Settings was opened from, if any
-        self._busy: dict[str, str] = {}
+        self._runner_update_profile = ""  # the game a critical runner offer opens
+        self._operations = OperationPresentation()
+        # Compatibility views for the unchanged account/update/removal adapters.
+        self._busy = self._operations.busy
         #: Profiles with a live predownload, kept apart from the main busy state: Play stays free.
         self._predownload_running: set[str] = set()
         # First installs the user stopped with "remove": the Remove dialog follows the stop.
         self._remove_after_cancel: set[str] = set()
-        #: Profiles whose install/update/repair waits for a free install slot (#770).
-        self._waiting: set[str] = set()
         self._steam_setup_dialog = None  # the one open Set up window, if any
+        self._safety_dialog = None  # the one open Safety check result, if any
+        self._safety_task: SafetyCheckTask | None = None
+        #: Set while the window is hidden with a game still running: a late safety result
+        #: must not pop a window back up. Cleared by showEvent.
+        self._safety_hidden = False
+        self._safety_signals = SafetyCheckSignals(self)
+        self._safety_signals.finished.connect(self._on_safety_done)
         self._finish_timer = QTimer(self)
         self._finish_timer.setSingleShot(True)
         self._finish_timer.timeout.connect(self._maybe_finish_background_close)
+        self._launch_sheet = None
+        self._launch_sheet_profile = None
         #: Latest ``(fraction, detail, eta text)`` and the ETA estimator per install (#773).
         self._download_progress: dict[str, tuple[float | None, str, str]] = {}
         self._download_eta: dict[str, EtaEstimator] = {}
+        self._init_runner_downloads()
         #: Set when the window was closed while a game ran: Nadare stays alive,
         #: hidden, and quits once the last game exits.
         self._quit_after_games = False
@@ -244,6 +274,8 @@ class MainWindow(
         #: Games found in another folder, and the ones the user said Not now to (#1293).
         self._found_copies: dict[str, list[Any]] = {}
         self._found_copies_ignored: set[str] = set()
+        #: A re-pointed game's copies, offered once its status says installed (#1300).
+        self._spare_pending: dict[str, tuple[list[Any], Any]] = {}
         #: Runner folders present when the last install/update/launch started, so a
         #: runner it downloaded can be noticed afterwards.
         self._runners_before: set[str] | None = None
@@ -261,11 +293,11 @@ class MainWindow(
         self._probe_round_at = 0.0
 
         # A hand-edited/imported language must never be used to build a path;
-        # only codes with a real catalogue are accepted.
-        language = str(config.data.get("language") or "en")
-        if language not in i18n.available():
-            language = i18n.DEFAULT_LANGUAGE
+        # the resolver only returns a code with a real catalogue, or English.
+        language = i18n.resolve_locale(str(config.data.get("language") or ""))
         i18n.set_language(language)
+        # Before widgets exist, so Qt's own buttons match the catalogue.
+        i18n.install_qt_translations(QApplication.instance(), language)
         apply_theme(self)
         self.setWindowTitle(channel.title(i18n.tr("Nadare")))
         self.setWindowIcon(app_icon())
@@ -277,7 +309,6 @@ class MainWindow(
 
         self.store.install_requested.connect(lambda kind: self._store_install(kind))
         self.store.play_requested.connect(self._store_play)
-        self.store.own_game_requested.connect(lambda: self._add_game_dialog(advanced=True))
 
         self.controller = BackendController(config, self)
         # A predownload may run for an hour; its own controller keeps the main slot free for Play.
@@ -286,6 +317,8 @@ class MainWindow(
         self.update_found.connect(self._show_update)
         self.notices_found.connect(self._show_notice)
         self.found_copies_ready.connect(self._show_found_copies)
+        self.spare_copies_ready.connect(self._offer_spare_copies)
+        self.spare_copies_done.connect(self._spare_copies_finished)
         self.graphics_installed.connect(self._graphics_install_finished)
         self.sandbox_ready_known.connect(self._sandbox_probe_answered)
         self._sandbox_probe_running = False
@@ -293,11 +326,27 @@ class MainWindow(
         #: loop; a sandboxed launch refreshes the real cache anyway).
         self._sandbox_ready_answer: bool | None = None
         self.runner_cleanup_ready.connect(self._offer_runner_cleanup)
+        self.runner_download_event.connect(self._on_runner_download_event)
+        self.runner_pin_updated.connect(self._announce_pin_change)
+        self.sandbox_broad_found.connect(self._show_sandbox_broad)
+        self.flatpak_reach_found.connect(self._show_flatpak_reach)
+        self.sandbox_trust_found.connect(self._ask_sandbox_trust)
         self.runner_cleanup_done.connect(self._runner_cleanup_finished)
         self.quality_cleanup_ready.connect(self._offer_quality_cleanup)
         self._start_update_check()
         self._start_notices_check()
+        self._start_holds_check()
         self._start_steam_shortcut_cleanup()
+        # After start-up settles: a bumped runner pin is fetched before the next Play (#1425).
+        QTimer.singleShot(20_000, self._start_runner_prefetch)
+        QTimer.singleShot(3_000, self._start_sandbox_broad_check)
+        QTimer.singleShot(3_000, self._start_flatpak_reach_check)
+        QTimer.singleShot(3_000, self._start_sandbox_trust_check)
+        # Crash leftovers of earlier runs (#1417); after start-up settles.
+        QTimer.singleShot(5_000, self._start_leftover_sweep)
+        QTimer.singleShot(6_000, self._offer_runtime_profile_update)
+        # Downloads the last close stopped (user sim P1 #3): asked once, after the first paint.
+        QTimer.singleShot(1_500, self._offer_interrupted_when_shown)
 
         self._backfill_libraries()
         self.refresh_library()
@@ -337,6 +386,10 @@ class MainWindow(
         """Re-probe the shown game, backing off while its probes keep failing."""
         if not self.isVisible():
             return
+        if self.stack.currentIndex() == PAGE_DOWNLOADS:
+            # Another window or command may start or finish a download (C5).
+            self._refresh_downloads()
+            return
         profile = self._current_profile
         if not profile or profile not in self.config.profiles or profile in self._busy:
             return
@@ -375,6 +428,7 @@ class MainWindow(
             self.config._removed.discard(name)
             self.config._snapshot.pop(name, None)
             self._snapshots.pop(name, None)
+            self._operations.forget(name)
             self._status_errors.pop(name, None)
             self._verify_failures.pop(name, None)
             dropped.append(name)
@@ -430,6 +484,10 @@ class MainWindow(
         self.notice_banner.dismissed.connect(self._dismiss_notice)
         self._notice = None
         right_column.addWidget(self.notice_banner)
+        self.runner_banner = InfoBanner()
+        self.runner_banner.action_clicked.connect(self._review_runner_update)
+        self.runner_banner.dismissed.connect(self.runner_banner.hide_banner)
+        right_column.addWidget(self.runner_banner)
         self.found_banner = InfoBanner()
         self.found_banner.action_clicked.connect(self._review_found_copies)
         self.found_banner.dismissed.connect(self.found_banner.hide_banner)
@@ -465,8 +523,11 @@ class MainWindow(
         self.game.remove_requested.connect(self._on_remove_requested)
         self.game.move_requested.connect(self._open_move)
         self.library.remove_game.connect(self._on_remove_requested)
+        self.library.favourite_toggled.connect(self._on_favourite_toggled)
         self.game.report_requested.connect(self._show_support_report)
         self.game.steam_setup_requested.connect(self._open_steam_setup)
+        self.game.safety_check_requested.connect(self._run_safety_check)
+        self.game.safety_dismissed.connect(self._dismiss_safety)
         self.settings.saved.connect(self._on_settings_saved)
         self.settings.notice.connect(lambda _profile, text: self._set_side_status(text))
         self.settings.download_requested.connect(self._on_quality_download_requested)
@@ -483,9 +544,9 @@ class MainWindow(
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
         sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(236)
+        sidebar.setFixedWidth(scaled(208))
         side = QVBoxLayout(sidebar)
-        side.setContentsMargins(18, 24, 18, 20)
+        side.setContentsMargins(scaled(14), scaled(22), scaled(14), scaled(20))
         side.setSpacing(6)
 
         brand_row = QHBoxLayout()
@@ -630,7 +691,7 @@ class MainWindow(
         self.controller.cancelled.connect(lambda *_args: self._refresh_downloads())
         self.downloads.pause_requested.connect(lambda name: self.controller.pause(name))
         self.downloads.resume_requested.connect(lambda name: self.controller.resume(name))
-        self.downloads.cancel_requested.connect(self._cancel_with_choice)
+        self.downloads.cancel_requested.connect(self._cancel_download_row)
         self.downloads.next_requested.connect(lambda name: self.controller.move_to_front(name))
         self.downloads.now_requested.connect(
             lambda name: self.controller.start_now(name, self._can_pause_profile)
@@ -676,6 +737,7 @@ class MainWindow(
         current = set(self.config.profiles)
         for name in self._known_profiles ^ current:
             self._generations[name] = self._profile_generation(name) + 1
+            self._operations.forget(name)
         self._known_profiles = current
         self.library.refresh(self.config.profiles)
         for name, snap in self._snapshots.items():
@@ -687,6 +749,13 @@ class MainWindow(
         )
         self.sidebar_games.set_profiles(self.config.profiles)
         self.store.set_installed_kinds(frozenset(steamstore.installed_kinds(self.config.profiles)))
+
+    def _on_favourite_toggled(self, profile: str, favourite: bool) -> None:
+        """Persist a library pin and update both copies of the cover."""
+        if self.config.set_favourite(profile, favourite):
+            with self.config.locked():
+                self.config.save()
+            self.refresh_library()
 
     def _remember_active(self, name: str) -> None:
         """Reopen this game next start (the config's ``active_profile``)."""
@@ -740,6 +809,7 @@ class MainWindow(
                     fraction=fraction,
                     eta=eta,
                     can_pause=operation in PAUSABLE and self._can_pause_profile(name),
+                    art=self._download_art(name),
                 )
             )
         for index, (name, operation) in enumerate(overview.waiting):
@@ -754,19 +824,50 @@ class MainWindow(
                     ahead=index,
                     can_pause=operation in PAUSABLE and self._can_pause_profile(name),
                     can_now=self.controller.can_start_now(name, self._can_pause_profile),
+                    art=self._download_art(name),
                 )
             )
         for name, operation in overview.paused:
             if name in self.config.profiles:
-                rows.append(DownloadRow(name, self._game_title(name), operation, "paused"))
-        return rows
+                # Paused here, but another window or command took the game over: Resume
+                # would only be refused by the lock (C5, r3b05 F2).
+                elsewhere = self._busy_elsewhere(name)
+                rows.append(
+                    DownloadRow(
+                        name,
+                        self._game_title(name),
+                        operation,
+                        "elsewhere" if elsewhere else "paused",
+                        art=self._download_art(name),
+                    )
+                )
+        listed = {row.profile for row in rows}
+        for name in self.config.profiles:
+            if name not in listed and self._busy_elsewhere(name):
+                rows.append(
+                    DownloadRow(
+                        name,
+                        self._game_title(name),
+                        "elsewhere",
+                        "elsewhere",
+                        art=self._download_art(name),
+                    )
+                )
+        return self._group_runner_rows(rows)
+
+    def _download_art(self, name: str) -> tuple[str, ...]:
+        """The cover candidates a Downloads row tries, as the library card does (#1623)."""
+        profile = self.config.profiles.get(name)
+        return tuple(profile_art_candidates(profile)) if isinstance(profile, dict) else ()
 
     def _refresh_downloads(self, force: bool = False) -> None:
         """Keep the Downloads entry's count current, and the list when the page is open."""
         if self._closing:
             return
         overview = self.controller.install_overview()
-        active = len(overview.running) + len(overview.waiting)
+        active = (
+            len(overview.running) + len(overview.waiting) + self._runner_active_count()
+        )
         text, tip = downloads_label(active, len(overview.paused))
         self.downloads_button.setText(text)
         self.downloads_button.setToolTip(tip)
@@ -775,13 +876,22 @@ class MainWindow(
 
     def _track_download_progress(self, profile: str, event: Event) -> None:
         """Remember the latest progress of an install for the Downloads page."""
+        if event.kind == "step":
+            # A new phase may report fractions without its own byte total.
+            self._reset_download_speed(profile)
+            self._download_eta.pop(profile, None)
+            self._download_progress.pop(profile, None)
         if event.progress is None and event.kind not in ("step", "progress"):
+            self._download_transfer_text(profile, event, None, "")
             return
-        fraction, detail, eta = self._download_progress.get(profile, (None, "", ""))
+        fraction, detail, _ = self._download_progress.get(profile, (None, "", ""))
+        eta = self._download_eta_text.get(profile, "")
         if event.progress is not None:
             fraction = max(0.0, min(1.0, float(event.progress)))
             estimator = self._download_eta.setdefault(profile, EtaEstimator())
             eta = format_eta(estimator.update(fraction, time.monotonic())) or ""
+            self._download_eta_text[profile] = eta
+        eta = self._download_transfer_text(profile, event, fraction, eta)
         if event.kind in ("step", "progress") and event.message:
             detail = event.message
         self._download_progress[profile] = (fraction, detail, eta)
@@ -807,6 +917,13 @@ class MainWindow(
             ),
         )
         self.game.set_found_copy(self._found_copy_path(profile))
+        self.game.set_unfinished_removal(
+            pending.removal_leftovers(self.config.profiles[profile])
+        )
+        self.game.set_safety_result(safetycheck.load_result(profile))
+        self.game.set_safety_running(
+            self._safety_task is not None and self._safety_task.profile == profile
+        )
         self.game.set_predownload_progress(self.predownloads.is_busy(profile))
         self.game.set_account_controls(
             supports_login(str(self.config.profiles[profile].get("backend") or ""))
@@ -822,15 +939,17 @@ class MainWindow(
         title = self._game_title(profile)
         snap_status = snp.get("status")
         running = bool(
-            snap_status and (snap_status.running or snap_status.state == "running")
+            gamefacts.is_running(snap_status)
         )
         self._set_side_status(f"Playing {title}" if running else f"Viewing {title}")
-        if profile in self._busy:
-            self.game.set_busy(self._busy[profile])
-            for past in snp.get("events", ()):
+        self._operations.sync_paused(profile, self.controller.paused_operation(profile))
+        operation_view = self._operations.view(profile)
+        if operation_view.busy is not None:
+            self.game.set_busy(operation_view.busy)
+            for past in operation_view.events:
                 self.game.append_event(past)
-            if profile in self._waiting:
-                self._show_waiting(profile, self._busy[profile])
+            if operation_view.queued:
+                self._show_waiting(profile, operation_view.busy)
             # A live login QR is a one-shot event; restore it from the snapshot
             # so leaving and returning does not lose the code for the rest of
             # the (up to 300 s) auth run.
@@ -838,8 +957,8 @@ class MainWindow(
         else:
             # Status always refreshes, but silently (no busy/CANCEL flash).
             self._start(profile, "status", silent=True)
-            if self.controller.is_paused(profile):
-                self.game.set_paused(self.controller.paused_operation(profile))
+            if operation_view.paused is not None:
+                self.game.set_paused(operation_view.paused)
 
     def _guarded(self, action: Any, *args: Any) -> None:
         """Run a sidebar navigation, first asking when Settings holds unsaved edits (#852)."""
@@ -880,7 +999,7 @@ class MainWindow(
             profile = self.config.active
         self._report_dialog = ReportDialog(self, profile)
         self._report_dialog.show()
-        task = ReportTask(dict(self.config.data), profile)
+        task = ReportTask(dict(self.config.data), profile, getattr(self.config, "path", None))
         task.signals.finished.connect(self._report_dialog.set_report)
         QThreadPool.globalInstance().start(task)
 
@@ -912,7 +1031,10 @@ class MainWindow(
             self._steam_setup_dialog = None
         try:
             dialog = steam_wiring.build_dialog(
-                self, app_id, binary=str(steam_wiring.profile_value(profile, "steam_binary"))
+                self,
+                app_id,
+                binary=str(steam_wiring.profile_value(profile, "steam_binary")),
+                runner_events=self.runner_download_event.emit,
             )
         except steam_wiring.SteamUnavailable as exc:
             self._tell_steam_problem(str(exc))
@@ -946,6 +1068,62 @@ class MainWindow(
         self._system_check_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._system_check_dialog.show()
         self._system_check_dialog.run_check()
+
+    def _run_safety_check(self, profile: str) -> None:
+        """Run one manual check off the GUI thread; the result is stored per profile."""
+        if self._closing or profile not in self.config.profiles:
+            return
+        if self._safety_task is not None:
+            self._safety_task.cancel()
+        self.game.set_safety_running(True)
+        task = SafetyCheckTask(profile, dict(self.config.profiles[profile]), self._safety_signals)
+        self._safety_task = task
+        QThreadPool.globalInstance().start(task)
+
+    def _cancel_safety_task(self) -> None:
+        """Stop the manual safety check; a late result must not touch a closed window."""
+        if self._safety_task is not None:
+            self._safety_task.cancel()
+
+    def _on_safety_done(
+        self, profile: str, result: safetycheck.SafetyResult, generation=None
+    ) -> None:
+        if self._safety_task is None or generation is not getattr(
+            self._safety_task, "generation", None
+        ):
+            return
+        if generation is None:
+            return
+        self._safety_task = None
+        if result.level != safetycheck.CANCELLED:
+            try:
+                safetycheck.save_result(profile, result)
+                result = safetycheck.load_result(profile) or result
+            except OSError:
+                log.debug("could not save safety result", exc_info=True)
+        # Closing, or hiding with a game still running, ends this window's UI: the result is
+        # saved above, but no banner or dialog may bring the window back.
+        if self._closing or self._safety_hidden:
+            return
+        if profile != self._current_profile:
+            return
+        self.game.set_safety_running(False)
+        self.game.set_safety_result(result)
+        if result.level == safetycheck.CANCELLED:
+            return
+        if self._safety_dialog is not None:
+            with contextlib.suppress(RuntimeError):
+                self._safety_dialog.close()
+        self._safety_dialog = SafetyResultDialog(self, result, self._game_title(profile))
+        self._safety_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._safety_dialog.show()
+
+    def _dismiss_safety(self, profile: str) -> None:
+        """Keep the result but stop showing its banner on this game's page."""
+        try:
+            safetycheck.dismiss(profile)
+        except OSError:
+            log.debug("could not remember the dismissed safety banner", exc_info=True)
 
     def _show_logs(self, profile: str) -> None:
         from .logs_dialog import LogsDialog
@@ -994,6 +1172,8 @@ class MainWindow(
     def _leave_settings(self) -> None:
         """Go back to the game page Settings was opened from; the Library otherwise."""
         origin, self._settings_return = self._settings_return, ""
+        # A game removed elsewhere while its Settings were open goes, not reopens (r3b05 F1).
+        self._sync_profiles_from_disk()
         if origin and origin in self.config.profiles:
             self.open_game(origin)
         else:
@@ -1032,8 +1212,21 @@ class MainWindow(
             with self.config.locked():
                 if core_libraries.backfill(self.config):
                     self.config.save()
+                # A recovered move into a library keeps its record until the save (#1486).
+                from ..core import importmove as core_importmove
+
+                core_importmove.forget_if_recorded(self.config)
         except Exception:  # noqa: BLE001 - start-up must not fail over a manifest
             log.warning("could not bring the game libraries up to date", exc_info=True)
+        # Originals a Move could not delete before Nadare closed or crashed (round 2, C4).
+        try:
+            from ..core import relocate as core_relocate
+            from .settings_parts.move import remove_original_quietly
+
+            for name, old, new in core_relocate.pending_originals(self.config):
+                remove_original_quietly(self.config, name, old, new)
+        except Exception:  # noqa: BLE001 - never fatal at start
+            log.warning("could not finish an earlier move", exc_info=True)
 
     def _library_choices(self) -> list[tuple[str, str]]:
         """The install dialog's Library picker: (label, folder), the default library first."""
@@ -1072,6 +1265,8 @@ class MainWindow(
         self._operation_generations[(profile, operation)] = generation
         if operation not in SILENT_OPERATIONS:
             self._worker_generations[profile] = generation
+        if operation == "launch" and self.isVisible():
+            self._show_launch_sheet(profile)
         return True
 
     def _snapshot(self, profile: str) -> dict[str, Any]:
@@ -1144,9 +1339,9 @@ class MainWindow(
         return self._start(profile, "news", silent=True)
 
     def _start_media(self, profile: str) -> bool:
-        """Kick off the official media fetch for capable backends."""
+        """Kick off the game-page art: the publisher feed where there is one, a hero otherwise."""
         data = self.config.profiles.get(profile)
-        if not data or not supports_media(str(data.get("backend") or "")):
+        if not data or not supports_hero(str(data.get("backend") or "")):
             return False
         return self._start(profile, "media", silent=True)
 
@@ -1172,6 +1367,7 @@ class MainWindow(
     def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
         # Brought back (second start, activation): stay open after the game ends.
         self._quit_after_games = False
+        self._safety_hidden = False
         self._close_requested_by_signal = False
         if not self._closing:
             self.controller.reopen()
@@ -1184,9 +1380,12 @@ class MainWindow(
             event.ignore()
             return
         self._save_geometry()
+        self._remember_interrupted_downloads()
         if self.controller.launching_profiles():
             # Never kill a running game by closing the launcher: drop the window
             # and everything else, and quit when the game exits.
+            self._cancel_safety_task()
+            self._safety_hidden = True
             self.controller.shutdown(keep_launches=True)
             self.predownloads.shutdown()
             self._quit_after_games = True
@@ -1198,6 +1397,9 @@ class MainWindow(
             self._notify_still_running()
             return
         self._closing = True
+        self._cancel_safety_task()
+        if self._runner_prefetch_cancel is not None:
+            self._runner_prefetch_cancel.cancel()
         self.controller.shutdown()
         self.predownloads.shutdown()
         super().closeEvent(event)
@@ -1235,7 +1437,6 @@ __all__ = [
     "STARTUP_PROBE_TIMEOUT",
     "_removal_reason_text",
     "capitalised",
-    "_ask_check_files",
     "_window_minimum",
     "_window_size",
     "DOWNLOAD_CONFIRM_BYTES",

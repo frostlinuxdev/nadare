@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Nadare contributors
-"""The catalog backend kinds, as plain data.
+"""Backend kind identity and storage classification, without implementations.
 
 ``direct-<game>`` kinds install straight from the publisher's API;
-``launcher-<game>`` kinds run the publisher's own launcher under Wine. Kept free
-of imports so the backend registry, the Add Game wizard, the runner defaults and
-the library labels can use it without loading any backend.
+``launcher-<game>`` kinds run the publisher's own launcher under Wine. The backend
+registry, persistence, the Add Game wizard, runner defaults and library labels can
+use this metadata without loading any backend.
 ``tests/test_direct_backend.py`` checks it against :mod:`nadare.backends`.
 """
 
 from __future__ import annotations
 
 import os
+from typing import Literal
 
 #: kind -> (class name in ``nadare.backends.direct``, title, install root, sub-folder, exe)
 _DIRECT: dict[str, tuple[str, str, str, str, str]] = {
@@ -28,6 +29,20 @@ _DIRECT: dict[str, tuple[str, str, str, str, str]] = {
         "drive_c/Games",
         "AetherGazer",
         "AetherGazer.exe",
+    ),
+    "direct-dna": (
+        "DnaBackend",
+        "Duet Night Abyss",
+        "drive_c/Games",
+        "DuetNightAbyss",
+        "EM.exe",
+    ),
+    "direct-snowbreak": (
+        "SnowbreakBackend",
+        "Snowbreak: Containment Zone",
+        "drive_c/Games",
+        "Snowbreak",
+        "Game/Binaries/Win64/Game.exe",
     ),
     "direct-mongil": (
         "MongilBackend",
@@ -134,6 +149,8 @@ ART: dict[str, int | None] = {
     "direct-bd2": None,
     "direct-aethergazer": None,
     "direct-mongil": None,
+    "direct-dna": 3950020,
+    "direct-snowbreak": 2668080,
     "direct-wuwa": 3513350,
     "direct-pgr": 4125930,
     "direct-gfl2": 3347400,
@@ -157,6 +174,54 @@ CATALOG_BACKENDS: dict[str, str] = {
     **{kind: f"nadare.backends.direct:{row[0]}" for kind, row in _DIRECT.items()},
     **{kind: f"nadare.backends.launcher:{row[0]}" for kind, row in _LAUNCHER.items()},
 }
+
+#: All builtin targets. Storage identity never depends on importing these modules.
+BUILTIN_BACKENDS: dict[str, str] = {
+    "stove-czn": "nadare.backends.czn.backend:CznBackend",
+    "fgo-lepton": "nadare.backends.fgo.backend:FgoLeptonBackend",
+    "wine": "nadare.backends.wine:WineBackend",
+    "steam": "nadare.backends.steam:SteamBackend",
+    "script": "nadare.backends.script:ScriptBackend",
+    "arknights-yostar": "nadare.backends.arknights:ArknightsBackend",
+    "stellasora-yostar": "nadare.backends.stellasora:StellaSoraBackend",
+    **CATALOG_BACKENDS,
+}
+
+#: Each generic profile is a different game; any number of profiles is allowed.
+UNLIMITED_KINDS = frozenset({"wine", "script", "steam"})
+#: Builds may deliberately omit these implementations (doctor reports this separately).
+OPTIONAL_KINDS = frozenset({"fgo-lepton"})
+
+StorageClass = Literal["catalog", "generic"]
+
+# Broader than the Store's CATALOG_KINDS: older CZN/FGO/Yostar kinds and registered
+# custom games have always used catalog storage too.
+_STORAGE_CLASSES: dict[str, StorageClass] = {
+    kind: "generic" if kind in UNLIMITED_KINDS else "catalog" for kind in BUILTIN_BACKENDS
+}
+
+
+def register_storage_kind(kind: str) -> None:
+    """Record the historical storage default for a custom registered implementation.
+
+    Registration supplies identity only, never the implementation itself. Generic and
+    retired names retain their historical meaning even if an implementation registers them.
+    """
+    if kind and kind not in RETIRED_KINDS:
+        _STORAGE_CLASSES.setdefault(kind, "generic" if kind in UNLIMITED_KINDS else "catalog")
+
+
+def storage_class(kind: object) -> StorageClass | None:
+    """Storage identity, or None for unknown, retired or damaged kinds; no imports."""
+    if not isinstance(kind, str) or kind in RETIRED_KINDS:
+        return None
+    return _STORAGE_CLASSES.get(kind)
+
+
+def one_per_game(kind: object) -> bool:
+    """Catalog storage has one profile per game, including unavailable implementations."""
+    return storage_class(kind) == "catalog"
+
 
 #: Wizard rows: (kind, title, install root, sub-folder, exe), direct games first.
 DIRECT_WIZARD: tuple[tuple[str, str, str, str, str], ...] = tuple(

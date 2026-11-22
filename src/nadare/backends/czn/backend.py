@@ -24,6 +24,7 @@ from __future__ import annotations
 # Names that tests and callers reach through this module; the code using them moved to
 # backend_parts/ (#1248). Re-exported so ``backend.X`` is the same object.
 import atexit as atexit  # noqa: E402, F401
+import contextlib
 import json
 import logging
 import os
@@ -40,7 +41,6 @@ from ...core import (
     paths,
     prefixmove,
     process,
-    removal,
     vcredist,
     webview2,
 )
@@ -54,9 +54,9 @@ from ...core.backends import (
     Option,
     Status,
 )
-from ...core.events import Event
-from ...core.removal import tree_safety
+from ...core.events import Cancelled, Event
 from ...core.runtimewatch import RuntimeWatch
+from ...core.sandboxed import SandboxMixin
 from .backend_parts.auth import (
     AUTH_MODULE as AUTH_MODULE,
 )
@@ -121,13 +121,7 @@ from .backend_parts.launching import (
     _cmdline_has_exe as _cmdline_has_exe,
 )
 from .backend_parts.prereqs import (
-    STUB_C_NAME as STUB_C_NAME,
-)
-from .backend_parts.prereqs import (
-    STUB_C_PREBUILT as STUB_C_PREBUILT,
-)
-from .backend_parts.prereqs import (
-    STUB_C_PREBUILT_SHA256 as STUB_C_PREBUILT_SHA256,
+    RETIRED_C_STUB_SHA256 as RETIRED_C_STUB_SHA256,
 )
 from .backend_parts.prereqs import (
     STUB_NAME as STUB_NAME,
@@ -241,6 +235,9 @@ log = logging.getLogger(__name__)
 GAME_SUBDIR = gameversion.CZN_GAME_SUBDIR
 SERVICE = gameversion.CZN_SERVICE
 SHIELD_NAME = "ssr-stove-shield.exe"
+#: How old the cached published version may be before the background check asks again (#1480).
+PUBLISHED_CHECK_INTERVAL = 6 * 60 * 60
+PUBLISHED_CACHE = "published-version.json"
 #: The WebView2 pipeline lives in :mod:`nadare.core.webview2` so every
 #: Wine-family backend shares one verifier and installer. Re-exported here
 #: because existing CZN tests (and callers) reference these names.
@@ -261,7 +258,10 @@ VCREDIST_HOST_SUFFIXES: tuple[str, ...] = vcredist.VCREDIST_HOST_SUFFIXES
 UPDATE_EXIT_MESSAGES: dict[int, str] = {
     1: "the game update failed (a download failed)",
     2: "cannot reach the update server",
+    3: "Chaos Zero Nightmare is running. Close the game, then try again",
     5: "the game files are missing or incomplete — press Install to repair them",
+    6: "another install or update of this game is already running. "
+    "Wait for it to finish, then try again",
 }
 
 #: Backend-side (not czn-linux) exit codes for WebView2 failures.
@@ -287,13 +287,19 @@ class CznBackend(
     PrereqsMixin,
     RunnerMixin,
     StreamingMixin,
+    SandboxMixin,
     GameBackend,
 ):
     unofficial_notice = True
 
     kind = KIND
     supports_remember_me = True
+    supports_remake_prefix = True
     supports_login = True
+    #: Offered, but off for this release: existing profiles keep playing as they did, and a
+    #: player switches the Sandbox on for CZN on its page (#1556).
+    supports_secure_mode = True
+    sandbox_default_on = False
 
     options = (
         Option("prefix", "Wine prefix", "path_dir", PREFIX_HELP),
@@ -326,6 +332,15 @@ class CznBackend(
             ),
         ),
         Option(
+            "secure_mode",
+            "Sandbox",
+            "bool",
+            "Hides your home folder from the game (needs bubblewrap). The game can still "
+            "use the network. Off by default for this game; turn it on if the game starts "
+            "and signs in normally. See docs/SECURE-MODE.md.",
+            default=False,
+        ),
+        Option(
             "extra_env",
             "Environment",
             "env",
@@ -356,9 +371,6 @@ class CznBackend(
         self._restore_code = 0
         self._remember_notice_shown = False
         self._renderer: str | None = None
-        # Cached host 32-bit library preflight (see _missing_hostlibs). ``None``
-        # means "unknown/not checked yet"; a list means a checked result.
-        self._hostlibs_checked = False
         #: Remembers runtime failures seen in the output (AppArmor userns block
         #: #429, failed umu Steam Runtime download) to explain the final error.
         self._watch = RuntimeWatch()
@@ -366,7 +378,6 @@ class CznBackend(
         self._run_env: dict[str, str] | None = None
         #: What a silent child is doing, for the progress heartbeat (None = no beat).
         self._activity: str | None = None
-        self._hostlibs_result: list[str] | None = None
         #: Message from the auth worker's last ``error`` event, if any.
         self._last_auth_error: str | None = None
         # Adopt a login performed by an earlier backend object in this process
@@ -393,7 +404,8 @@ class CznBackend(
 
     def prefix(self) -> Path:
         raw = str(self.ctx.profile.get("prefix") or "").strip()
-        return Path(os.path.expanduser(raw)) if raw else self._data_dir() / "prefix"
+        # A pure path (#1465); _ensure_prefix creates it with its parents.
+        return Path(os.path.expanduser(raw)) if raw else self.ctx.data_path() / "prefix"
 
     def game_dir(self) -> Path:
         return self.prefix() / GAME_SUBDIR
@@ -406,6 +418,14 @@ class CznBackend(
 
     def installed(self) -> bool:
         return self.shield().is_file()
+
+    def _sandbox_prefix(self) -> Path:
+        """The prefix the Sandbox binds writable (the game and WebView2 live in it)."""
+        return self.prefix()
+
+    def _sandbox_game_dir(self) -> Path | None:
+        """The game folder the Sandbox binds writable; it is already inside the prefix."""
+        return self.game_dir()
 
     # ---- env / process helpers --------------------------------------------
     def _env(self) -> dict[str, str]:
@@ -443,16 +463,83 @@ class CznBackend(
             return self._win(path)
         return "C:\\" + "\\".join(rel.parts)
 
+    # ---- published version (#1480) -------------------------------------------
+    def _published_cache_path(self) -> Path:
+        return self._data_dir() / PUBLISHED_CACHE
+
+    def _installed_number(self) -> int | None:
+        try:
+            value = json.loads(self.upf().read_text())["local_version"]
+        except Exception:
+            return None
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    def _read_published(self) -> tuple[int, float] | None:
+        """``(version, checked_at)`` the last update check saw, or ``None``. Never the network."""
+        try:
+            blob = json.loads(self._published_cache_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(blob, dict):
+            return None
+        version, checked = blob.get("version"), blob.get("checked_at", 0)
+        if not isinstance(version, int) or isinstance(version, bool) or version <= 0:
+            return None
+        try:
+            return version, float(checked)
+        except (TypeError, ValueError):
+            return version, 0.0
+
+    def check_update(self) -> None:
+        """Cache the published version for the page (background; offline-safe, never raises).
+
+        ``status()`` must not make network calls, so it shows what this check saw last.
+        """
+        try:
+            if not self.ctx.config.data.get("check_updates", True):
+                return
+        except AttributeError:
+            pass
+        installed = self._installed_number()
+        if installed is None:
+            return
+        cached = self._read_published()
+        if cached is not None and 0 <= time.time() - cached[1] < PUBLISHED_CHECK_INTERVAL:
+            return
+        from . import update as czn_update
+
+        try:
+            latest, _source = czn_update.resolve_latest(installed)
+        except Cancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a background check must never fail
+            log.debug("CZN: published version check failed: %s", exc)
+            return
+        if not isinstance(latest, int) or latest <= 0:
+            return
+        path = self._published_cache_path()
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps({"version": latest, "checked_at": time.time()}), "utf-8")
+            os.replace(tmp, path)
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            log.debug("CZN: could not cache the published version: %s", exc)
+
     # ---- status ------------------------------------------------------------
     def status(self) -> Status:
         installed = self.installed()
         elsewhere = self._running_elsewhere()
         running = self._game_running() or elsewhere
+        number = self._installed_number()
         version = None
         try:
             version = "v" + str(json.loads(self.upf().read_text())["local_version"])
         except Exception:
             pass
+        published = self._read_published() if installed else None
+        newer = published is not None and number is not None and published[0] > number
         logged_in = bool(self._refresh_token)
         if not logged_in and self._remember_enabled():
             logged_in = self._load_credential() is not None
@@ -483,6 +570,9 @@ class CznBackend(
                 "can_repair": installed,
                 "renderer": self._renderer or "",
                 **({"running_elsewhere": True} if elsewhere else {}),
+                # Purely local: check_update() refreshes the cache (#1480).
+                **({"update_available": newer} if installed else {}),
+                **({"latest_version": f"v{published[0]}"} if newer and published else {}),
             },
         )
 
@@ -565,7 +655,9 @@ class CznBackend(
                 f"refusing to rebuild {self.prefix()}: it is shared with profile {other!r}"
             )
         self.ctx.emit(Event("step", "Moving the old Wine prefix aside"))
-        backup = prefixmove.move_aside(self.prefix())
+        # Recorded (and saved) before anything moves: a killed rebuild is put back at the next
+        # start, and its backup is never mistaken for disposable profile data (#1490).
+        backup = prefixmove.begin_rebuild(self.ctx, self.prefix(), [self.game_dir()])
         moved: list[Path] = []
         try:
             # _ensure_prefix only runs wineboot when drive_c is missing, so the
@@ -575,11 +667,9 @@ class CznBackend(
             self.install()
         except BaseException:
             prefixmove.roll_back(backup, self.prefix(), moved)
+            prefixmove.end_rebuild(self.ctx, backup, kept=False)
             raise
-        backups = self.ctx.profile.get("prefix_backups")
-        if not isinstance(backups, list):
-            backups = []
-        self.ctx.set("prefix_backups", [*backups, str(backup.resolve())])
+        prefixmove.end_rebuild(self.ctx, backup, kept=True)
         self.ctx.emit(
             Event(
                 "done",
@@ -656,80 +746,4 @@ class CznBackend(
                 return [str(x) for x in obj.get("differ", [])]
         return None
 
-    def uninstall(self, purge: bool = False) -> None:
-        if self._running():
-            self._fail("uninstall", 8)
-        prefix = self.prefix()
-        left: list[str] = []
-        failed: list[str] = []
-        # A prefix Nadare stamped but whose wineboot never finished has no drive_c: still ours
-        # to remove (#1207 b019). The deletability check below stays the gate.
-        if prefix.is_dir() and (
-            (prefix / "drive_c").is_dir() or (prefix / PREFIX_MARKER).is_file()
-        ):
-            why = self._prefix_not_deletable(prefix)
-            if why:
-                left.append(f"{prefix} ({why})")
-            else:
-                self.ctx.emit(Event("step", f"Removing the game prefix {prefix}…"))
-                try:
-                    outcome = removal._rmtree_safely(prefix)
-                except OSError as exc:
-                    failed.append(f"{prefix}: {exc}")
-                else:
-                    left.extend(
-                        f"{m} is a separate mounted drive, left in place"
-                        for m in outcome.mounts
-                    )
-                    failed.extend(
-                        removal._leftover_warning(p, e) for p, e in outcome.leftovers
-                    )
-        if purge:
-            data = self._data_dir()
-            safe, reason = tree_safety(self.ctx.config.profiles, self.ctx.name, data)
-            if not safe:
-                left.append(f"{data} ({reason})")
-            else:
-                self.ctx.emit(Event("step", "Purging profile data (login, session, stub)…"))
-                try:
-                    outcome = removal._rmtree_safely(data)
-                except OSError as exc:
-                    failed.append(f"{data}: {exc}")
-                else:
-                    left.extend(
-                        f"{m} is a separate mounted drive, left in place"
-                        for m in outcome.mounts
-                    )
-                    failed.extend(
-                        removal._leftover_warning(p, e) for p, e in outcome.leftovers
-                    )
-        for item in left:
-            self.ctx.emit(Event("step", f"Left in place: {item}"))
-        if failed:
-            raise BackendError(
-                "Could not remove these items (permissions or in use?): " + "; ".join(failed)
-            )
-        if left:
-            self.ctx.emit(Event("done", "Finished; left in place: " + "; ".join(left)))
-            return
-        self.ctx.emit(Event("done", "Uninstalled"))
 
-    def _prefix_not_deletable(self, prefix: Path) -> str:
-        """Why ``prefix`` must be left alone ("" when it is clearly Nadare's to delete)."""
-        safe, reason = tree_safety(self.ctx.config.profiles, self.ctx.name, prefix)
-        if not safe:
-            return reason
-        try:
-            own = (paths.profiles_dir() / self.ctx.name).resolve()
-            resolved = prefix.resolve()
-        except OSError:
-            return "cannot be resolved"
-        if resolved == own:
-            # The game's own Nadare folder also holds its login, session and stub: a plain
-            # uninstall must not take them with the prefix (final round).
-            return "is this game's own Nadare folder, which also holds its login"
-        if own in resolved.parents:
-            return ""
-        if (prefix / PREFIX_MARKER).is_file():
-            return ""
-        return "not created by Nadare"

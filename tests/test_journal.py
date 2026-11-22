@@ -172,10 +172,11 @@ def test_begin_refuses_preexisting_journal_dir(tmp_path: Path) -> None:
 
 def test_atomic_json_fsyncs_the_directory(tmp_path: Path, monkeypatch) -> None:
     """M7: the rename itself must be durable, not just the file contents."""
-    from nadare.core import journal
+    from nadare.core import atomicfile, journal
 
     synced: list[Path] = []
-    monkeypatch.setattr(journal, "_sync_dir", lambda p: synced.append(Path(p)))
+    # the shared writer syncs the folder now (#1455 R4-6)
+    monkeypatch.setattr(atomicfile, "sync_folder", lambda p: synced.append(Path(p)))
     path = tmp_path / "journal.json"
     journal._atomic_json(path, {"phase": "applying", "operations": []})
     assert path.is_file()

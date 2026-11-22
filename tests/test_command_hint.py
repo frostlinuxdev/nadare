@@ -104,58 +104,15 @@ def test_umu_runner_error_says_how_to_fix_it(tmp_path, monkeypatch):
     backend = czn_backend.CznBackend(
         make_context(tmp_path, "stove-czn", {"runner": "GE-Proton9-99"})
     )
-    monkeypatch.setattr(czn_backend.umu_mod, "system", lambda *a, **k: None)
+    # No umu at all on a desktop: the shared message every Proton game gives (#1449).
+    monkeypatch.setattr("nadare.core.umu.resolve", lambda *a, **k: None)
     monkeypatch.setattr(czn_backend.sandbox, "in_flatpak", lambda: False)
-    monkeypatch.setattr(czn_backend.hostlibs, "missing_32bit", lambda: [])
 
     with pytest.raises(BackendError) as exc:
         backend._prefix_command(["game.exe"])
 
     text = exc.value.message
-    assert "install umu-launcher" in text
-    assert "Settings" in text
+    assert "umu-launcher" in text
+    assert "Play again" in text
 
 
-def test_missing_wine_error_names_the_runner_settings(tmp_path, monkeypatch):
-    from _backend_helpers import make_context
-
-    from nadare.backends.czn import backend as czn_backend
-
-    backend = czn_backend.CznBackend(make_context(tmp_path, "stove-czn", {}))
-    # The plain-Wine fallback (no Proton runner); a profile word no longer selects it (W9-1).
-    monkeypatch.setattr(backend, "resolve_runner", lambda: ("", "wine"))
-    monkeypatch.delenv("CZN_WINE", raising=False)
-    monkeypatch.setattr(czn_backend.shutil, "which", lambda *a, **k: None)
-
-    with pytest.raises(BackendError) as exc:
-        backend._prefix_command(["game.exe"])
-
-    text = exc.value.message
-    assert "no Proton runner found" in text
-    assert "Settings -> Manage runners" in text
-    assert "CZN_WINE" in text
-
-
-def test_removal_failure_keeps_paths_and_errno_with_plain_wording(tmp_path, monkeypatch):
-    from _backend_helpers import make_context
-
-    from nadare.backends.czn import backend as czn_backend
-
-    prefix = tmp_path / "wine"
-    (prefix / "drive_c").mkdir(parents=True)
-    (prefix / czn_backend.PREFIX_MARKER).write_text("nadare\n")
-    backend = czn_backend.CznBackend(make_context(tmp_path, "stove-czn", {"prefix": str(prefix)}))
-    monkeypatch.setattr(czn_backend.CznBackend, "_game_running", lambda self: False)
-
-    def boom(path, *args, **kwargs):
-        raise PermissionError("locked")
-
-    monkeypatch.setattr(czn_backend.shutil, "rmtree", boom)
-
-    with pytest.raises(BackendError) as exc:
-        backend.uninstall()
-
-    text = exc.value.message
-    assert text.startswith("Could not remove these items (permissions or in use?): ")
-    assert str(prefix) in text
-    assert "locked" in text

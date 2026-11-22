@@ -32,6 +32,7 @@ with the other generic backends, which use the same subprocess machinery.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shlex
 import shutil
@@ -49,16 +50,24 @@ from ..core import (
     monitors,
     paths,
     process,
+    protoncmd,
+    runlock,
     runners,
-    sandbox,
-    umu,
-    userns,
+    shadercache,
     vcredist,
 )
-from ..core.backends import PREFIX_HELP, BackendError, GameBackend, Option, Status
+from ..core import sandbox as sandbox  # noqa: F401 - tests patch sandbox through this module
+from ..core.backends import (
+    PREFIX_HELP,
+    BackendError,
+    GameBackend,
+    Option,
+    Status,
+    wine_prefix,
+)
 from ..core.config import as_bool, profile_value
 from ..core.events import Cancel, Cancelled, Event, mask
-from ..core.sandboxed import SandboxMixin
+from ..core.sandboxed import SANDBOX_EXEMPTION_OPTIONS, SandboxMixin
 
 _SIGNAL_TERM = 15
 
@@ -184,6 +193,27 @@ def stop_runner_wineserver(
     _stop_wineserver(argv, env)
 
 
+def stop_elsewhere(
+    prefix: Path,
+    info: Callable[[str], object],
+    *,
+    timeout: float = 20.0,
+    poll: float = 0.2,
+) -> None:
+    """Ask the Nadare window that started the game in ``prefix`` to stop it, and wait.
+
+    In the Flatpak every window has its own process namespace, so the game's processes are not
+    visible here; the run lock (:mod:`nadare.core.runlock`) carries the request. One helper for
+    every Wine backend (#1455 R4-2)."""
+    info("asking the other Nadare window to stop the game")
+    runlock.request_stop(prefix)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and runlock.running(prefix):
+        time.sleep(poll)
+    if runlock.running(prefix):
+        info(f"the game did not stop within {timeout:g} s")
+
+
 def stream(
     argv: Iterable[str],
     env: dict[str, str],
@@ -191,12 +221,14 @@ def stream(
     cancel: Cancel | None = None,
     stop_wine: bool = True,
     cwd: str | os.PathLike[str] | None = None,
+    before_stop: Callable[[], object] | None = None,
 ) -> int:
     """Run ``argv`` in its own process group, streaming merged output.
 
     Cancellation is checked at least every 0.2 s regardless of output, the
     whole process group is signalled, and the call returns as soon as the
     direct child exits even if a grandchild (wineserver) holds the stdout pipe.
+    ``before_stop`` runs once before that signal (Stop asks the game to close).
     """
     cmd = [str(part) for part in argv]
     emit = None
@@ -209,7 +241,13 @@ def stream(
     _forget_kill(cmd, env)
     try:
         completed = process.run(
-            cmd, env=env, emit=emit, cancel=cancel, errors="replace", cwd=cwd
+            cmd,
+            env=env,
+            emit=emit,
+            cancel=cancel,
+            errors="replace",
+            cwd=cwd,
+            before_stop=before_stop,
         )
     except Cancelled:
         if stop_wine:
@@ -248,6 +286,8 @@ class ProcessQuery:
     #: When set, an :attr:`args` hit only counts if ``argv[0]``'s basename is one of these
     #: (an editor that has the script open must not read as the script running).
     arg_runners: tuple[str, ...] = ()
+    #: Require the executable name as well as prefix ownership (launcher games).
+    require_name: bool = False
     _extra: tuple[str, ...] = field(default=(), repr=False)
 
 
@@ -304,6 +344,13 @@ def _query_matches(query: ProcessQuery, argv: list[str], env: dict[str, str]) ->
     env_prefixes = [
         value for value in (env.get("WINEPREFIX"), env.get("STEAM_COMPAT_DATA_PATH")) if value
     ]
+    if query.require_name:
+        basename = (
+            os.path.basename(argv[0]).replace("\\", "/").rsplit("/", 1)[-1].lower() if argv else ""
+        )
+        return basename in names and (
+            not env_prefixes or any(_is_prefix(value, prefix) for value in env_prefixes)
+        )
     belongs = bool(prefix) and any(_is_prefix(value, prefix) for value in env_prefixes)
     if not belongs and names and not env_prefixes:
         basename = os.path.basename(argv[0]).lower()
@@ -379,6 +426,33 @@ def remember_start(pids: list[int]) -> list[int]:
     while len(_SCAN_START) > _SCAN_START_MAX:
         del _SCAN_START[next(iter(_SCAN_START))]
     return pids
+
+
+class GamePidsMixin:
+    """``GameBackend.game_pids`` from the backend's own Stop rule (#1654)."""
+
+    def game_pids(self) -> Callable[[], list[int]] | None:
+        return game_pids(self)
+
+
+def game_pids(backend) -> Callable[[], list[int]] | None:
+    """The pids Stop would treat as ``backend``'s game, as a callable for the launch monitor.
+
+    ``None`` when the backend has no reliable process rule; never raises.
+    """
+    try:
+        patterns = getattr(backend, "_patterns", None)
+        if callable(patterns):
+            query = patterns()
+        elif callable(getattr(backend, "prefix", None)):
+            query = ProcessQuery(prefix=str(backend.prefix()))
+        else:
+            query = None
+    except Exception:  # noqa: BLE001 - no ownership rule is not a launch failure
+        query = None
+    if query is None:
+        return None
+    return lambda: scan_pids(query)
 
 
 def scan_pids(
@@ -467,11 +541,12 @@ def first_wine() -> Path:
 
 
 # --------------------------------------------------------------------------
-class WineBackend(SandboxMixin, GameBackend):
+class WineBackend(GamePidsMixin, SandboxMixin, GameBackend):
     kind = "wine"
     supports_update = False  # the game or its own launcher updates itself
     supports_secure_mode = True
     sandbox_default_on = False
+    uses_wine_prefix = True
 
     options = (
         Option("install_dir", "Game folder", "path_dir", "Where the game lives."),
@@ -539,6 +614,7 @@ class WineBackend(SandboxMixin, GameBackend):
             "this backend never creates a prefix.",
             default=False,
         ),
+        *SANDBOX_EXEMPTION_OPTIONS,
     )
 
     # ---- profile resolution -----------------------------------------------
@@ -548,11 +624,8 @@ class WineBackend(SandboxMixin, GameBackend):
         return configured if configured is not None else self.ctx.data_dir()
 
     def _prefix(self) -> Path:
-        configured = path_option(
-            profile_setting(self.ctx.profile, "prefix")
-            or profile_setting(self.ctx.profile, "wineprefix")
-        )
-        return configured if configured is not None else self.ctx.data_dir() / "prefix"
+        # A pure path (#1465): status() asks for it. _prefix_command makes the profile folder.
+        return wine_prefix(self.ctx.profile, self.ctx.data_path())
 
     def _target(self) -> Path:
         raw = (
@@ -602,6 +675,21 @@ class WineBackend(SandboxMixin, GameBackend):
         if self._wine_binary() is not None:
             return None
         return runners.DEFAULT_FAMILY
+
+    def _runner_facts(self, runner: str | None) -> dict:
+        """The runner this launch uses, for the game page's failure box (#1732)."""
+        wine = str(profile_setting(self.ctx.profile, "wine_binary") or "").strip() or None
+        if not runner:
+            return runners.launch_facts(None, wine=wine)
+        try:
+            path = (
+                runners.installed_pinned(runner)
+                if runner in runners.RUNNERS
+                else runners.resolve_runner(runner)
+            )
+        except runners.RunnerError:
+            path = None
+        return runners.launch_facts(path, wine=wine) if path else {}
 
     def _runner_path(self, runner: str) -> Path:
         """Resolve a runner tag/path the same way the Arknights backend does."""
@@ -671,7 +759,12 @@ class WineBackend(SandboxMixin, GameBackend):
         bus) cannot run, so Proton runs directly like the catalog games (VMs, 2026-11-14).
         """
         prefix = self._prefix()
-        env = process.build_env(None, extra={"WINEPREFIX": str(prefix)})
+        if prefix == self.ctx.data_path() / "prefix":
+            self.ctx.data_dir()  # Wine/Proton create the prefix itself, not its parent
+        env = process.build_env(
+            {"pass_env": profile_setting(self.ctx.profile, "pass_env")},
+            extra={"WINEPREFIX": str(prefix)},
+        )
         runner = self._runner()
         if runner:
             runner_path = self._runner_for_build(runner)
@@ -680,37 +773,19 @@ class WineBackend(SandboxMixin, GameBackend):
             # Native Wayland keeps Wine in charge of its own child windows so
             # launcher dialogs/updaters behave (see the stella launcher notes).
             env.setdefault("PROTON_ENABLE_WAYLAND", "1")
-            configured = str(profile_setting(self.ctx.profile, "umu_binary", "umu-run"))
-            # An installed managed copy counts as it does in status(), complete host libraries
-            # or not; only a download waits for missing ones (#973).
-            # Every Proton launch goes through umu (user, #1338): a system umu-run, else Nadare's
-            # own (installed from the AppImage's bundled archive, else downloaded once). The one
-            # exception is the Flatpak's Sandbox (see the docstring).
-            umu_run = (
-                None
-                if sandboxed and sandbox.in_flatpak()
-                else umu.resolve(
-                    configured,
-                    allow_download=True,
-                    emit=self.ctx.emit,
-                    cancel=self.ctx.cancel,
-                )
+            # The one umu decision every Proton game shares (#1338, #1441, #1449): an
+            # installed managed copy counts as it does in status(), complete host libraries or
+            # not; only a download waits for missing ones (#973).
+            argv = protoncmd.proton_argv(
+                args,
+                proton=runner_path,
+                prefix=prefix,
+                env=env,
+                configured=str(profile_setting(self.ctx.profile, "umu_binary", "umu-run")),
+                sandboxed=sandboxed,
+                emit=self.ctx.emit,
+                cancel=self.ctx.cancel,
             )
-            if umu_run:
-                if not sandbox.in_flatpak() and userns.blocks_runtime():
-                    raise BackendError(
-                        userns.with_hint(userns.BLOCKED_BEFORE_LAUNCH, blocked=True)
-                    )
-                umu.note_first_runtime(self.ctx.emit)
-                argv = [umu_run, *args]
-            elif sandbox.in_flatpak():
-                argv, env_updates = sandbox.proton_direct(runner_path, prefix, args)
-                env.update(env_updates)
-            else:
-                message = umu.unavailable_message()
-                if userns.blocks_runtime():
-                    message = userns.with_hint(message, blocked=True)
-                raise BackendError(message)
         else:
             resolved_wine = self._wine_binary()
             argv = [
@@ -725,13 +800,27 @@ class WineBackend(SandboxMixin, GameBackend):
         kind = "proton" if runner else "wine"
         env.update(graphics.renderer_env(self.ctx.profile, kind=kind, environ=env))
         monitors.apply_env(env, self.ctx)
+        shadercache.prepare(
+            self.ctx.name,
+            env,
+            self.info,
+            runner=runner_path if runner else None,
+        )
         extra_env = profile_setting(self.ctx.profile, "extra_env")
         process.apply_extra_env(
             env,
             extra_env if isinstance(extra_env, dict) else None,
             reserved=process.LAUNCH_RESERVED_ENV,
         )
-        return argv, process.sanitize_game_env(env)
+        # After the profile's Environment, so a value the user set is kept (#1448).
+        protoncmd.play_speedups(env, prefix, proton=kind == "proton", info=self.info)
+        shadercache.log_caches(
+            self.ctx.name, prefix, env, lambda line: self.info(line),
+            sandboxed=sandboxed,
+        )
+        return argv, process.sanitize_game_env(
+            env, preserve=process.launchenv.explicit_names(self.ctx.profile)
+        )
 
     def build(self) -> tuple[list[str], dict[str, str], Path, Path]:
         """Return ``(argv, env, prefix, target)`` for the profile's launch."""
@@ -836,7 +925,29 @@ class WineBackend(SandboxMixin, GameBackend):
     def update(self) -> None:
         raise BackendError("the wine backend does not update games")
 
+    def _running_elsewhere(self) -> bool:
+        """Another Flatpak window launched this prefix's game (#1455 R4-3)."""
+        return sandbox.in_flatpak() and runlock.running(self._prefix())
+
+    def _run_lock(self) -> contextlib.AbstractContextManager[None]:
+        """Inside the Flatpak, let other Nadare windows see this launch and ask it to stop."""
+        if not sandbox.in_flatpak():
+            return contextlib.nullcontext()
+        return runlock.guard(self._prefix(), self._stop_from_elsewhere)
+
+    def _stop_from_elsewhere(self) -> None:
+        """Another window asked to stop this game: end its processes, then the wait."""
+        pids = scan_pids(self._patterns())
+        if pids:
+            self.info(f"stopping {len(pids)} process(es) for another Nadare window: {pids}")
+            stop_pids(pids)
+        self.ctx.cancel.cancel()
+
     def launch(self) -> int:
+        with self._run_lock():
+            return self._launch()
+
+    def _launch(self) -> int:
         self.ctx.cancel.raise_if_cancelled()
         self._run_vcredist()
         try:
@@ -844,6 +955,7 @@ class WineBackend(SandboxMixin, GameBackend):
             runner = self._runner()
             tag = "Proton" if runner else "Wine"
             self.ctx.emit(Event("step", f"{tag}: launching {target.name}"))
+            self.info(f"runner: {tag}", **self._runner_facts(runner))
             self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
             _renderer, note = graphics.effective_renderer(self.ctx.profile)
             if note:
@@ -868,6 +980,9 @@ class WineBackend(SandboxMixin, GameBackend):
         if pids:
             self.info(f"stopping {len(pids)} process(es): {pids}")
             stop_pids(pids)
+        elif self._running_elsewhere():
+            stop_elsewhere(self._prefix(), self.info)
+            return
         proton: str | None = None
         runner = self._runner()
         if runner:

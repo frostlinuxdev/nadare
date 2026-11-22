@@ -46,7 +46,7 @@ def _run(tmp_path, monkeypatch, result, operation="launch") -> str:
 
 
 def _end_line(text: str) -> str:
-    ends = [line for line in text.splitlines() if line.startswith("[end] ")]
+    ends = [line for line in text.splitlines() if "s [end] " in line]
     assert len(ends) == 1, text
     return ends[0]
 

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
-from . import download, hosting, paths, sandbox, tls
+from . import atomicfile, download, hosting, paths, sandbox, tls
 
 logger = logging.getLogger(__name__)
 
@@ -260,10 +260,7 @@ def _read_cache(url: str) -> dict[str, Any] | None:
 def _write_cache(entry: dict[str, Any]) -> None:
     path = paths.cache_dir() / CACHE_NAME
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        part = path.with_name(f"{path.name}.{os.getpid()}.part")
-        part.write_text(json.dumps(entry), encoding="utf-8")
-        os.replace(part, path)
+        atomicfile.write(path, json.dumps(entry), make_parent=True)
     except OSError:
         logger.debug("could not write the update-check cache", exc_info=True)
 

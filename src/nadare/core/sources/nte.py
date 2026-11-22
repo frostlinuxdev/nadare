@@ -24,7 +24,9 @@ from urllib.parse import urlparse
 from .. import directdl
 from . import Fetch, _aes, default_fetch
 
-ENTRY_CONFIG_URL = "https://ntecdn1.perfectworld.com/clientRes/publish_PC/Version/Windows/config.xml"
+ENTRY_CONFIG_URL = (
+    "https://ntecdn1.perfectworld.com/clientRes/publish_PC/Version/Windows/config.xml"
+)
 MAGIC = b"PatcherXML0\x00"
 EXE = "Client/WindowsNoEditor/HT/Binaries/Win64/HTGame.exe"
 
@@ -234,11 +236,50 @@ def _manifest_zip(data: bytes, what: str) -> bytes:
     return body
 
 
+MAX_BRANCH_HOPS = 4
+
+
+def _text(root: ET.Element, tag: str) -> str:
+    node = root.find(tag)
+    return (node.text or "").strip() if node is not None else ""
+
+
+def _next_branch(branch_xml: ET.Element, branch: str) -> tuple[str, str, str] | None:
+    """The branch this branch config hands the client on to, if any.
+
+    A live branch's own ResConfig names the branch that replaced it (PC_140 -> PC_150
+    once 1.5 went live). While that branch is still a running pre-release
+    (``PreReleaseStatus`` other than ``end``) the current branch stays the live one.
+    """
+    if branch_xml.find("ResConfig") is None:
+        return None
+    nxt = _entry_config(ET.tostring(branch_xml))
+    if nxt[2] == branch:
+        return None
+    if (
+        _text(branch_xml, "PreReleaseBranch") == nxt[2]
+        and _text(branch_xml, "PreReleaseStatus") != "end"
+    ):
+        return None
+    return nxt
+
+
 def resolve(fetch: Fetch | None = None) -> directdl.Plan:
     fetch = fetch or default_fetch
-    res_url, app_id, _branch = _entry_config(fetch(ENTRY_CONFIG_URL, None))
+    res_url, app_id, branch = _entry_config(fetch(ENTRY_CONFIG_URL, None))
 
-    branch_xml = _xml(fetch(f"{res_url}/Version/Windows/config.xml", None), "branch config")
+    seen = {branch}
+    while True:
+        branch_xml = _xml(fetch(f"{res_url}/Version/Windows/config.xml", None), "branch config")
+        nxt = _next_branch(branch_xml, branch)
+        if nxt is None:
+            break
+        res_url, app_id, branch = nxt
+        if branch in seen:
+            raise directdl.DirectError(f"branch configs loop back to {branch}")
+        seen.add(branch)
+        if len(seen) > MAX_BRANCH_HOPS + 1:
+            raise directdl.DirectError("branch configs hand on too many times")
     node = branch_xml.find("ResVersion")
     version = (node.text or "").strip() if node is not None else ""
     if not _VERSION.fullmatch(version):

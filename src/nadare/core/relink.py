@@ -8,13 +8,15 @@ after checking the new place really looks like the prefix.
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from . import flatpakfs, paths, prefixguard
-from .libraries import default_root, game_folder_name
+from . import flatpakfs, location, paths, prefixguard
+from .libraries import MANIFEST_NAME, MANIFEST_TMP_NAME, default_root, game_folder_name
+from .shadercache import VERSIONS_FILE
 
 
 class RelinkError(ValueError):
@@ -82,6 +84,37 @@ def _same(a: Path, b: Path) -> bool:
         return a.absolute() == b.absolute()
 
 
+def _canonical(path: Path) -> Path:
+    """``path`` with its parents resolved but not itself, so a link keeps its own name."""
+    return path.parent.resolve() / path.name
+
+
+def _link_inside_own_folders(literal: Path, profile: Mapping[str, Any]) -> bool:
+    """True when a link sits in the prefix's path at or below a folder that is Nadare's own.
+
+    Nadare's own: anything below ``profiles/`` and any folder recorded in ``owned_dirs``. A path
+    that cannot be checked counts as linked, so the move is refused rather than guessed.
+    """
+    try:
+        roots = [paths.profiles_dir().resolve()]
+        dirs = profile.get("owned_dirs")
+        for entry in dirs if isinstance(dirs, list) else ():
+            if isinstance(entry, str) and entry:
+                roots.append(_canonical(Path(os.path.abspath(os.path.expanduser(entry)))))
+        for part in (literal, *literal.parents):
+            if not part.is_symlink():
+                continue
+            if part == literal:
+                return True
+            spot = _canonical(part)
+            for root in roots:
+                if spot != roots[0] and (spot == root or root in spot.parents):
+                    return True
+    except (OSError, RuntimeError):
+        return True
+    return False
+
+
 def check_movable(
     profile: dict[str, Any],
     *,
@@ -95,9 +128,19 @@ def check_movable(
 
     Called before anything is moved, so a move never ends in a profile Nadare cannot update.
     """
-    text = str(profile.get("prefix") or "")
+    text = str(location._setting(profile, "prefix") or "")
     if not text:
         raise RelinkError("This game has no prefix set, so there is nothing to move.")
+    literal = Path(os.path.abspath(os.path.expanduser(text)))
+    if _link_inside_own_folders(literal, profile):
+        # A link inside Nadare's own folders (profiles/<name> linked to Documents, say) would move
+        # the folder it points to, out of the player's own place (storage simulator, 2026-11-14).
+        # A link above them (~/Games on another disk, /home -> /var/home) is fine: renaming
+        # through it still moves the real game folder (review of #1389).
+        raise RelinkError(
+            f"{literal} is reached through a link. Nadare only moves real folders: move the "
+            'folder it points to yourself, then use "I moved it myself".'
+        )
     old = Path(text).expanduser()
     if old.is_symlink():
         raise RelinkError(
@@ -116,7 +159,7 @@ def check_movable(
                 f"{who} also uses this prefix, and only one game can be relinked after a move. "
                 f"Move or remove {who} first."
             )
-    install = str(profile.get("install_dir") or "")
+    install = str(location._setting(profile, "install_dir") or "")
     if install:
         inside = _under(Path(install).expanduser(), old)
         if inside is not None and not (old / inside).is_dir():
@@ -138,33 +181,29 @@ def _tree_values(profile: Mapping[str, Any]) -> list[str]:
 
 
 def _claimed(profiles: Mapping[str, Any], folder: Path) -> bool:
-    """True when a profile already records ``folder`` or something inside it (as Add Game)."""
-    for profile in profiles.values():
-        if isinstance(profile, dict) and any(
-            is_inside(_absolute(value), folder) for value in _tree_values(profile)
-        ):
-            return True
-    return False
+    """True when a game already uses ``folder`` or something inside it (#1372 step 2)."""
+    return (
+        location.overlapping(
+            profiles, folder, excluding=None, direction="contains", ignore_broad=False
+        )
+        is not None
+    )
 
 
 def _other_inside(profiles: Mapping[str, Any], name: str | None, root: Path) -> str | None:
-    """The name of another profile that keeps something inside ``root``, if any."""
-    for key, other in profiles.items():
-        if key == name or not isinstance(other, dict):
-            continue
-        if any(is_inside(_absolute(value), root) for value in _tree_values(other)):
-            return str(other.get("title") or key)
-    return None
+    """The title of another game that keeps something inside ``root``, if any."""
+    claim = location.overlapping(
+        profiles, root, excluding=name, direction="contains", ignore_broad=False
+    )
+    return claim.title if claim is not None else None
 
 
 def _inside_other(profiles: Mapping[str, Any], name: str | None, path: Path) -> str | None:
-    """The name of another profile whose folders ``path`` lies inside, if any."""
-    for key, other in profiles.items():
-        if key == name or not isinstance(other, dict):
-            continue
-        if any(is_inside(path, _absolute(value)) for value in _tree_values(other)):
-            return str(other.get("title") or key)
-    return None
+    """The title of another game whose folders ``path`` lies inside, if any."""
+    claim = location.overlapping(
+        profiles, path, excluding=name, direction="inside", ignore_broad=False
+    )
+    return claim.title if claim is not None else None
 
 
 def _is_profile_dir(home: Path) -> bool:
@@ -174,6 +213,18 @@ def _is_profile_dir(home: Path) -> bool:
     except OSError:
         return False
 
+
+#: Nadare's own records about a move in progress or still to finish: they name the old place
+#: on purpose and are not settings the game reads.
+_BOOKKEEPING_KEYS = frozenset(
+    {
+        "move_in_progress",
+        "move_originals_pending",
+        "removal_pending",
+        "moved_by_nadare",
+        "location",
+    }
+)
 
 #: Profile keys ``plan_home_move`` re-roots when the folder moves.
 _REROOTED_KEYS = frozenset(
@@ -202,12 +253,16 @@ def _profile_dir_moves_whole(profile: Mapping[str, Any], home: Path, *, exists: 
     """
     if exists:
         try:
-            if any(entry.name not in {"prefix", "install"} for entry in home.iterdir()):
+            # Nadare's own manifest (b22 folder rule) holds only paths relative to the folder.
+            # The runner versions of the last Play (#1364) are Nadare's too: every game that
+            # was played has them, and losing them only means the next Play records them again.
+            allowed = {"prefix", "install", MANIFEST_NAME, MANIFEST_TMP_NAME, VERSIONS_FILE}
+            if any(entry.name not in allowed for entry in home.iterdir()):
                 return False
         except OSError:
             return False
     for key, value in profile.items():
-        if key in _REROOTED_KEYS:
+        if key in _REROOTED_KEYS or key in _BOOKKEEPING_KEYS:
             continue
         for text in _strings(value):
             if text.startswith(("/", "~")) and _under(_absolute(text), home) is not None:
@@ -243,10 +298,10 @@ def managed_home(profile: dict[str, Any], *, exists: bool = True) -> Path | None
     """
     dirs = profile.get("owned_dirs")
     owned = profile.get("owned_trees")
-    prefix = str(profile.get("prefix") or "")
+    prefix = str(location._setting(profile, "prefix") or "")
     if not isinstance(owned, list) or "prefix" not in owned or not prefix:
         return None
-    install = str(profile.get("install_dir") or "")
+    install = str(location._setting(profile, "install_dir") or "")
     if not isinstance(dirs, list) or not dirs:
         dirs = _legacy_dirs(owned, prefix, install)
     for entry in dirs:
@@ -267,8 +322,25 @@ def managed_home(profile: dict[str, Any], *, exists: bool = True) -> Path | None
             and (not install or waits or Path(install).expanduser().is_dir())
         ):
             continue  # a half-missing layout cannot move as one unit: re-rooting would fail
+        if not _is_game_folder(profile, home):
+            continue  # only the folder location calls the game's own moves whole (#1372 step 4)
         return home
     return None
+
+
+def _is_game_folder(profile: Mapping[str, Any], home: Path) -> bool:
+    """Whether ``home`` is the folder :func:`location.game_folder` names for this profile.
+
+    The game's own folder has one answer (``location``); a whole-folder Move never takes a
+    folder that answer does not name (phase 1 step 4 of #1372). ``location`` models catalog
+    games only: a custom Wine game Add Game laid out keeps the ownership checks above alone,
+    as Uninstall does for it.
+    """
+    if not location.catalog_kind(profile.get("backend")):
+        return True
+    name = home.name if _is_profile_dir(home) else ""
+    folder = location.game_folder(profile, name)
+    return folder is not None and _same(folder, home)
 
 
 def home_name(profile: Mapping[str, Any], home: Path) -> str:
@@ -316,13 +388,49 @@ def free_folder(root: str | Path, name: str, profiles: Mapping[str, Any]) -> Pat
     candidate = base / name
     index = 2
     while (
-        candidate.exists()
+        (candidate.exists() and not _stale_folder(candidate, profiles))
         or candidate.is_symlink()
+        or os.path.lexists(candidate.with_name(candidate.name + ".nadare-partial"))
         or _claimed(profiles, candidate)
     ):
         candidate = base / f"{name} {index}"
         index += 1
     return candidate
+
+
+def _stale_folder(folder: Path, profiles: Mapping[str, Any]) -> bool:
+    """A game folder holding nothing but Nadare's own manifest (#1362): free to use again.
+
+    A game added but never installed (or uninstalled by an older Nadare) left
+    ``<library>/Nadare/<Game>/nadare-game.json`` alone; a reinstall then went to
+    "<Game> 2". Only an unclaimed real folder whose every entry is the manifest or its temp
+    file counts. Checking changes nothing; :func:`clear_stale_folder` clears it once the
+    player confirmed (storage review A9).
+    """
+    ours = {MANIFEST_NAME, MANIFEST_TMP_NAME}
+    try:
+        if folder.is_symlink() or not folder.is_dir() or _claimed(profiles, folder):
+            return False
+        entries = list(folder.iterdir())
+        return bool(entries) and all(
+            e.name in ours and e.is_file() and not e.is_symlink() for e in entries
+        )
+    except OSError:
+        return False
+
+
+def clear_stale_folder(folder: Path, profiles: Mapping[str, Any]) -> bool:
+    """Remove a :func:`_stale_folder` so a move can create it; ``True`` when it went."""
+    folder = Path(folder)
+    if not _stale_folder(folder, profiles):
+        return False
+    try:
+        for entry in list(folder.iterdir()):
+            entry.unlink()
+        folder.rmdir()
+    except OSError:
+        return False
+    return True
 
 
 def free_home(library: str | Path, name: str, profiles: Mapping[str, Any]) -> Path:
@@ -409,7 +517,7 @@ def plan_home_move(
     changes: dict[str, Any] = {}
     notes: list[str] = []
     for key in ("prefix", "install_dir", "installed_prefix"):
-        value = str(profile.get(key) or "")
+        value = str(location._setting(profile, key) or "")
         if not value:
             continue
         inside = _under(Path(value).expanduser(), home)
@@ -462,6 +570,42 @@ def _follow_backup(entry: Any, old_dir: Path, new_dir: Path) -> Any:
     return str(moved) if moved.is_dir() else entry
 
 
+#: ``{key: {"path": resolved path, "id": [st_dev, st_ino]}}`` for folders Nadare itself moved
+#: outside the game's folder (a prefix-only Move). Removal accepts such a folder only while path
+#: and identity both still match (#1366 A3).
+MOVED_BY_NADARE = "moved_by_nadare"
+
+
+def _folder_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino) if stat.S_ISDIR(info.st_mode) else None
+
+
+def moved_by_nadare(profile: Mapping[str, Any], path: Path) -> bool:
+    """Whether ``path`` is a folder Nadare itself moved there for this profile (path + inode)."""
+    proof = profile.get(MOVED_BY_NADARE)
+    if not isinstance(proof, dict):
+        return False
+    try:
+        resolved = str(path.resolve())
+    except (OSError, RuntimeError):
+        return False
+    identity = _folder_identity(path)
+    if identity is None or path.is_symlink():
+        return False
+    for entry in proof.values():
+        if (
+            isinstance(entry, dict)
+            and entry.get("path") == resolved
+            and entry.get("id") == list(identity)
+        ):
+            return True
+    return False
+
+
 def plan_relink(
     profile: dict[str, Any],
     new_prefix: str | Path,
@@ -500,7 +644,7 @@ def plan_relink(
         moved_keys.append("prefix")
 
     sibling: str | None = None
-    install = str(profile.get("install_dir") or "")
+    install = str(location._setting(profile, "install_dir") or "")
     if install and old is not None:
         install_path = Path(install).expanduser()
         inside = _under(install_path, old)
@@ -551,14 +695,26 @@ def plan_relink(
 
     if moved_keys:
         paths = dict(recorded) if isinstance(recorded, dict) else {}
+        proof = profile.get(MOVED_BY_NADARE)
+        proof = dict(proof) if isinstance(proof, dict) else {}
         if made_by_nadare:
             for key in moved_keys:
                 paths[key] = str(Path(changes[key]).resolve())
+                # The folder's identity too: a hand-edited owned_paths cannot fake it, so
+                # Uninstall can tell Nadare's own Move from an edit (#1366 A3, #1229).
+                identity = _folder_identity(Path(changes[key]))
+                if identity is None:
+                    proof.pop(key, None)
+                else:
+                    proof[key] = {"path": paths[key], "id": list(identity)}
         else:
             for key in moved_keys:
                 paths.pop(key, None)
+                proof.pop(key, None)
             changes["owned_trees"] = [key for key in owned if key not in moved_keys]
         changes["owned_paths"] = paths
+        if proof or MOVED_BY_NADARE in profile:
+            changes[MOVED_BY_NADARE] = proof
     if not made_by_nadare and isinstance(owned, list) and "prefix" in owned:
         notes.append(
             "Because you moved it yourself, Nadare will not delete this folder when you "

@@ -28,6 +28,8 @@ from urllib.parse import urlparse
 log = logging.getLogger(__name__)
 
 SCHEMA = 1
+#: Portrait library covers and landscape key art have independent candidates and caches.
+ART_KINDS = ("cover", "wide")
 MAX_CANDIDATES = 4
 MAX_DIMENSION = 20_000
 #: How long a loaded document is used, and how long a failed load is not retried.
@@ -53,8 +55,10 @@ ALLOWED_HOSTS: dict[str, tuple[str, ...]] = {
     "direct-gfl2": STEAM_HOSTS,
     "direct-gfl2-haoplay": STEAM_HOSTS,
     "direct-endfield": STEAM_HOSTS,
+    "direct-dna": STEAM_HOSTS,
+    "direct-snowbreak": STEAM_HOSTS,
     "stellasora-yostar": STEAM_HOSTS,
-    "direct-nte": ("nte.perfectworld.com",),
+    "direct-nte": (*STEAM_HOSTS, "nte.perfectworld.com"),
     "launcher-nikke": ("nikke-en.com",),
     "direct-aethergazer": ("www.aethergazer.com",),
     "direct-bd2": ("www.browndust2.com",),
@@ -121,12 +125,13 @@ def valid_document(doc: Any) -> bool:
     for entry in games.values():
         if not isinstance(entry, dict):
             return False
-        if "cover" in entry and not isinstance(entry["cover"], list):
-            return False
+        for art in ART_KINDS:
+            if art in entry and not isinstance(entry[art], list):
+                return False
     return True
 
 
-def parse(doc: Any) -> dict[str, list[ArtCandidate]]:
+def _parse_art(doc: Any, art: str) -> dict[str, list[ArtCandidate]]:
     """The accepted candidates per game (``{}`` for a document of the wrong shape)."""
     if not valid_document(doc):
         return {}
@@ -136,13 +141,23 @@ def parse(doc: Any) -> dict[str, list[ArtCandidate]]:
     out: dict[str, list[ArtCandidate]] = {}
     for kind, hosts in ALLOWED_HOSTS.items():
         entry = games.get(kind)
-        covers = entry.get("cover") if isinstance(entry, dict) else None
+        covers = entry.get(art) if isinstance(entry, dict) else None
         if not isinstance(covers, list):
             continue
         accepted = [c for raw in covers if (c := parse_candidate(raw, hosts)) is not None]
         if accepted:
             out[kind] = accepted[:MAX_CANDIDATES]
     return out
+
+
+def parse(doc: Any) -> dict[str, list[ArtCandidate]]:
+    """Accepted portrait cover candidates per game."""
+    return _parse_art(doc, "cover")
+
+
+def parse_wide(doc: Any) -> dict[str, list[ArtCandidate]]:
+    """Accepted landscape key art candidates per game."""
+    return _parse_art(doc, "wide")
 
 
 # ---- loading ----------------------------------------------------------------------------------
@@ -154,6 +169,7 @@ def _default_loader() -> Any:
 
 _loader: Callable[[], Any] = _default_loader
 _parsed: dict[str, list[ArtCandidate]] | None = None
+_parsed_wide: dict[str, list[ArtCandidate]] | None = None
 _valid_until = 0.0
 _state_lock = threading.Lock()
 _load_lock = threading.Lock()
@@ -171,9 +187,9 @@ def set_loader(loader: Callable[[], Any] | None) -> None:
 
 def _invalidate() -> None:
     """Forget the loaded document; a load that is still running will not store its answer."""
-    global _parsed, _valid_until, _generation
+    global _parsed, _parsed_wide, _valid_until, _generation
     with _state_lock:
-        _parsed, _valid_until = None, 0.0
+        _parsed, _parsed_wide, _valid_until = None, None, 0.0
         _generation += 1
 
 
@@ -186,15 +202,16 @@ def reset() -> None:
     _loader = _default_loader
 
 
-def _fresh() -> dict[str, list[ArtCandidate]] | None:
+def _fresh(art: str = "cover") -> dict[str, list[ArtCandidate]] | None:
     with _state_lock:
-        if _parsed is not None and time.monotonic() < _valid_until:
-            return _parsed
+        parsed = _parsed if art == "cover" else _parsed_wide
+        if parsed is not None and time.monotonic() < _valid_until:
+            return parsed
     return None
 
 
 def _load_now() -> dict[str, list[ArtCandidate]]:
-    global _parsed, _valid_until
+    global _parsed, _parsed_wide, _valid_until
     # Taken before waiting for the lock: a load that waits across a reset belongs to the state
     # that was reset and must not store its answer into the new one.
     with _state_lock:
@@ -204,26 +221,34 @@ def _load_now() -> dict[str, list[ArtCandidate]]:
         if again is not None:  # another thread loaded it while this one waited
             return again
         try:
-            parsed, ttl = parse(_loader()), TTL
+            doc, ttl = _loader(), TTL
+            parsed, wide = parse(doc), parse_wide(doc)
         except Exception as exc:  # noqa: BLE001 - offline or broken index: the old sources stay
             log.debug("art index unavailable: %s", exc)
             # The copy on disk still answers during the outage; only the retry wait is reset.
-            parsed, ttl = _saved_copy(), RETRY_AFTER_FAILURE
+            doc, ttl = _read_saved_doc(), RETRY_AFTER_FAILURE
+            parsed, wide = parse(doc), parse_wide(doc)
         with _state_lock:
             if generation == _generation:
-                _parsed, _valid_until = parsed, time.monotonic() + ttl
+                _parsed, _parsed_wide = parsed, wide
+                _valid_until = time.monotonic() + ttl
         return parsed
 
 
-def _saved_copy() -> dict[str, list[ArtCandidate]]:
+def _read_saved_doc() -> Any:
     """What the index said the last time it was reachable (disk only, never the network)."""
     from . import indexfetch
 
     try:
-        return parse(indexfetch.read_cached("catalog/art.json", validate=valid_document))
+        return indexfetch.read_cached("catalog/art.json", validate=valid_document)
     except Exception as exc:  # noqa: BLE001 - an unreadable copy is just no copy
         log.debug("art index: saved copy unreadable: %s", exc)
-        return {}
+        return None
+
+
+def _saved_copy(art: str = "cover") -> dict[str, list[ArtCandidate]]:
+    """Accepted art from the saved index, without a network request."""
+    return _parse_art(_read_saved_doc(), art)
 
 
 def _start_background() -> None:
@@ -242,22 +267,27 @@ def wait_for_load(timeout: float = 5.0) -> None:
         thread.join(timeout)
 
 
-def lookup(kind: str, *, wait: bool = False) -> list[tuple[str, tuple[str, ...]]]:
-    """The index art for ``kind`` as ``(url, allowed hosts)``, best first.
+def lookup(
+    kind: str, *, art: str = "cover", wait: bool = False
+) -> list[tuple[str, tuple[str, ...]]]:
+    """The index ``art`` for ``kind`` as ``(url, allowed hosts)``, best first.
 
     With ``wait=False`` this never waits for the network: while the document is not loaded it
     answers from the copy saved on disk (if any) and starts a background refresh, so a cover that
     is already on disk is never held up by a slow or absent network. Use ``wait=True`` when
     there is nothing to show yet, or when the user asked for the art explicitly.
     """
-    parsed = _fresh()
+    if art not in ART_KINDS:
+        return []
+    parsed = _fresh(art)
     if parsed is None:
         if wait:
-            parsed = _load_now()
+            _load_now()
+            parsed = _fresh(art) or {}
         else:
             # Answer at once from the copy saved on disk, and refresh it in the background: a
             # new process does not need the network to know the list it saw last time.
-            parsed = _saved_copy()
+            parsed = _saved_copy(art)
             _start_background()
     hosts = ALLOWED_HOSTS.get(kind, ())
     return [(candidate.url, hosts) for candidate in parsed.get(kind, ())]
@@ -265,9 +295,11 @@ def lookup(kind: str, *, wait: bool = False) -> list[tuple[str, tuple[str, ...]]
 
 __all__ = [
     "ALLOWED_HOSTS",
+    "ART_KINDS",
     "ArtCandidate",
     "lookup",
     "parse",
+    "parse_wide",
     "reset",
     "set_loader",
     "valid_document",

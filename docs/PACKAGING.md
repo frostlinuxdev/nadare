@@ -10,8 +10,8 @@ One version string, everywhere: `0.1.0bN` from `pyproject.toml` (mirrored in
 | Channel | Artifact | Built by | Updates owned by |
 | --- | --- | --- | --- |
 | AppImage | `Nadare-<version>-x86_64.AppImage` (signed) + `.zsync` + `SHA256SUMS` + detached `.asc` signatures | `scripts/build_appimage.sh`, signed with `scripts/sign_appimage.py`, uploaded to the GitHub release | Nadare's in-app update check; AppImageUpdate-based tools read the embedded update information |
-| Flatpak | local `.flatpak` bundle (not published) | `scripts/build_flatpak.sh` + `packaging/flatpak/` | manual reinstall; Flatpak owns the sandbox update |
-| AUR `nadare-bin` | the release AppImage, unpacked into `/opt/nadare` | `packaging/aur/nadare-bin/PKGBUILD` | pacman |
+| Flatpak | signed Flatpak repository + `.flatpakref` + single-file `.flatpak` bundle | `packaging/flatpak/stage_repo.py` (stages the AppImage's files), `build_repo.sh` (export, sign, bundle), `upload.sh` | Flatpak (`flatpak update`); runtimes come from Flathub |
+| AUR `nadare-bin` (draft, not published yet) | the release AppImage, unpacked into `/opt/nadare` | `packaging/aur/nadare-bin/PKGBUILD` | pacman |
 | `.deb` | `dist/nadare_<version>_<arch>.deb` (built, not published) | `scripts/build_deb.sh` | dpkg/apt |
 | Source | this checkout | `docs/SOURCE-INSTALL.md` | the user's own `git pull` |
 
@@ -74,16 +74,56 @@ will offer a manual AppImage download that the package manager would overwrite.
 - The `.deb` derives its `libc6 (>= ...)` floor from `readelf -V` on the bundle
   instead of assuming the build host's glibc.
 
+## SBOM and build provenance
+
+Each release asset can carry two JSON files that describe it, both written by local
+scripts from what the build already knows (no network):
+
+```sh
+python packaging/sbom.py dist/Nadare-<version>-x86_64.AppImage \
+    --out dist/Nadare-<version>-x86_64.AppImage.cdx.json
+python packaging/provenance.py dist/Nadare-<version>-x86_64.AppImage \
+    --commit "$(git rev-parse HEAD)" --command "scripts/build_appimage.sh" \
+    --out dist/Nadare-<version>-x86_64.AppImage.intoto.json
+```
+
+`packaging/sbom.py` writes a CycloneDX 1.6 SBOM: the asset and its SHA-256, Nadare's
+version and licence, the pinned Python requirements with their hashes, and the bundled
+native libraries that `scripts/collect_licences.py` finds. `packaging/provenance.py`
+writes an unsigned in-toto v1 statement with the SLSA provenance v1 predicate: the asset
+digest, the source commit, the builder `nadare-release-scripts` and the build command line.
+Both outputs are deterministic; set `SOURCE_DATE_EPOCH` to pin their timestamps. Signing,
+attaching the files to the release and naming them in `SHA256SUMS` is the release
+scripts' job.
+
+Pass the actual build command with `--command`; omitting it records an empty command.
+Use `--requirements` for the hashed requirements used by that build and `--internal`
+for its bundle directory (for example, `build/flatpak-root/files/lib/nadare/_internal`
+for a staged Flatpak). The default bundle directory is `AppDir/usr/bin/_internal`
+relative to the working directory; if it is absent, no native libraries are listed.
+Requirement hashes describe the locked distribution archives, including conditional
+requirements; they do not prove which wheel was installed in the asset.
+
 ## Maintainer timers
+
+Runner recommendations are also maintainer data: a signed `runners.json` in the index can move
+the tested pin without a Nadare release. See [RUNNER-INDEX.md](RUNNER-INDEX.md).
 
 `packaging/systemd/nadare-index-refresh.{service,timer}` and
 `nadare-pin-publisher.{service,timer}` are maintainer jobs, not part of any package. They
 are installed by hand, as **system** units that run as the checkout owner (`User=` in the
 unit), and they read their configuration from an environment file outside the repository
 (mode 600). A `systemctl --user` unit cannot read such a file, so they are not user units.
-The unit files in the repo use `%h`, which in a system unit is root's home: set `User=` and
-the paths to the checkout owner's before installing. See [ARCHIVE-PINS.md](ARCHIVE-PINS.md)
-for the pin job.
+The templates leave `User=` commented out because the account name is site-specific; set
+it before installing. `%h` then expands to that account's home (without `User=`, a system
+unit gets root's home), so the paths in the unit must point at the checkout owner's.
+
+Both services are sandboxed: `NoNewPrivileges=`, `PrivateTmp=`, `ProtectSystem=strict`
+and `ProtectHome=read-only`, with `ReadWritePaths=` listing everything the job writes
+(the index checkout, the canary or pin state). If a path in a unit changes, change its
+`ReadWritePaths=` entry too, or the job cannot write there. The first `git push` has to be
+done by hand: with a read-only home, ssh cannot add a new host key to `~/.ssh/known_hosts`.
+See [ARCHIVE-PINS.md](ARCHIVE-PINS.md) for the pin job.
 
 The refresh script is a source-checkout job (it imports `scripts/*.py` and
 `src/nadare`), which is why it is not part of the regular AppImage install.
@@ -91,9 +131,15 @@ The refresh script is a source-checkout job (it imports `scripts/*.py` and
 ## Release checks
 
 - CI (`ci.yml`) runs the unit suite on every push to `master`/`main` and on every pull request. Weekly (or by hand) it also rebuilds
-  both committed CZN PCSDK stubs (the Go default and the C fallback) in pinned containers
-  and compares them with the committed binaries, and audits the lock with `pip-audit`.
+  the committed CZN PCSDK stub (the Go build) in a pinned container
+  and compares it with the committed binary, and audits the lock with `pip-audit`.
   Those two jobs need a container engine or the network and have not run in CI yet.
+- Flatpak: `.github/workflows/flatpak-manifest.yml` (also `.forgejo/workflows/flatpak-manifest.yml`)
+  runs when packaging files change and weekly. It checks the manifest's internal consistency (the
+  files it installs exist, the app id matches the metainfo, desktop entry, `stage_repo.py` and
+  `build_repo.sh`, the 32-bit extensions match the runtime version), parses the manifest with
+  `flatpak-builder --show-manifest`, and validates the metainfo with `appstreamcli validate --no-net`.
+  It is a separate workflow so no pull request that touches nothing in `packaging/` waits for it.
 - In-place updates: after building the release AppImage, record its hash in the index with
   `python scripts/release_hash.py <nadare-index checkout> <version> dist/Nadare-<version>-x86_64.AppImage`
   and push the index (`app/releases.json`). Nadare checks the downloaded file against that hash
@@ -114,11 +160,54 @@ The refresh script is a source-checkout job (it imports `scripts/*.py` and
 Until Nadare is on Flathub, a signed repository of our own carries it (`packaging/flatpak/`):
 
 ```sh
-scripts/build_appimage.sh                     # produces AppDir/
-python3 packaging/flatpak/stage_repo.py --appdir AppDir --out build/flatpak-root
+# Expected inputs come from the intended source cut, never from the AppDir marker.
+EXPECTED_VERSION=<release-version>
+EXPECTED_COMMIT=$(git rev-parse HEAD)
+EXPECTED_LOCK_SHA256=$(sha256sum uv.lock | cut -d' ' -f1)
+scripts/build_appimage.sh                     # produces AppDir/ and build-identity.json
+python3 packaging/flatpak/stage_repo.py --appdir AppDir --out build/flatpak-root \
+  --expected-version "$EXPECTED_VERSION" --expected-commit "$EXPECTED_COMMIT" \
+  --expected-lock-sha256 "$EXPECTED_LOCK_SHA256"
 NADARE_FLATPAK_URL=https://<repo address>/ NADARE_FLATPAK_KEY=<key fingerprint> \
   packaging/flatpak/build_repo.sh build/flatpak-root build/flatpak-repo
 ```
+
+The AppImage build checks that the selected interpreter imports Nadare from this source
+checkout, that source/project/installed versions agree, and that installed runtime and build
+packages (including transitive dependencies and platform markers) match `uv.lock`. These checks
+also apply when `PYTHON` is supplied. It snapshots the environment before bundling and rechecks it,
+the source commit and the lock before emitting `AppDir/build-identity.json` after library trimming.
+A verified build requires a clean Git checkout, or, where the build has no Git (the release
+container builds a `git archive` export), `NADARE_SOURCE_COMMIT` set by the caller to the exact
+40-hex commit it exported; in a checkout that value must match HEAD. Keep existing release
+source-location and installed-version checks as additional guards.
+
+The JSON format has `schema: 1`, `verified`, `version`, `source_commit`, `uv_lock_sha256`,
+`environment` (checked package versions), `payload_sha256`, and `transformations` (the deliberate
+bundling, library relocation/removal and stripping operations). The payload digest covers
+`AppDir/usr/bin`: sorted relative paths, entry types, regular-file permission modes and content
+SHA-256 values, and symlink targets, encoded as compact JSON records with a trailing newline.
+Directory entries are included but their modes and timestamps are omitted. External symlinks and
+special files are refused. This is a checked local handoff, not a signature or proof of
+bit-for-bit reproducibility; it assumes a trusted builder and installed package metadata.
+
+Staging requires all three explicit expected inputs, checks the marker and payload digest before
+creating output, and checks the copied payload again before applying Flatpak transformations.
+A stale AppDir is refused even if a newer `dist/nadare` bundle exists. There is no automatic
+fallback. The staged `files/share/nadare/build-identity.json` preserves `input_identity`, records
+`input_payload_sha256`, verification errors and Flatpak transformations (removed libraries,
+pinned Proton packages and metadata generation), and records `payload_sha256` over the complete
+staged `files/` tree except that identity file itself. Flatpak metadata outside `files/`, including
+changes made later by `build_repo.sh`, is outside that digest.
+
+For ad-hoc development only, `NADARE_BUILD_ALLOW_UNVERIFIED=1 scripts/build_appimage.sh` permits
+dirty or unknown source identity; the marker states `source_commit: "dirty"` or `"unknown"` and
+`verified: false`. It still requires matching installed packages and source location. Release
+builds (`NADARE_RELEASE` set) reject this option. To stage development payloads, pass
+`--allow-unverified` explicitly: missing markers, identity mismatches or digest mismatches are
+recorded, a warning is printed, and the staged identity remains `verified: false`. These outputs
+must not be published as verified releases. The flag does not permit unsafe symlinks or special
+files. Neither option is needed for a correctly bound clean build.
 
 The stage step also downloads the pinned Debian packages from `packaging/flatpak/proton-libs.json`
 into `build/flatpak-debs` (override with `--deb-cache`), verifies their SHA-256, and unpacks the
@@ -128,13 +217,17 @@ Nadare keeps using the runtime's copies. `--no-proton-libs` skips this, and unli
 step it needs the network on the first run.
 
 `build_repo.sh` needs `flatpak`, `appstreamcli` (with appstream-compose) and the signing key in gpg; it
-runs offline and writes `index.flatpakrepo` and `nadare.flatpakref` next to the repository. Re-running
+runs offline and writes `index.flatpakrepo`, `nadare.flatpakref` and `nadare.flatpak` next to the
+repository. `nadare.flatpak` is a single-file bundle for stores that ignore the repository named in a
+`.flatpakref` (Bazaar on Bazzite); it carries the repository address and key, so updates still come from
+the repository. Re-running
 against the same directory adds a commit, which users receive as an update.
 
 Publish with `packaging/flatpak/upload.sh build/flatpak-repo` (`RCLONE` set to an rclone command that
 knows the `r2:` remote). The repository is served at `https://flatpak.nadare.app/` from a Cloudflare R2
 bucket; that address must never change. The upload puts objects first and the summary last, sets
-`no-cache` on the files that change, and never deletes anything.
+`no-cache` on the files that change, uploads the bundle last (`application/vnd.flatpak`), and never
+deletes anything.
 
 The signing key and the bucket credentials are kept off this repository and off CI.
 

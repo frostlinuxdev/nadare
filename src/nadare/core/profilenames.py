@@ -57,6 +57,8 @@ SHORT_NAMES: dict[str, str] = {
     "direct-bd2": "bd2",
     "direct-aethergazer": "aether-gazer",
     "direct-mongil": "mongil",
+    "direct-dna": "dna",
+    "direct-snowbreak": "snowbreak",
     "direct-wuwa": "wuwa",
     "direct-endfield": "endfield",
     "direct-pgr": "pgr",

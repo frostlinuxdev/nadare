@@ -15,7 +15,6 @@ except Exception:  # noqa: BLE001
 
 from nadare.core import artwork, shortcuts
 from nadare.core.config import Config
-from nadare.gui.add_game import AddGameDialog
 
 
 @pytest.fixture(scope="module")
@@ -27,17 +26,8 @@ def test_two_steam_games_get_distinct_shortcut_names_and_art_keys(tmp_path, qapp
     config = Config.load(tmp_path / "config.json")
     names = []
     for profile, app_id in (("steam-a", "5019180"), ("steam-b", "3557620")):
-        dialog = AddGameDialog(config, data_root=tmp_path / "data")
-        try:
-            dialog.set_backend("steam")
-            dialog.set_profile_name(profile)
-            dialog.set_install_dir(tmp_path / "games" / profile)
-            created = dialog.create_profile()
-            assert created == profile, dialog.error_label.text()
-            config.profiles[profile]["steam_app_id"] = app_id
-        finally:
-            dialog.deleteLater()
-            qapp.processEvents()
+        # Both carry the same fixed title, as the old wizard's "Steam game" row gave them.
+        config.add_profile(profile, backend="steam", title="Steam game", steam_app_id=app_id)
         names.append(profile)
 
     titles = [config.profiles[n]["title"] for n in names]

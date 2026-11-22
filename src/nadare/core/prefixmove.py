@@ -8,12 +8,19 @@ old prefix is always renamed (kept) and a failed rebuild is rolled back.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from datetime import datetime
 from pathlib import Path
 
 from . import prefixguard
+
+log = logging.getLogger(__name__)
+
+#: Profile key of a rebuild in progress (#1490): written and saved BEFORE the old prefix is
+#: renamed, cleared once the rebuild finished or was rolled back.
+REBUILD_KEY = "prefix_rebuild"
 
 
 class PrefixMoveError(RuntimeError):
@@ -67,12 +74,26 @@ def _refusal_reason(prefix: Path) -> str | None:
     return None
 
 
-def move_aside(prefix: Path) -> Path:
-    """Rename ``prefix`` to a unique ``.broken-<timestamp>`` sibling.
+def move_aside(prefix: Path, backup: Path | None = None) -> Path:
+    """Rename ``prefix`` to a unique ``.broken-<timestamp>`` sibling (or ``backup``).
 
     Same parent means same filesystem, so this is an atomic rename and never a
     copy or a delete. Returns the backup path.
     """
+    _check_movable(prefix)
+    backup = backup if backup is not None else backup_path(prefix)
+    if os.path.lexists(backup):
+        raise PrefixMoveError(f"could not move {prefix} aside: {backup} already exists")
+    try:
+        os.rename(prefix, backup)
+    except OSError as exc:
+        raise PrefixMoveError(
+            f"could not move {prefix} aside: {exc}. Nothing was changed."
+        ) from exc
+    return backup
+
+
+def _check_movable(prefix: Path) -> None:
     if prefix.is_symlink():
         raise PrefixMoveError(
             f"refusing to move {prefix}: it is a symlink. Point the profile at "
@@ -90,14 +111,150 @@ def move_aside(prefix: Path) -> Path:
             f"refusing to move {prefix}: it does not look like a Wine prefix (no drive_c) and "
             "holds other files. Point the profile at the real prefix folder first."
         )
-    backup = backup_path(prefix)
+
+
+def _identity(path: Path) -> list[int] | None:
     try:
-        os.rename(prefix, backup)
-    except OSError as exc:
-        raise PrefixMoveError(
-            f"could not move {prefix} aside: {exc}. Nothing was changed."
-        ) from exc
+        info = os.lstat(path)
+    except OSError:
+        return None
+    return [info.st_dev, info.st_ino] if os.path.isdir(path) and not path.is_symlink() else None
+
+
+def _without(values: object, backup: str) -> list[object]:
+    return [v for v in values if v != backup] if isinstance(values, list) else []
+
+
+def begin_rebuild(ctx, prefix: Path, keep: list[Path]) -> Path:
+    """Record the rebuild, save, then move ``prefix`` aside; returns the backup (#1490).
+
+    The backup is in ``prefix_backups`` and the intent under :data:`REBUILD_KEY` before
+    anything moves, so a process killed mid-rebuild leaves a recorded backup (removal keeps
+    it) and :func:`finish_interrupted_rebuilds` can put the old prefix back.
+    """
+    _check_movable(prefix)
+    identity = _identity(prefix)
+    if identity is None:
+        raise PrefixMoveError(f"the Wine prefix {prefix} is not a folder")
+    backup = backup_path(prefix)
+    recorded = str(_resolve(prefix.parent) / backup.name)
+    profile, config = ctx.profile, ctx.config
+    with config.locked():
+        before = (profile.get("prefix_backups"), profile.get(REBUILD_KEY))
+        backups = profile.get("prefix_backups")
+        profile["prefix_backups"] = [*(backups if isinstance(backups, list) else []), recorded]
+        profile[REBUILD_KEY] = {
+            "prefix": str(prefix),
+            "backup": recorded,
+            "id": identity,
+            "keep": [str(path) for path in keep if path.is_absolute()],
+        }
+        try:
+            config.save()
+        except BaseException:
+            _restore(profile, before)
+            raise
+    try:
+        move_aside(prefix, backup)
+    except BaseException:
+        end_rebuild(ctx, backup, kept=False)
+        raise
     return backup
+
+
+def _restore(profile: dict, before: tuple[object, object]) -> None:
+    for key, value in zip(("prefix_backups", REBUILD_KEY), before, strict=True):
+        if value is None:
+            profile.pop(key, None)
+        else:
+            profile[key] = value
+
+
+def end_rebuild(ctx, backup: Path, *, kept: bool) -> None:
+    """Forget the intent; ``kept=False`` (rolled back) drops the backup's entry too."""
+    _forget(ctx.config, ctx.profile, str(_resolve(backup.parent) / backup.name), kept=kept)
+
+
+def _forget(config, profile: dict, backup: str, *, kept: bool, save: bool = True) -> None:
+    with config.locked():
+        profile.pop(REBUILD_KEY, None)
+        if not kept:
+            remaining = _without(profile.get("prefix_backups"), backup)
+            if remaining:
+                profile["prefix_backups"] = remaining
+            else:
+                profile.pop("prefix_backups", None)
+        if save:
+            config.save()
+
+
+def finish_interrupted_rebuilds(config) -> list[str]:
+    """Put back the old prefix of every rebuild a killed process left (#1490); the caller saves.
+
+    Only a backup that is still the very folder the rebuild renamed (same device and inode)
+    is put back, with :func:`roll_back`: game files already moved into the new prefix go back
+    into it, and the half-built prefix is parked as ``.failed-*`` (or removed when it holds no
+    file). A profile another Nadare is working on is skipped. Anything that does not match is
+    left alone with its record and recorded backup, which removal keeps.
+    """
+    from . import process  # noqa: PLC0415 - process imports a lot
+
+    notes: list[str] = []
+    for name, profile in list(config.profiles.items()):
+        record = profile.get(REBUILD_KEY) if isinstance(profile, dict) else None
+        if record is None:
+            continue
+        lock = process.OperationLock(name)
+        try:
+            lock.acquire()
+        except process.ProfileLockError:
+            continue  # being rebuilt right now, or no lock folder: try again later
+        try:
+            note = _finish_one(config, name, profile, record)
+        finally:
+            lock.release()
+        if note:
+            notes.append(note)
+    return notes
+
+
+def _finish_one(config, name: str, profile: dict, record: object) -> str:
+    kept = "its record and the backup were kept (nothing was moved)"
+    if not isinstance(record, dict):
+        return f"{name}: an unfinished prefix rebuild could not be read; {kept}"
+    prefix_text, backup_text, identity = (
+        record.get("prefix"), record.get("backup"), record.get("id")
+    )
+    if not (isinstance(prefix_text, str) and isinstance(backup_text, str)
+            and isinstance(identity, list) and len(identity) == 2):
+        return f"{name}: an unfinished prefix rebuild could not be read; {kept}"
+    prefix, backup = Path(prefix_text), Path(backup_text)
+    if not prefix.is_absolute() or not backup.is_absolute() or backup.parent != prefix.parent:
+        return f"{name}: an unfinished prefix rebuild names odd folders; {kept}"
+    if not os.path.lexists(backup):
+        if _identity(prefix) == identity:
+            # Killed before the rename: the prefix never moved.
+            _forget(config, profile, backup_text, kept=False, save=False)
+            return f"{name}: an interrupted prefix rebuild had not moved anything yet"
+        return f"{name}: the old prefix of an interrupted rebuild is not at {backup}; {kept}"
+    if _identity(backup) != identity:
+        return f"{name}: {backup} is not the prefix the rebuild moved aside; {kept}"
+    moved: list[Path] = []
+    for text in record.get("keep") or []:
+        if not isinstance(text, str):
+            continue
+        try:
+            rel = Path(text).relative_to(prefix)
+        except ValueError:
+            continue
+        if rel.parts and os.path.lexists(prefix / rel) and not os.path.lexists(backup / rel):
+            moved.append(prefix / rel)
+    try:
+        roll_back(backup, prefix, moved)
+    except PrefixMoveError as exc:
+        return f"{name}: could not put back the old prefix ({exc}); {kept}"
+    _forget(config, profile, backup_text, kept=False, save=False)
+    return f"{name}: put back the Wine prefix an interrupted rebuild had moved aside"
 
 
 def restore_inside(backup: Path, prefix: Path, keep: list[Path]) -> list[Path]:

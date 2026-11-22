@@ -16,83 +16,72 @@ import os
 import time
 import traceback
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from typing import cast
 
 from PyQt6.QtCore import QObject, QRunnable, QThread, pyqtSignal
 
 from .. import __version__
-from ..core import diskspace, exitcode, friendly, paths, runlog, vcredist
-from ..core.backends import BackendError, BackendUnsupported, create
-from ..core.config import Config
-from ..core.events import Cancel, Cancelled, Event, mask
-from ..core.process import (
-    OPERATION_BUSY,
-    OPERATION_IN_PROGRESS,
-    OperationLock,
-    PredownloadLock,
-    ProfileLockError,
-    launch_blocked,
+from ..core import (
+    exitcode,
+    flatpakreport,
+    friendly,
+    launch_window,
+    launchgate,
+    operation_policy,
+    paths,
+    runlog,
 )
+from ..core.backends import (
+    BackendError,
+    BackendUnsupported,
+    GameBackend,
+    PredownloadBackend,
+    create,
+    supports_media,
+)
+from ..core.config import Config, bounded_int
+from ..core.events import Cancel, Cancelled, Event, mask
 
 log = logging.getLogger(__name__)
 
 #: Operations nobody asked for; a removed game may drop them at once (the same set as the
 #: window's SILENT_OPERATIONS).
-_BACKGROUND_OPERATIONS = frozenset({"status", "news", "media", "check_update"})
+_BACKGROUND_OPERATIONS = operation_policy.operations_with("background")
 
 #: Operations a worker understands.
-OPERATIONS = (
-    "status",
-    "install",
-    "update",
-    "repair",
-    "remake_prefix",
-    "login",
-    "launch",
-    "stop",
-    "verify",
-    "uninstall",
-    "set_remember",
-    "logout",
-    "news",
-    "media",
-    "check_update",
-    "predownload",
-)
+OPERATIONS = tuple(operation_policy.POLICIES)
+
+
+@dataclass(frozen=True)
+class QualityCleanup:
+    """The payload of ``remove_qualities`` (#1474): the tiers the user confirmed, and the
+    settings the question was asked with (a Settings save meanwhile must not change which
+    tier is deleted)."""
+
+    only: tuple[str, ...]
+    config: Config
+
+
+@dataclass(frozen=True)
+class QualityCleanupResult:
+    """What ``remove_qualities`` reports: bytes freed, warnings, and the tiers asked for."""
+
+    freed: int
+    warnings: tuple[str, ...]
+    only: tuple[str, ...]
+
 
 #: Operations that exclude each other (and Remove) per profile across processes.
-LOCKED_OPERATIONS = frozenset({"install", "update", "repair", "remake_prefix", "uninstall"})
-
-#: Operations that can be paused and later resumed from their partial downloads.
-PAUSABLE = frozenset({"install", "update", "repair"})
-
-#: Heavy operations only a few of which run at once; the rest wait their turn (#770).
-CAPPED = frozenset({"install", "update", "repair"})
+LOCKED_OPERATIONS = operation_policy.operations_with("locked")
+PAUSABLE = operation_policy.operations_with("pausable")
+CAPPED = operation_policy.operations_with("capped")
 DEFAULT_ACTIVE_INSTALLS = 1
 MAX_ACTIVE_INSTALLS = 4
-
-#: Operations that mutate the installation and therefore take a per-profile lock.
-MUTATING = frozenset(
-    {
-        "install",
-        "update",
-        "repair",
-        "remake_prefix",
-        "login",
-        "launch",
-        "uninstall",
-        "set_remember",
-        "logout",
-    }
-)
-
-
-#: Operations refused while a download is paused: they would drop its RESUME entry (#855).
-#: Sign-in operations wait too (round 6): run beside a paused entry, Cancel and the page's end
-#: of the operation treated the paused download as theirs.
-_WAIT_FOR_PAUSED = frozenset({"verify", "repair", "update", "login", "logout", "set_remember"})
+MUTATING = operation_policy.operations_with("mutating")
+_WAIT_FOR_PAUSED = operation_policy.operations_with("wait_for_paused")
 
 
 class _CallSignals(QObject):
@@ -100,6 +89,15 @@ class _CallSignals(QObject):
 
     done = pyqtSignal(object)
     failed = pyqtSignal(str)
+
+
+def _game_pids(backend):
+    """``backend.game_pids()``, or ``None``: the window monitor must never block Play."""
+    try:
+        return backend.game_pids()
+    except Exception:  # noqa: BLE001 - an optional observation, not a launch failure
+        log.debug("no process rule for the launch monitor", exc_info=True)
+        return None
 
 
 class CallTask(QRunnable):
@@ -168,6 +166,9 @@ class BackendWorker(QThread):
         self._operation = operation
         self._payload = payload
         self._cancel_token = Cancel()
+        if operation == "stop" and payload is True:
+            # A repeated Stop during the launch also applies to its queued cleanup.
+            self._cancel_token.cancel()
         self._log = None
         self._last_progress_logged = float("-inf")
 
@@ -192,58 +193,27 @@ class BackendWorker(QThread):
         """Ask the step that offers a skip to stop; the operation itself carries on."""
         self._cancel_token.skip_step()
 
-    def _reserve_install_space(self, backend) -> diskspace.Reservation | None:
-        """Promise an install's space so a second install cannot claim the same bytes (#770).
-
-        Only fresh installs reserve; what already sits in the folder (a resumed install)
-        counts as written. A backend without a size or a folder just installs as before.
-        """
-        if self._operation != "install":
-            return None
-        size = getattr(backend, "install_size_hint", None)
-        folder = getattr(backend, "install_dir", None)
-        if not size or not callable(folder):
-            return None
-        try:
-            path = Path(folder())
-        except Exception:  # noqa: BLE001 - no reservation is better than a failed install
-            return None
-        needed = max(0, int(size) - diskspace.tree_bytes(path))
-        return diskspace.reserve(path, needed, owner=self._profile)
-
     def run(self) -> None:  # noqa: D401 - QThread entry point
         started = time.monotonic()
         code: int | None = None
-        lock = None
-        predownload_lock = None
-        reservation = None
+        resources = ExitStack()
         try:
-            if self._operation == "predownload":
-                lock = OperationLock(self._profile)
-                try:
-                    lock.acquire()
-                except ProfileLockError:
-                    raise BackendError(OPERATION_BUSY.format(name=self._profile)) from None
-                predownload_lock = PredownloadLock(self._profile)
-                try:
-                    predownload_lock.acquire()
-                except ProfileLockError:
-                    lock.release()
-                    lock = None
-                    raise BackendError(OPERATION_BUSY.format(name=self._profile)) from None
-            elif self._operation in LOCKED_OPERATIONS:
-                lock = OperationLock(self._profile)
-                try:
-                    lock.acquire()
-                except ProfileLockError:
-                    raise BackendError(OPERATION_BUSY.format(name=self._profile)) from None
-            elif self._operation == "launch" and launch_blocked(self._profile):
-                # Launch itself does not hold the lock (a game runs for hours).
-                raise BackendError(OPERATION_IN_PROGRESS.format(name=self._profile))
-            backend = create(
-                self._profile, self._config, emit=self._on_event, cancel=self._cancel_token
+            resources.enter_context(operation_policy.operation_lock(self._operation, self._profile))
+            config = self._config
+            if self._operation == "remove_qualities":
+                if not isinstance(self._payload, QualityCleanup):
+                    raise BackendError("the quality cleanup needs its settings snapshot")
+                config = self._payload.config
+            backend = create(self._profile, config, emit=self._on_event, cancel=self._cancel_token)
+            resources.enter_context(
+                operation_policy.preflight(
+                    self._operation,
+                    backend,
+                    name=self._profile,
+                    adapter="gui",
+                    on_retry=self._runtime_retry_notice,
+                )
             )
-            reservation = self._reserve_install_space(backend)
             if self._operation == "status":
                 from ..core.process import ProcessScanRound, use_process_scan_round
 
@@ -276,12 +246,7 @@ class BackendWorker(QThread):
                 detail += f" signal={signal}"
             self._note(self._end_text(detail, started))
         finally:
-            if reservation is not None:
-                reservation.release()
-            if predownload_lock is not None:
-                predownload_lock.release()
-            if lock is not None:
-                lock.release()
+            resources.close()
             self._close_log()
         self.succeeded.emit(code)
 
@@ -295,10 +260,11 @@ class BackendWorker(QThread):
         message = self._fail_exception(exc)
         self._note(self._end_text(f"failed: {' '.join(message.split())}", started))
 
-    def _dispatch(self, backend) -> int:
+    def _dispatch(self, backend: GameBackend) -> int:
         op = self._operation
         if op == "status":
-            self.result.emit(backend.status())
+            # An old game outside the Flatpak's folders says why, not "not installed" (#1299).
+            self.result.emit(flatpakreport.status_of(backend))
         elif op == "verify":
             self.result.emit(backend.verify())
         elif op == "install":
@@ -306,18 +272,17 @@ class BackendWorker(QThread):
         elif op == "update":
             backend.update()
         elif op == "repair":
-            self._retry_runtime_step(backend)
             backend.repair()
         elif op == "remake_prefix":
             backend.remake_prefix()
         elif op == "login":
             backend.login()
         elif op == "launch":
-            return int(backend.launch())
+            # Every pre-Play check, then the game (#1451).
+            with launch_window.watch(_game_pids(backend), self._on_event, self._cancel_token):
+                return launchgate.play(backend)
         elif op == "stop":
             backend.stop()
-        elif op == "uninstall":
-            backend.uninstall()
         elif op == "set_remember":
             backend.set_remember(bool(self._payload), persist_flag=False)
         elif op == "logout":
@@ -329,10 +294,16 @@ class BackendWorker(QThread):
         elif op == "check_update":
             backend.check_update()
         elif op == "predownload":
-            method = getattr(backend, "predownload", None)
-            if not callable(method):
-                raise BackendError("this game has no predownload")
-            method()
+            if not backend.supports_predownload:
+                raise BackendUnsupported("this game has no predownload")
+            cast(PredownloadBackend, backend).predownload()
+        elif op == "remove_qualities":
+            payload = self._payload
+            assert isinstance(payload, QualityCleanup)  # checked in run()
+            freed, warnings = backend.remove_other_qualities(only=list(payload.only))
+            self.result.emit(
+                QualityCleanupResult(int(freed), tuple(str(w) for w in warnings), payload.only)
+            )
         else:  # pragma: no cover - guarded in __init__
             raise BackendError(f"unsupported operation: {op}")
         return 0
@@ -369,10 +340,11 @@ class BackendWorker(QThread):
         return result
 
     def _load_media(self, backend):
-        """Fetch the official launcher background/banners for ``backend``.
+        """Fetch the game-page hero (and any publisher banners) for ``backend``.
 
-        Never raises: a backend without configured media yields an empty result
-        that the UI renders as today's look.
+        A publisher feed supplies the background and banners where the backend has one; every
+        other game page falls back to the index wide art (or Steam's library hero). Never
+        raises: a game with no art anywhere keeps today's plain card.
         """
         from ..core import artwork, news, yostar
 
@@ -385,23 +357,58 @@ class BackendWorker(QThread):
                 index_source = backend.manifest_source()
             except Exception:  # noqa: BLE001 - best effort
                 index_source = ""
-        source = yostar.configured_media(profile) or index_source
-        empty = {"kind": "media", "hero": None, "banners": []}
-        if not source:
-            return empty
+        # Only a backend with a publisher feed reads one; every other game page gets the
+        # index wide art (or Steam's library hero) below.
+        source = ""
+        if supports_media(str(profile.get("backend") or "")):
+            source = yostar.configured_media(profile) or index_source
+
         deadline = time.monotonic() + news.NEWS_DEADLINE
+
+        def await_media(call):
+            self._cancel_token.raise_if_cancelled()
+            if time.monotonic() >= deadline:
+                return None
+            try:
+                # Reuse news' polling wait, including for images and fallback artwork.
+                return news._await(call, cancel=self._cancel_token, deadline=deadline)
+            except news._Stopped:
+                self._cancel_token.raise_if_cancelled()
+                return None
+
+        def fallback_hero() -> str | None:
+            # Already-cached art answers at once; the index is waited for only when there is
+            # nothing on disk yet (a background page open must not sit on the network).
+            wide = await_media(lambda: artwork.fetch(profile, title, "cover", art="wide"))
+            if wide is None:
+                wide = await_media(lambda: artwork.fetch(profile, title, "hero"))
+            self._cancel_token.raise_if_cancelled()
+            return str(wide) if wide is not None else None
+
+        if not source:
+            return {"kind": "media", "hero": fallback_hero(), "banners": []}
         try:
-            timeout = max(1, int(deadline - time.monotonic()))
-            media = yostar.load_media(source, game_tag=game_tag or None, timeout=timeout)
+            media = await_media(
+                lambda: yostar.load_media(
+                    source,
+                    game_tag=game_tag or None,
+                    timeout=max(1, int(deadline - time.monotonic())),
+                    cancel=self._cancel_token,
+                )
+            )
         except (yostar.MediaError, yostar.ManifestError, OSError, ValueError):
             # Bad or unreachable media: the page shows no banners, the worker does not fail
             # (#1207 b251). A cancel is not one of these and still stops the worker.
-            return empty
-        cached = yostar.cache_media(
-            media, artwork.slug(profile, title), deadline=deadline, cancel=self._cancel_token
-        )
+            return {"kind": "media", "hero": fallback_hero(), "banners": []}
+        if media is None:
+            return {"kind": "media", "hero": fallback_hero(), "banners": []}
+        cached = await_media(
+            lambda: yostar.cache_media(
+                media, artwork.slug(profile, title), deadline=deadline, cancel=self._cancel_token
+            )
+        ) or {}
         self._cancel_token.raise_if_cancelled()
-        hero = cached.get("hero")
+        hero = cached.get("hero") or fallback_hero()
         return {"kind": "media", "hero": hero, "banners": cached.get("banners", [])}
 
     # ---- emitter plumbing --------------------------------------------------
@@ -414,18 +421,17 @@ class BackendWorker(QThread):
         A skip, cancel or hang is remembered per prefix so launches do not keep asking; the user
         asking for a repair is the signal to forget it. Best effort: it never breaks the repair.
         """
-        try:
-            forgotten = vcredist.retry_after_repair(backend)
-        except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
-            return
-        if forgotten:
-            self._on_event(
-                Event(
-                    "status",
-                    "The Windows component (Visual C++ runtime) will be tried again at "
-                    "the next launch.",
-                )
+        if operation_policy.retry_runtime(backend, adapter="gui"):
+            self._runtime_retry_notice()
+
+    def _runtime_retry_notice(self) -> None:
+        self._on_event(
+            Event(
+                "status",
+                "The Windows component (Visual C++ runtime) will be tried again at "
+                "the next launch.",
             )
+        )
 
     def _on_event(self, event: Event) -> None:
         if self._worth_logging(event):
@@ -434,6 +440,9 @@ class BackendWorker(QThread):
 
     def _worth_logging(self, event: Event) -> bool:
         """Progress ticks arrive per megabyte; the log keeps one every half minute and the last."""
+        if event.kind == "window_seen":
+            # Internal launch feedback for the sheet, not a line a run log should carry.
+            return False
         if event.kind != "progress":
             return True
         now = time.monotonic()
@@ -478,6 +487,7 @@ class BackendWorker(QThread):
             # Owner-only, whatever the umask: logs can quote paths and account state.
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             self._log = os.fdopen(fd, "a", encoding="utf-8")
+            self._log_started = time.monotonic()
             self._log.write(
                 f"\n===== {datetime.now().isoformat(timespec='seconds')} "
                 f"{self._operation} ({self._profile}) | nadare {__version__} =====\n"
@@ -498,7 +508,11 @@ class BackendWorker(QThread):
         if log is None:
             return
         try:
-            log.write(mask(line.rstrip("\n")) + "\n")
+            text = mask(line.rstrip("\n"))
+            if self._operation not in BACKGROUND:
+                prefix = f"+{time.monotonic() - self._log_started:6.1f}s "
+                text = "\n".join(prefix + part for part in text.split("\n"))
+            log.write(text + "\n")
             log.flush()
         except OSError:
             pass
@@ -514,7 +528,7 @@ class BackendWorker(QThread):
 
 #: Background refreshes. They never mark the page busy and can be cancelled when
 #: a user operation needs the profile's slot.
-BACKGROUND = frozenset({"status", "news", "media", "check_update"})
+BACKGROUND = operation_policy.operations_with("background")
 
 
 #: Workers still running after their controller shut down (see ``shutdown``).
@@ -561,33 +575,62 @@ class _WorkerBridge(QObject):
         self._profile = profile
         self._operation = operation
         self._worker = worker
+        self._epoch = getattr(controller, "_profile_epochs", {}).get(profile, 0)
+        config = getattr(controller, "_config", None)
+        self._profile_object = config.profiles.get(profile) if config is not None else None
+
+    def _same_profile(self) -> bool:
+        return (
+            self._epoch == self._controller._profile_epochs.get(self._profile, 0)
+            and self._profile_object is not None
+            and self._controller._config.profiles.get(self._profile) is self._profile_object
+        )
+
+    def _current(self) -> bool:
+        return self._same_profile() and self._controller._workers.get(self._profile) is self._worker
+
+    def _retire(self) -> None:
+        self._controller._finish(self._profile, self._operation, self._worker, notify=False)
 
     def forward_event(self, event: Event) -> None:
         try:
+            if not self._current():
+                return
             self._controller.backend_event.emit(self._profile, event)
         except Exception:  # noqa: BLE001 - a slot must never raise
             log.exception("worker-event forward failed for %r", self._profile)
 
     def forward_result(self, result: object) -> None:
         try:
-            self._controller.result.emit(self._profile, result)
+            if not self._current():
+                return
+            self._controller.result.emit(self._profile, self._operation, result)
         except Exception:  # noqa: BLE001 - a slot must never raise
             log.exception("worker-result forward failed for %r", self._profile)
 
     def on_succeeded(self, code: int) -> None:
         try:
+            if not self._current():
+                self._retire()
+                return
             self._controller._on_succeeded(self._profile, self._operation, code, self._worker)
         except Exception:  # noqa: BLE001 - a slot must never raise
             log.exception("worker-succeeded bookkeeping failed for %r", self._profile)
 
     def on_failed(self, message: str) -> None:
         try:
+            if not self._current():
+                self._retire()
+                return
             self._controller._on_failed(self._profile, self._operation, message, self._worker)
         except Exception:  # noqa: BLE001 - a slot must never raise
             log.exception("worker-failed bookkeeping failed for %r", self._profile)
 
     def on_cancelled(self) -> None:
         try:
+            if not self._current():
+                self._retire()
+                return
             self._controller._on_cancelled(self._profile, self._operation, self._worker)
         except Exception:  # noqa: BLE001 - a slot must never raise
             log.exception("worker-cancelled bookkeeping failed for %r", self._profile)
@@ -597,6 +640,9 @@ class _WorkerBridge(QObject):
         # so a broken payload cannot leak the bridge for the whole process; the
         # exception must not escape the slot either.
         try:
+            if not self._same_profile():
+                self._retire()
+                return
             self._controller._on_worker_finished(self._profile, self._worker)
         except Exception:  # noqa: BLE001 - a slot must never raise
             log.exception("worker-finished bookkeeping failed for %r", self._profile)
@@ -627,7 +673,7 @@ class BackendController(QObject):
     """
 
     backend_event = pyqtSignal(str, object)  # profile, Event
-    result = pyqtSignal(str, object)  # profile, Status | dict
+    result = pyqtSignal(str, str, object)  # profile, operation, its result (#1458)
     succeeded = pyqtSignal(str, str, int)  # profile, operation, exit code
     failed = pyqtSignal(str, str, str)  # profile, operation, message
     cancelled = pyqtSignal(str, str)  # profile, operation
@@ -640,6 +686,7 @@ class BackendController(QObject):
         super().__init__(parent)
         self._config = config
         self._workers: dict[str, BackendWorker] = {}
+        self._profile_epochs: dict[str, int] = {}
         #: Profiles with a live ``launch`` worker. Kept explicitly because a
         #: QThread still reports ``isRunning()`` while its final slots run.
         self._launches: set[str] = set()
@@ -676,11 +723,7 @@ class BackendController(QObject):
     def max_active_installs(self) -> int:
         """How many installs, updates and repairs may run at once (the setting, kept sane)."""
         value = self._config.data.get("max_concurrent_installs", DEFAULT_ACTIVE_INSTALLS)
-        try:
-            count = int(value)
-        except (TypeError, ValueError):
-            return DEFAULT_ACTIVE_INSTALLS
-        return max(1, min(MAX_ACTIVE_INSTALLS, count))
+        return bounded_int(value, DEFAULT_ACTIVE_INSTALLS, 1, MAX_ACTIVE_INSTALLS)
 
     def _active_installs(self) -> int:
         return sum(1 for worker in self._workers.values() if worker.operation in CAPPED)
@@ -740,10 +783,23 @@ class BackendController(QObject):
         running = worker is not None and worker.isRunning()
         waiting = profile in self._waiting
 
+        if operation == "stop" and running and (
+            worker.operation == "stop"
+            or (worker.operation == "launch" and pending is not None and pending[0] == "stop")
+        ):
+            # Keep escalation intent when the launch hands off to queued cleanup.
+            if worker.operation == "launch":
+                self._pending[profile] = ("stop", True)
+            worker.cancel()
+            return True
+
         if running or pending is not None or waiting:
             if operation in BACKGROUND:
                 # Background refreshes are best-effort and never queue up.
                 return False
+            if operation == "stop" and pending is not None and pending[0] == "launch":
+                self.cancel(profile)
+                return True
             if pending is not None or waiting:
                 return False
             if worker is not None and worker.operation in BACKGROUND:
@@ -890,6 +946,7 @@ class BackendController(QObject):
 
     def forget(self, profile: str) -> None:
         """Drop everything a removed game could still resume or keep occupied."""
+        self._profile_epochs[profile] = self._profile_epochs.get(profile, 0) + 1
         self._pausing.discard(profile)
         self._requeue.discard(profile)
         self._paused.pop(profile, None)
@@ -1064,7 +1121,9 @@ class BackendController(QObject):
                 _detached.add(worker)
 
     # ---- callbacks ---------------------------------------------------------
-    def _finish(self, profile: str, operation: str, worker: BackendWorker) -> None:
+    def _finish(
+        self, profile: str, operation: str, worker: BackendWorker, *, notify: bool = True
+    ) -> None:
         if self._workers.get(profile) is not worker:
             # A worker whose slot ran late (a stall on the GUI thread, or one that was detached):
             # the profile has moved on and its busy state belongs to the newer operation, or was
@@ -1073,7 +1132,8 @@ class BackendController(QObject):
         self._workers.pop(profile, None)
         if operation == "launch":
             self.launch_ended(profile)
-        self.busy.emit(profile, operation, False)
+        if notify:
+            self.busy.emit(profile, operation, False)
         self._release_waiting()
 
     def _on_worker_finished(self, profile: str, worker: BackendWorker) -> None:
@@ -1096,18 +1156,24 @@ class BackendController(QObject):
         self._start_or_wait(profile, pending[0], pending[1])
 
     def _on_succeeded(self, profile: str, operation: str, code: int, worker) -> None:
+        if self._workers.get(profile) is not worker:
+            return
         self._pausing.discard(profile)
         self._requeue.discard(profile)
         self._finish(profile, operation, worker)
         self.succeeded.emit(profile, operation, code)
 
     def _on_failed(self, profile: str, operation: str, message: str, worker) -> None:
+        if self._workers.get(profile) is not worker:
+            return
         self._pausing.discard(profile)
         self._requeue.discard(profile)
         self._finish(profile, operation, worker)
         self.failed.emit(profile, operation, message)
 
     def _on_cancelled(self, profile: str, operation: str, worker) -> None:
+        if self._workers.get(profile) is not worker:
+            return
         if profile in self._pausing:
             self._pausing.discard(profile)
             if profile in self._requeue:

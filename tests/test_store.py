@@ -201,7 +201,7 @@ def test_art_is_fetched_in_background_and_decoded_by_image_loader(
     called = []
     real_request = ImageLoader.request
 
-    def fetch(profile, title=None, kind="cover"):
+    def fetch(profile, title=None, kind="cover", art=None):
         called.append((profile, title, kind))
         return art_path
 
@@ -223,6 +223,31 @@ def test_art_is_fetched_in_background_and_decoded_by_image_loader(
         assert page._cards["direct-pgr"].art.pixmap().cacheKey() != placeholder_key
     finally:
         page.close()
+
+
+@pytest.mark.parametrize(
+    ("kind", "app_id"), [("direct-endfield", None), ("steam-730", "730")]
+)
+def test_a_store_tile_keeps_its_kind_for_the_index_and_carries_the_steam_app_id(
+    monkeypatch, qapp, kind, app_id
+):
+    """The index looks art up by backend kind, so the tile keeps the kind it was given."""
+    seen = []
+
+    def fetch(profile, title=None, kind="cover", **kwargs):
+        seen.append((dict(profile), kind, dict(kwargs)))
+        return None
+
+    monkeypatch.setattr(artwork, "fetch", fetch)
+    page = StorePage()
+    try:
+        store._FetchArt(kind, "A Game", page._art_signals).run()
+    finally:
+        page.close()
+    profile, art_kind, kwargs = seen[0]
+    assert art_kind == "cover" and kwargs == {"art": "wide"}
+    assert profile["backend"] == kind
+    assert profile.get("steam_app_id") == app_id
 
 
 @pytest.mark.parametrize("width", [520, 900, 1400])
@@ -249,7 +274,7 @@ def test_card_art_survives_search_and_filter_changes(monkeypatch, qapp, tmp_path
     assert image.save(str(art_path))
     fetches = []
 
-    def fetch(profile, title=None, kind="cover"):
+    def fetch(profile, title=None, kind="cover", art=None):
         fetches.append(profile["backend"])
         return art_path
 

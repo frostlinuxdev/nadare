@@ -12,9 +12,6 @@ import copy
 import logging
 import threading
 
-from PyQt6.QtCore import (
-    QThreadPool,
-)
 from PyQt6.QtWidgets import (
     QMessageBox,
 )
@@ -22,18 +19,48 @@ from PyQt6.QtWidgets import (
 from ...core import backends as core_backends
 from ...core import (
     diskspace,
+    flatpakreport,
+    gamesandbox,
+    installercache,
+    leftovers,
+    runnerindex,
+    sandboxreport,
     shortcuts,
 )
 from ...core import runners as core_runners
 from ...core.config import Config
+from ...core.events import Cancel, Cancelled, Event
 from ..library import count_text
-from ..workers import CallTask
+from ..workers import QualityCleanup, QualityCleanupResult
 
 log = logging.getLogger("nadare.gui.main_window")
 
 
+def runner_pin_text(change: runnerindex.Change, profiles: dict) -> str:
+    """The one-line notice for a moved pin, plus a count for a critical one."""
+    text = f"Recommended runner updated to {change.tag}."
+    offers = runnerindex.critical_offers(change, profiles)
+    if offers:
+        count = len(offers)
+        noun = "game" if count == 1 else "games"
+        text += (
+            f" Critical fix: {count} {noun} on {change.previous_tag} can switch in Settings."
+        )
+    return text
+
+
 class CleanupMixin:
     """Mixin for :class:`MainWindow`; see the module text."""
+
+    def _offer_runtime_profile_update(self) -> None:
+        from ...core import userns
+        from ..userns_dialog import UsernsDialog
+
+        if getattr(self, "_runtime_profile_offered", False):
+            return
+        if userns.runtime_profile_outdated():
+            self._runtime_profile_offered = True
+            UsernsDialog(userns.RUNTIME_MOVED_MESSAGE + "\n" + userns.hint(), self).exec()
 
     def _start_steam_shortcut_cleanup(self) -> None:
         """Drop Steam shortcuts of games removed while Steam was running (#1031).
@@ -63,6 +90,296 @@ class CleanupMixin:
 
         threading.Thread(target=run, name="steam-shortcut-cleanup", daemon=True).start()
 
+    # ---- crash leftovers and unneeded installers (#1417) ------------------------------
+    def _start_leftover_sweep(self) -> None:
+        """Remove what a killed run left behind and installers no library game needs (#1417).
+
+        Leftovers: Nadare's own per-run names older than a day whose owner is gone
+        (:mod:`nadare.core.leftovers`). Installers: only with a trustworthy list of games
+        (:mod:`nadare.core.installercache`). Runs in a thread: it walks a few cache folders.
+        """
+        profiles = None if self.config.notice else copy.deepcopy(dict(self.config.profiles))
+        threading.Thread(
+            target=self._run_leftover_sweep, args=(profiles,), name="leftover-sweep", daemon=True
+        ).start()
+
+    def _run_leftover_sweep(self, profiles: dict | None) -> None:
+        removed, freed = 0, 0
+        for label, step in (
+            ("leftover", leftovers.sweep),
+            ("installer", None if profiles is None else lambda: installercache.sweep(profiles)),
+        ):
+            if step is None:
+                continue
+            try:
+                result = step()
+            except Exception:  # noqa: BLE001 - a start-up tidy-up must never break start-up
+                log.debug("%s sweep failed", label, exc_info=True)
+                continue
+            removed += len(result.removed)
+            freed += result.freed
+        if removed:
+            log.info(
+                "removed %d leftover file(s) and unneeded installer(s) (%s)",
+                removed,
+                diskspace.human_size(freed),
+            )
+
+    # ---- Sandbox folders (#1299) ---------------------------------------------------
+    def _start_sandbox_broad_check(self) -> None:
+        """Tell the player once which games the Sandbox will refuse to start, and why (#1299).
+
+        An older profile never chose the Sandbox (on by default since b22) and its folder may be
+        one the launch refuses to bind; it used to learn that only at Play.
+        """
+        if self.config.notice or not self.config.profiles:
+            return
+        profiles = copy.deepcopy(dict(self.config.profiles))
+        seen = list(self.config.data.get("sandbox_broad_seen") or [])
+        threading.Thread(
+            target=self._run_sandbox_broad_check,
+            args=(profiles, seen),
+            name="sandbox-folders",
+            daemon=True,
+        ).start()
+
+    def _run_sandbox_broad_check(self, profiles: dict, seen: list) -> None:
+        try:
+            new = sandboxreport.unseen(sandboxreport.broad_folders(profiles), seen)
+        except Exception:  # noqa: BLE001 - a start-up hint must never break start-up
+            log.debug("Sandbox folder check failed", exc_info=True)
+            return
+        if not new:
+            return
+        try:
+            self.sandbox_broad_found.emit(new)
+        except RuntimeError:
+            pass  # the window closed meanwhile
+
+    def _show_sandbox_broad(self, items: object) -> None:
+        found = list(items) if isinstance(items, list) else []
+        if not found:
+            return
+        seen = list(self.config.data.get("sandbox_broad_seen") or [])
+        seen.extend(item.key for item in found if item.key not in seen)
+        self.config.data["sandbox_broad_seen"] = seen
+        try:
+            self.config.save()
+        except OSError:
+            log.debug("could not remember the Sandbox folder note", exc_info=True)
+        QMessageBox.warning(self, "Sandbox will stop these games", sandboxreport.message(found))
+
+    # ---- Flatpak folders (#1299) ---------------------------------------------------
+    def _start_flatpak_reach_check(self) -> None:
+        """Tell the player once which games sit in folders the Flatpak cannot see (#1299).
+
+        An older Nadare (the AppImage, or a Flatpak with the whole host) may have put a game in
+        ``/srv`` or ``/data``; inside today's Flatpak it simply looks not installed.
+        """
+        if self.config.notice or not self.config.profiles:
+            return
+        profiles = copy.deepcopy(dict(self.config.profiles))
+        seen = list(self.config.data.get("flatpak_reach_seen") or [])
+        threading.Thread(
+            target=self._run_flatpak_reach_check,
+            args=(profiles, seen),
+            name="flatpak-folders",
+            daemon=True,
+        ).start()
+
+    def _run_flatpak_reach_check(self, profiles: dict, seen: list) -> None:
+        try:
+            new = flatpakreport.unseen(flatpakreport.out_of_reach(profiles), seen)
+        except Exception:  # noqa: BLE001 - a start-up hint must never break start-up
+            log.debug("Flatpak folder check failed", exc_info=True)
+            return
+        if not new:
+            return
+        try:
+            self.flatpak_reach_found.emit(new)
+        except RuntimeError:
+            pass  # the window closed meanwhile
+
+    def _show_flatpak_reach(self, items: object) -> None:
+        found = list(items) if isinstance(items, list) else []
+        if not found:
+            return
+        seen = list(self.config.data.get("flatpak_reach_seen") or [])
+        seen.extend(item.key for item in found if item.key not in seen)
+        self.config.data["flatpak_reach_seen"] = seen
+        try:
+            self.config.save()
+        except OSError:
+            log.debug("could not remember the Flatpak folder note", exc_info=True)
+        QMessageBox.warning(
+            self, "The Flatpak cannot see these games", flatpakreport.message(found)
+        )
+
+    # ---- Sandbox runtime trust (#1299) --------------------------------------------
+    def _start_sandbox_trust_check(self) -> None:
+        """Ask once per start whether to trust a runtime bubblewrap umu updated (#1299).
+
+        Nadare runs only the ``srt-bwrap`` it recorded (#871). umu's runtime updates change it,
+        and where the system's bubblewrap is blocked (Ubuntu 24.04+) the Sandbox then had no
+        copy left and games played without it.
+        """
+        if self.config.notice or not self.config.profiles:
+            return
+        profiles = copy.deepcopy(dict(self.config.profiles))
+        threading.Thread(
+            target=self._run_sandbox_trust_check,
+            args=(profiles,),
+            name="sandbox-trust",
+            daemon=True,
+        ).start()
+
+    def _run_sandbox_trust_check(self, profiles: dict) -> None:
+        try:
+            wanted = any(
+                isinstance(profile, dict)
+                and gamesandbox.wanted(
+                    profile,
+                    supported=core_backends.supports_sandbox(str(profile.get("backend") or "")),
+                    default=core_backends.sandbox_default(str(profile.get("backend") or "")),
+                    required=core_backends.sandbox_required(str(profile.get("backend") or "")),
+                )
+                for profile in profiles.values()
+            )
+            copies = gamesandbox.trust_question() if wanted else []
+        except Exception:  # noqa: BLE001 - a start-up hint must never break start-up
+            log.debug("Sandbox runtime check failed", exc_info=True)
+            return
+        if not copies:
+            return
+        try:
+            self.sandbox_trust_found.emit(copies)
+        except RuntimeError:
+            pass  # the window closed meanwhile
+
+    def _ask_sandbox_trust(self, items: object) -> None:
+        copies = [str(item) for item in items] if isinstance(items, list) else []
+        if not copies:
+            return
+        listed = "\n".join(f"  • {item}" for item in copies)
+        answer = QMessageBox.question(
+            self,
+            "Trust the new copy?",
+            "Sandbox runs games with the bubblewrap that comes with the game runtime, and "
+            "Nadare only runs the copy it recorded. That copy changed, usually because the "
+            "game runtime updated itself:\n\n"
+            f"{listed}\n\n"
+            "Until you trust it, games run without the Sandbox (or do not start, when you "
+            "switched the Sandbox on). Trust the new copy? Choose No if you did not expect "
+            "an update; Nadare asks again at the next start.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            gamesandbox.trust_runtime_copies(copies)
+        except gamesandbox.RuntimeBusy:
+            QMessageBox.information(
+                self,
+                "Trust the new copy?",
+                "A game is running, so Nadare cannot check the copy now. Close the game and "
+                "restart Nadare to be asked again.",
+            )
+            return
+        except OSError as exc:
+            QMessageBox.warning(self, "Trust the new copy?", f"Could not record it: {exc}")
+            return
+        self._sandbox_ready_answer = None  # probe again: the Sandbox can start now
+        self._sync_sandbox(self._current_profile)
+
+    # ---- runner prefetch (#1425) ---------------------------------------------
+    def _start_runner_prefetch(self) -> None:
+        """Fetch a bumped runner pin in the background, so Play never waits for it (#1425).
+
+        Only with update checks on and a trustworthy list of games; when something was
+        downloaded, the usual "Delete unused runners?" offer follows for the old pin.
+        """
+        if not self.config.data.get("check_updates", True):
+            return
+        if self.config.notice:
+            return
+        thread = getattr(self, "_runner_prefetch_thread", None)
+        if thread is not None and thread.is_alive():
+            return
+        cancel = Cancel()
+        self._runner_prefetch_cancel = cancel
+        profiles = copy.deepcopy(dict(self.config.profiles))
+        self._runner_prefetch_thread = threading.Thread(
+            target=self._run_runner_prefetch,
+            args=(profiles, cancel),
+            name="runner-prefetch",
+            daemon=True,
+        )
+        self._runner_prefetch_thread.start()
+
+    def _run_runner_prefetch(self, profiles: dict, cancel: Cancel | None = None) -> None:
+        token = cancel or self._runner_prefetch_cancel
+        if token is None:
+            return
+        signal = getattr(self, "runner_download_event", None)
+
+        def emit(event: Event) -> None:
+            if signal is not None:
+                try:
+                    signal.emit(token, event)
+                except RuntimeError:
+                    token.cancel()  # the window was destroyed
+
+        def announce(changes: list) -> None:
+            if changes:
+                try:
+                    self.runner_pin_updated.emit(changes)
+                except RuntimeError:
+                    pass  # the window closed meanwhile
+
+        try:
+            got = core_runners.prefetch(profiles, emit=emit, cancel=token, on_change=announce)
+        except Cancelled:
+            return
+        except Exception:  # noqa: BLE001 - a background fetch must never break start-up
+            log.debug("runner prefetch failed", exc_info=True)
+            return
+        finally:
+            emit(Event("runner_end"))
+        if not got:
+            return
+        log.info("fetched the updated runner in the background: %s", ", ".join(p.name for p in got))
+        self._measure_stale(profiles)
+
+    def _announce_pin_change(self, changes: object) -> None:
+        """The signal slot for a changed runner recommendation."""
+        self._show_runner_pin_updated(changes)
+
+    def _show_runner_pin_updated(self, changes: object) -> None:
+        """Say once that a signed pin moved; a critical one only points at Settings.
+
+        Nothing is changed here: a running game and a profile with its own runner stay
+        put. Games on the previous recommended build get the existing per-game choice.
+        """
+        items = list(changes) if isinstance(changes, list) else []
+        if not items:
+            return
+        profiles = dict(self.config.profiles)
+        offers = [
+            name for change in items for name in runnerindex.critical_offers(change, profiles)
+        ]
+        self._runner_update_profile = offers[0] if offers else ""
+        text = "\n".join(runner_pin_text(change, profiles) for change in items)
+        self.runner_banner.show_message(text, "Settings")
+
+    def _review_runner_update(self) -> None:
+        """Open the runner choice in Settings, without changing a profile."""
+        profile = self._runner_update_profile
+        self.runner_banner.hide_banner()
+        if profile and profile in self.config.profiles:
+            self.open_game(profile)
+        self.open_settings()
+
     # ---- old runners ----------------------------------------------------------
     def _maybe_offer_runner_cleanup(self) -> None:
         """After an operation that downloaded a runner, offer to delete unused old ones."""
@@ -85,9 +402,7 @@ class CleanupMixin:
         # one of them while the sizes were being measured.
         in_use = core_runners.runner_usage(profiles)
         pairs = [
-            (path, core_runners.runner_size(path))
-            for path in stale
-            if not in_use.get(str(path))
+            (path, core_runners.runner_size(path)) for path in stale if not in_use.get(str(path))
         ]
         if not pairs:
             return
@@ -109,7 +424,7 @@ class CleanupMixin:
             "Delete unused runners?",
             f"These older Proton runners are not used by any game ({human_size(total)}):"
             f"\n\n{names}\n\nDelete them to free the space? The recommended build is kept."
-            "\nYou can also do this later under Settings → Manage runners.",
+            "\nYou can also do this later in Settings, under Disk space.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,  # a destructive action never defaults to Yes
         )
@@ -189,31 +504,18 @@ class CleanupMixin:
         # Snapshot the settings the dialog was shown for: a Settings save while the slow
         # deletion runs must not change which tier is deleted.
         with self.config.locked():
-            worker_config = Config(
-                path=self.config.path, data=copy.deepcopy(self.config.data)
-            )
-        try:
-            backend = core_backends.create(profile, worker_config)
-        except core_backends.BackendError as exc:
-            self._quality_cleanup_failed(profile, str(exc))
-            return
-        only = [str(tier[0]) for tier in tiers]
-        task = CallTask(lambda: backend.remove_other_qualities(only=only))
-        task.signals.done.connect(
-            lambda result: self._quality_cleanup_finished(profile, tiers, result)
-        )
-        task.signals.failed.connect(
-            lambda message: self._quality_cleanup_failed(profile, message)
-        )
-        QThreadPool.globalInstance().start(task)
+            worker_config = Config(path=self.config.path, data=copy.deepcopy(self.config.data))
+        only = tuple(str(tier[0]) for tier in tiers)
+        # A controller operation like an install (#1474): one per game, the cross-process
+        # operation lock, busy on the page, and counted when quitting. A game that is busy
+        # gets the usual Busy box; the cleanup is offered again after its next update.
+        self._start(profile, "remove_qualities", QualityCleanup(only, worker_config))
 
-    def _quality_cleanup_finished(
-        self, profile: str, tiers: list, result: object
-    ) -> None:
+    def _quality_cleanup_finished(self, profile: str, result: QualityCleanupResult) -> None:
         if profile not in self.config.profiles:
             return
-        freed, warnings = result if isinstance(result, tuple) else (0, [])
-        names = " and ".join(str(tier[0]).upper() for tier in tiers)
+        freed, warnings = result.freed, result.warnings
+        names = " and ".join(tier.upper() for tier in result.only)
         if freed > 0:
             text = f"Removed the {names} files: {diskspace.human_size(freed)} freed"
         else:
@@ -224,14 +526,6 @@ class CleanupMixin:
         self._set_side_status(text)
         if profile == self._current_profile:
             self.game.append_line(text, "done")
-        self._start(profile, "status", silent=True)
-
-    def _quality_cleanup_failed(self, profile: str, message: str) -> None:
-        text = f"Could not remove the old resource-quality files: {message}"
-        if profile in self.config.profiles:
-            self._set_side_status(text)
-        if profile == self._current_profile:
-            self.game.append_line(text, "error")
 
     def _ask_remove_qualities(self, title: str, items: list, current: str) -> bool:
         """The one modal for removing unused resource tiers; No is the default."""

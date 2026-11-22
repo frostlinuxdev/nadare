@@ -10,14 +10,14 @@ stacks (Wine/Proton, native Steam, Android-in-a-container, shell scripts).
 | Game | Backend kind | Runtime |
 |---|---|---|
 | Chaos Zero Nightmare | `stove-czn` | umu/Proton + native STOVE login + a PCSDK stub |
-| Arknights (EN) | `arknights-yostar` | Proton/Wine + Yostar's own launcher/installer |
+| Arknights (EN) | `arknights-yostar` | Proton/Wine + a CI-signed Yostar manifest (direct download) |
 | Stella Sora (EN) | `stellasora-yostar` | Proton/Wine + a CI-signed Yostar manifest (direct download) |
 | Fate/Grand Order (NA) | `fgo-lepton` | lepton-x86 Android context + Venus/virgl, via the `lepton-fgo` CLI |
 | Wine / Steam / script | `wine`, `steam`, `script` | scaffolding; you supply the prefix, exe or app |
 | Catalog: 13 direct-download games | `direct-<game>` | Proton/Wine prefix + the publisher's patch API |
 | Catalog: 3 publisher-launcher games | `launcher-<game>` | Proton/Wine prefix + the publisher's installer/launcher |
 
-The `direct-*` kinds are `direct-bd2`, `direct-aethergazer`, `direct-mongil`,
+The `direct-*` kinds are `direct-bd2`, `direct-aethergazer`, `direct-mongil`, `direct-dna`, `direct-snowbreak`,
 `direct-wuwa`, `direct-gfl2`, `direct-endfield`, `direct-pgr`, `direct-nte`,
 `direct-gfl2-haoplay`, `direct-genshin`, `direct-hsr`, `direct-hi3` and
 `direct-zzz`. The only `launcher-*` kind is `launcher-nikke` (its sign-in needs the
@@ -27,8 +27,8 @@ kinds (2026-11-10). Their catalogue rows live in
 and how to add one.
 
 `stellasora-yostar` subclasses `arknights-yostar` (`backends/arknights.py`) so the
-Yostar manifest machinery lives in one place; it adds the manifest requirement and
-game-specific paths. The neutral Wine/Proton half (prefix, runner, launch, process
+Yostar manifest machinery lives in one place; both are `DirectBackend` games
+(`backends/direct.py`) whose plan is the manifest (#1452). The neutral Wine/Proton half (prefix, runner, launch, process
 detection, status) is `WineGameBackend` in `backends/winegame.py`, which
 `arknights-yostar` and the direct-download and launcher games all build on. FGO is experimental and **optional** in builds (see
 [Optional FGO](#optional-fgo)).
@@ -41,7 +41,7 @@ The design builds on projects that already work:
   the PCSDK stub, reproducible builds.
 - **lepton-fgo** — the FGO stack; Nadare never reimplements it, it drives its CLI.
 - **Yostar's official PC clients** — Arknights and Stella Sora are installed and
-  launched through Yostar's own launcher or a signed download manifest.
+  launched from a signed download manifest (Yostar's launcher route was retired in #1452).
 
 ## Layout
 
@@ -64,7 +64,7 @@ src/nadare/
     news.py artwork.py i18n.py logging.py shortcuts.py updatecheck.py yostar.py
   backends/
     czn/                # stove-czn: auth.py, backend.py, runners.py, update.py,
-                        # news.py, stub_src/, build_stub.sh
+                        # news.py (stub source: stub/pcsdk-go/)
     fgo/                # fgo-lepton: backend.py, installer.py, lepton.py,
                         # news.py, readiness.py
     arknights.py  arknights_news.py  stellasora.py   # Yostar backends
@@ -164,8 +164,9 @@ FGO-free target.
 - `packaging/nadare.spec` is the PyInstaller onedir recipe (onedir by default).
 - `scripts/build_appimage.sh` builds the AppImage with `appimagetool`.
 - `scripts/build_deb.sh` builds the `.deb`.
-- `packaging/flatpak/` holds a Flatpak manifest and `scripts/build_flatpak.sh`
-  builds it, but **Flatpak is deferred** and a Flatpak/Flathub build would ship
+- `packaging/flatpak/` builds the Flatpak: `stage_repo.py` stages the AppImage's
+  files as `/app` (nothing is compiled against the SDK), `build_repo.sh` exports and
+  signs the repository and bundle, `upload.sh` publishes it. The Flatpak ships
   **without FGO**.
 
 ## Data layout
@@ -174,8 +175,21 @@ FGO-free target.
 ~/.local/share/nadare/          # data: runners/, profiles/<name>/ (trees, prefixes, stubs)
 ~/.config/nadare/config.json    # profiles + settings
 ~/.local/state/nadare/          # logs/, journals, update receipts
-~/.cache/nadare/                # downloads, WebView2, backgrounds
+~/.cache/nadare/                # downloads, WebView2, backgrounds, sandbox-cache/
 ```
+
+Shader caches (#1364) live under the cache root, at the same path with and without the
+Sandbox:
+
+```
+~/.cache/nadare/sandbox-cache/shader-cache/
+  mesa/                         # one shared Mesa cache (MESA_SHADER_CACHE_DIR)
+  games/<profile>/vkd3d/        # one VKD3D cache per game (VKD3D_SHADER_CACHE_PATH)
+```
+
+DXVK keeps its cache inside the game's prefix,
+`<prefix>/drive_c/users/<user>/AppData/Local/dxvk` (`steamuser` under Proton, the desktop
+user under plain Wine). The NVIDIA driver cache is only reported, never cleared.
 
 ## Threading model
 
@@ -187,6 +201,8 @@ takes a per-profile lock (see `core/process.py`).
 ## Why Python
 
 `curl_cffi`'s Chrome TLS impersonation is required for STOVE's CDN, and the CZN
-auth path is already proven in it. Rust would risk the one thing that works, and
+auth path is already proven in it. (The game's patch files answer plain TLS, measured
+2026-11-17: CZN's client files go through the shared direct-download engine,
+`core/directdl.py`, #1557.) Rust would risk the one thing that works, and
 packaging is a solved Python problem. A future
 engine/UI split can move hot paths to Rust without a rewrite.

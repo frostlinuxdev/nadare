@@ -104,8 +104,8 @@ and it was not re-checked. All of these are public and need no login.
   Raven below.
   - List: `GET https://hw-media-cdn-mingchao.kurogame.com/akiwebsite/website2.0/json/G152/en/ArticleMenu.json`
     (JSON array; `articleId`, `articleTitle`, `articleType` 57 News / 58 Notice / 59 Event,
-    `startTime` as `YYYY-MM-DD HH:MM:SS` in CMS local time, `top`; **not sorted**: sort by
-    `startTime`). Labels per locale from `.../en/MainMenu.json` → `articleType`.
+    `startTime` as `YYYY-MM-DD HH:MM:SS` in the CMS clock (China time, UTC+8), `top`; **not
+    sorted**: sort by `startTime`). Labels per locale from `.../en/MainMenu.json` → `articleType`.
   - Hero art: `MainMenu.json` → `pcTopPicture.coverImage` (1920×1080 PNG); banners:
     `picture[]` with `pictureType == 8`, `imgUrl`.
   - Article page: `https://wutheringwaves.kurogames.com/en/main/news/detail/<articleId>`.

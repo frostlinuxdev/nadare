@@ -34,7 +34,7 @@ def read_version_record(install_dir: Path | str | None) -> dict[str, Any] | None
             Path(install_dir) / VERSION_FILE,
             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
         )
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return None
     try:
         # A FIFO would block a plain read; only a regular file can hold the JSON.
@@ -65,13 +65,13 @@ def read_czn_version(prefix: Path | str | None) -> str | None:
     """CZN's installed version from its UPF, the same field its status shows."""
     if prefix is None:
         return None
-    upf = (
-        Path(prefix)
-        / CZN_GAME_SUBDIR
-        / "combinedata_manifest"
-        / f"GameManifest_{CZN_SERVICE}.upf"
-    )
     try:
+        upf = (
+            Path(prefix)
+            / CZN_GAME_SUBDIR
+            / "combinedata_manifest"
+            / f"GameManifest_{CZN_SERVICE}.upf"
+        )
         data = json.loads(upf.read_text(encoding="utf-8"))
         value = int(data["local_version"])
     except (OSError, UnicodeDecodeError, ValueError, TypeError, KeyError, RecursionError):

@@ -11,6 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _official_route import OfficialRouteBackend
 
 from nadare.backends import arknights as ak
 from nadare.backends.arknights import ArknightsBackend
@@ -344,7 +345,7 @@ def test_status_error_retry_interval_backs_off_per_profile(tmp_path: Path, qapp)
             window._on_failed("alpha", "status", "offline")
             assert window._status_errors["alpha"] == count
             assert window._status_interval_ms("alpha") == expected
-        window._on_result("alpha", main_window_mod.Status("installed"))
+        window._on_result("alpha", "status", main_window_mod.Status("installed"))
         assert "alpha" not in window._status_errors
         assert window._status_interval_ms("alpha") == main_window_mod.STATUS_REFRESH_INTERVAL_MS
     finally:
@@ -355,7 +356,7 @@ def test_status_error_retry_interval_backs_off_per_profile(tmp_path: Path, qapp)
 
 # ---- #374: a deleted explicit Proton runner is not READY -------------------
 def _ark_backend(tmp_path: Path, profile: dict | None = None) -> ArknightsBackend:
-    return ArknightsBackend(make_context(tmp_path, ak.KIND, profile))
+    return OfficialRouteBackend(make_context(tmp_path, ak.KIND, profile))
 
 
 def test_status_errors_when_explicit_runner_is_gone(tmp_path: Path) -> None:

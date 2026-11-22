@@ -39,15 +39,18 @@ from ..core import vcredist as vcredist  # noqa: E402, F401
 from ..core.backends import (
     BackendContext,
     BackendError,
+    BackendNotInstalled,
     BackendUnsupported,
     GameBackend,
     Status,
+    wine_prefix,
 )
 from ..core.events import Event, mask
 from ..core.gameversion import versions_equal
 from ..core.sandboxed import SandboxMixin
 from .arknights_news import IMAGE_HOSTS
 from .wine import (
+    GamePidsMixin,
     ProcessQuery,
     path_option,
     profile_setting,
@@ -125,84 +128,8 @@ KIND = "arknights-yostar"
 atomic_write_json = _atomic_write_json
 
 
-def _dangerous_removal_reason(
-    target: Path, data_dir: Path, recorded: str | None = None
-) -> str | None:
-    """Why ``target`` must never be removed, or ``None`` when it is allowed.
-
-    ``prefix`` is user-controlled, so removal follows a coherent policy: a
-    prefix is removable only when it is inside this profile's data dir, or it
-    matches the prefix recorded at install time (``INSTALLED_PREFIX_KEY``).
-    Everything else -- the filesystem root, the home directory, this profile's
-    data dir or one of its ancestors, another Nadare profile's tree -- is
-    refused so a crafted/imported ``prefix`` cannot delete unrelated data.
-    """
-    resolved = target.resolve()
-    if resolved.parent == resolved:
-        return "the filesystem root"
-    home = Path.home().resolve()
-    if resolved == home:
-        return "the home directory"
-    data_resolved = data_dir.resolve()
-    if resolved == data_resolved or resolved in data_resolved.parents:
-        return f"the profile data directory {data_dir} (or one of its parents)"
-    if data_resolved in resolved.parents:
-        # Owned by this profile.
-        return None
-    profiles_resolved = paths.profiles_dir().resolve()
-    if resolved == profiles_resolved or profiles_resolved in resolved.parents:
-        return "another Nadare profile directory"
-    if recorded:
-        try:
-            if resolved == Path(recorded).expanduser().resolve():
-                return None
-        except OSError:
-            pass
-    return "not a prefix this profile installed"
-
-
-def _purge_target(data_dir: Path, recorded_prefix: str | None = None) -> Path | None:
-    """The resolved directory a ``purge`` may remove, or raise ``BackendError``.
-
-    ``None`` means the profile dir is a symlink to a directory that merely
-    *contains* the recorded prefix: that directory may hold unrelated data, so
-    the caller drops the link and leaves the target alone.
-
-    ``data_dir`` may be a symlink (a profile relocated to another disk), which
-    ``shutil.rmtree`` refuses; the resolved target is returned instead. The same
-    ownership policy as prefix removal applies: only the profile's own directory
-    is removed, or a relocation the profile can prove it installed into (its
-    recorded ``installed_prefix`` resolves inside it). Anything else -- the
-    filesystem root, the home directory, another profile, or an arbitrary
-    symlink target such as ``/opt`` -- is refused instead of being ``rmtree``'d.
-    """
-    resolved = data_dir.resolve()
-    if resolved.parent == resolved:
-        raise BackendError(f"refusing to purge {data_dir}: it resolves to the filesystem root")
-    if resolved == Path.home().resolve():
-        raise BackendError(f"refusing to purge {data_dir}: it resolves to the home directory")
-    expected = data_dir.parent.resolve() / data_dir.name
-    if resolved == expected:
-        return resolved
-    profiles_resolved = paths.profiles_dir().resolve()
-    if resolved == profiles_resolved or profiles_resolved in resolved.parents:
-        raise BackendError(
-            f"refusing to purge {data_dir}: it resolves to another profile directory"
-        )
-    if recorded_prefix:
-        try:
-            prefix_resolved = Path(recorded_prefix).expanduser().resolve()
-        except OSError:
-            prefix_resolved = None
-        if prefix_resolved is not None:
-            if prefix_resolved == resolved:
-                return resolved
-            if resolved in prefix_resolved.parents:
-                return None
-    raise BackendError(f"refusing to purge {data_dir}: it resolves outside the profile directory")
-
-
 class WineGameBackend(
+    GamePidsMixin,
     InstallerMixin,
     LaunchingMixin,
     RunnerMixin,
@@ -211,6 +138,8 @@ class WineGameBackend(
     GameBackend,
 ):
     unofficial_notice = True
+    supports_remake_prefix = True
+    uses_wine_prefix = True
     install_size_hint = int(3.5 * 1024**3)
 
     #: Display driver when the profile says ``auto``: ``wayland`` or ``x11``.
@@ -230,6 +159,7 @@ class WineGameBackend(
     #: Default install sub-path and launcher candidates, overridable per game.
     install_subdir: Path = DEFAULT_INSTALL_SUBDIR
     launcher_names: tuple[str, ...] = LAUNCHER_NAMES
+    game_process_names: tuple[str, ...] = ()
     direct_exe: str = "Arknights.exe"
     #: Installer defaults and trust, overridable by launcher-only games.
     default_installer_url: str = DEFAULT_INSTALLER_URL
@@ -273,11 +203,8 @@ class WineGameBackend(
         return self.ctx.data_dir()
 
     def prefix(self) -> Path:
-        configured = path_option(
-            profile_setting(self.ctx.profile, "prefix")
-            or profile_setting(self.ctx.profile, "wineprefix")
-        )
-        return configured if configured is not None else self._data_dir() / "prefix"
+        # A pure path (#1465): status() asks for it; _ensure_prefix creates it with its parents.
+        return wine_prefix(self.ctx.profile, self.ctx.data_path())
 
     def install_dir(self) -> Path:
         configured = path_option(profile_setting(self.ctx.profile, "install_dir"))
@@ -327,9 +254,16 @@ class WineGameBackend(
         """Another Flatpak instance launched this prefix's game."""
         return sandbox.in_flatpak() and runlock.running(self.prefix())
 
+    def _game_running(self) -> bool:
+        """The game's processes run here, or another Flatpak window started it (#1455 R4-4)."""
+        return bool(
+            scan_pids(self._running_patterns())
+            or (not self.game_process_names and self._running_elsewhere())
+        )
+
     def _refuse_if_running(self, what: str) -> None:
         """Stop before replacing game files under a running game (#933)."""
-        if scan_pids(self._patterns()) or self._running_elsewhere():
+        if self._game_running():
             raise BackendError(f"Stop the game before {what}", 8)
 
     def _sync_direct(self) -> dict[str, Any]:
@@ -355,6 +289,8 @@ class WineGameBackend(
         "DISPLAY",
         "XDG_SESSION_TYPE",
         "LD_LIBRARY_PATH",
+        "LOCPATH",
+        "PRESSURE_VESSEL_GENERATE_LOCALES",
     )
 
     #: Whether this game offers the Sandbox (the home folder hidden while it plays).
@@ -366,8 +302,8 @@ class WineGameBackend(
         direct = self.direct_mode()
         target = self.direct_target() if direct else self.find_launcher()
         incomplete = direct and self._install_incomplete()
-        pids = scan_pids(self._patterns(target))
-        elsewhere = self._running_elsewhere()
+        pids = scan_pids(self._running_patterns(target))
+        elsewhere = not self.game_process_names and self._running_elsewhere()
         running = bool(pids) or elsewhere
         data = {
             "prefix": str(prefix),
@@ -489,6 +425,14 @@ class WineGameBackend(
             )
         return {}, None, None
 
+    def _running_patterns(self, target: Path | None | object = _SEARCH) -> ProcessQuery:
+        """Playing tracks the game executable where it is known, never its launcher."""
+        if self.game_process_names:
+            return ProcessQuery(
+                prefix=str(self.prefix()), names=self.game_process_names, require_name=True
+            )
+        return self._patterns(target)
+
     def _patterns(self, target: Path | None | object = _SEARCH) -> ProcessQuery:
         """Build the structured process query for this profile's launcher.
 
@@ -600,11 +544,11 @@ class WineGameBackend(
         if self.direct_mode():
             target = self.direct_target()
             if target is None or not target.is_file():
-                raise BackendError(f"{self.display_name} is not installed")
+                raise BackendNotInstalled(f"{self.display_name} is not installed")
             self._sync_direct()
             return
         if self.find_launcher() is None:
-            raise BackendError("the game is not installed")
+            raise BackendNotInstalled("the game is not installed")
         self.ctx.emit(
             Event("step", f"Starting the {self.display_name} launcher (it checks for updates)")
         )
@@ -620,7 +564,7 @@ class WineGameBackend(
                 "Repair is only available when Nadare manages the game files"
             )
         if not self.install_dir().is_dir():
-            raise BackendError(f"{self.display_name} is not installed")
+            raise BackendNotInstalled(f"{self.display_name} is not installed")
         self._sync_direct()
         try:
             missing = self._missing_entries(verify=False)
@@ -648,7 +592,9 @@ class WineGameBackend(
         # Make sure a runner exists BEFORE anything is moved: wineboot needs it.
         self._ensure_default_runner(strict=True)
         self.ctx.emit(Event("step", "Moving the old Wine prefix aside"))
-        backup = prefixmove.move_aside(self.prefix())
+        # Recorded (and saved) before anything moves: a killed rebuild is put back at the next
+        # start, and its backup is never mistaken for disposable profile data (#1490).
+        backup = prefixmove.begin_rebuild(self.ctx, self.prefix(), [self.install_dir()])
         moved: list[Path] = []
         try:
             # _ensure_prefix creates the new prefix and runs wineboot; when it
@@ -660,11 +606,9 @@ class WineGameBackend(
             moved = prefixmove.restore_inside(backup, self.prefix(), [self.install_dir()])
         except BaseException:
             prefixmove.roll_back(backup, self.prefix(), moved)
+            prefixmove.end_rebuild(self.ctx, backup, kept=False)
             raise
-        backups = self.ctx.profile.get("prefix_backups")
-        if not isinstance(backups, list):
-            backups = []
-        self.ctx.set("prefix_backups", [*backups, str(backup.resolve())])
+        prefixmove.end_rebuild(self.ctx, backup, kept=True)
         self.ctx.emit(
             Event(
                 "done",
@@ -738,72 +682,6 @@ class WineGameBackend(
         other = _shared_with(self.ctx.config.profiles, self.ctx.name, tree.resolve())
         if other:
             raise BackendError(f"refusing to {action} {tree}: it is shared with profile {other!r}")
-
-    def _remove_tree_safely(self, tree: Path) -> None:
-        """Delete ``tree`` without entering a mounted drive; report what was left (#947)."""
-        from ..core import removal
-
-        outcome = removal._rmtree_safely(tree)
-        left = [f"{m} is a separate mounted drive, left in place" for m in outcome.mounts]
-        left += [removal._leftover_warning(p, e) for p, e in outcome.leftovers]
-        if left:
-            raise BackendError(
-                f"{tree} was only partly removed ({'; '.join(left)}). "
-                "Everything else in it is gone; the profile is kept."
-            )
-
-    def uninstall(self, purge: bool = False) -> None:
-        if scan_pids(self._patterns()) or self._running_elsewhere():
-            raise BackendError("Stop the game before uninstalling it", 8)
-        prefix = self.prefix()
-        data_dir = self._data_dir()
-        recorded = profile_setting(self.ctx.profile, INSTALLED_PREFIX_KEY)
-        # ``prefix`` is user-controlled: only remove it when it is inside this
-        # profile's data dir or matches the prefix recorded at install time.
-        reason = _dangerous_removal_reason(
-            prefix, data_dir, str(recorded) if recorded not in (None, "") else None
-        )
-        if reason is not None:
-            raise BackendError(
-                f"refusing to remove the prefix {prefix}: it is {reason} "
-                "(reinstall to record it, or set 'prefix' under the profile's data dir)"
-            )
-        if (prefix / "drive_c").is_dir():
-            if prefix.is_symlink():
-                # The link may have been moved to another disk or swapped after
-                # install, so its target can hold unrelated data: drop the link
-                # and leave the folder it points at.
-                self.ctx.emit(
-                    Event(
-                        "step",
-                        f"{prefix} links to {prefix.resolve()}, which may hold other "
-                        "files: removing the link and leaving that folder in place",
-                    )
-                )
-                prefix.unlink(missing_ok=True)
-            else:
-                self._refuse_if_shared(prefix)
-                self.ctx.emit(Event("step", f"Removing the game prefix {prefix}"))
-                self._remove_tree_safely(prefix)
-        if purge:
-            self.ctx.emit(Event("step", "Purging profile data (cache, prefix)"))
-            target = _purge_target(
-                data_dir, str(recorded) if recorded not in (None, "") else None
-            )
-            if target is None:
-                self.ctx.emit(
-                    Event(
-                        "step",
-                        f"{data_dir} links to {data_dir.resolve()}, which may hold other "
-                        "files: removing the link and leaving that folder in place",
-                    )
-                )
-            else:
-                self._refuse_if_shared(target)
-                self._remove_tree_safely(target)
-            if data_dir.is_symlink():
-                data_dir.unlink(missing_ok=True)
-        self.ctx.emit(Event("done", "Uninstalled"))
 
 
 __all__ = [

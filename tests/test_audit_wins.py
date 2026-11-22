@@ -8,6 +8,7 @@ import types
 from pathlib import Path
 
 from _backend_helpers import make_context
+from _official_route import OfficialRouteBackend
 from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
@@ -50,7 +51,7 @@ def test_a_pack_extent_over_many_folders_is_linear():
 
 
 def test_status_resolves_the_launcher_once(tmp_path, monkeypatch):
-    backend = ak.ArknightsBackend(make_context(tmp_path, ak.KIND, None, "t"))
+    backend = OfficialRouteBackend(make_context(tmp_path, ak.KIND, None, "t"))
     calls = []
     real = backend.find_launcher
     monkeypatch.setattr(backend, "find_launcher", lambda: calls.append(1) or real())
@@ -120,7 +121,7 @@ def test_yostar_plan_without_verify_does_not_crc(tmp_path, monkeypatch):
 
 
 def test_repair_checks_files_after_a_sync_without_hashing_again(tmp_path, monkeypatch):
-    backend = ak.ArknightsBackend(make_context(tmp_path, ak.KIND, None, "t"))
+    backend = OfficialRouteBackend(make_context(tmp_path, ak.KIND, None, "t"))
     seen = []
     monkeypatch.setattr(backend, "direct_mode", lambda: True)
     monkeypatch.setattr(backend, "install_dir", lambda: tmp_path)

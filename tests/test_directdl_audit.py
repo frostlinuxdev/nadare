@@ -161,13 +161,13 @@ def test_a_full_disk_while_unpacking_keeps_the_verified_archive(server, tmp_path
     def disk_full(*args, **kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(dd.shutil, "copyfileobj", disk_full)
-    with pytest.raises(dd.DirectError):
-        dd.sync(plan, tmp_path)
+    with monkeypatch.context() as fault:
+        fault.setattr(dd.shutil, "copyfileobj", disk_full)
+        with pytest.raises(dd.DirectError):
+            dd.sync(plan, tmp_path)
     kept = [p for p in tmp_path.rglob("g.zip")]
     assert kept and kept[0].read_bytes() == archive
 
-    monkeypatch.undo()
     requests_before = len(s.ranges)
     assert dd.sync(plan, tmp_path) == {"downloaded": 1, "skipped": 0}
     assert (tmp_path / "game.exe").read_bytes().startswith(b"MZ")
@@ -256,10 +256,10 @@ def test_a_retry_after_a_failed_unpack_does_not_download_the_archive_again(
     def disk_full(*args, **kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(dd.shutil, "copyfileobj", disk_full)
-    with pytest.raises(dd.DirectError):
-        dd.sync(plan, tmp_path)
-    monkeypatch.undo()
+    with monkeypatch.context() as fault:
+        fault.setattr(dd.shutil, "copyfileobj", disk_full)
+        with pytest.raises(dd.DirectError):
+            dd.sync(plan, tmp_path)
     served = s.bytes_served
     dd.sync(plan, tmp_path)
     assert s.bytes_served == served

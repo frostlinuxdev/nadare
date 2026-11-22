@@ -73,6 +73,9 @@ def test_czn_command_env_has_no_launcher_token(tmp_path, monkeypatch: pytest.Mon
     backend = CznBackend(ctx)
     backend.ctx.profile["runner"] = str(proton)
     monkeypatch.setattr(czn_backend.shutil, "which", lambda name, *a, **k: None)
+    # CZN runs through umu like every Proton game (#1449).
+    monkeypatch.setattr("nadare.core.umu.resolve", lambda *a, **k: "/usr/bin/umu-run")
+    monkeypatch.setattr("nadare.core.umu.note_first_runtime", lambda emit: None)
     monkeypatch.setenv("NADARE_GITHUB_TOKEN", "ghp-launcher")
 
     _argv, env = backend._prefix_command(["game.exe"])

@@ -1,139 +1,51 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Navigation between the store grid and a game's detail page."""
+"""What a Store card does (#1536: there is no detail page between the grid and the install).
+
+A game not installed asks for the Install dialog (which carries the tier, delivery, the game's
+notice and the version picker); an installed game opens its page; a Steam tile goes to its own
+add-or-open flow.
+"""
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import QStackedWidget
 
-from ..core import artwork
-from ..core.storecatalog import entries, game_of
-from .images import ImageLoader
+from ..core import steamstore
+from ..core.storecatalog import game_of
 from .store import StorePage
-from .store_detail import StoreDetail
-
-
-class _HeroSignals(QObject):
-    finished = pyqtSignal(int, str, object, bool)  # generation, kind, path, path is a cover
-
-
-class _FetchHero(QRunnable):
-    """Fetch one hero image off the GUI thread.
-
-    ``signals`` belongs to the flow, never to the task: Qt destroys a finished runnable on
-    a pool thread, and a QObject made on the GUI thread must not die there.
-    """
-
-    def __init__(self, generation: int, kind: str, title: str, signals: _HeroSignals) -> None:
-        super().__init__()
-        self.generation = generation
-        self.kind = kind
-        self.title = title
-        self.signals = signals
-
-    def run(self) -> None:
-        try:
-            profile = {"backend": self.kind}
-            path = artwork.fetch(profile, self.title, "hero")
-            is_cover = False
-            if not path:  # most games have no hero source: stand in their cover
-                path = artwork.fetch(profile, self.title, "cover")
-                is_cover = bool(path)
-        except Exception:  # noqa: BLE001 - artwork is optional
-            path, is_cover = None, False
-        try:
-            self.signals.finished.emit(self.generation, self.kind, path, is_cover)
-        except RuntimeError:  # the flow was destroyed while the fetch ran
-            pass
 
 
 class StoreFlow(QStackedWidget):
     install_requested = pyqtSignal(str)
     play_requested = pyqtSignal(str)
-    own_game_requested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.grid = StorePage()
         self.addWidget(self.grid)
-        self.detail: StoreDetail | None = None
-        self._detail_kind = ""
-        self._installed = frozenset()
-        self._generation = 0
-        self._images = ImageLoader(parent=self)
-        self._hero_signals = _HeroSignals(self)
-        self._hero_signals.finished.connect(self._hero_fetched)
-        self.grid.entry_activated.connect(self.show_detail)
-        self.grid.own_game_requested.connect(self.own_game_requested.emit)
+        self._installed: frozenset[str] = frozenset()
+        self.grid.entry_activated.connect(self.activate)
 
     def set_installed_kinds(self, kinds: frozenset[str]) -> None:
         self._installed = frozenset(kinds)
         self.grid.set_installed_kinds(self._installed)
-        if self.detail is None:
+
+    def activate(self, kind: str) -> None:
+        """A card was opened: play what is installed, otherwise ask to install ``kind``."""
+        if steamstore.app_id_of(kind) is not None:
+            self.install_requested.emit(kind)  # the window adds the tile or reopens it
             return
-        entry = self._entry_for(self._detail_kind)
-        # Only rebuild the page when what it shows changed; set_entry resets the hero art.
-        if entry is not None and entry != self.detail.entry:
-            self.detail.set_entry(entry)
-
-    def _entry_for(self, kind: str):
-        return next((e for e in entries(installed_kinds=self._installed) if e.kind == kind), None)
-
-    def show_detail(self, kind: str) -> None:
         game = game_of(kind, installed_kinds=self._installed)
-        entry = next((e for e in game.entries if e.kind == kind), None) if game else None
-        if entry is None:
-            entry = self._entry_for(kind)
-        if entry is None:
-            return
-        variants = game.entries if game is not None else ()
-        self._generation += 1
-        self._detail_kind = kind
-        if self.detail is None:
-            self.detail = StoreDetail(entry)
-            self.addWidget(self.detail)
-            self.detail.back_requested.connect(lambda: self.show_grid(focus_card=True))
-            self.detail.install_requested.connect(self.install_requested.emit)
-            self.detail.play_requested.connect(self.play_requested.emit)
-            self.detail.variant_requested.connect(self.show_detail)
-            self.detail.set_entry(entry, variants)
+        builds = game.entries if game is not None else ()
+        installed = next((build.kind for build in builds if build.kind in self._installed), "")
+        if not installed and kind in self._installed:
+            installed = kind
+        if installed:
+            self.play_requested.emit(installed)
         else:
-            self.detail.set_entry(entry, variants)
-        self.setCurrentWidget(self.detail)
-        if entry.has_art:
-            QThreadPool.globalInstance().start(
-                _FetchHero(self._generation, kind, entry.title, self._hero_signals)
-            )
-
-    def _hero_fetched(self, generation: int, kind: str, path: object, is_cover: bool) -> None:
-        if generation != self._generation or not path or self.detail is None:
-            return
-        # A real hero is already banner-shaped, so the loader may crop it to 1600x400. A cover
-        # standing in for one is decoded whole (just kept within 1600 px): the banner decides
-        # what to crop or blur, and a loader crop first would lose the top of the art.
-        width, height, crop = (1600, 1600, False) if is_cover else (1600, 400, True)
-        self._images.request(
-            [str(path)],
-            width,
-            height,
-            lambda pixmap: self._set_hero(generation, kind, pixmap, is_cover),
-            crop=crop,
-        )
-
-    def _set_hero(
-        self, generation: int, kind: str, pixmap: QPixmap | None, is_cover: bool = False
-    ) -> None:
-        if (
-            generation == self._generation
-            and self.detail is not None
-            and self._detail_kind == kind
-        ):
-            self.detail.set_hero(pixmap, is_cover=is_cover)
+            self.install_requested.emit(kind)
 
     def show_grid(self, *, focus_card: bool = False) -> None:
-        """Return to the grid; ``focus_card`` puts focus back on the game that was open."""
-        self._generation += 1
+        """Show the grid (it is the only page); kept for the window's Store button."""
         self.setCurrentWidget(self.grid)
-        if focus_card and self._detail_kind:
-            self.grid.focus_card(self._detail_kind)

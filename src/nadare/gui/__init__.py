@@ -214,6 +214,19 @@ def _show_profile(window: Any, profile: str) -> None:
         window.open_game(profile)
 
 
+def _startup_notes(cfg: Config) -> list[str]:
+    """One-time notes for the user that come from tidying the settings at start."""
+    from ..core import owngames
+
+    if cfg.notice:  # a quarantined or unreadable config: leave it alone
+        return []
+    try:
+        note = owngames.retire(cfg)
+    except OSError as exc:
+        return [f"Nadare could not update its settings: {exc}"]
+    return [note] if note else []
+
+
 def _config_recovery_text(cfg: Config) -> str:
     """Add a plain next step to a quarantined-config notice (#332 F-08)."""
     text = cfg.notice or ""
@@ -246,6 +259,18 @@ def run(config: Config | None = None, profile: str | None = None) -> int:
     _require_display()
     tls.setup()
     application = _application()
+    moved_notes: list[str] = []
+    if config is None:
+        # Before the settings are read: a move to the Flatpak a crash interrupted (#1353).
+        from ..core import flatpakmove
+
+        try:
+            moved_notes = flatpakmove.finish_interrupted()
+        except OSError as exc:
+            moved_notes = [f"An interrupted move to the Flatpak could not be finished: {exc}"]
+        note = flatpakmove.moved_note()
+        if note:
+            moved_notes.append(note)
     try:
         cfg = config if config is not None else Config.load()
     except (ConfigReadError, OSError) as exc:
@@ -273,6 +298,7 @@ def run(config: Config | None = None, profile: str | None = None) -> int:
                 )
             return code
 
+    moved_notes.extend(_startup_notes(cfg))  # after the lock: only one window writes
     try:
         window = open_window(cfg, profile=profile, app=application)
     except OSError as exc:
@@ -286,6 +312,10 @@ def run(config: Config | None = None, profile: str | None = None) -> int:
         from PyQt6.QtWidgets import QMessageBox
 
         QMessageBox.information(window, "Nadare", _config_recovery_text(cfg))
+    if moved_notes:
+        from PyQt6.QtWidgets import QMessageBox
+
+        QMessageBox.information(window, "Nadare", "\n\n".join(moved_notes))
     if instance is not None:
         instance.activation_requested.connect(lambda: _activate(window))
         instance.profile_requested.connect(lambda name: _show_profile(window, name))

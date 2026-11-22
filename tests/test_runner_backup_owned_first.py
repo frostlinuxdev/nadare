@@ -8,7 +8,9 @@ could not be published the rollback found nothing and the runner was gone.
 
 from __future__ import annotations
 
+import os
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -74,5 +76,12 @@ def test_a_backup_left_by_a_dead_installer_is_still_pruned(root):
     leftover = root / ".GE-X.old-dead"
     leftover.mkdir()
     (leftover / runners._OWNER_MARKER).write_text("999999999")
+    # A bare PID proves nothing in another PID namespace (#1494): kept while young...
+    runners._prune_stale(root)
+    assert leftover.exists()
+    # ...and pruned once old.
+    long_ago = time.time() - 7 * 3600
+    for path in (leftover / runners._OWNER_MARKER, leftover):
+        os.utime(path, (long_ago, long_ago))
     runners._prune_stale(root)
     assert not leftover.exists()

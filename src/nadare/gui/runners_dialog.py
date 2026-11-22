@@ -23,7 +23,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import diskspace, runners
+from ..core import runners
+from . import i18n
 
 COLUMNS = ("Runner", "Status", "Size", "Used by", "")
 
@@ -35,23 +36,28 @@ EMPTY_RUNNERS_TEXT = (
 
 
 def human_size(size: int) -> str:
-    """``1.6 GiB`` style size (the app-wide format)."""
-    return diskspace.human_size(size)
+    """``1.6 GiB`` style size (the app-wide format), in the UI language."""
+    return i18n.format_size(size)
+
+
+#: ``runners.standing`` -> the Status column.
+_STATUS = {
+    "recommended": "recommended (tested)",
+    "older": "older build",
+    "untested": "newer (untested)",
+    "custom": "custom",
+}
 
 
 def status_text(path: Path) -> str:
-    if runners.is_recommended(path):
-        return "recommended (tested)"
-    if runners.runner_family(path):
-        return "untested"
-    return "custom"
+    return _STATUS[runners.standing(path)]
 
 
 class _Worker(QObject):
     """Usage, sizes and deletions run off the GUI thread; results come back as signals."""
 
     usage_ready = pyqtSignal(int, object, object)  # generation, usage, unused
-    size_ready = pyqtSignal(str, int)
+    size_ready = pyqtSignal(str, object)  # bytes: a Qt int is 32-bit
     deleted = pyqtSignal(str, bool)
 
 

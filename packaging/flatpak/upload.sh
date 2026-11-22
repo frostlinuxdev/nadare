@@ -16,7 +16,7 @@ set -euo pipefail
 repo="${1:?usage: upload.sh <repo dir>}"
 rclone="${RCLONE:?set RCLONE to an rclone command with an r2: remote}"
 dest="${NADARE_FLATPAK_BUCKET:-r2:nadare-flatpak}"
-[[ -f "$repo/summary" && -f "$repo/nadare.flatpakref" ]] || {
+[[ -f "$repo/summary" && -f "$repo/nadare.flatpakref" && -f "$repo/nadare.flatpak" ]] || {
     echo "[!] $repo is not a built repository (run build_repo.sh)" >&2
     exit 1
 }
@@ -38,4 +38,7 @@ done
 for name in index.flatpakrepo nadare.flatpakref; do
     $rclone copyto --header-upload "$fresh" "$repo/$name" "$dest/$name"
 done
+# The bundle for Bazaar (#1410): same name every release, so a link to it never changes.
+$rclone copyto --header-upload "$fresh" --header-upload "Content-Type: application/vnd.flatpak" \
+    "$repo/nadare.flatpak" "$dest/nadare.flatpak"
 echo "[+] uploaded $repo to $dest"

@@ -23,10 +23,11 @@ import signal
 from pathlib import Path
 from typing import Any
 
-from ..core import process
+from ..core import process, shadercache
 from ..core.backends import BackendError, GameBackend, Option, Status
 from ..core.events import Event, mask
 from .wine import (
+    GamePidsMixin,
     ProcessQuery,
     WineBackend,
     path_option,
@@ -73,7 +74,7 @@ def _own_groups(pids: list[int]) -> set[int]:
     return groups
 
 
-class ScriptBackend(GameBackend):
+class ScriptBackend(GamePidsMixin, GameBackend):
     kind = "script"
     supports_update = False  # a script profile updates itself
 
@@ -188,14 +189,11 @@ class ScriptBackend(GameBackend):
         argv = ["bash", str(script)]
         self.ctx.emit(Event("step", f"Script: launching {script.name}"))
         self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
-        extra_env = profile_setting(self.ctx.profile, "extra_env")
-        extra = (
-            {str(k): str(v) for k, v in extra_env.items()} if isinstance(extra_env, dict) else {}
-        )
-        # Nadare's own environment loses its credential-looking variables (#811); what the
-        # profile sets on purpose is the user's choice and stays.
-        env = process.drop_secret_env(process.build_env(None))
-        env.update(extra)
+        # Owned shader caches go in first, so the profile's Environment still wins.
+        host = dict(os.environ)
+        shadercache.prepare(self.ctx.name, host, self.info)
+        env = process.build_env(self.ctx.profile, base=host)
+        shadercache.log_caches(self.ctx.name, self.ctx.data_path() / "prefix", env, self.info)
         return stream(
             argv,
             env,

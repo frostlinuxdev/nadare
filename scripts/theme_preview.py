@@ -127,12 +127,12 @@ def main() -> int:
         # one not-installed profile that must stay out of the sidebar.
         from nadare.core.backends import Status
 
-        window._on_result("neon-drift", Status("running", running=True))
-        window._on_result("aether-arc", Status("installed"))
+        window._on_result("neon-drift", "status", Status("running", running=True))
+        window._on_result("aether-arc", "status", Status("installed"))
         window._on_result(
-            "midnight-run", Status("installed", data={"update_available": True})
+            "midnight-run", "status", Status("installed", data={"update_available": True})
         )
-        window._on_result("dust-veil", Status("not_installed"))
+        window._on_result("dust-veil", "status", Status("not_installed"))
 
         window.resize(1180, 780)
         window.show()
@@ -200,5 +200,138 @@ def main() -> int:
     return 0
 
 
+def library_preview() -> int:
+    """Render the compact library and neighbouring pages using only local fixtures."""
+    from datetime import UTC, datetime, timedelta
+    from unittest.mock import patch
+
+    from PyQt6.QtCore import QEventLoop
+    from PyQt6.QtWidgets import QApplication
+
+    from nadare.core.backends import Status
+    from nadare.gui.main_window import MainWindow
+    from nadare.gui.theme import placeholder_art
+
+    output = OUTPUT_DIR
+    output.mkdir(parents=True, exist_ok=True)
+    app = QApplication.instance() or QApplication([])
+    # Keep fixture writes in the worktree; only the requested PNGs go to output.
+    with tempfile.TemporaryDirectory(prefix=".library-preview-", dir=REPO_ROOT) as tmp:
+        workdir = Path(tmp)
+        for var in ("XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+            os.environ[var] = str(workdir / var.lower())
+        os.environ["NADARE_NO_KEYRING"] = "1"
+        os.environ["NADARE_INDEX_BASE"] = ""
+        os.environ["NADARE_RELEASES_API"] = ""
+        os.environ["NADARE_ASSUME_NOTICES"] = "1"
+        from nadare.core.config import Config
+
+        config = Config.load(workdir / "config.json")
+        art_root = Path(os.environ.get(
+            "NADARE_PREVIEW_ART",
+            "/mnt/kikyou/work/visual-refresh-2026-11-13/proto-art/nadare/covers",
+        ))
+
+        def local_art(profile, title=None, kind="cover", **kwargs):
+            from nadare.core import artwork
+            slug = artwork.slug(profile, title)
+            slot = "cover-wide" if kwargs.get("art") == "wide" else "cover"
+            hit = next((p for p in art_root.glob(f"{slug}-{slot}.*") if p.suffix != ".src"), None)
+            return hit or profile.get("cover")
+
+        # Disable startup workers before constructing the window: this is a local render.
+        with (
+            patch("nadare.core.artwork.fetch", side_effect=local_art),
+            patch.object(MainWindow, "_start", return_value=False),
+            patch.object(MainWindow, "_start_update_check"),
+            patch.object(MainWindow, "_start_notices_check"),
+            patch.object(MainWindow, "_start_steam_shortcut_cleanup"),
+            patch.object(MainWindow, "_start_found_copies_check"),
+        ):
+            window = MainWindow(config)
+            games = [
+                ("wuthering-waves", "Wuthering Waves"),
+                ("girls-frontline-2", "Girls' Frontline 2"),
+                ("zenless-zone-zero", "Zenless Zone Zero"),
+                ("punishing-gray-raven", "Punishing: Gray Raven"),
+                ("arknights", "Arknights"),
+                ("genshin-impact", "Genshin Impact"),
+                ("stella-sora", "Stella Sora"),
+                ("honkai-impact-3rd", "Honkai Impact 3rd"),
+                ("honkai-star-rail", "Honkai: Star Rail"),
+                ("neverness-to-everness", "Neverness to Everness"),
+                ("goddess-of-victory-nikke", "Goddess of Victory: NIKKE"),
+                ("brown-dust-2", "Brown Dust 2"),
+                ("aether-gazer", "Aether Gazer"),
+                ("arknights-endfield", "Arknights: Endfield"),
+            ]
+            for index, (name, title) in enumerate(games):
+                candidates = list(art_root.glob(f"{name}-cover.*"))
+                cover = next((p for p in candidates if p.suffix != ".src"), None)
+                if cover is None:
+                    cover = workdir / f"{name}.png"
+                    placeholder_art(400, 520, title).save(str(cover))
+                wide = next(
+                    (p for p in art_root.glob(f"{name}-cover-wide.*") if p.suffix != ".src"), cover
+                )
+                now = datetime.now(UTC)
+                config.add_profile(
+                    name,
+                    title=title,
+                    backend="wine",
+                    cover=str(cover),
+                    wide=str(wide),
+                    favourite=index < 3,
+                    last_played=(now - timedelta(hours=index + 2)).isoformat() if index < 3 else "",
+                    added_at=(now - timedelta(days=3 if index in (4, 6) else 30)).isoformat(),
+                )
+            window.refresh_library()
+            for index, (name, _) in enumerate(games):
+                status = (
+                    Status("not_installed")
+                    if index == 6
+                    else Status("installed", data={"update_available": True})
+                    if index == 4
+                    else Status("running")
+                    if index == 3
+                    else Status("installed")
+                )
+                window._snapshot(name)["status"] = status
+                window.library.set_state(name, status)
+                window.sidebar_games.set_status(name, status)
+            window.show_library()
+            window.show()
+            window.library.search.setFocus()
+            for width, height in ((1280, 800), (1920, 1080)):
+                window.resize(width, height)
+                for _ in range(8):
+                    app.processEvents(QEventLoop.ProcessEventsFlag.AllEvents)
+                window.library.wait_for_images()
+                app.processEvents()
+                path = output / f"library-{width}x{height}.png"
+                assert window.grab().save(str(path))
+                print(path)
+            window.resize(1280, 800)
+            for name, show in (
+                ("store", window.show_store),
+                ("game", lambda: window.open_game(games[0][0])),
+                ("settings", window.open_settings),
+            ):
+                show()
+                app.processEvents()
+                if name == "store":
+                    window.store.grid.wait_for_images()
+                elif name == "game":
+                    window.game.wait_for_images()
+                app.processEvents()
+                path = output / f"{name}-1280x800.png"
+                assert window.grab().save(str(path))
+                print(path)
+            window.close()
+            window.deleteLater()
+            app.processEvents()
+    return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(library_preview() if "--library" in sys.argv else main())

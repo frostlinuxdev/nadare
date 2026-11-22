@@ -1,0 +1,7 @@
+{
+  "upcoming": [
+    {"title": "Silver Palace", "publisher": "Silver Studio", "when": "Q1 2027", "art": "https://cdn2.unrealengine.com/sample.jpg", "link": "https://silver.example/"},
+    {"title": "Star Garden", "publisher": "Garden Studio", "when": "2027", "link": "https://garden.example/"},
+    {"title": "Moon Voyage", "publisher": "Moon Studio", "when": "To be announced", "link": "https://moon.example/"}
+  ]
+}

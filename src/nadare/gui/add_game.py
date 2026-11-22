@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Nadare contributors
-"""The "Add game" wizard: pick a backend, install new or import an existing one.
+"""The "Add game" wizard: pick a backend and create a new profile.
 
 The dialog only reads the folders the user points it at; it never creates,
 moves or deletes anything inside them. Saving a profile writes the config, and
-the caller decides what to do next (open the game page, offer a verify run).
+the caller decides what to do next (open the game page or start the install).
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from typing import Any
 
 from PyQt6.QtCore import Qt, QThreadPool, pyqtSignal
 from PyQt6.QtWidgets import (
-    QButtonGroup,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -29,7 +28,6 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
-    QRadioButton,
     QScrollArea,
     QSizePolicy,
     QVBoxLayout,
@@ -49,6 +47,7 @@ from ..core.directkinds import (
     hoyo_visible,
     tier_of,
 )
+from ..core.paths import inside as _inside
 from ..core.profilenames import short_name
 from ..core.shortcuts import command_hint
 from .theme import apply_theme
@@ -73,9 +72,6 @@ class GameType:
     #: Longer name for the wizard list, when the profile title should stay short.
     display: str = ""
 
-
-#: The wizard group for profiles that need the user's own game files.
-ADVANCED_GROUP = "Advanced (bring your own game files)"
 
 _CATALOG: tuple[GameType, ...] = (
     GameType("Chaos Zero Nightmare", "stove-czn"),
@@ -137,27 +133,6 @@ _CATALOG: tuple[GameType, ...] = (
         )
         for kind, title, root, subdir, exe in LAUNCHER_WIZARD
     ),
-    GameType(
-        "Wine / Proton game",
-        "wine",
-        group=ADVANCED_GROUP,
-        badge="bring your own files",
-        badge_help="Use a Wine or Proton prefix and game files you already have.",
-    ),
-    GameType(
-        "Steam game",
-        "steam",
-        group=ADVANCED_GROUP,
-        badge="bring your own files",
-        badge_help="Use a game already installed in your Steam library.",
-    ),
-    GameType(
-        "Script",
-        "script",
-        group=ADVANCED_GROUP,
-        badge="bring your own files",
-        badge_help="Run a command or script you already have.",
-    ),
 )
 
 
@@ -181,7 +156,7 @@ def __getattr__(name: str) -> Any:
 
 #: Kinds that run through a Wine/Proton prefix (so the wizard offers a prefix).
 PREFIX_KINDS = frozenset(
-    {"wine", "script", "arknights-yostar", "stellasora-yostar", "stove-czn", *CATALOG_KINDS}
+    {"arknights-yostar", "stellasora-yostar", "stove-czn", *CATALOG_KINDS}
 )
 
 #: Prefix kinds whose whole install lives inside the Wine prefix (no separate
@@ -212,34 +187,6 @@ def _slugify(text: str) -> str:
     while "--" in slug:
         slug = slug.replace("--", "-")
     return slug[:MAX_PROFILE_NAME].strip("-")
-
-
-def _find_exe(folder: Path, names: tuple[str, ...], *, max_depth: int = 2) -> Path | None:
-    """Find one of ``names`` under ``folder`` (bounded, read-only walk).
-
-    A name that is a relative path (NTE's ``Client/.../HTGame.exe``) is looked up at exactly that
-    place; comparing it with file names never matched (measured on the rig, 2026-11-10).
-    """
-    for name in names:
-        found = libraries.exe_at_path(folder, name)
-        if found is not None:
-            return found
-    wanted = {name.lower() for name in names}
-    stack: list[tuple[Path, int]] = [(folder, 0)]
-    visited = 0
-    while stack and visited < 400:
-        directory, depth = stack.pop(0)
-        visited += 1
-        try:
-            entries = list(directory.iterdir())
-        except OSError:
-            continue
-        for entry in entries:
-            if entry.is_file() and entry.name.lower() in wanted:
-                return entry
-        if depth < max_depth:
-            stack.extend((entry, depth + 1) for entry in entries if entry.is_dir())
-    return None
 
 
 def game_spec(game: GameType) -> libraries.GameSpec:
@@ -335,11 +282,6 @@ def _holds_game(game: GameType, folder: Path) -> bool:
         return False
 
 
-def _inside(path: Path, root: Path) -> bool:
-    """True when ``path`` is ``root`` or lies below it (no symlink resolution needed here)."""
-    return path == root or root in path.parents
-
-
 def _drive_c_prefix(folder: Path) -> Path | None:
     """The Wine prefix that contains ``folder``, if it lies under ``drive_c``.
 
@@ -351,106 +293,6 @@ def _drive_c_prefix(folder: Path) -> Path | None:
         if (candidate / "drive_c").is_dir():
             return candidate
     return None
-
-
-def _lepton_prefix(folder: Path) -> Path | None:
-    """The lepton-fgo install prefix holding ``lepton-x86_64/lepton-fgo``.
-
-    Users may pick the prefix or the ``lepton-x86_64`` folder inside it, so walk
-    up the same way :func:`_drive_c_prefix` does.
-    """
-    for candidate in (folder, *folder.parents):
-        if (candidate / "lepton-x86_64" / "lepton-fgo").is_file():
-            return candidate
-    return None
-
-
-def detect_import(kind: str, folder: str | Path | None, prefix: str | Path | None) -> dict:
-    """Best-effort, read-only detection of an existing install.
-
-    Returns ``{"install_dir", "prefix", "notes"}``. Nothing is ever written:
-    callers decide which hint to adopt.
-    """
-    info: dict[str, Any] = {"install_dir": "", "prefix": "", "notes": []}
-    folder_path = Path(folder).expanduser() if folder else None
-    prefix_path = Path(prefix).expanduser() if prefix else None
-    if prefix_path is not None and prefix_path.exists() and not prefix_path.is_dir():
-        # A file is never a prefix (#1207 b149). A path that does not exist yet stays only as
-        # the new prefix for a game found elsewhere; it is never "found".
-        prefix_path = None
-    if kind in LEPTON_KINDS:
-        for candidate in (folder_path, prefix_path):
-            if candidate is None or not candidate.is_dir():
-                continue
-            found = _lepton_prefix(candidate)
-            if found is not None:
-                info["prefix"] = str(found)
-                info["notes"].append(f"Found the lepton-fgo install at {found}.")
-                break
-        return info
-    game = next((g for g in _catalog() if g.kind == kind), None)
-    adopted = (
-        _drive_c_prefix(folder_path)
-        if folder_path and folder_path.is_dir() and not (folder_path / "drive_c").is_dir()
-        else None
-    )
-    if adopted is not None:
-        info["prefix"] = str(adopted)
-        info["notes"].append(f"Found the Wine prefix at {adopted}.")
-
-    if game and game.install_subdir:
-        subdir = Path(game.install_root) / game.install_subdir
-        # The user may have picked the prefix itself (which holds drive_c/...).
-        layout_root = adopted if adopted is not None else folder_path
-        if layout_root and (layout_root / "drive_c").is_dir():
-            candidate = layout_root / subdir
-            # The game's own folder must hold the game, not just exist (#1207 b148).
-            if candidate.is_dir() and _find_exe(candidate, game.exes) is not None:
-                info["prefix"] = str(layout_root)
-                info["install_dir"] = str(candidate)
-                info["notes"].append(f"Found the {game.title} prefix layout.")
-        if not info["install_dir"] and folder_path and folder_path.is_dir():
-            exe = _find_exe(folder_path, game.exes)
-            if exe is not None:
-                info["install_dir"] = str(folder_path)
-                info["notes"].append(f"Found {exe.name}.")
-        if prefix_path and (prefix_path.is_dir() or info["install_dir"]):
-            info["prefix"] = str(prefix_path)
-            candidate = prefix_path / subdir
-            if candidate.is_dir() and _find_exe(candidate, game.exes) is not None:
-                info["notes"].append(f"Found {game.title} in the prefix.")
-                if not info["install_dir"]:
-                    info["install_dir"] = str(candidate)
-        if not info["install_dir"] and info["prefix"]:
-            # The prefix exists but the game is not installed in it: do not invent
-            # ``<prefix>/<subdir>`` as the install folder (#598c). The backend's own
-            # default applies, and INSTALL can put the game there.
-            if not any("prefix" in note.lower() for note in info["notes"]):
-                info["notes"].append(f"Found the Wine prefix at {info['prefix']}.")
-            info["notes"].append(f"{game.title} is not installed in it yet.")
-    else:
-        if folder_path and folder_path.is_dir():
-            if kind in PREFIX_ONLY_KINDS:
-                # The backend reads only ``prefix()``; only a real prefix (one
-                # holding drive_c, or a folder inside it) is worth importing.
-                found = _drive_c_prefix(folder_path)
-                if found is not None:
-                    info["prefix"] = str(found)
-                    if not any("prefix" in note.lower() for note in info["notes"]):
-                        info["notes"].append(f"Found the Wine prefix at {found}.")
-            else:
-                info["install_dir"] = str(folder_path)
-                info["notes"].append("Folder found; Nadare will use it as-is.")
-                if adopted is not None:
-                    info["notes"].append("Nadare will use the Wine prefix that contains it.")
-        if prefix_path and prefix_path.is_dir():
-            # The game folder inside the prefix is an easy thing to pick: use the
-            # prefix that contains it.
-            found = _drive_c_prefix(prefix_path)
-            if kind not in PREFIX_ONLY_KINDS or found is not None:
-                info["prefix"] = str(found or prefix_path)
-                info["notes"].append("Prefix folder found.")
-    return info
 
 
 class _ElidedLabel(QLabel):
@@ -505,21 +347,19 @@ class AddGameDialog(QDialog):
         data_root: Path | None = None,
         *,
         kind: str | None = None,
-        advanced: bool = False,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("Root")
         apply_theme(self)
         self.config = config
         self.created_profile = ""
-        self.created_by_import = False
         self._data_root = data_root
         self._name_touched = False
         self._folder_touched = False
         self.reused: libraries.Candidate | None = None  # a library folder _plan_paths reuses
         self._prefix_touched = False
         #: Bumped per background detection / free-space read so a stale result cannot
-        #: overwrite the hints. Separate counters: typing must not cancel an import check.
+        #: overwrite the hints. Separate counters: typing must not cancel a reuse check.
         self._detect_generation = 0
         #: Reusable copies the background detection found, by folder (#1207 b150).
         self._reuse_cache: dict[str, Any] = {}
@@ -558,22 +398,9 @@ class AddGameDialog(QDialog):
         self.game_list.setMaximumHeight(210)
         self._first_row = -1
         valid_kind = kind if any(game.kind == kind for game in available_catalog()) else None
-        self._populate_games(advanced_only=advanced)
+        self._populate_games()
         self.game_list.currentRowChanged.connect(self._on_game_changed)
         root.addWidget(self.game_list)
-
-        mode_row = QHBoxLayout()
-        self.install_new = QRadioButton("Install new")
-        self.import_existing = QRadioButton("Import existing")
-        self.install_new.setChecked(True)
-        mode_group = QButtonGroup(self)
-        mode_group.addButton(self.install_new)
-        mode_group.addButton(self.import_existing)
-        self.install_new.toggled.connect(self._on_mode_changed)
-        mode_row.addWidget(self.install_new)
-        mode_row.addWidget(self.import_existing)
-        mode_row.addStretch(1)
-        root.addLayout(mode_row)
 
         self.size_hint = QLabel("")
         self.size_hint.setObjectName("Muted")
@@ -655,11 +482,6 @@ class AddGameDialog(QDialog):
         form.addRow("Game name", self.name)
         root.addLayout(form)
 
-        self.detect_label = QLabel("")
-        self.detect_label.setObjectName("Muted")
-        self.detect_label.setWordWrap(True)
-        root.addWidget(self.detect_label)
-
         self.error_label = _ErrorLabel("")
         self.error_label.setObjectName("Error")
         self.error_label.setWordWrap(True)
@@ -692,9 +514,7 @@ class AddGameDialog(QDialog):
 
         self._select_row(self._first_row)
         self._on_game_changed(self._first_row)
-        if advanced:
-            self.game_list.setAccessibleName("Advanced game type")
-        elif valid_kind:
+        if valid_kind:
             self.set_backend(valid_kind)
             # The store already chose the game; an unknown kind keeps the full list.
             self.game_list.hide()
@@ -709,24 +529,20 @@ class AddGameDialog(QDialog):
         self.resize(max(self.minimumWidth(), self.sizeHint().width()), max(300, min(want, limit)))
 
     # ---- construction helpers ---------------------------------------------
-    def _populate_games(self, *, advanced_only: bool = False) -> None:
-        groups = (ADVANCED_GROUP,) if advanced_only else ("Games", ADVANCED_GROUP)
-        for group in groups:
-            header = QListWidgetItem(group.upper())
-            header.setFlags(Qt.ItemFlag.NoItemFlags)
-            self.game_list.addItem(header)
-            for game in available_catalog():
-                if game.group != group:
-                    continue
-                shown = game.display or game.title
-                label = f"{shown}  ·  {game.badge}" if game.badge else shown
-                item = QListWidgetItem(label)
-                if game.badge_help:
-                    item.setToolTip(game.badge_help)
-                item.setData(Qt.ItemDataRole.UserRole, game.kind)
-                self.game_list.addItem(item)
-                if self._first_row < 0:
-                    self._first_row = self.game_list.row(item)
+    def _populate_games(self) -> None:
+        header = QListWidgetItem("GAMES")
+        header.setFlags(Qt.ItemFlag.NoItemFlags)
+        self.game_list.addItem(header)
+        for game in available_catalog():
+            shown = game.display or game.title
+            label = f"{shown}  ·  {game.badge}" if game.badge else shown
+            item = QListWidgetItem(label)
+            if game.badge_help:
+                item.setToolTip(game.badge_help)
+            item.setData(Qt.ItemDataRole.UserRole, game.kind)
+            self.game_list.addItem(item)
+            if self._first_row < 0:
+                self._first_row = self.game_list.row(item)
 
     def _with_browse(self, line_edit: QLineEdit, slot) -> QWidget:
         row = QWidget()
@@ -763,27 +579,23 @@ class AddGameDialog(QDialog):
                 self._select_row(row)
                 return
 
-    def set_mode(self, import_existing: bool) -> None:
-        # The two radios are exclusive: unchecking one needs the other checked.
-        (self.import_existing if import_existing else self.install_new).setChecked(True)
-
     def set_install_dir(self, path: str | Path) -> None:
         self.folder.setText(str(path))
         self._folder_touched = True
         self._folder_changed()
-        self.detect()
+        self._update_free_space()
         self._detect_async()  # the reuse hint is looked up off the GUI thread (#1207 b150)
 
     def use_default_location(self) -> None:
         """Back to the default library: the folder and prefix Nadare picks itself."""
         self._folder_touched = False
         self._prefix_touched = False
-        self._on_mode_changed()
+        self._on_game_changed(self.game_list.currentRow())
 
     def set_prefix(self, path: str | Path) -> None:
         self._prefix_touched = True
         self.prefix.setText(str(path))
-        self.detect()
+        self._update_free_space()
 
     def set_profile_name(self, name: str) -> None:
         self.name.setText(name)
@@ -829,11 +641,7 @@ class AddGameDialog(QDialog):
         if game is None:
             return
         self._prefix_open = False
-        self.prefix.setPlaceholderText(
-            "Folder of the existing install"
-            if self.import_existing.isChecked()
-            else "Created automatically"
-        )
+        self.prefix.setPlaceholderText("Created automatically")
         if game.kind in PREFIX_KINDS:
             self.prefix_row.setVisible(True)
         else:
@@ -842,12 +650,10 @@ class AddGameDialog(QDialog):
             self._apply_location_visibility()
         if not self._name_touched:
             self.name.setText(self._default_name(game.title, game.kind))
-        if not self._folder_touched and self.install_new.isChecked():
+        if not self._folder_touched:
             self.folder.setText(str(self._root() / self._slug() / "install"))
         if not self._prefix_touched:
-            # A default prefix only makes sense for a fresh install; in Import
-            # mode an auto-filled, non-existent path must never be accepted.
-            if game.kind in PREFIX_KINDS and self.install_new.isChecked():
+            if game.kind in PREFIX_KINDS:
                 self.prefix.setText(self._matching_prefix(self.folder.text()))
             else:
                 self.prefix.clear()
@@ -867,7 +673,7 @@ class AddGameDialog(QDialog):
         return str(path.parent / ("prefix" if path.name == "install" else f"{path.name}-prefix"))
 
     def _folder_changed(self, _text: str = "") -> None:
-        if not self._prefix_touched and self.install_new.isChecked():
+        if not self._prefix_touched:
             game = self._selected_game()
             if game is not None and game.kind in PREFIX_KINDS:
                 self.prefix.setText(self._matching_prefix(self.folder.text()))
@@ -881,11 +687,9 @@ class AddGameDialog(QDialog):
     def _apply_location_visibility(self) -> None:
         """A fresh install uses the default folders unless the user asks to choose.
 
-        Folder and Wine-prefix fields are jargon for most people, and the defaults
-        are right for them; an import must show them because it needs real paths.
+        Folder and Wine-prefix fields stay behind the location controls.
         """
-        importing = self.import_existing.isChecked()
-        show = importing or self._location_open
+        show = self._location_open
         game = self._selected_game()
         uses_prefix = game is not None and (
             game.kind in PREFIX_KINDS or game.kind in LEPTON_KINDS
@@ -893,23 +697,23 @@ class AddGameDialog(QDialog):
         prefix_only = game is not None and game.kind in PREFIX_ONLY_KINDS
         form = self._form
         # A prefix-only kind has no separate game folder: the prefix *is* the
-        # game location, so the install-folder row is never shown (not even for
-        # an import, which asks for that location in the prefix row instead).
+        # game location, so the install-folder row is never shown.
         form.setRowVisible(0, show and not prefix_only)  # install folder
         form.setRowVisible(1, show and not prefix_only)
         # A fresh install hides the Wine prefix row (its label, field and free-space line)
-        # behind the "separately" link; an import and a prefix-only kind always show it.
+        # behind the "separately" link; a prefix-only kind always shows it.
         advanced = getattr(self, "_prefix_open", False)
-        prefix_shown = show and uses_prefix and (prefix_only or importing or advanced)
+        editable_prefix = game is not None and not game.kind.startswith("direct-")
+        prefix_shown = show and uses_prefix and editable_prefix and (prefix_only or advanced)
         form.setRowVisible(2, prefix_shown)  # Wine prefix
         form.setRowVisible(3, prefix_shown)
         if hasattr(self, "prefix_toggle"):
-            prefix_controls = show and uses_prefix and not prefix_only and not importing
+            prefix_controls = show and uses_prefix and editable_prefix and not prefix_only
             self.prefix_summary.setVisible(prefix_controls)
             self.prefix_only_summary.setVisible(
-                show and uses_prefix and prefix_only and not importing
+                show and uses_prefix and prefix_only and game.kind not in LEPTON_KINDS
             )
-            self.install_summary.setVisible(show and not prefix_only and not importing)
+            self.install_summary.setVisible(show and not prefix_only)
             self.prefix_toggle.setVisible(prefix_controls)
             self.prefix_toggle.setText(
                 "Use the matching prefix folder"
@@ -917,7 +721,7 @@ class AddGameDialog(QDialog):
                 else "Choose the Wine prefix separately…"
             )
             self._update_prefix_summary()
-        form.setRowVisible(self.location_toggle, not importing)
+        form.setRowVisible(self.location_toggle, True)
         self._apply_prefix_label(prefix_only)
         self.location_toggle.setText(
             "Use the default location" if self._location_open else "Choose where to install…"
@@ -945,39 +749,14 @@ class AddGameDialog(QDialog):
             for widget in (label, self.prefix, self.prefix_row):
                 widget.setToolTip("")
 
-    def _on_mode_changed(self, _checked: bool = False) -> None:
-        self._prefix_open = self.import_existing.isChecked()
-        self._apply_location_visibility()
-        if self.import_existing.isChecked():
-            self.folder_label.setText("Existing game folder")
-            self.prefix.setPlaceholderText("Folder of the existing install")
-            if not self._folder_touched:
-                self.folder.clear()
-            # Drop an untouched default prefix so the import guard can tell a
-            # real pick from the auto-filled path.
-            if not self._prefix_touched:
-                self.prefix.clear()
-        else:
-            self.folder_label.setText("Game folder")
-            self.prefix.setPlaceholderText("Created automatically")
-            if not self._folder_touched:
-                self.folder.setText(str(self._root() / self._slug() / "install"))
-            if not self._prefix_touched and self._selected_game() is not None:
-                if self._selected_game().kind in PREFIX_KINDS:
-                    self.prefix.setText(self._matching_prefix(self.folder.text()))
-        self._update_size_hint()
-        self._folder_changed()
-        self._detect_async()
-
     def _update_prefix_summary(self) -> None:
         game = self._selected_game()
-        fresh = game is not None and self.install_new.isChecked()
+        fresh = game is not None
         if fresh:
             install_dir, prefix, _owned, _dirs = self._plan_paths(
                 game,
                 self.folder.text().strip(),
                 self.prefix.text().strip(),
-                False,
                 cached_reuse_only=True,
             )
             if game.kind not in PREFIX_ONLY_KINDS:
@@ -999,7 +778,7 @@ class AddGameDialog(QDialog):
     def _update_size_hint(self) -> None:
         """Explain that Install new downloads later, with the known download size."""
         game = self._selected_game()
-        if game is None or not self.install_new.isChecked():
+        if game is None:
             self.size_hint.clear()
             self.size_hint.setVisible(False)
             return
@@ -1075,37 +854,28 @@ class AddGameDialog(QDialog):
         self.prefix_free.setText(prefix_hint)
 
     def _detect_async(self) -> None:
-        """Run import detection and free-space reads on a worker thread (#102)."""
+        """Check reusable library folders and free space on a worker thread (#102)."""
         self._detect_generation += 1
         generation = self._detect_generation
         folder = self.folder.text().strip()
         prefix = self.prefix.text().strip()
-        kind = self.selected_kind()
-        importing = self.import_existing.isChecked()
-        # Add stays as it was while the worker runs: a click on a disabled button is simply
-        # lost, and create_profile() re-checks the folder itself before writing anything.
-        # With no folder and no prefix there is nothing to look at, so say so at once.
-        if importing and not folder and not prefix:
-            self._show_detection(True, {})
-
         game = self._selected_game()
         candidates = (
             self._reuse_candidates(game, folder, prefix)
-            if game is not None and self.install_new.isChecked()
+            if game is not None
             else []
         )
         config, spec = self.config, game_spec(game) if game is not None else None
 
         def run() -> tuple:
             hints = (self._free_hint(folder), self._free_hint(prefix))
-            info = detect_import(kind, folder, prefix) if kind and importing else {}
             reuse = {}
             for candidate in candidates:
                 try:
                     reuse[str(candidate)] = libraries.reusable_folder(config, candidate, spec)
                 except Exception:  # noqa: BLE001 - a hint only; Add looks again itself
                     reuse[str(candidate)] = None
-            return folder, prefix, hints, info, reuse
+            return folder, prefix, hints, reuse
 
         task = CallTask(run)
         task.signals.done.connect(
@@ -1114,54 +884,20 @@ class AddGameDialog(QDialog):
         QThreadPool.globalInstance().start(task)
 
     def _apply_detection(self, generation: int, result: tuple) -> None:
-        folder, prefix, hints, info, reuse = result
+        folder, prefix, hints, reuse = result
         if generation != self._detect_generation:
             return
         try:
             current = (self.folder.text().strip(), self.prefix.text().strip())
-            importing = self.import_existing.isChecked()
         except RuntimeError:
             return  # the dialog was closed before the worker answered
         if current != (folder, prefix):
             return
         self.folder_free.setText(hints[0])
         self.prefix_free.setText(hints[1])
-        self._show_detection(importing, info)
         if reuse:
             self._reuse_cache.update(reuse)
             self._update_prefix_summary()
-
-    def _show_detection(self, importing: bool, info: dict) -> None:
-        if not importing:
-            self.detect_label.setText("")
-            self.create_button.setEnabled(True)
-            return
-        notes = list(info.get("notes") or [])
-        if info.get("install_dir"):
-            notes.append(f"Game folder: {info['install_dir']}")
-        if info.get("prefix"):
-            notes.append(f"Prefix: {info['prefix']}")
-        self.detect_label.setText("  ".join(notes) if notes else "Nothing detected yet.")
-        # Never offer to import a folder where nothing was found: that profile
-        # could not launch. CZN is fine because its prefix-only detection adds a note.
-        found = bool(notes)
-        self.create_button.setEnabled(found)
-        self.create_button.setToolTip(
-            "" if found else "Pick the folder where the game is already installed."
-        )
-
-    def detect(self) -> dict:
-        """Run read-only detection and update the hints; returns the result."""
-        self._update_free_space()
-        kind = self.selected_kind()
-        importing = bool(kind) and self.import_existing.isChecked()
-        info = (
-            detect_import(kind, self.folder.text().strip(), self.prefix.text().strip())
-            if importing
-            else {}
-        )
-        self._show_detection(importing, info)
-        return info
 
     # ---- creation ----------------------------------------------------------
     def _reusable(self, game: GameType, folder: Path, *, cached_only: bool):
@@ -1187,7 +923,6 @@ class AddGameDialog(QDialog):
         game: GameType,
         install_dir: str,
         prefix_value: str,
-        importing: bool,
         *,
         cached_reuse_only: bool = False,
     ) -> tuple[str, str, list[str], list[str]]:
@@ -1206,7 +941,7 @@ class AddGameDialog(QDialog):
         self.reused = None
         install_dir = _absolute(install_dir) if install_dir else ""
         prefix_value = _absolute(prefix_value) if prefix_value else ""
-        if not importing and install_dir and kind not in PREFIX_ONLY_KINDS:
+        if install_dir and kind not in PREFIX_ONLY_KINDS:
             chosen = Path(install_dir)
             library = libraries.library_of(chosen)
             default_place = not self._folder_touched or _inside(chosen, self._root())
@@ -1236,7 +971,8 @@ class AddGameDialog(QDialog):
                 install_dir = str(chosen)
             if _new_or_empty(chosen):
                 owned.append("install_dir")
-        if not importing and prefix_value and kind in PREFIX_ONLY_KINDS:
+        # Lepton uses its own existing host installation, not a Wine library layout.
+        if prefix_value and kind in PREFIX_ONLY_KINDS and kind not in LEPTON_KINDS:
             chosen = Path(prefix_value)
             default_place = not self._prefix_touched or _inside(chosen, self._root())
             # A folder that already holds a prefix is the prefix, as for other kinds;
@@ -1261,8 +997,7 @@ class AddGameDialog(QDialog):
                     prefix_value = str(game_dir / "prefix")
                 owned_dirs.append(str(game_dir))
         if (
-            not importing
-            and prefix_value
+            prefix_value
             and kind in PREFIX_KINDS
             and kind not in PREFIX_ONLY_KINDS
             and self._prefix_touched
@@ -1277,7 +1012,7 @@ class AddGameDialog(QDialog):
                 )
                 owned_dirs.append(str(game_dir))
                 prefix_value = str(game_dir / "prefix")
-        if not importing and prefix_value and kind in PREFIX_KINDS:
+        if prefix_value and kind in PREFIX_KINDS:
             if _new_or_empty(Path(prefix_value)):
                 owned.append("prefix")
         if self.reused is not None:
@@ -1325,53 +1060,17 @@ class AddGameDialog(QDialog):
 
         folder = self.folder.text().strip()
         prefix = self.prefix.text().strip()
-        importing = self.import_existing.isChecked()
-        if importing and not folder and not prefix:
-            self.error_label.setText("Pick the existing install folder (or its prefix).")
-            return None
-
-        info = detect_import(kind, folder, prefix) if importing else {}
-        if importing:
-            # Only a real finding may create a profile: a mistyped or empty
-            # folder would otherwise leave the user with a game that cannot launch.
-            if not info.get("notes"):
-                if game.install_subdir:
-                    self.error_label.setText(
-                        f"No {game.title} installation was found there. Pick the folder "
-                        f"that contains {game.exes[0] if game.exes else 'the game'} or its "
-                        "Wine prefix."
-                    )
-                elif kind in LEPTON_KINDS:
-                    self.error_label.setText(
-                        "No lepton-fgo install was found there. Pick the folder that "
-                        "holds lepton-x86_64/lepton-fgo (usually "
-                        "~/.local/share/lepton-nv)."
-                    )
-                elif kind in PREFIX_ONLY_KINDS:
-                    self.error_label.setText(
-                        f"No {game.title} Wine prefix was found there. Pick the folder "
-                        "that holds the existing prefix (it must contain drive_c)."
-                    )
-                else:
-                    self.error_label.setText(
-                        "That folder does not exist. Pick the folder you already use for "
-                        "this game."
-                    )
-                return None
-            install_dir = info.get("install_dir") or ""
-            prefix_value = info.get("prefix") or prefix or ""
-        else:
-            install_dir = folder
-            prefix_value = prefix
+        install_dir = folder
+        prefix_value = prefix
         if kind in PREFIX_ONLY_KINDS:
             # The prefix is the whole install; never persist a duplicate path.
             install_dir = ""
-        if not importing and kind in LAUNCHER_KINDS and not self._folder_touched:
+        if kind in LAUNCHER_KINDS and not self._folder_touched:
             # Launchers install inside the prefix; a default folder would be ignored.
             install_dir = ""
 
         install_dir, prefix_value, owned, owned_dirs = self._plan_paths(
-            game, install_dir, prefix_value, importing
+            game, install_dir, prefix_value
         )
         for label, value in (("game folder", install_dir), ("Wine prefix", prefix_value)):
             reason = prefixguard.unsafe_reason(value, profiles=self.config.profiles)
@@ -1383,7 +1082,7 @@ class AddGameDialog(QDialog):
                 self.error_label.setText(out_of_reach)
                 return None
 
-        if not importing and kind in PREFIX_ONLY_KINDS and prefix_value:
+        if kind in PREFIX_ONLY_KINDS and prefix_value:
             chosen = Path(prefix_value)
             container = _drive_c_prefix(chosen)
             if container is not None and container != chosen:
@@ -1392,19 +1091,18 @@ class AddGameDialog(QDialog):
                 )
                 return None
 
-        if not importing:
-            targets = []
-            if kind not in PREFIX_ONLY_KINDS and install_dir:
-                targets.append(("game folder", install_dir))
-            if prefix_value and kind in PREFIX_KINDS:
-                targets.append(("Wine prefix", prefix_value))
-            for label, target in targets:
-                if _cannot_create(target):
-                    self.error_label.setText(
-                        f"That {label} is not writable: {target}. "
-                        "Pick a folder you can write to."
-                    )
-                    return None
+        targets = []
+        if kind not in PREFIX_ONLY_KINDS and install_dir:
+            targets.append(("game folder", install_dir))
+        if prefix_value and kind in PREFIX_KINDS:
+            targets.append(("Wine prefix", prefix_value))
+        for label, target in targets:
+            if _cannot_create(target):
+                self.error_label.setText(
+                    f"That {label} is not writable: {target}. "
+                    "Pick a folder you can write to."
+                )
+                return None
 
         values: dict[str, Any] = {"backend": kind, "title": game.title}
         if install_dir and kind not in PREFIX_ONLY_KINDS:
@@ -1447,13 +1145,10 @@ class AddGameDialog(QDialog):
                 self.config.remove_profile(name)
                 self.error_label.setText(f"Could not save config: {exc}")
                 return None
-        if not importing:
-            # A small manifest lets a library added back find this game again (Steam-like).
-            libraries.record_new_game(self.config.profiles[name], name, default_root=self._root())
-        # Detection only ever produced install_dir/prefix on existing dirs; the
-        # prefix may be created later by install, but never here.
+        # A small manifest lets a library added back find this game again (Steam-like).
+        libraries.record_new_game(self.config.profiles[name], name, default_root=self._root())
+        # Install creates the prefix later, never here.
         self.created_profile = name
-        self.created_by_import = importing
         self.created.emit(name)
         self.accept()
         return name
@@ -1466,5 +1161,4 @@ __all__ = [
     "PREFIX_KINDS",
     "PREFIX_ONLY_KINDS",
     "available_catalog",
-    "detect_import",
 ]

@@ -29,7 +29,7 @@ DEFAULT_INDEX_BASE = (
 #: same fields Nadare reads: ``tag_name``, ``html_url``, ``name``.
 DEFAULT_RELEASES_API = "https://api.github.com/repos/frostlinuxdev/nadare/releases/latest"
 
-#: Pinned umu-launcher zipapp (the managed copy used when no system umu-run exists).
+#: Pinned umu-launcher zipapp (Nadare's own copy; preferred over a system umu-run).
 DEFAULT_UMU_ZIPAPP_URL = (
     "https://github.com/Open-Wine-Components/umu-launcher/releases/download/"
     "1.4.4/umu-launcher-1.4.4-zipapp.tar"

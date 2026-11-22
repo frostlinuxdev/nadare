@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Nadare contributors
-"""Yostar direct downloads from a CI-signed manifest.
+"""Yostar direct downloads from a CI-published manifest, pinned by the index's sha256.
 
 Yostar's launcher API is authenticated with per-game signing material that must
 never ship in a GPL client. A publishing job signs the calls and publishes a
@@ -26,8 +26,6 @@ No salt is ever read, stored or logged by this module; :func:`signature` and
 
 from __future__ import annotations
 
-import ctypes
-import ctypes.util
 import hashlib
 import json
 import logging
@@ -44,7 +42,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import diskspace, download, hosting, installlock, paths
+from . import directdl, diskspace, download, hosting, installlock, news, paths
+from .crc64 import (  # noqa: F401 - re-exported: the Yostar API keeps these names
+    _CRC64_MASK,
+    _CRC64_POLY,
+    _CRC64_TABLE,
+    _NATIVE_CRC64,
+    Crc64,
+    _crc64_native,
+    _crc64_python,
+    _load_native_crc64,
+    crc64,
+    crc64_file,
+    normalize_crc64,
+)
 from .events import Cancel, Cancelled, Emitter, Event, emitter
 
 log = logging.getLogger(__name__)
@@ -85,6 +96,7 @@ __all__ = [
     "safe_relative_path",
     "host_allowed",
     "base_url_trusted",
+    "check_base_url",
     "file_url",
     "configured_manifest",
     "load_manifest",
@@ -97,6 +109,7 @@ __all__ = [
     "cache_media",
     "plan",
     "sync",
+    "to_plan",
 ]
 
 #: Known game tags.  Values are the Nadare backend kinds that consume them.
@@ -133,125 +146,6 @@ class SyncBusy(ManifestRefused):
     """Another install or update already syncs this folder."""
 
     busy = True
-
-
-# ---------------------------------------------------------------------------
-# CRC-64/XZ (reflected ECMA-182).  liblzma exposes this as ``lzma_crc64`` and
-# runs orders of magnitude faster than a pure-Python byte loop, so prefer it
-# when present and fall back to the table below otherwise.  The native call
-# takes the running CRC directly as its third argument, matching the
-# incremental contract of :func:`crc64` (``crc64(b, crc64(a)) == crc64(a+b)``).
-# ---------------------------------------------------------------------------
-_CRC64_POLY = 0xC96C5795D7870F42
-_CRC64_MASK = 0xFFFFFFFFFFFFFFFF
-_CRC64_TABLE: list[int] = []
-for _i in range(256):
-    _crc = _i
-    for _ in range(8):
-        _crc = (_crc >> 1) ^ _CRC64_POLY if (_crc & 1) else _crc >> 1
-    _CRC64_TABLE.append(_crc)
-del _i, _crc
-
-
-def _load_native_crc64() -> Any:
-    """Return liblzma's ``lzma_crc64`` as a ctypes function, or ``None``."""
-    names: list[str] = []
-    try:
-        found = ctypes.util.find_library("lzma")
-    except OSError:
-        found = None
-    if found:
-        names.append(found)
-    names += ["liblzma.so.5", "liblzma.so"]
-    for name in names:
-        try:
-            lib = ctypes.CDLL(name)
-            fn = lib.lzma_crc64
-        except (OSError, AttributeError):
-            continue
-        fn.restype = ctypes.c_uint64
-        fn.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_uint64]
-        return fn
-    return None
-
-
-_NATIVE_CRC64 = _load_native_crc64()
-
-
-def _crc64_python(data: bytes, crc: int = 0) -> int:
-    value = (crc ^ _CRC64_MASK) & _CRC64_MASK
-    table = _CRC64_TABLE
-    for byte in data:
-        value = (value >> 8) ^ table[(value ^ byte) & 0xFF]
-    return (value ^ _CRC64_MASK) & _CRC64_MASK
-
-
-def _crc64_native(data: bytes, crc: int = 0) -> int:
-    if _NATIVE_CRC64 is None:
-        raise RuntimeError("liblzma crc64 is unavailable")
-    if not isinstance(data, bytes):
-        data = bytes(data)
-    return int(_NATIVE_CRC64(data, len(data), crc & _CRC64_MASK))
-
-
-def crc64(data: bytes, crc: int = 0) -> int:
-    """Return the CRC-64/XZ of ``data``, continuing from ``crc``."""
-    if _NATIVE_CRC64 is not None:
-        return _crc64_native(data, crc)
-    return _crc64_python(data, crc)
-
-
-class Crc64:
-    """Incremental CRC-64/XZ helper: ``update(block)`` then read ``value``."""
-
-    __slots__ = ("_value",)
-
-    def __init__(self, crc: int = 0) -> None:
-        self._value = crc & _CRC64_MASK
-
-    def update(self, data: bytes) -> Crc64:
-        self._value = crc64(data, self._value)
-        return self
-
-    def reset(self) -> None:
-        self._value = 0
-
-    @property
-    def value(self) -> int:
-        return self._value
-
-
-def crc64_file(path: str | os.PathLike[str], *, chunk: int = 1 << 20) -> int:
-    """Stream ``path`` and return its CRC-64/XZ (native when available)."""
-    hasher = Crc64()
-    with open(path, "rb") as fh:
-        while True:
-            block = fh.read(chunk)
-            if not block:
-                break
-            hasher.update(block)
-    return hasher.value
-
-
-def normalize_crc64(value: int | str | None) -> int:
-    """Normalise a decimal/hex CRC-64 (with or without ``0x``) to an int."""
-    if value is None:
-        return 0
-    if isinstance(value, bool):
-        raise ValueError("invalid CRC-64")
-    if isinstance(value, int):
-        return value & _CRC64_MASK
-    text = str(value).strip()
-    if not text:
-        return 0
-    if text.lower().startswith("0x"):
-        return int(text, 16) & _CRC64_MASK
-    digits = text.lstrip("+-")
-    if digits.isdigit():
-        return int(text, 10) & _CRC64_MASK
-    if re.fullmatch(r"[0-9a-fA-F]+", text):
-        return int(text, 16) & _CRC64_MASK
-    raise ValueError(f"invalid CRC-64: {value!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -544,11 +438,12 @@ def load_manifest(source: str, *, game_tag: str | None = None, timeout: int = 60
         target = _resolve_relative(source, str(entry["url"]))
         raw = _read_bytes(target, timeout)
         expected = entry.get("sha256")
-        if isinstance(expected, str) and re.fullmatch(r"[0-9a-fA-F]{64}", expected):
-            if hashlib.sha256(raw).hexdigest() != expected.lower():
-                raise ManifestError(
-                    f"manifest {target} does not match the sha256 in the index"
-                )
+        # The index's hash is what ties a manifest to Nadare's published index (the
+        # manifests carry no signature): an entry without one is refused, not trusted (#789 F5).
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", expected):
+            raise ManifestError(f"the index entry for {game_tag!r} has no valid sha256")
+        if hashlib.sha256(raw).hexdigest() != expected.lower():
+            raise ManifestError(f"manifest {target} does not match the sha256 in the index")
         payload = _parse_json(raw, target)
         source = target
         _depth += 1
@@ -610,17 +505,34 @@ def _parse_media(payload: Any, source: str = "") -> Media:
     )
 
 
+# Successful documents only; an index selection is part of the source's cache key.
+_MEDIA_CACHE: dict[tuple[str, str | None], tuple[float, Media]] = {}
+
+
 def load_media(
-    source: str, game_tag: str | None = None, *, timeout: int = 60, _depth: int = 0
+    source: str,
+    game_tag: str | None = None,
+    *,
+    timeout: int = 60,
+    cancel: Cancel | None = None,
+    _depth: int = 0,
 ) -> Media:
     """Load a media document from a URL, a local path, or a manifest index.
 
     Mirrors :func:`load_manifest`: when ``source`` is an index that carries a
     ``media`` entry for ``game_tag``, that per-game media document is loaded.
+    Successful documents are cached for the news TTL; cancellation is checked
+    before cache hits, each index hop, and publishing a fetched document.
     """
     if not source or not str(source).strip():
         raise MediaError("no media source configured")
     source = str(source).strip()
+    if cancel is not None:
+        cancel.raise_if_cancelled()
+    key = (source, game_tag)
+    cached = _MEDIA_CACHE.get(key)
+    if cached is not None and 0 <= time.monotonic() - cached[0] < news.CACHE_TTL:
+        return cached[1]
     payload = _read_json(source, timeout)
     if _looks_like_index(payload):
         if not game_tag:
@@ -634,10 +546,16 @@ def load_media(
         if _depth >= 4:
             raise MediaError("media index nesting too deep")
         resolved = _resolve_relative(source, str(target))
-        return load_media(resolved, game_tag=game_tag, timeout=timeout, _depth=_depth + 1)
-    media = _parse_media(payload, source)
+        media = load_media(
+            resolved, game_tag=game_tag, timeout=timeout, cancel=cancel, _depth=_depth + 1
+        )
+    else:
+        media = _parse_media(payload, source)
     if game_tag and media.game_tag != game_tag:
         raise MediaError(f"media is for {media.game_tag!r}, expected {game_tag!r}")
+    if cancel is not None:
+        cancel.raise_if_cancelled()
+    _MEDIA_CACHE[key] = (time.monotonic(), media)
     return media
 
 
@@ -763,7 +681,7 @@ def _clamp_workers(workers: int) -> int:
         number = int(workers)
     except (TypeError, ValueError):
         number = 6
-    return max(1, min(16, number))
+    return max(1, min(32, number))
 
 
 def plan(
@@ -824,6 +742,59 @@ def file_url(manifest: Manifest, entry: ManifestFile) -> str:
     """Build the CDN URL for one manifest file under ``base_url``."""
     quoted = urllib.parse.quote(entry.path, safe="/")
     return manifest.base_url.rstrip("/") + "/" + quoted
+
+
+def check_base_url(manifest: Manifest, allowed_hosts: set[str] | None = None) -> None:
+    """Raise :class:`ManifestRefused` unless game files may come from ``manifest.base_url``.
+
+    The one host rule :func:`sync` and :func:`to_plan` both apply: https on a trusted host
+    (:func:`base_url_trusted`), and a loopback base only from a local manifest."""
+    parsed_base = urllib.parse.urlparse(manifest.base_url)
+    base_host = parsed_base.hostname
+    if not base_url_trusted(manifest.base_url, allowed_hosts):
+        if parsed_base.scheme != "https" and (base_host or "").lower() not in _LOOPBACK_HOSTS:
+            raise ManifestRefused(
+                f"refusing plain http download (https required): {manifest.base_url}"
+            )
+        raise ManifestRefused(
+            f"refusing to download from untrusted host {base_host!r} "
+            f"(manifest base_url {manifest.base_url!r})"
+        )
+    # FRESH-5: loopback is only a test affordance; a manifest fetched from a
+    # remote host may not point the download at a localhost service (SSRF).
+    if (base_host or "").lower() in _LOOPBACK_HOSTS and not _source_is_local(manifest.source):
+        raise ManifestRefused(
+            f"refusing a loopback download base_url from a remote manifest: "
+            f"{manifest.base_url!r}"
+        )
+
+
+def to_plan(
+    manifest: Manifest,
+    *,
+    exe: str = "",
+    allowed_hosts: set[str] | None = None,
+) -> directdl.Plan:
+    """The manifest as a :class:`directdl.Plan`: one file per entry, checked by size and
+    CRC-64 (#1452). Applies :func:`check_base_url` first, so a refused manifest never
+    becomes a plan, and carries the same per-hop redirect guard :func:`sync` uses."""
+    check_base_url(manifest, allowed_hosts)
+    base_host = urllib.parse.urlparse(manifest.base_url).hostname
+    return directdl.Plan(
+        game_tag=manifest.game_tag,
+        version=manifest.version,
+        files=tuple(
+            directdl.RemoteFile(
+                path=entry.path,
+                url=file_url(manifest, entry),
+                size=entry.size,
+                crc64=entry.crc64,
+            )
+            for entry in manifest.files
+        ),
+        exe=exe,
+        redirect_allowed=_redirect_allowed(manifest.source, base_host, allowed_hosts),
+    )
 
 
 def host_allowed(
@@ -938,12 +909,14 @@ class _SyncProgress:
         progress = (done / self._total) if self._total else 1.0
         remaining = self._total - done
         eta = (remaining / speed) if speed > 0 and remaining > 0 else None
+        measurement = download.current_transfer()
         return Event(
             "progress",
             _format_progress(done, self._total, speed, eta),
             progress=progress,
             data={
                 "stage": "sync",
+                "connections": measurement.active if measurement else 0,
                 "done": done,
                 "total": self._total,
                 "speed_bps": speed,
@@ -1105,6 +1078,7 @@ def _install_lock(install_dir: Path) -> Iterator[None]:
     )
 
 
+@download.transfer.measured
 def sync(
     manifest: Manifest,
     install_dir: str | os.PathLike[str],
@@ -1146,34 +1120,18 @@ def _sync(
 ) -> dict[str, Any]:
     """Download missing/changed files from ``manifest`` into ``install_dir``.
 
-    Up to ``workers`` (1-16) files are fetched in parallel, each over a
+    Up to ``workers`` (1-32) files are fetched in parallel, each over a
     keep-alive HTTP connection, and every byte is CRC-64/XZ-hashed as it is
     written so verification needs no second read.  Returns a summary dict.
 
-    Large single files are *not* split into parallel Range parts: doing so
-    would multiply CDN connections and complicate cancellation/resume for a
-    case (a handful of very large files) that is not the bottleneck here.
+    The current Yostar backends use directdl, whose shared downloader splits large
+    files into resumable Range parts. This legacy streaming CRC path keeps one
+    connection per file; few-large-file plans should use directdl.
     """
     say = emitter(emit)
     root = Path(install_dir).expanduser()
-    parsed_base = urllib.parse.urlparse(manifest.base_url)
-    base_host = parsed_base.hostname
-    if not base_url_trusted(manifest.base_url, allowed_hosts):
-        if parsed_base.scheme != "https" and (base_host or "").lower() not in _LOOPBACK_HOSTS:
-            raise ManifestRefused(
-                f"refusing plain http download (https required): {manifest.base_url}"
-            )
-        raise ManifestRefused(
-            f"refusing to download from untrusted host {base_host!r} "
-            f"(manifest base_url {manifest.base_url!r})"
-        )
-    # FRESH-5: loopback is only a test affordance; a manifest fetched from a
-    # remote host may not point the download at a localhost service (SSRF).
-    if (base_host or "").lower() in _LOOPBACK_HOSTS and not _source_is_local(manifest.source):
-        raise ManifestRefused(
-            f"refusing a loopback download base_url from a remote manifest: "
-            f"{manifest.base_url!r}"
-        )
+    check_base_url(manifest, allowed_hosts)
+    base_host = urllib.parse.urlparse(manifest.base_url).hostname
     worker_count = _clamp_workers(workers)
     todo = plan(manifest, root, workers=worker_count, cancel=cancel)
 
@@ -1237,7 +1195,11 @@ def _sync(
             for entry in todo:
                 work(entry)
         else:
-            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            with ThreadPoolExecutor(
+                initializer=download.inherit_transfer,
+                initargs=(download.current_transfer(),),
+                max_workers=worker_count,
+            ) as executor:
                 futures = [executor.submit(work, entry) for entry in todo]
                 for future in futures:
                     try:

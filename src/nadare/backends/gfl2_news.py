@@ -3,11 +3,11 @@
 """Girls' Frontline 2: Exilium (Darkwinter global build) news from Sunborn's public web API.
 
 ``GET /website/news_list/0?page=1&limit=N`` returns ``{code: 0, data: {list: [{Id, Type,
-Title, Date}]}}`` with ``Date`` as ``YYYY-MM-DD HH:MM:SS``; ``Type`` is 1 News, 3 Notices,
-4 Events (the site's own table). ``/website/rotation`` lists the site's banners; the first one
-on the publisher's image CDN is added as a trailing "Featured" item (``core.news`` takes the page
-hero from item images, as for Kuro's feed). A failing banner request never hides the news.
-This module is free of launcher/GUI concerns: it returns plain items in the
+Title, Date}]}}`` with ``Date`` as ``YYYY-MM-DD HH:MM:SS`` in the CMS wall clock (``UTC-4``);
+``Type`` is 1 News, 3 Notices, 4 Events (the site's own table). ``/website/rotation`` lists the
+site's banners; the first one on the publisher's image CDN is added as a trailing "Featured" item
+(``core.news`` takes the page hero from item images, as for Kuro's feed). A failing banner request
+never hides the news. This module is free of launcher/GUI concerns: it returns plain items in the
 :mod:`nadare.core.news` shape.
 """
 
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..core.news import NewsError, NewsResult, http_get_json, https_on
@@ -28,6 +28,9 @@ ARTICLE = "https://gf2exilium.sunborngame.com/NewsInfo?typeId={kind}&id={id}"
 IMAGE_HOSTS: tuple[str, ...] = ("gf2-us-image-cdn.sunborngame.com",)
 
 _CATEGORIES = {1: "News", 3: "Notices", 4: "Events"}
+# Sunborn's CMS writes Date in its own UTC-4 wall clock, year-round (its notices say "(UTC-4)"
+# in January as well as October).
+_CMS_TZ = timezone(timedelta(hours=-4))
 _ID_RE = re.compile(r"\A[0-9]{1,12}\Z")
 
 
@@ -47,7 +50,7 @@ def _published_at(value: Any) -> int:
         parsed = datetime.strptime(str(value).strip(), "%Y-%m-%d %H:%M:%S")
     except (TypeError, ValueError):
         return 0
-    return int(parsed.replace(tzinfo=UTC).timestamp() * 1000)
+    return int(parsed.replace(tzinfo=_CMS_TZ).timestamp() * 1000)
 
 
 def _rows(payload: Any) -> list[Any]:

@@ -117,11 +117,15 @@ def test_news_media_workers_do_not_mutate_the_live_config(tmp_path, qapp, monkey
     )
 
     class FakeBackend:
-        game_tag = "czn"
-        kind = "stove-czn"
+        game_tag = "arknights"
+        kind = "arknights-yostar"
 
         def __init__(self) -> None:
-            self.ctx = type("Ctx", (), {"profile": {"title": "P"}})()
+            self.ctx = type(
+                "Ctx",
+                (),
+                {"profile": {"backend": "arknights-yostar", "title": "P"}},
+            )()
 
     worker = workers.BackendWorker(Config.load(tmp_path / "config.json"), "p", "media")
     result = worker._load_media(FakeBackend())
@@ -142,7 +146,7 @@ def test_news_result_records_official_hero_on_the_gui_thread(tmp_path, qapp, mon
         artwork, "record_official", lambda *args, **kwargs: recorded.append(args) or True
     )
     try:
-        window._on_result("p", NewsResult(items=[], hero="/cache/h.png"))
+        window._on_result("p", "news", NewsResult(items=[], hero="/cache/h.png"))
         assert recorded == [(config.profile("p"), "/cache/h.png", "hero")]
     finally:
         window.close()

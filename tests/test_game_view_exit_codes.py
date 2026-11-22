@@ -17,6 +17,10 @@ except Exception:  # noqa: BLE001
 from nadare.core.events import Event
 from nadare.gui import game_view as game_view_mod
 from nadare.gui.game_view import GameView
+from nadare.gui.game_view_parts import busy as busy_mod
+
+#: The line a launch that exits 0 at once leaves: it handed the game over, it did not play it.
+_HAND_OFF = "The launcher closed after {time}; the game may still be running."
 
 
 @pytest.fixture(scope="module")
@@ -44,6 +48,20 @@ def warnings(monkeypatch):
         "_failure_choice",
         lambda _self, title, message, can_retry: seen.append((title, message)) or "close",
     )
+    return seen
+
+
+@pytest.fixture
+def lines(view):
+    """Every console line the page adds, with the kind it was added as."""
+    seen: list[tuple[str, str]] = []
+    original = view._append_line
+
+    def record(message, kind="log"):
+        seen.append((str(message), kind))
+        original(message, kind)
+
+    view._append_line = record
     return seen
 
 
@@ -173,3 +191,65 @@ def test_a_setup_line_during_the_launch_does_not_hide_the_exit_line(view, monkey
     now[0] += 600
     view.finish("launch", 0)
     assert "game exited normally" in view.console.toPlainText()
+
+
+# ---------------------------------------------------------------------------
+# #1554: a launch that exits 0 at once handed the game over, it did not play it
+# ---------------------------------------------------------------------------
+
+
+def test_a_quick_exit_zero_is_a_launcher_hand_off(view, monkeypatch, warnings):
+    """A launcher that starts the game as another process exits 0 while the game runs."""
+    _finish_after(view, monkeypatch, "launch", 0, 2)
+    log = view.console.toPlainText()
+    assert _HAND_OFF.format(time="2 seconds") in log
+    assert "game exited normally" not in log
+    assert warnings == []
+
+
+def test_a_quick_exit_zero_is_a_status_line_not_a_done_line(view, monkeypatch, lines):
+    """It is not the game ending: the page must not blue-line it like one."""
+    _finish_after(view, monkeypatch, "launch", 0, 2)
+    kinds = {message: kind for message, kind in lines}
+    assert kinds[_HAND_OFF.format(time="2 seconds")] == "status"
+
+
+def test_an_exit_zero_at_the_grace_is_a_normal_exit(view, monkeypatch, warnings):
+    """The boundary is strict: the grace is the first length of play that counts as a session."""
+    _finish_after(view, monkeypatch, "launch", 0, busy_mod._LAUNCH_EXIT_GRACE_S)
+    assert "game exited normally" in view.console.toPlainText()
+
+
+def test_an_exit_zero_just_before_the_grace_is_a_hand_off(view, monkeypatch, warnings):
+    _finish_after(view, monkeypatch, "launch", 0, busy_mod._LAUNCH_EXIT_GRACE_S - 0.5)
+    log = view.console.toPlainText()
+    assert "The launcher closed after" in log
+    assert "game exited normally" not in log
+
+
+def test_a_quick_exit_zero_while_stopping_is_not_a_hand_off(view, monkeypatch, lines):
+    """STOP is the user ending the game, not a launcher handing it over."""
+    now = [1_000_000.0]
+    monkeypatch.setattr(game_view_mod.time, "time", lambda: now[0])
+    view.set_busy("launch")
+    now[0] += 2
+    view._busy_op = "stop"
+    view.finish("launch", 0)
+    assert not [m for m, _kind in lines if "launcher closed" in m]
+
+
+@pytest.mark.parametrize("said", sorted(busy_mod._GAME_END_LINES))
+def test_no_hand_off_line_after_the_backend_said_the_game_ended(
+    view, monkeypatch, lines, said
+):
+    """A backend that already said how the game ended keeps its own line."""
+    now = [1_000_000.0]
+    monkeypatch.setattr(game_view_mod.time, "time", lambda: now[0])
+    view.set_busy("launch")
+    view.append_event(Event("done", said))
+    now[0] += 2
+    view.finish("launch", 0)
+    said_lines = [m for m, _kind in lines if said.lower() in m.lower()]
+    assert len(said_lines) == 1
+    assert not [m for m, _kind in lines if "launcher closed" in m]
+

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import time
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from test_nikke_game_auth_cache_1420 import play as play
 
 from nadare.backends import launcher as launcher_module
 from nadare.backends.launcher import NikkeBackend
@@ -106,34 +108,37 @@ def test_the_session_cache_is_private(tmp_path):
     assert (cache / "intl_auth.txt").stat().st_mode & 0o777 == 0o600
 
 
-def test_patterns_include_the_game_only_during_a_launcherless_run(tmp_path):
+def test_patterns_include_the_game_in_any_instance(tmp_path):
+    """Status and Stop see a launcherless game from any Nadare window (2026-11-15)."""
     backend = make_install(tmp_path)
-    assert "nikke.exe" not in backend._patterns().names
-
-    backend._launcherless_active = True
     assert "nikke.exe" in backend._patterns().names
     assert h.SAIL_HOST_NAME in backend._patterns().names
+    # The launcher alone never counts the game (a Play beside a running game, #1388).
+    assert "nikke.exe" not in backend._launcher_query().names
 
 
-def test_a_launcherless_launch_runs_the_intl_host_then_the_sail_host(tmp_path, monkeypatch):
+def test_a_launcherless_launch_runs_sign_in_inside_the_sail_host(tmp_path, monkeypatch):
     backend = make_install(tmp_path)
     backend._launcherless_plan()
     calls = []
 
     def fake_stream(argv, env, on_line=None, cancel=None, **kwargs):
         calls.append(list(argv))
-        if h.INTL_HOST_NAME in argv[0]:
-            out = argv[argv.index("--out") + 1]
-            # Turn the C:\ path the host got back into the file under the prefix.
-            relative = out.split(":\\", 1)[1].replace("\\", "/")
-            session_file = backend.prefix() / "drive_c" / relative
-            session_file.parent.mkdir(parents=True, exist_ok=True)
-            session_file.write_text(json.dumps(AUTH), encoding="utf-8")
+        assert h.SAIL_HOST_NAME in argv[0]
+        assert h.INTL_HOST_NAME in env["SAIL_SIGNIN_CMD"]
+        relative = argv[1].split(":\\", 1)[1].replace("\\", "/")
+        session_file = backend.prefix() / "drive_c" / relative
+        (session_file.parent / "session.enc.json").write_text(json.dumps(AUTH))
+        deadline = time.monotonic() + 2
+        while not session_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert json.loads(session_file.read_text())["token"] == AUTH["token"]
         return 0
 
     monkeypatch.setattr(launcher_module, "stream", fake_stream)
     monkeypatch.setattr(
-        NikkeBackend, "_prefix_command", lambda self, args, extra_env=None, **kw: (args, {})
+        NikkeBackend, "_prefix_command",
+        lambda self, args, extra_env=None, **kw: (args, extra_env or {})
     )
     monkeypatch.setattr(NikkeBackend, "_run_vcredist", lambda self, created=False: None)
     monkeypatch.setattr(NikkeBackend, "_log_launch_details", lambda self, env: None)
@@ -152,30 +157,29 @@ def test_a_launcherless_launch_runs_the_intl_host_then_the_sail_host(tmp_path, m
     code = backend.launch()
 
     assert code == 0
-    assert len(calls) == 2
-    assert h.INTL_HOST_NAME in calls[0][0]
-    assert h.SAIL_HOST_NAME in calls[1][0]
-    assert "--launch" in calls[1]
+    assert len(calls) == 1
+    assert h.SAIL_HOST_NAME in calls[0][0]
+    assert "--launch" in calls[0]
     # the Sail host got the real resource folder, not the capture's S: path
-    assert not any("S:\\NIKKE" in arg for arg in calls[1])
+    assert not any("S:\\NIKKE" in arg for arg in calls[0])
     # the temporary session directory is gone after the run
     stage = backend.prefix().joinpath(*h.STAGE_PARTS)
     assert list(stage.glob("session-*")) == []
 
 
-def test_a_failed_sign_in_says_how_to_recover(tmp_path, monkeypatch):
+def test_a_failed_sign_in_says_how_to_recover(tmp_path, play):
     backend = make_install(tmp_path)
-    backend._launcherless_plan()
 
-    monkeypatch.setattr(launcher_module, "stream", lambda *a, **k: 3)
-    monkeypatch.setattr(
-        NikkeBackend, "_prefix_command", lambda self, args, extra_env=None, **kw: (args, {})
-    )
-    monkeypatch.setattr(NikkeBackend, "_run_vcredist", lambda self, created=False: None)
-    backend.info = lambda _line: None
+    def failed(argv, env, **kwargs):
+        relative = argv[1].split(":\\", 1)[1].replace("\\", "/")
+        session = backend.prefix() / "drive_c" / relative
+        (session.parent / "sail_host.log").write_text(
+            "RESULT no-signin: sign-in helper exit 3\n"
+        )
+        return 5
 
     with pytest.raises(BackendError, match="sign in again in the launcher"):
-        backend.launch()
+        play(backend, failed)
 
 
 def test_a_missing_cache_fails_before_anything_runs(tmp_path, monkeypatch):

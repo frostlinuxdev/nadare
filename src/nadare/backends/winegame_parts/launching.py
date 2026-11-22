@@ -9,36 +9,43 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import os
 import shlex
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 
 from ...core import (
     graphics,
-    hostlibs,
+    launch_window,
     monitors,
     process,
+    protoncmd,
     runlock,
     runners,
     runtimewatch,
     sandbox,
-    umu,
-    userns,
+    shadercache,
+    stopstate,
     vcredist,
+    x11windows,
 )
 from ...core.backends import (
     BackendError,
+    BackendNotInstalled,
 )
 from ...core.config import as_bool
 from ...core.events import Event
 from ..wine import (
+    cmdline_argv,
     first_wine,
     path_option,
     profile_setting,
     scan_pids,
+    stop_elsewhere,
     stop_pids,
     stop_runner_wineserver,
     stream,
@@ -51,25 +58,124 @@ _SEARCH_MAX_DEPTH = 4
 
 _SEARCH_MAX_DIRS = 2000
 
+#: How long Stop asks the game's windows to close before it uses SIGTERM (#1421 ask 3).
+STOP_GRACE_SECONDS = 8.0
+#: A single ``taskkill`` helper may take this long before Stop goes on to SIGTERM.
+_STOP_HELPER_TIMEOUT = 5.0
+#: How often the polite stop looks for the game's processes while it waits.
+_STOP_POLL_SECONDS = 0.5
+
+#: Wine's own long-lived helpers. They belong to the prefix but are not the game, so
+#: they must not keep the grace running after the game and its launcher have closed.
+_WINE_HELPERS = frozenset(
+    {"wineserver", "services", "winedevice", "plugplay", "rpcss", "tabtip", "conhost"}
+)
 
 
+def _wine_helper(pid: int) -> bool:
+    """Whether ``pid`` is one of Wine's long-lived helper processes, not the game."""
+    argv = cmdline_argv(Path("/proc") / str(pid)) or []
+    if not argv:
+        return False
+    name = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    if name in _WINE_HELPERS:
+        return True
+    # Wine's desktop shell is a helper too; explorer.exe without /desktop is not used.
+    return name == "explorer" and any(arg.lower().startswith("/desktop") for arg in argv[1:])
 
-def _umu_unavailable() -> str:
-    """Why umu could not be set up, plus Ubuntu's one-time fix when that is ALSO in the way
-    (otherwise the AppArmor block surfaced only after the next attempt; stress u3)."""
-    message = umu.unavailable_message()
-    if userns.blocks_runtime():
-        message = userns.with_hint(message, blocked=True)
-    return message
+
+#: Kept names: the shared versions live in :mod:`nadare.core.protoncmd` (#1449).
+_umu_unavailable = protoncmd.unavailable_message
+_refuse_if_userns_blocked = protoncmd.refuse_if_userns_blocked
+
+#: What this process's current launch left on disk for each prefix: the identity of its
+#: request file, or ``None`` while that launch has none there (writing it failed). A file
+#: that does not match belongs to an older launch and must not be used as this one's. A
+#: prefix this process never launched is absent: another window may own its game (#1421).
+_stop_requests: dict[str, tuple[int, int, int] | None] = {}
 
 
-def _refuse_if_userns_blocked() -> None:
-    """Ask for Ubuntu's one-time AppArmor fix BEFORE the launch (#1338)."""
-    if userns.blocks_runtime():
-        raise BackendError(userns.with_hint(userns.BLOCKED_BEFORE_LAUNCH, blocked=True))
+def _prefix_key(prefix: str) -> str:
+    return str(Path(prefix).resolve())
+
+
+def _stop_request_identity(prefix: str) -> tuple[int, int, int] | None:
+    """The device, inode and mtime of the saved request, or ``None`` when there is none."""
+    try:
+        info = stopstate.path(prefix).stat()
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino, info.st_mtime_ns)
+
+
+def _forget_stop_request(prefix: str) -> None:
+    """Nothing already saved for ``prefix`` speaks for the launch that starts now."""
+    _stop_requests[_prefix_key(prefix)] = None
+    stopstate.clear(prefix)
+
+
+def _remember_stop_request(prefix: str) -> None:
+    _stop_requests[_prefix_key(prefix)] = _stop_request_identity(prefix)
+
+
+def _stop_request_is_stale(prefix: str) -> bool:
+    """Whether the saved request was not written by this process's running launch."""
+    key = _prefix_key(prefix)
+    if key not in _stop_requests:
+        return False  # another Nadare window launched this game; its file is all we have
+    return _stop_requests[key] != _stop_request_identity(prefix)
+
 
 class LaunchingMixin:
     """Mixin for :class:`WineGameBackend`; see the module text."""
+
+    def _watch_game_process(
+        self, done: threading.Event, closed: threading.Event, query=None
+    ) -> None:
+        """Report a real start; close a known game's launcher after a debounced exit.
+
+        ``query``: the game's own processes when the caller knows them better than
+        ``_running_patterns`` (NIKKE's Sail host starts before the game).
+        """
+        seen = False
+        missing_since = None
+        query = self._running_patterns() if query is None else query
+        while not self.ctx.cancel.cancelled and not done.wait(1.0):
+            if self.ctx.cancel.cancelled:
+                return
+            if scan_pids(query):
+                missing_since = None
+                if not seen:
+                    seen = True
+                    self.ctx.emit(Event("game_running", f"{self.display_name} is running"))
+            elif seen and self.game_process_names:
+                now = time.monotonic()
+                if missing_since is None:
+                    missing_since = now
+                elif now - missing_since >= 3.0:
+                    self.info(f"{self.display_name}: the game closed; closing the launcher")
+                    self.stop()
+                    closed.set()
+                    return
+
+    @contextlib.contextmanager
+    def _game_process_watch(self, query=None):
+        done = threading.Event()
+        closed = threading.Event()
+        watcher = threading.Thread(
+            target=self._watch_game_process,
+            args=(done, closed),
+            kwargs={} if query is None else {"query": query},
+            daemon=True,
+        )
+        watcher.start()
+        try:
+            yield closed
+        finally:
+            done.set()
+            watcher.join()
 
     def _renderer_probe(self) -> graphics.RendererProbe:
         return graphics.RendererProbe(
@@ -77,8 +183,15 @@ class LaunchingMixin:
             on_result=lambda label: self.info(f"renderer: {label}"),
         )
 
+    #: Games whose existing extra-args hook supplies defaults put them before optional flags.
+    launch_extra_args_before_user = False
+
+    def skip_intro_args(self) -> list[str]:
+        """Arguments that skip the game's logo videos (default: none)."""
+        return []
+
     def launch_extra_args(self) -> list[str]:
-        """Arguments appended after the profile's ``launch_args`` (default: none)."""
+        """Game arguments (normally after the profile's ``launch_args``; default: none)."""
         return []
 
     def launch_extra_env(self) -> dict[str, str]:
@@ -125,22 +238,34 @@ class LaunchingMixin:
 
     def _direct_argv(self, target: Path) -> list[str]:
         """The program and arguments handed to umu-run for a direct launch."""
-        return [str(target), *self._extra_args("launch_args"), *self.launch_extra_args()]
+        user_args = self._extra_args("launch_args")
+        extra_args = self.launch_extra_args()
+        return [
+            str(target),
+            *(extra_args if self.launch_extra_args_before_user else []),
+            *self.skip_intro_args(),
+            *user_args,
+            *(extra_args if not self.launch_extra_args_before_user else []),
+        ]
 
     def _launch_direct(self) -> int:
         target = self.direct_target()
         if target is None or not target.is_file():
             raise BackendError(f"game executable not found: {target}")
         self._run_vcredist(created=False)
+        direct_argv = self._direct_argv(target)
         argv, env = self._prefix_command(
-            self._direct_argv(target),
+            direct_argv,
             self.launch_extra_env() or None,
             sandboxed=self.secure_mode_enabled(),
         )
         try:
             argv, env = self._secure_wrap(argv, env)
+            # After the wrap: Stop asks with a taskkill only when the game really runs
+            # unsandboxed, and the Sandbox can be on by default and skipped here.
+            self._record_polite_stop(argv, env, len(direct_argv))
             self.ctx.emit(Event("step", f"{self.display_name}: launching {target.name}"))
-            self.info(self._runtime_note())
+            self.info(self._runtime_note(), **self._runner_facts())
             self.info(self._redacted("exec: " + " ".join(shlex.quote(part) for part in argv)))
             self._log_launch_details(env)
             _renderer, note = graphics.effective_renderer(self.ctx.profile)
@@ -152,11 +277,15 @@ class LaunchingMixin:
             try:
                 # Held while the game runs, so other Nadare instances (a Flatpak desktop
                 # shortcut has its own process namespace) see it and can ask it to stop.
-                with self._run_lock():
+                with self._run_lock(), self._game_process_watch() as closed:
                     self._begin_game_output()
                     try:
                         code = stream(
-                            argv, env, on_line=self._on_game_line, cancel=self.ctx.cancel
+                            argv,
+                            env,
+                            on_line=self._on_game_line,
+                            cancel=self.ctx.cancel,
+                            before_stop=self._ask_game_to_close,
                         )
                     finally:
                         self._end_game_output()
@@ -166,7 +295,7 @@ class LaunchingMixin:
                 self._renderer = probe.result
         finally:
             self._stop_link_relay()
-        return self._checked_launch_exit(code)
+        return 0 if closed.is_set() else self._checked_launch_exit(code)
 
     def _explicit_target(self) -> Path | None:
         raw = profile_setting(self.ctx.profile, "exe_name") or profile_setting(
@@ -268,6 +397,28 @@ class LaunchingMixin:
             return "x11 (no Wayland session)"
         return "wayland"
 
+    def _display_source(self) -> str:
+        """Where :meth:`_display_in_use` took the display from, for the launch log (#1299).
+
+        The default is code, not stored data: a release that flips a game's default changes
+        old profiles silently, so the log says when the default decided.
+        """
+        profile_env = profile_setting(self.ctx.profile, "extra_env")
+        if isinstance(profile_env, dict) and "PROTON_ENABLE_WAYLAND" in profile_env:
+            return "the game's Environment setting"
+        choice = str(profile_setting(self.ctx.profile, "display") or "auto").strip().lower()
+        if choice in ("x11", "xwayland", "wayland"):
+            return "the game's Display setting"
+        if "PROTON_ENABLE_WAYLAND" in os.environ:
+            return "PROTON_ENABLE_WAYLAND in Nadare's environment"
+        return "this game's default"
+
+    def _runner_facts(self) -> dict:
+        """The runner this launch uses, for the game page's failure box (#1732)."""
+        proton, _kind = self.resolve_runner()
+        wine = str(profile_setting(self.ctx.profile, "wine_binary") or "").strip() or None
+        return runners.launch_facts(proton, wine=wine)
+
     def _runtime_note(self) -> str:
         """One log line naming the runner build, display driver and renderer requested."""
         proton, kind = self.resolve_runner()
@@ -277,7 +428,17 @@ class LaunchingMixin:
         requested = graphics.renderer_choice(self.ctx.profile)
         api = "Vulkan (DXVK)" if renderer == "vulkan" else "OpenGL (WineD3D)"
         source = f", requested {requested}" if requested == "auto" else ""
-        return f"runner: {runner or kind}, display: {display}, renderer: {api}{source}"
+        return (
+            f"runner: {runner or kind}, display: {display}, "
+            f"display from: {self._display_source()}, renderer: {api}{source}"
+        )
+
+    def _note_prefix_upgrade(self, proton: Path) -> None:
+        """Say so when this runner will upgrade the prefix first (#1422): about 40 s of a Play
+        that otherwise looks stuck. Once per prefix version change, not per helper command."""
+        protoncmd.note_prefix_upgrade(
+            self, self.prefix(), proton, name=self.display_name, emit=self.ctx.emit
+        )
 
     def _prefix_command(
         self,
@@ -294,30 +455,15 @@ class LaunchingMixin:
         not have: with it a game could ask Flatpak for a process outside the Sandbox.
         """
         prefix = self.prefix()
-        env = process.build_env(None, extra={"WINEPREFIX": str(prefix)})
+        env = process.build_env(
+            {"pass_env": profile_setting(self.ctx.profile, "pass_env")},
+            extra={"WINEPREFIX": str(prefix)},
+        )
         proton, kind = self.resolve_runner()
         if kind == "proton":
-            configured = str(profile_setting(self.ctx.profile, "umu_binary", "umu-run"))
-            flatpak = sandbox.in_flatpak()
-            missing = None
-            umu_run = None
-            if not (flatpak and sandboxed):
-                # Every Proton launch outside the Flatpak Sandbox goes through umu (user, #1338):
-                # a system umu-run, else Nadare's own (from the AppImage's bundled archive, else
-                # downloaded once). A host that merely has the 32-bit libraries no longer runs
-                # `proton run`, which skipped every per-game fix and the Steam Runtime.
-                umu_run = umu.resolve(
-                    configured,
-                    allow_download=True,
-                    emit=self.ctx.emit,
-                    cancel=self.ctx.cancel,
-                )
-                if umu_run is None and not flatpak:
-                    raise BackendError(_umu_unavailable())
-                if umu_run is not None and not flatpak:
-                    _refuse_if_userns_blocked()
             env["PROTONPATH"] = str(proton)
             env["STEAM_COMPAT_DATA_PATH"] = str(prefix)
+            self._note_prefix_upgrade(proton)
             # A Display choice in the profile beats a PROTON_ENABLE_WAYLAND inherited from the
             # desktop: "x11" is the escape hatch for the NVIDIA first-frame hang and was
             # silently ignored. "auto" still respects a value the user exported.
@@ -326,20 +472,17 @@ class LaunchingMixin:
                 env["PROTON_ENABLE_WAYLAND"] = self._wayland_default()
             else:
                 env.setdefault("PROTON_ENABLE_WAYLAND", self._wayland_default())
-            if umu_run:
-                umu.note_first_runtime(self.ctx.emit)
-                argv = [umu_run, *args]
-            else:
-                # Only inside the Flatpak (its Sandbox, or umu unavailable there): run the Proton
-                # tree directly with the runtime's pinned libraries. A desktop install raised
-                # above instead (#1338); the Flatpak path is its own issue.
-                if not sandbox.in_flatpak():
-                    if missing is None:
-                        missing = hostlibs.missing_32bit()
-                    if missing:
-                        raise BackendError(hostlibs.hint(missing))
-                argv, env_updates = sandbox.proton_direct(proton, prefix, args)
-                env.update(env_updates)
+            # The one umu decision every Proton game shares (#1338, #1441, #1449).
+            argv = protoncmd.proton_argv(
+                args,
+                proton=proton,
+                prefix=prefix,
+                env=env,
+                configured=str(profile_setting(self.ctx.profile, "umu_binary", "umu-run")),
+                sandboxed=sandboxed,
+                emit=self.ctx.emit,
+                cancel=self.ctx.cancel,
+            )
         else:
             # Plain Wine would otherwise ask to download wine-mono / wine-gecko.
             overrides = [p for p in str(env.get("WINEDLLOVERRIDES") or "").split(";") if p.strip()]
@@ -374,6 +517,12 @@ class LaunchingMixin:
         if self.dxvk_config and "DXVK_CONFIG" not in env:
             env["DXVK_CONFIG"] = self.dxvk_config  # profile extra_env still wins
         monitors.apply_env(env, self.ctx)
+        shadercache.prepare(
+            self.ctx.name,
+            env,
+            self.info,
+            runner=Path(proton) if kind == "proton" and proton else None,
+        )
         profile_env = profile_setting(self.ctx.profile, "extra_env")
         process.apply_extra_env(
             env,
@@ -381,7 +530,15 @@ class LaunchingMixin:
             reserved=process.LAUNCH_RESERVED_ENV,
         )
         process.apply_extra_env(env, extra_env, reserved=process.LAUNCH_RESERVED_ENV)
-        return argv, process.sanitize_game_env(env)
+        # After the profile's Environment, so a value the user set is kept.
+        protoncmd.play_speedups(env, prefix, proton=kind == "proton", info=self.info)
+        shadercache.log_caches(
+            self.ctx.name, prefix, env, lambda line: self.info(self._redacted(line)),
+            sandboxed=sandboxed,
+        )
+        return argv, process.sanitize_game_env(
+            env, preserve=process.launchenv.explicit_names(self.ctx.profile, extra_env)
+        )
 
     def _run_in_prefix(self, argv: list[str]) -> int:
         """Run ``argv`` inside this profile's Wine/Proton prefix."""
@@ -501,10 +658,14 @@ class LaunchingMixin:
     def _stop_game_processes(self, pids: list[int]) -> None:
         """Stop ``pids``; inside the Flatpak, look again until no process of the game is left.
 
-        A Sandboxed game's Wine helpers can outlive the first sweep (measured: a winedevice.exe
-        that ignored SIGTERM and kept the launching Flatpak instance alive), and the app's
-        ``wineserver -k`` cannot reach the Sandbox's wineserver.
+        The game is first asked to close (``taskkill`` without ``/F``) and given a short grace
+        to save (#1421 ask 3). A Sandboxed game's Wine helpers can outlive the first sweep
+        (measured: a winedevice.exe that ignored SIGTERM and kept the launching Flatpak instance
+        alive), and the app's ``wineserver -k`` cannot reach the Sandbox's wineserver.
         """
+        pids = self._ask_game_to_close(pids)
+        if not pids:
+            return
         stop_pids(pids)
         if not sandbox.in_flatpak():
             return
@@ -518,6 +679,236 @@ class LaunchingMixin:
             # wineserver -k cannot reach the Sandbox's wineserver.
             stop_pids(pids, signal.SIGKILL)
 
+    def _stop_grace_seconds(self) -> float:
+        """How long Stop asks the game to close first; ``0`` skips the polite step."""
+        raw = profile_setting(self.ctx.profile, "stop_grace_seconds")
+        if raw in (None, ""):
+            return STOP_GRACE_SECONDS
+        try:
+            value = float(raw)
+        except (TypeError, ValueError, OverflowError):
+            return STOP_GRACE_SECONDS
+        if not math.isfinite(value):
+            return STOP_GRACE_SECONDS
+        return max(0.0, value)
+
+    def _stop_exe_names(self) -> list[str]:
+        """Windows image names the polite stop should close, without duplicates."""
+        names: list[str] = []
+        seen: set[str] = set()
+
+        def add(name: object) -> None:
+            text = str(name).strip()
+            if text and text.lower() not in seen:
+                seen.add(text.lower())
+                names.append(text)
+
+        for query in (self._running_patterns(), self._patterns()):
+            for name in getattr(query, "names", ()):
+                add(name)
+        if self.direct_mode():
+            target = self.direct_target()
+            if target is not None:
+                add(target.name)
+        return names
+
+    def _record_polite_stop(
+        self, argv: list[str], env: dict[str, str], game_argc: int
+    ) -> None:
+        """Save what Stop will need, built once from this launch's own command and env.
+
+        A bookkeeping failure must never break Play: without a saved request Stop just
+        uses the existing signal path.
+        """
+        # A new session starts here: an attempt made for an earlier one (the tray launcher
+        # stopped before this Play) must not skip this session's polite stop (#1421 review).
+        self._polite_stop_attempted = False
+        try:
+            prefix = self.prefix()
+            # The old request is for the previous run; if this one cannot be written, Stop
+            # must fall back to signals instead of reusing it (#1421 review).
+            _forget_stop_request(prefix)
+            # What the launch really did, not what the player asked for: the Sandbox can be
+            # on by default and skipped here (no bubblewrap), and the game then runs
+            # unwrapped (#1421 review).
+            wrapped = self._sandbox_wrapped
+            if wrapped is None:
+                wrapped = self.secure_mode_enabled()
+            if wrapped:
+                # A taskkill outside the Sandbox would start a second wineserver on the
+                # prefix. Stop asks the game's own windows to close instead.
+                stopstate.save(prefix, kind="x11")
+                _remember_stop_request(prefix)
+                return
+            if game_argc <= 0 or game_argc > len(argv):
+                stopstate.save(prefix, kind="none")
+                _remember_stop_request(prefix)
+                return
+            head = list(argv[: len(argv) - game_argc])
+            names = self._stop_exe_names()
+            commands = [[*head, "taskkill", "/IM", name] for name in names]
+            stopstate.save(
+                prefix,
+                kind="taskkill" if commands else "none",
+                commands=commands,
+                env=env,
+            )
+            _remember_stop_request(prefix)
+        except Exception as exc:  # noqa: BLE001 - a saved request must never break Play
+            self.info(
+                f"could not save the close request ({exc}); Stop will end the game at once"
+            )
+
+    def _run_stop_helper(self, argv: list[str], env: dict[str, str], deadline: float) -> bool:
+        """Run one ``taskkill``; False when it failed, hung, or Stop was pressed again."""
+        if time.monotonic() >= deadline or self._stop_was_repeated():
+            self.info("the close request was interrupted or timed out; ending it now")
+            return False
+        try:
+            proc = process.spawn(
+                argv, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except OSError as exc:
+            self.info(f"could not ask the game to close ({exc}); ending it now")
+            return False
+        try:
+            while True:
+                if self._stop_was_repeated():
+                    self.info("Stop was pressed again; ending the game now")
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.info("asking the game to close took too long; ending it now")
+                    return False
+                try:
+                    code = proc.wait(timeout=min(0.1, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
+                if code != 0:
+                    self.info(
+                        "the game did not accept the close request "
+                        f"(taskkill exit {code}); ending it now"
+                    )
+                    return False
+                return True
+        finally:
+            # A successful wrapper may exit before its taskkill child. Always clean
+            # up the session's group, even when the direct child has already exited.
+            with contextlib.suppress(OSError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            if proc.poll() is None:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                    proc.wait(timeout=1)
+
+    def _stop_was_repeated(self) -> bool:
+        return self.ctx.cancel.cancel_count > getattr(self, "_stop_cancel_count", 1)
+
+    def _game_pids(self) -> list[int]:
+        """The processes Stop counts as the game: the stop path's query, without helpers."""
+        return [pid for pid in scan_pids(self._patterns()) if not _wine_helper(pid)]
+
+    def _ask_game_to_close(self, pids: list[int] | None = None) -> list[int]:
+        """Ask the game to close and wait, cheaply, for it to exit.
+
+        Returns the processes that are still running, so the caller can send SIGTERM. An empty
+        list means the game exited during the grace and must not be signalled at all. The
+        command was saved by the launch; Stop itself never resolves a runner or builds one.
+        """
+        if pids is None:
+            pids = self._game_pids()
+        if not pids:
+            return []
+        grace = self._stop_grace_seconds()
+        if grace <= 0 or self._stop_was_repeated():
+            return pids
+        saved = stopstate.load(self.prefix())
+        if saved is None or saved["kind"] == "none":
+            self.info("no saved close request for this game; ending it now")
+            return pids
+        if _stop_request_is_stale(self.prefix()):
+            self.info("the saved close request is from an earlier run; ending it now")
+            return pids
+        # One polite attempt per backend run: after an earlier-instance stop already asked,
+        # the cancelled launch must not wait a second grace before it escalates.
+        if getattr(self, "_polite_stop_attempted", False):
+            return pids
+        self._polite_stop_attempted = True
+        started = time.monotonic()
+        deadline = started + grace
+        self.ctx.emit(Event("step", "Asking the game to close…"))
+        try:
+            if saved["kind"] == "x11":
+                return self._ask_sandboxed_to_close(pids, deadline)
+            helper_deadline = min(deadline, started + _STOP_HELPER_TIMEOUT)
+            # The launch's own environment, rebuilt the way Play built it, plus the
+            # difference it saved. Not this process's environment: that would hand the
+            # helper the credentials and Python/loader variables a launch filters out.
+            helper_env = process.build_env(self.ctx.profile)
+            helper_env.update(saved["env"])
+            asked = False
+            for argv in saved["commands"]:
+                # A launcher-only session also knows the game exe, which is not running: one
+                # missing name must not throw away the grace another name just earned.
+                asked = self._run_stop_helper(argv, helper_env, helper_deadline) or asked
+                if self._stop_was_repeated():
+                    return pids
+            if not asked or time.monotonic() >= helper_deadline:
+                return pids
+            return self._wait_for_game_exit(deadline)
+        finally:
+            # The request served this launch. A Stop worker started afterwards (the queued
+            # cleanup of the same single Stop) must not wait a second grace for it (#1421).
+            stopstate.clear(self.prefix())
+
+    def _ask_sandboxed_to_close(self, pids: list[int], deadline: float) -> list[int]:
+        """Ask a Sandboxed game's own windows to close; never start a Wine helper outside.
+
+        No window is not a failure: a Wayland-native game, a session without X11 or a
+        missing libX11 just means the existing signals end it at once.
+        """
+        if not os.environ.get("DISPLAY"):
+            self.info("no X display here, so the game was not asked to close; ending it now")
+            return pids
+        try:
+            windows = x11windows.list_windows_owned()
+        except Exception:  # noqa: BLE001 - reading windows is optional
+            windows = None
+        if windows is None:
+            self.info(
+                "X11 is not available here, so the game was not asked to close; ending it now"
+            )
+            return pids
+        game = [pid for pid in pids if not _wine_helper(pid)]
+        owned = launch_window.WindowEvidence(set()).owned_windows(game, dict(windows))
+        if not owned:
+            self.info(
+                "no X11 window was found for the game, so it was not asked to close; "
+                "ending it now"
+            )
+            return pids
+        sent = x11windows.request_close(owned)
+        if not sent:
+            self.info("the X close request could not be sent; ending it now")
+            return pids
+        return self._wait_for_game_exit(deadline)
+
+    def _wait_for_game_exit(self, deadline: float) -> list[int]:
+        """Wait until no game process is left (Wine's helpers do not count), or the grace ends."""
+        while True:
+            remaining = scan_pids(self._patterns())
+            game = [pid for pid in remaining if not _wine_helper(pid)]
+            if not game:
+                return remaining
+            if self._stop_was_repeated():
+                return remaining
+            now = time.monotonic()
+            if now >= deadline:
+                self.info("the game did not close in time; ending it now")
+                return remaining
+            time.sleep(min(_STOP_POLL_SECONDS, max(0.0, deadline - now)))
+
     def launch(self) -> int:
         self.ctx.cancel.raise_if_cancelled()
         # Fail "not installed" before spending a 320 MB download on a runner.
@@ -526,7 +917,7 @@ class LaunchingMixin:
             if target is None or not target.is_file():
                 raise BackendError(f"game executable not found: {target}")
         elif self.find_launcher() is None:
-            raise BackendError("the game is not installed")
+            raise BackendNotInstalled("the game is not installed")
         self._ensure_default_runner(strict=True)
         if self.direct_mode():
             return self._launch_direct()
@@ -535,8 +926,11 @@ class LaunchingMixin:
         self._launch_started = time.monotonic()
         try:
             argv, env, target = self.build_launch()
+            self._record_polite_stop(
+                argv, env, 1 + len(self._extra_args("launch_args"))
+            )
             self.ctx.emit(Event("step", f"{self.display_name}: launching {target.name}"))
-            self.info(self._runtime_note())
+            self.info(self._runtime_note(), **self._runner_facts())
             self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
             self._log_launch_details(env)
             _renderer, note = graphics.effective_renderer(self.ctx.profile)
@@ -546,11 +940,15 @@ class LaunchingMixin:
             try:
                 # Held while the game runs, so other Nadare instances (a Flatpak desktop
                 # shortcut has its own process namespace) see it and can ask it to stop.
-                with self._run_lock():
+                with self._run_lock(), self._game_process_watch() as closed:
                     self._begin_game_output()
                     try:
                         code = stream(
-                            argv, env, on_line=self._on_game_line, cancel=self.ctx.cancel
+                            argv,
+                            env,
+                            on_line=self._on_game_line,
+                            cancel=self.ctx.cancel,
+                            before_stop=self._ask_game_to_close,
                         )
                     finally:
                         self._end_game_output()
@@ -560,7 +958,7 @@ class LaunchingMixin:
                 self._renderer = probe.result
         finally:
             self._stop_link_relay()
-        return self._checked_launch_exit(code)
+        return 0 if closed.is_set() else self._checked_launch_exit(code)
 
     def _checked_launch_exit(self, code: int) -> int:
         """``code``, unless the output showed the runtime failed: then say why.
@@ -589,25 +987,25 @@ class LaunchingMixin:
         return code
 
     def stop(self) -> None:
-        pids = scan_pids(self._patterns())
-        if pids:
-            self.info(f"stopping {len(pids)} process(es): {pids}")
-            self._stop_game_processes(pids)
-        elif self._running_elsewhere():
-            self.info("asking the other Nadare window to stop the game")
-            runlock.request_stop(self.prefix())
-            deadline = time.monotonic() + 20
-            while time.monotonic() < deadline and runlock.running(self.prefix()):
-                time.sleep(0.2)
-            if runlock.running(self.prefix()):
-                self.info("the game did not stop within 20 s")
-            return
-        proton: str | None = None
+        # This operation itself is the first Stop. Any cancellation, including one
+        # delivered before process scanning, is a request to escalate immediately.
+        self._stop_cancel_count = 0
         try:
-            resolved, kind = self.resolve_runner()
-        except BackendError:
-            resolved, kind = None, "wine"
-        if kind == "proton" and resolved:
-            proton = resolved
-        wine = path_option(profile_setting(self.ctx.profile, "wine_binary"))
-        stop_runner_wineserver(prefix=self.prefix(), proton=proton, wine_binary=wine)
+            pids = scan_pids(self._patterns())
+            if pids:
+                self.info(f"stopping {len(pids)} process(es): {pids}")
+                self._stop_game_processes(pids)
+            elif self._running_elsewhere():
+                stop_elsewhere(self.prefix(), self.info)
+                return
+            proton: str | None = None
+            try:
+                resolved, kind = self.resolve_runner()
+            except BackendError:
+                resolved, kind = None, "wine"
+            if kind == "proton" and resolved:
+                proton = resolved
+            wine = path_option(profile_setting(self.ctx.profile, "wine_binary"))
+            stop_runner_wineserver(prefix=self.prefix(), proton=proton, wine_binary=wine)
+        finally:
+            stopstate.clear(self.prefix())

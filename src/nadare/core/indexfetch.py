@@ -11,8 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
-import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -21,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from . import download, hosting, paths
+from . import atomicfile, download, hosting, paths
 
 log = logging.getLogger(__name__)
 
@@ -55,18 +53,7 @@ def cache_path(base: str, rel: str) -> Path:
 
 def _write_cache(path: Path, payload: bytes) -> None:
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, name = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(payload)
-            os.replace(name, path)
-        except OSError:
-            try:
-                os.unlink(name)
-            except OSError:
-                pass
-            raise
+        atomicfile.write(path, payload, make_parent=True)
     except OSError as exc:
         log.debug("cannot cache %s: %s", path, exc)
 

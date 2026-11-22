@@ -5,6 +5,10 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+# Installed as a system unit (docs/PACKAGING.md), so set the account that owns the
+# checkouts here: without it the job runs as root and %h is /root. The name is
+# site-specific, which is why the template leaves it empty.
+#User=
 # The pin job has its own index checkout and its own copy of scripts/ and src/ (see
 # docs/ARCHIVE-PINS.md). Adjust the paths if they live elsewhere.
 Environment=NADARE_PIN_INDEX_DIR=%h/nadare-pins/nadare-index
@@ -17,6 +21,18 @@ ExecStart=%h/nadare-pins/scripts/publish_pins_node.sh
 # A first pass streams a whole archive (minutes to an hour); publish_pins.py enforces its own
 # two hour budget.
 TimeoutStartSec=150min
+# Hardening (#1551). The job needs no privileges; it runs as the checkout owner.
 NoNewPrivileges=true
-ProtectSystem=full
+# A private /tmp and /var/tmp: XDG_RUNTIME_DIR=/tmp above puts the run lock there,
+# which is also why that variable is not /run/user (read-only under strict below).
 PrivateTmp=true
+# The whole tree is read-only; write access only through ReadWritePaths= below.
+ProtectSystem=strict
+# Home is readable (git config, ssh keys) but not writable. An ssh push therefore
+# cannot add a new host key to ~/.ssh/known_hosts: run the first push by hand.
+ProtectHome=read-only
+# Everything the job writes: NADARE_PIN_STATUS is replaced through a temp file in the
+# same directory (%h/nadare-pins), which also holds its index checkout and the copy
+# of scripts/ and src/ it runs from. Move status.json elsewhere (and list that
+# directory instead) to keep the scripts read-only.
+ReadWritePaths=%h/nadare-pins

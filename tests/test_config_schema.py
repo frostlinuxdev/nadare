@@ -100,3 +100,77 @@ def test_a_migrated_config_is_written_back_on_the_next_save(tmp_path, monkeypatc
     assert on_disk["schema"] == 2
     assert on_disk["profiles"]["a"]["title"] == "migrated"
     assert on_disk["check_notices"] is False
+
+
+# --- #1476: a failed step is not stamped as done ---------------------------------------------
+
+
+def _half_then_raise(raw):
+    raw["profiles"]["a"]["title"] = "half-migrated"
+    raw["half"] = True
+    raise KeyError("boom")
+
+
+def test_a_failed_migration_is_not_persisted_as_completed(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_mod, "SCHEMA", 2)
+    monkeypatch.setattr(config_mod, "MIGRATIONS", {1: _half_then_raise})
+    path = _write(tmp_path, schema=1)
+    cfg = Config.load(path)
+    assert cfg.notice and "could not be updated" in cfg.notice
+    cfg.save()
+    on_disk = json.loads(path.read_text())
+    assert on_disk["schema"] == 1, "the failed step was stamped as done"
+    assert "half" not in on_disk, "the failed step's partial edits were kept"
+    assert on_disk["profiles"]["a"].get("title") != "half-migrated"
+
+
+def test_a_later_build_with_a_fixed_step_runs_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_mod, "SCHEMA", 2)
+    monkeypatch.setattr(config_mod, "MIGRATIONS", {1: _half_then_raise})
+    path = _write(tmp_path, schema=1)
+    Config.load(path).save()
+
+    def fixed(raw):
+        raw["profiles"]["a"]["title"] = "migrated"
+
+    monkeypatch.setattr(config_mod, "MIGRATIONS", {1: fixed})
+    cfg = Config.load(path)
+    assert cfg.notice is None
+    assert cfg.profiles["a"]["title"] == "migrated"
+    cfg.save()
+    assert json.loads(path.read_text())["schema"] == 2
+
+
+def test_steps_before_the_failing_one_are_kept_and_stamped(tmp_path, monkeypatch):
+    def one(raw):
+        raw["profiles"]["a"]["title"] = "after 1"
+
+    monkeypatch.setattr(config_mod, "SCHEMA", 3)
+    monkeypatch.setattr(config_mod, "MIGRATIONS", {1: one, 2: _half_then_raise})
+    path = _write(tmp_path, schema=1)
+    cfg = Config.load(path)
+    assert cfg.profiles["a"]["title"] == "after 1"
+    assert cfg.data["schema"] == 2
+    cfg.save()
+    on_disk = json.loads(path.read_text())
+    assert on_disk["schema"] == 2
+    assert on_disk["profiles"]["a"]["title"] == "after 1"
+    assert "half" not in on_disk
+
+
+def test_a_failed_step_with_no_backup_is_still_not_stamped(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_mod, "SCHEMA", 2)
+    monkeypatch.setattr(config_mod, "MIGRATIONS", {1: _half_then_raise})
+    monkeypatch.setattr(Config, "_quarantine", classmethod(lambda cls, p, keep=False: None))
+    path = _write(tmp_path, schema=1)
+    cfg = Config.load(path)
+    assert "could not be backed up" in (cfg.notice or "")
+    cfg.save()
+    assert json.loads(path.read_text())["schema"] == 1
+
+
+def test_a_failed_migration_still_loads_the_library(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_mod, "SCHEMA", 2)
+    monkeypatch.setattr(config_mod, "MIGRATIONS", {1: _half_then_raise})
+    cfg = Config.load(_write(tmp_path, schema=1))
+    assert "a" in cfg.profiles and cfg.profiles["a"]["backend"] == "wine"

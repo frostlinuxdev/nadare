@@ -182,15 +182,21 @@ def test_gfl2_plan():
     all_paths_safe(plan)
 
 
-def test_gfl2_haoplay_global_plan_is_only_the_small_client_from_the_intl_cdn():
+def test_gfl2_haoplay_global_plan_installs_the_client_and_game_data_from_the_intl_cdn():
     cdn = "https://gf2-intl-cdn.17996cdn.com/prod/"
     flex = "https://gf2-launcher-intl.haoplay.com/flexible_config"
-    f = FakeFetch({flex: fx("gfl2_haoplay_flexible_config.json")})  # nothing else is fetched
+    f = FakeFetch(
+        {
+            flex: fx("gfl2_haoplay_flexible_config.json"),
+            cdn + "AssetBundles_Windows/28279/Version.txt": fx("gfl2_haoplay_Version.txt"),
+        }
+    )
     plan = gfl2.resolve_haoplay(f)
     assert plan.game_tag == "gfl2-haoplay"
     assert plan.version == "2.0.3936.14886.28279+client-2.0.3936"
     assert plan.exe == "GF2_Exilium.exe"
-    assert plan.files == ()  # the game downloads its own ~88 GB of resources in-game
+    assert plan.files  # the game data is listed now, not fetched in-game
+    assert all(x.url.startswith(cdn) for x in plan.files)
     (arc,) = plan.archives
     assert arc.source.url == cdn + "package/PCClient/2.0.3936/GF2_Exilium_Origin.zip"
     all_paths_safe(plan)
@@ -344,3 +350,11 @@ def test_pgr_streams_nothing_and_is_a_plain_file_list():
 
     _u, routes, _r, _c = pgr_routes()
     assert not any(a.stream for a in pgr.resolve(FakeFetch(routes)).archives)
+
+
+@pytest.mark.parametrize("data", ["text", [1], 5])
+def test_aethergazer_data_that_is_not_an_object_is_refused(data):
+    """#812 fuzz: a non-object ``data`` raised AttributeError instead of DirectError."""
+    body = json.dumps({"errorCode": "0", "data": data}).encode()
+    with pytest.raises(dd.DirectError):
+        aethergazer.resolve(lambda url, headers=None: body)

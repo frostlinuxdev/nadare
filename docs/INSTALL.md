@@ -1,11 +1,36 @@
 # Install Nadare
 
-Nadare is one file, an AppImage. There is nothing to install in the usual sense: you download
-the file, allow it to run once, and start it. Games are installed from the **Store** inside
-Nadare.
+Nadare comes as a Flatpak or as one file, an AppImage. The AppImage needs nothing installed in
+the usual sense: you download the file, allow it to run once, and start it. Games are installed
+from the **Store** inside Nadare.
 
 Screenshots are from a fresh Linux Mint 22.3 Cinnamon install. GNOME (Ubuntu, Fedora) and KDE
 look different, but the steps are the same.
+
+## Flatpak (including Bazzite / Bazaar)
+
+The Flatpak comes from our own signed repository at `https://flatpak.nadare.app/`, not from
+Flathub. Anything else claiming to be the Nadare Flatpak is not ours.
+
+1. Download [nadare.flatpakref](https://flatpak.nadare.app/nadare.flatpakref) and open it.
+   Linux Mint's Software Manager and GNOME Software install it from there. Or in a terminal:
+
+   ```sh
+   flatpak install --user https://flatpak.nadare.app/nadare.flatpakref
+   ```
+
+2. Start **Nadare** from your app menu. If a banner says the Flatpak's 32-bit graphics package
+   or system libraries are missing, press **Install** on it: Nadare installs them from Flathub.
+
+On **Bazzite**, Bazaar cannot add a repository from a `.flatpakref`. Download
+[nadare.flatpak](https://flatpak.nadare.app/nadare.flatpak) and open it instead; updates still
+come from our repository.
+
+The Flatpak uses `~/Games`, folders on other drives, and Nadare's own folder, not your whole
+home folder. If you already use the AppImage, Settings → **Move to the Flatpak…** moves your
+games and settings once.
+
+The steps below install the AppImage.
 
 ## 1. Download
 

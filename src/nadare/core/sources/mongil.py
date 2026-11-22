@@ -8,6 +8,7 @@ import json
 from urllib.parse import quote, urlsplit
 
 from .. import directdl
+from ..directdl import require_https
 from . import Fetch, default_fetch
 
 _URL = "https://apis.netmarble.com/cpplauncher/api/game/monster2/builds?buildCode=A"
@@ -34,10 +35,6 @@ def _load(fetch: Fetch) -> dict:
     return data
 
 
-def _https(url: object) -> str:
-    if not isinstance(url, str) or urlsplit(url).scheme != "https":
-        raise directdl.DirectError(f"mongil: not an https URL: {url!r}")
-    return url
 
 
 def resolve(fetch: Fetch | None = None) -> directdl.Plan:
@@ -51,7 +48,7 @@ def resolve(fetch: Fetch | None = None) -> directdl.Plan:
     if not isinstance(exe, str):
         raise directdl.DirectError("mongil: invalid executeFileName")
 
-    url = _https(data.get("buildDownloadUrl"))
+    url = require_https(data.get("buildDownloadUrl"))
     name = urlsplit(url).path.rsplit("/", 1)[-1]
     if not name:
         raise directdl.DirectError("mongil: download URL has no file name")

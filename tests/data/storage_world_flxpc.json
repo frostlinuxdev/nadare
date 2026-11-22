@@ -1,0 +1,174 @@
+{
+ "libraries": [
+  {
+   "path": "{MNT}/Games"
+  }
+ ],
+ "profiles": {
+  "Blue Archive": {
+   "backend": "steam",
+   "prefix": "",
+   "install_dir": ""
+  },
+  "CZN": {
+   "backend": "stove-czn",
+   "prefix": "{MNT}/Games/Nadare/Chaos Zero Nightmare/prefix",
+   "install_dir": "",
+   "owned_trees": [
+    "prefix"
+   ],
+   "owned_paths": {
+    "prefix": "{MNT}/Games/Nadare/Chaos Zero Nightmare/prefix"
+   },
+   "owned_dirs": [
+    "{MNT}/Games/Nadare/Chaos Zero Nightmare"
+   ]
+  },
+  "FGO": {
+   "backend": "fgo-lepton",
+   "prefix": "{HOME}/.local/share/lepton-nv",
+   "install_dir": ""
+  },
+  "STELLASORA": {
+   "backend": "stellasora-yostar",
+   "install_dir": "{MNT}/Games/Stella Sora/YostarGames/StellaSora_EN"
+  },
+  "aether-gazer": {
+   "backend": "direct-aethergazer",
+   "prefix": "{DATA}/profiles/aether-gazer/prefix",
+   "install_dir": "{DATA}/profiles/aether-gazer/install",
+   "installed_prefix": "{DATA}/profiles/aether-gazer/prefix"
+  },
+  "arknights": {
+   "backend": "arknights-yostar",
+   "prefix": "{MNT}/Games/Nadare/Arknights/prefix",
+   "install_dir": "{MNT}/Games/Nadare/Arknights/install",
+   "owned_trees": [
+    "install_dir",
+    "prefix"
+   ],
+   "owned_paths": {
+    "install_dir": "{MNT}/Games/Nadare/Arknights/install",
+    "prefix": "{MNT}/Games/Nadare/Arknights/prefix"
+   },
+   "owned_dirs": [
+    "{MNT}/Games/Nadare/Arknights"
+   ],
+   "installed_prefix": "{MNT}/Games/Nadare/Arknights/prefix"
+  },
+  "arknights-endfield": {
+   "backend": "direct-endfield",
+   "prefix": "{MNT}/Games/Nadare/Arknights Endfield/prefix",
+   "install_dir": "{MNT}/Games/Nadare/Arknights Endfield/install",
+   "owned_trees": [
+    "install_dir",
+    "prefix"
+   ],
+   "owned_paths": {
+    "install_dir": "{MNT}/Games/Nadare/Arknights Endfield/install",
+    "prefix": "{MNT}/Games/Nadare/Arknights Endfield/prefix"
+   },
+   "owned_dirs": [
+    "{MNT}/Games/Nadare/Arknights Endfield"
+   ],
+   "installed_prefix": "{MNT}/Games/Nadare/Arknights Endfield/prefix"
+  },
+  "brown-dust-2": {
+   "backend": "direct-bd2",
+   "prefix": "{DATA}/profiles/brown-dust-2/prefix",
+   "install_dir": "{DATA}/profiles/brown-dust-2/install",
+   "installed_prefix": "{DATA}/profiles/brown-dust-2/prefix"
+  },
+  "girls-frontline-2-haoplay-global-build": {
+   "backend": "direct-gfl2-haoplay",
+   "prefix": "{MNT}/Games/Nadare/Girls' Frontline 2 (Haoplay global build)/prefix",
+   "install_dir": "{MNT}/Games/Nadare/Girls' Frontline 2 (Haoplay global build)/install",
+   "owned_trees": [
+    "install_dir",
+    "prefix"
+   ],
+   "owned_paths": {
+    "install_dir": "{MNT}/Games/Nadare/Girls' Frontline 2 (Haoplay global build)/install",
+    "prefix": "{MNT}/Games/Nadare/Girls' Frontline 2 (Haoplay global build)/prefix"
+   },
+   "owned_dirs": [
+    "{MNT}/Games/Nadare/Girls' Frontline 2 (Haoplay global build)"
+   ],
+   "installed_prefix": "{MNT}/Games/Nadare/Girls' Frontline 2 (Haoplay global build)/prefix"
+  },
+  "honkai-star-rail": {
+   "backend": "direct-hsr",
+   "prefix": "{DATA}/profiles/honkai-star-rail/prefix",
+   "install_dir": "{DATA}/profiles/honkai-star-rail/install"
+  },
+  "neverness-to-everness": {
+   "backend": "direct-nte",
+   "prefix": "{DATA}/profiles/neverness-to-everness/prefix",
+   "install_dir": "{DATA}/profiles/neverness-to-everness/install"
+  },
+  "nikke": {
+   "backend": "launcher-nikke",
+   "prefix": "{MNT}/Games/Nadare/NIKKE Goddess of Victory/prefix",
+   "owned_trees": [
+    "install_dir",
+    "prefix"
+   ],
+   "owned_paths": {
+    "install_dir": "{MNT}/Games/Nadare/NIKKE Goddess of Victory/install",
+    "prefix": "{MNT}/Games/Nadare/NIKKE Goddess of Victory/prefix"
+   },
+   "owned_dirs": [
+    "{MNT}/Games/Nadare/NIKKE Goddess of Victory"
+   ],
+   "installed_prefix": "{MNT}/Games/Nadare/NIKKE Goddess of Victory/prefix"
+  },
+  "punishing-gray-raven": {
+   "backend": "direct-pgr",
+   "prefix": "{MNT}/Games/Nadare/Punishing Gray Raven/prefix",
+   "install_dir": "{MNT}/Games/Nadare/Punishing Gray Raven/install",
+   "owned_trees": [
+    "install_dir",
+    "prefix"
+   ],
+   "owned_paths": {
+    "install_dir": "{MNT}/Games/Nadare/Punishing Gray Raven/install",
+    "prefix": "{MNT}/Games/Nadare/Punishing Gray Raven/prefix"
+   },
+   "owned_dirs": [
+    "{MNT}/Games/Nadare/Punishing Gray Raven"
+   ],
+   "installed_prefix": "{MNT}/Games/Nadare/Punishing Gray Raven/prefix"
+  },
+  "wuthering-waves": {
+   "backend": "direct-wuwa",
+   "prefix": "{DATA}/profiles/wuthering-waves/prefix",
+   "install_dir": "{DATA}/profiles/wuthering-waves/install",
+   "owned_trees": [
+    "install_dir",
+    "prefix"
+   ],
+   "owned_paths": {
+    "install_dir": "{DATA}/profiles/wuthering-waves/install",
+    "prefix": "{DATA}/profiles/wuthering-waves/prefix"
+   },
+   "installed_prefix": "{DATA}/profiles/wuthering-waves/prefix"
+  },
+  "zenless-zone-zero": {
+   "backend": "direct-zzz",
+   "prefix": "{MNT}/Games/Nadare/Zenless Zone Zero/prefix",
+   "install_dir": "{MNT}/Games/Nadare/Zenless Zone Zero/install",
+   "owned_trees": [
+    "install_dir",
+    "prefix"
+   ],
+   "owned_paths": {
+    "install_dir": "{MNT}/Games/Nadare/Zenless Zone Zero/install",
+    "prefix": "{MNT}/Games/Nadare/Zenless Zone Zero/prefix"
+   },
+   "owned_dirs": [
+    "{MNT}/Games/Nadare/Zenless Zone Zero"
+   ],
+   "installed_prefix": "{MNT}/Games/Nadare/Zenless Zone Zero/prefix"
+  }
+ }
+}

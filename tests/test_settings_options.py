@@ -157,14 +157,14 @@ def test_env_is_edited_as_key_value_lines(tmp_path, qapp, monkeypatch):
 
 
 def test_int_options_use_a_bounded_spin_box(tmp_path, qapp, monkeypatch):
-    # Download workers is config-only now; the spin box still works for any int option.
+    # Worker caps are visible and accept up to 32.
     monkeypatch.setattr("nadare.core.backends.CONFIG_ONLY_KEYS", frozenset())
     config = _config(tmp_path, "arknights-yostar")
     page = SettingsPage()
     try:
         page.load(config, "sample")
         spin = page.option_widget("download_workers")
-        assert (spin.minimum(), spin.maximum()) == (1, 16)
+        assert (spin.minimum(), spin.maximum()) == (1, 32)
         spin.setValue(3)
         page.save()
         assert config.profile("sample")["download_workers"] == 3

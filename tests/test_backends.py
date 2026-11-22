@@ -85,9 +85,29 @@ def test_public_api_exports_registry_helpers() -> None:
     """L18: ``__all__`` must advertise the registry helpers callers import."""
     from nadare.core import backends
 
-    for name in ("supports_media", "unavailable"):
+    for name in ("supports_media", "supports_hero", "unavailable"):
         assert name in backends.__all__
         assert hasattr(backends, name)
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        ("direct-wuwa", True),
+        ("launcher-nikke", True),
+        ("steam", True),
+        ("arknights-yostar", True),
+        ("stove-czn", True),
+        ("wine", False),
+        ("script", False),
+        ("no-such-kind", False),
+    ],
+)
+def test_only_kinds_with_an_art_source_can_have_a_hero(kind: str, expected: bool) -> None:
+    """A game page fetches a hero only where some source can supply one."""
+    from nadare.core.backends import supports_hero
+
+    assert supports_hero(kind) is expected
 
 
 def test_create_returns_instance_with_context(tmp_path: Path) -> None:
@@ -232,12 +252,12 @@ def test_optional_defaults(tmp_path: Path) -> None:
     with pytest.raises(BackendUnsupported):
         backend.login()
     with pytest.raises(BackendUnsupported):
-        backend.uninstall()
-    with pytest.raises(BackendUnsupported):
         backend.set_remember(True)
     with pytest.raises(BackendUnsupported):
         backend.logout()
-    assert backend.verify() == {"verified": False, "message": "nothing to verify"}
+    assert backend.verify() == {
+        "outcome": "nothing_to_verify", "verified": False, "message": "nothing to verify"
+    }
 
 
 def test_supports_remember_me_reports_capabilities_safely() -> None:

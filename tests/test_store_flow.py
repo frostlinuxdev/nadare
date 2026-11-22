@@ -5,20 +5,16 @@ from __future__ import annotations
 
 import os
 import socket
-import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from _main_window_patch import patch_main_window
-from PyQt6.QtCore import QCoreApplication, QThreadPool
-from PyQt6.QtGui import QColor, QImage
 from PyQt6.QtWidgets import QApplication, QDialog
 
 from nadare.core import artwork
 from nadare.core.config import Config
-from nadare.gui import add_game
 from nadare.gui.add_game import AddGameDialog
 from nadare.gui.main_window import PAGE_GAME, PAGE_LIBRARY, PAGE_SETTINGS, PAGE_STORE, MainWindow
 from nadare.gui.store_flow import StoreFlow
@@ -46,40 +42,6 @@ def _close(window, qapp) -> None:
     window.close()
     window.deleteLater()
     qapp.processEvents()
-
-
-def _settle(flow: StoreFlow, qapp, timeout: float = 5.0) -> None:
-    """Wait (in real time) for background fetches and decodes and the callbacks they queue."""
-    pool = QThreadPool.globalInstance()
-    deadline = time.monotonic() + timeout
-    quiet = 0
-    while time.monotonic() < deadline:
-        idle = pool.waitForDone(50)
-        QCoreApplication.processEvents()
-        # Idle pool and nothing pending, twice in a row: a finished fetch can still have
-        # queued the decode request that only the next pass delivers.
-        quiet = quiet + 1 if idle and not flow._images.pending() else 0
-        if quiet >= 2:
-            return
-    raise AssertionError("background art work did not settle")
-
-
-def _red_image(path: Path, colour: str = "#ff0000") -> Path:
-    image = QImage(160, 90, QImage.Format.Format_ARGB32)
-    image.fill(QColor(colour))
-    assert image.save(str(path))
-    return path
-
-
-def _hero_colour(flow: StoreFlow) -> QColor:
-    image = flow.detail.hero_label.pixmap().toImage()
-    return QColor(image.pixel(image.width() // 2, image.height() // 2))
-
-
-def _is(colour: QColor, name: str) -> bool:
-    target = QColor(name)
-    got, want = colour.getRgb()[:3], target.getRgb()[:3]
-    return all(abs(a - b) < 40 for a, b in zip(got, want, strict=True))
 
 
 # ---- navigation ------------------------------------------------------------
@@ -131,44 +93,6 @@ def test_library_add_game_opens_the_store_not_the_dialog(tmp_path, qapp, monkeyp
         _close(window, qapp)
 
 
-def test_detail_back_restores_the_grid_with_its_search_and_filter(tmp_path, qapp):
-    window = _window(tmp_path)
-    try:
-        window.show_store()
-        window.show()
-        qapp.processEvents()
-        grid = window.store.grid
-        grid.search.setText("a")
-        grid.tier_filter.setCurrentText("Verified")
-        before = grid.visible_kinds()
-        assert "direct-pgr" in before
-        grid.entry_activated.emit("direct-pgr")
-        assert window.store.currentWidget() is window.store.detail
-        assert window.store.detail.title_label.text() == "Punishing: Gray Raven"
-        window.store.detail.back_button.click()
-        assert window.store.currentWidget() is grid
-        assert grid.search.text() == "a"
-        assert grid.tier_filter.currentText() == "Verified"
-        assert grid.visible_kinds() == before
-        grid.entry_activated.emit("direct-pgr")
-        window.store.show_grid()
-        assert window.store.currentWidget() is grid
-    finally:
-        _close(window, qapp)
-
-
-def test_opening_the_store_from_the_sidebar_returns_to_the_grid(tmp_path, qapp):
-    window = _window(tmp_path)
-    try:
-        window.show_store()
-        window.store.show_detail("direct-pgr")
-        window.show_library()
-        window.show_store()
-        assert window.store.currentWidget() is window.store.grid
-    finally:
-        _close(window, qapp)
-
-
 # ---- install hand-off ------------------------------------------------------
 class _FakeDialog:
     """Stands in for AddGameDialog: records how it was built and can 'create' a profile."""
@@ -180,7 +104,6 @@ class _FakeDialog:
         self.config = config
         self.kwargs = kwargs
         self.created_profile = ""
-        self.created_by_import = False
         type(self).instances.append(self)
 
     def exec(self):
@@ -228,8 +151,7 @@ def test_install_asks_once_for_that_game_and_rejecting_changes_nothing(
     window.open_game = opened.append
     try:
         window.show_store()
-        window.store.show_detail("direct-pgr")
-        window.store.detail.install_button.click()
+        window.store.grid.entry_activated.emit("direct-pgr")  # the card opens the dialog (#1536)
         assert len(quick_dialog.shown) == 1
         assert window.config.profiles == {}
         assert opened == []
@@ -252,24 +174,10 @@ def test_accepted_install_creates_the_profile_marks_it_added_and_opens_it(
         qapp.processEvents()
         card = window.store.grid._cards["direct-pgr"]
         assert card.added_marker.isHidden()
-        window.store.show_detail("direct-pgr")
-        assert window.store.detail.install_button.text() == "Install"
-        window.store.detail.install_button.click()
+        window.store.grid.entry_activated.emit("direct-pgr")  # the card opens the dialog (#1536)
         (name,) = window.config.profiles
         assert opened == [name] and started == [(name, "install")]
         assert not window.store.grid._cards["direct-pgr"].added_marker.isHidden()
-        assert window.store.detail.install_button.isHidden()
-        assert not window.store.detail.installed_note.isHidden()
-    finally:
-        _close(window, qapp)
-
-
-def test_add_your_own_game_opens_the_advanced_dialog(tmp_path, qapp, fake_dialog):
-    window = _window(tmp_path)
-    try:
-        window.show_store()
-        window.store.grid.own_game_button.click()
-        assert [d.kwargs for d in fake_dialog.instances] == [{"kind": None, "advanced": True}]
     finally:
         _close(window, qapp)
 
@@ -287,171 +195,6 @@ def test_existing_profiles_show_as_added_in_a_fresh_store(tmp_path, qapp):
 
 
 # ---- hero art ---------------------------------------------------------------
-def test_hero_for_the_shown_game_replaces_the_placeholder(tmp_path, qapp, monkeypatch):
-    red = _red_image(tmp_path / "red.png")
-    monkeypatch.setattr(artwork, "fetch", lambda profile, title=None, kind="cover": red)
-    flow = StoreFlow()
-    try:
-        flow.show_detail("direct-pgr")
-        assert not _is(_hero_colour(flow), "#ff0000")
-        _settle(flow, qapp)
-        assert _is(_hero_colour(flow), "#ff0000")
-    finally:
-        flow.deleteLater()
-        qapp.processEvents()
-
-
-def _by_kind(**paths):
-    return lambda profile, title=None, kind="cover": paths.get(kind)
-
-
-def test_a_wide_cover_stands_in_when_the_game_has_no_hero(tmp_path, qapp, monkeypatch):
-    cover = _red_image(tmp_path / "cover.png")  # 160x90, wide
-    monkeypatch.setattr(artwork, "fetch", _by_kind(cover=cover))
-    flow = StoreFlow()
-    try:
-        flow.show_detail("direct-aethergazer")
-        _settle(flow, qapp)
-        assert _is(_hero_colour(flow), "#ff0000")
-    finally:
-        flow.deleteLater()
-        qapp.processEvents()
-
-
-def test_a_portrait_cover_still_stands_in_for_the_hero(tmp_path, qapp, monkeypatch):
-    image = QImage(90, 160, QImage.Format.Format_ARGB32)
-    image.fill(QColor("#ff0000"))
-    assert image.save(str(tmp_path / "portrait.png"))
-    monkeypatch.setattr(artwork, "fetch", _by_kind(cover=tmp_path / "portrait.png"))
-    flow = StoreFlow()
-    try:
-        flow.show_detail("direct-aethergazer")
-        _settle(flow, qapp)
-        assert _is(_hero_colour(flow), "#ff0000")  # the poster, whole, in the middle
-    finally:
-        flow.deleteLater()
-        qapp.processEvents()
-
-
-def _two_tone_image(path: Path, width: int, height: int, top: float) -> Path:
-    """A picture whose top ``top`` fraction is blue and the rest red."""
-    image = QImage(width, height, QImage.Format.Format_ARGB32)
-    image.fill(QColor("#ff0000"))
-    for y in range(int(height * top)):
-        for x in range(width):
-            image.setPixelColor(x, y, QColor("#0000ff"))
-    assert image.save(str(path))
-    return path
-
-
-def test_the_cover_reaches_the_banner_whole_not_pre_cropped(tmp_path, qapp, monkeypatch):
-    # The loader used to centre-crop every hero to 4:1 before the banner was built, which threw
-    # away the top of a 16:9 cover (logo, faces) that the banner keeps. A cover that is 40% blue
-    # on top must still show blue in the middle of the banner.
-    cover = _two_tone_image(tmp_path / "cover.png", 160, 90, 0.4)
-    monkeypatch.setattr(artwork, "fetch", _by_kind(cover=cover))
-    flow = StoreFlow()
-    try:
-        flow.show_detail("direct-aethergazer")
-        _settle(flow, qapp)
-        assert _is(_hero_colour(flow), "#0000ff")
-    finally:
-        flow.deleteLater()
-        qapp.processEvents()
-
-
-def test_a_portrait_cover_reaches_the_banner_whole(tmp_path, qapp, monkeypatch):
-    # Top 40% blue: a whole poster centred in the banner shows its seam at 40% of the height, so
-    # the banner's top middle is blue; a poster pre-cropped to a sliver would be one colour.
-    cover = _two_tone_image(tmp_path / "poster.png", 90, 160, 0.4)
-    monkeypatch.setattr(artwork, "fetch", _by_kind(cover=cover))
-    flow = StoreFlow()
-    try:
-        flow.show_detail("direct-aethergazer")
-        _settle(flow, qapp)
-        image = flow.detail.hero_label.pixmap().toImage()
-        top = QColor(image.pixel(image.width() // 2, 4))
-        bottom = QColor(image.pixel(image.width() // 2, image.height() - 5))
-        assert _is(top, "#0000ff") and _is(bottom, "#ff0000")
-    finally:
-        flow.deleteLater()
-        qapp.processEvents()
-
-
-def test_a_real_hero_wins_over_the_cover(tmp_path, qapp, monkeypatch):
-    hero = _red_image(tmp_path / "hero.png", "#0000ff")
-    cover = _red_image(tmp_path / "cover.png", "#ff0000")
-    monkeypatch.setattr(artwork, "fetch", _by_kind(hero=hero, cover=cover))
-    flow = StoreFlow()
-    try:
-        flow.show_detail("direct-aethergazer")
-        _settle(flow, qapp)
-        assert _is(_hero_colour(flow), "#0000ff")
-    finally:
-        flow.deleteLater()
-        qapp.processEvents()
-
-
-def test_a_hero_for_a_game_the_user_left_is_ignored(tmp_path, qapp, monkeypatch):
-    colours = {"direct-pgr": _red_image(tmp_path / "a.png", "#ff0000"),
-               "direct-nte": _red_image(tmp_path / "b.png", "#0000ff")}
-    monkeypatch.setattr(
-        artwork, "fetch", lambda profile, title=None, kind="cover": colours[profile["backend"]]
-    )
-    flow = StoreFlow()
-    try:
-        flow.show_detail("direct-pgr")
-        flow.show_detail("direct-nte")  # the first fetch is now stale
-        _settle(flow, qapp)
-        assert flow.detail.title_label.text() != "Punishing: Gray Raven"
-        assert _is(_hero_colour(flow), "#0000ff")
-        # Leaving the page must also drop a fetch that is still in flight: the detail keeps
-        # its placeholder instead of receiving art for a game the user already left.
-        flow.show_detail("direct-pgr")
-        flow.show_grid()
-        _settle(flow, qapp)
-        assert not _is(_hero_colour(flow), "#ff0000")
-        assert not _is(_hero_colour(flow), "#0000ff")
-    finally:
-        flow.deleteLater()
-        qapp.processEvents()
-
-
-def test_unrelated_profile_changes_do_not_reset_the_hero(tmp_path, qapp, monkeypatch):
-    red = _red_image(tmp_path / "red.png")
-    monkeypatch.setattr(artwork, "fetch", lambda profile, title=None, kind="cover": red)
-    flow = StoreFlow()
-    try:
-        flow.show_detail("direct-pgr")
-        _settle(flow, qapp)
-        assert _is(_hero_colour(flow), "#ff0000")
-        flow.set_installed_kinds(frozenset({"direct-nte"}))
-        assert _is(_hero_colour(flow), "#ff0000")
-        assert flow.detail.install_button.text() == "Install"
-        flow.set_installed_kinds(frozenset({"direct-pgr"}))
-        assert flow.detail.install_button.isHidden()
-    finally:
-        flow.deleteLater()
-        qapp.processEvents()
-
-
-def test_games_without_art_keep_the_placeholder_and_never_fetch(qapp, monkeypatch):
-    from nadare.core import storecatalog
-
-    calls = []
-    monkeypatch.setattr(artwork, "fetch", lambda *a, **kw: calls.append(a) or None)
-    monkeypatch.setattr(storecatalog, "publisher_art_kinds", lambda: frozenset())
-    flow = StoreFlow()
-    try:
-        flow.show_detail("stove-czn")  # no art source once the publisher kinds are gone
-        _settle(flow, qapp)
-        assert calls == []
-        assert not flow.detail.hero_label.pixmap().isNull()
-    finally:
-        flow.deleteLater()
-        qapp.processEvents()
-
-
 # ---- layout and safety -----------------------------------------------------
 @pytest.mark.parametrize("width", [900, 1400])
 def test_store_has_no_horizontal_overflow_in_the_window(tmp_path, qapp, width):
@@ -465,10 +208,6 @@ def test_store_has_no_horizontal_overflow_in_the_window(tmp_path, qapp, width):
         assert grid.scroll.horizontalScrollBar().maximum() == 0
         assert window.store.width() <= width
         assert grid.layout().minimumSize().width() <= window.store.width()
-        window.store.show_detail("direct-pgr")
-        qapp.processEvents()
-        detail = window.store.detail
-        assert detail.layout().minimumSize().width() <= window.store.width()
     finally:
         _close(window, qapp)
 
@@ -512,21 +251,6 @@ def test_dialog_with_a_kind_still_creates_that_games_profile(tmp_path, qapp):
         dialog.deleteLater()
 
 
-def test_advanced_dialog_lists_only_the_three_advanced_types(tmp_path, qapp):
-    dialog = AddGameDialog(_config(tmp_path), advanced=True)
-    try:
-        advanced = {
-            g.kind for g in add_game.available_catalog() if g.group == add_game.ADVANCED_GROUP
-        }
-        assert advanced == {"wine", "steam", "script"}
-        assert dialog.game_list.count() == 1 + len(advanced)
-        assert dialog.game_list.item(0).text().startswith("ADVANCED")
-        assert dialog.selected_kind() in advanced
-        assert not dialog.game_list.isHidden()
-    finally:
-        dialog.deleteLater()
-
-
 def test_unknown_kind_falls_back_to_the_normal_dialog(tmp_path, qapp):
     plain = AddGameDialog(_config(tmp_path))
     unknown = AddGameDialog(_config(tmp_path), kind="not-a-game")
@@ -540,33 +264,3 @@ def test_unknown_kind_falls_back_to_the_normal_dialog(tmp_path, qapp):
 
 
 # ---- pool tasks must not own a QObject (see test_qrunnable_signal_ownership.py) --------
-def test_hero_fetches_report_through_the_flows_own_signals(tmp_path, qapp, monkeypatch):
-    from nadare.gui import store_flow
-
-    red = _red_image(tmp_path / "red.png")
-    monkeypatch.setattr(artwork, "fetch", lambda profile, title=None, kind="cover": red)
-    flow = StoreFlow()
-    try:
-        flow.show_detail("direct-pgr")
-        generation = flow._generation
-        task = store_flow._FetchHero(generation, "direct-pgr", "Punishing", flow._hero_signals)
-        assert task.signals is flow._hero_signals
-        task.run()
-        _settle(flow, qapp)
-        assert _is(_hero_colour(flow), "#ff0000")
-    finally:
-        flow.deleteLater()
-        qapp.processEvents()
-
-
-def test_a_hero_fetch_finishing_after_the_flow_died_does_not_raise(tmp_path, qapp, monkeypatch):
-    from PyQt6 import sip
-
-    from nadare.gui import store_flow
-
-    red = _red_image(tmp_path / "red.png")
-    monkeypatch.setattr(artwork, "fetch", lambda profile, title=None, kind="cover": red)
-    flow = StoreFlow()
-    task = store_flow._FetchHero(0, "direct-pgr", "Punishing", flow._hero_signals)
-    sip.delete(flow)
-    task.run()

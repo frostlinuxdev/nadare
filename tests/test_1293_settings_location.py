@@ -229,6 +229,28 @@ def test_change_location_with_nothing_on_disk_replans_in_a_library(rig, qapp, mo
     assert lib.resolve() in libraries.library_roots(Config.load(rig.config.path))
 
 
+def test_change_location_records_the_new_folders_as_nadares(rig, qapp, monkeypatch):
+    """Storage review C1: without the record Uninstall refused the folders Nadare made."""
+    old = rig.tmp / "gone" / "Nadare" / "Brown Dust 2"
+    _catalog(rig, old)
+    for key in ("owned_trees", "owned_paths", "owned_dirs"):
+        rig.config.profiles["bd2"].pop(key, None)  # an imported game, say
+    rig.config.save()
+    lib = rig.tmp / "Big"
+    lib.mkdir()
+    monkeypatch.setattr(
+        SettingsPage, "_choose_found_copy", lambda self, n, c: pytest.fail("no copy")
+    )
+    rig.picks.append(lib)
+    _load(rig, qapp)
+    rig.page.change_location_button.click()
+    _settle(qapp)
+    home = lib.resolve() / "Nadare" / "Brown Dust 2"
+    saved = _saved(rig)
+    assert sorted(saved["owned_trees"]) == ["install_dir", "prefix"]
+    assert saved["owned_paths"]["prefix"] == str(home / "prefix")
+
+
 def test_change_location_into_a_picked_nadare_folder_means_its_library(rig, qapp):
     _catalog(rig, rig.tmp / "gone" / "Nadare" / "Brown Dust 2")
     picked = rig.tmp / "Big" / "Nadare"

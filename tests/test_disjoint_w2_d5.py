@@ -33,12 +33,12 @@ def test_failed_verify_is_not_erased_by_the_next_status(tmp_path, qapp, monkeypa
     window = MainWindow(config)
     try:
         window.open_game("alpha")
-        window._on_result("alpha", Status("installed"))
+        window._on_result("alpha", "status", Status("installed"))
         window._on_result(
-            "alpha", {"verified": False, "message": "integrity check failed: files"}
+            "alpha", "verify", {"verified": False, "message": "integrity check failed: files"}
         )
         assert shown and shown[0][0] == "File check failed", shown
-        window._on_result("alpha", Status("installed"))
+        window._on_result("alpha", "status", Status("installed"))
         seen = {
             "snapshot": window._snapshots["alpha"]["status"].state,
             "page_badge": window.game.badge.text(),

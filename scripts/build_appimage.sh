@@ -15,7 +15,8 @@
 # target. The release build is done on Ubuntu 22.04 (glibc 2.35).
 #
 # Requirements (build host):
-#   uv sync --frozen --extra build   # PyInstaller and the locked runtime set (uv.lock)
+#   uv                               # the script syncs the locked build set (uv.lock) into
+#                                    # .venv-build itself: uv sync --frozen --extra build
 #   appimagetool                     # on PATH, or set APPIMAGETOOL=/path
 #
 # `appimage-builder` is intentionally not used: on Ubuntu 22.04 it drags in a
@@ -23,7 +24,9 @@
 # stack. appimagetool only needs the PyInstaller bundle and a static runtime.
 #
 # Environment:
-#   PYTHON        interpreter to build with (overrides an existing .venv/)
+#   PYTHON        interpreter to build with; skips the locked sync (the release
+#                 container syncs with --locked itself and sets it)
+#   NADARE_BUILD_ALLOW_UNVERIFIED=1  development only: permit dirty/unknown source identity
 #   APPIMAGETOOL  path to appimagetool (a native binary or an AppImage)
 #   OUTPUT_DIR    where the AppImage is written (default: dist/)
 #   NADARE_RELEASE=1     mark a release build: requires the pin + digest below
@@ -34,19 +37,29 @@
 #                        embedded in the AppImage (fixed tag, never `continuous`)
 #   APPIMAGE_RUNTIME_SHA256  published sha256 of that runtime (required for a
 #                        release build); APPIMAGE_RUNTIME_FILE uses a local copy
+#   NADARE_PYINSTALLER_SOURCE  optional local copy of uv.lock's PyInstaller sdist
+# Requires gcc/build-essential for the hardened bootloader, also with explicit PYTHON.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
-# An explicit PYTHON wins over a source checkout's .venv, which may have been
-# created by a different host/libc than the one we must build on.
+# An explicit PYTHON wins (the release container syncs the lock itself). Otherwise build from
+# the locked set in its own environment (#1553): never from whatever an ambient venv holds,
+# and without stripping the dev tools from .venv (uv sync is exact).
 if [[ -n "${PYTHON:-}" ]]; then
     PY="$PYTHON"
-elif [[ -x .venv/bin/python ]]; then
-    PY=".venv/bin/python"
+elif command -v uv >/dev/null 2>&1 && [[ -f uv.lock ]]; then
+    echo "[*] Syncing the locked build environment (.venv-build: uv sync --frozen --extra build)"
+    UV_PROJECT_ENVIRONMENT=.venv-build uv sync --frozen --extra build
+    PY=".venv-build/bin/python"
 else
-    PY="python3"
+    echo "[!] uv not found: building from an environment uv.lock does not check." >&2
+    if [[ -x .venv/bin/python ]]; then
+        PY=".venv/bin/python"
+    else
+        PY="python3"
+    fi
 fi
 
 # --- update information (AppImageUpdate, Gearlever) ------------------------
@@ -240,9 +253,23 @@ else
     image="$(cd "$output_dir" && pwd)/Nadare-${version}-x86_64.AppImage"
 fi
 
+# Validate the selected interpreter, including explicit PYTHON, before bundling.
+identity_args=()
+if [[ "${NADARE_BUILD_ALLOW_UNVERIFIED:-0}" == "1" ]]; then
+    if [[ -n "$NADARE_RELEASE" ]]; then
+        echo "[!] release builds cannot allow unverified source identity" >&2
+        exit 1
+    fi
+    identity_args=(--allow-unverified)
+fi
+"$PY" packaging/build_identity.py prepare --environment build/appimage-environment.json "${identity_args[@]}"
+
 echo "[*] Nadare ${version}: building PyInstaller onedir bundle (${PY})"
 bash scripts/fetch_7zip.sh
 bash scripts/fetch_umu.sh
+# The wheel's precompiled bootloader is not PIE/full RELRO. Rebuild from the
+# exact sdist and SHA-256 already pinned in uv.lock, after any environment sync.
+"$PY" scripts/build_hardened_bootloader.py
 if [[ "$image_stem" == "Nadare-unstable" ]]; then
     printf 'unstable\n' > "$channel_marker"
     trap 'rm -f "$root/$channel_marker"' EXIT
@@ -343,6 +370,15 @@ cp packaging/nadare.svg AppDir/usr/share/icons/hicolor/scalable/apps/nadare.svg
 cp packaging/flatpak/io.github.frostlinuxdev.Nadare.metainfo.xml \
     AppDir/usr/share/metainfo/io.github.frostlinuxdev.Nadare.metainfo.xml
 ln -sf usr/bin/nadare AppDir/AppRun
+
+# Check the final executable payload after stripping, before hashing/wrapping it.
+# System/Qt shared objects are not PIE executables; this gate covers our two
+# bundled native executables. The 7zzs exception is path + digest + property scoped.
+"$PY" scripts/check_elf_hardening.py AppDir/usr/bin/nadare "$internal/nadare/assets/7zzs"
+
+# Recheck source/lock/installed packages and bind the final transformed payload.
+"$PY" packaging/build_identity.py emit --environment build/appimage-environment.json \
+    --appdir AppDir "${identity_args[@]}"
 
 echo "[*] Building $image"
 rm -f "$image"

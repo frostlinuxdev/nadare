@@ -119,6 +119,7 @@ def test_the_worker_runs_a_predownload_holding_both_locks(tmp_path, monkeypatch)
 
     class FakeBackend:
         install_size_hint = None
+        supports_predownload = True  # declared capability (#1457)
 
         def predownload(self):
             seen.append(
@@ -149,6 +150,7 @@ def test_the_worker_refuses_a_predownload_while_an_update_holds_the_game(tmp_pat
 
     class FakeBackend:
         install_size_hint = None
+        supports_predownload = True  # declared capability (#1457)
 
         def predownload(self):
             ran.append(1)

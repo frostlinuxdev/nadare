@@ -1,15 +1,22 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "nadare-launcher"
-version = "0.1.0b24"
+version = "0.1.0b25"
 description = "An open-source Linux launcher for anime gacha games (Fate/Grand Order, Chaos Zero Nightmare, and more)"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "GPL-3.0-only" }
+# PEP 639 (#1549). The wheel also carries the Inter font (OFL-1.1) and the
+# 7-Zip licence for the 7zzs binary the AppImage build drops into assets/.
+license = "GPL-3.0-only AND OFL-1.1"
+license-files = [
+  "LICENSE",
+  "src/nadare/assets/fonts/OFL.txt",
+  "src/nadare/assets/licenses/7zip-License.txt",
+]
 dependencies = [
   "PyQt6>=6.6,<7",
   # STOVE's CDN filters by TLS/JA3; Chrome impersonation needs curl_cffi, whose
@@ -28,7 +35,9 @@ dependencies = [
 
 [project.optional-dependencies]
 build = ["pyinstaller>=6.6"]
-dev = ["pytest>=8", "pytest-qt>=4.4", "pytest-xdist>=3.5", "ruff>=0.6", "pyyaml>=6"]
+# setuptools: test_impl2_packaging builds the wheel in-process; the distro's copy can
+# predate PEP 639 (#1549).
+dev = ["pytest>=8", "pytest-qt>=4.4", "pytest-xdist>=3.5", "ruff>=0.6", "pyyaml>=6", "setuptools>=77"]
 # Enables "Remember me": stores CZN logins in the OS keyring (never plaintext).
 secure = ["keyring>=24"]
 
@@ -40,12 +49,13 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q -m 'not network'"
+addopts = "-q -m 'not network and not lifecycle'"
 filterwarnings = ["error::DeprecationWarning:nadare"]
 markers = [
     "network: requires real network access; run with -m network",
     "real_cover_migration: keep the background cover migration (conftest stubs it, #1024)",
+    "lifecycle: production-policy lifecycle lane (#1463); its own CI step, run with -m lifecycle",
 ]
 
 [tool.setuptools.package-data]
-nadare = ["assets/*", "assets/fonts/*", "assets/icons/*", "assets/licenses/*", "assets/locales/*.json", "backends/**/*.c", "core/shim_src/*.c", "backends/czn/build_stub.sh"]
+nadare = ["assets/*", "assets/fonts/*", "assets/icons/*", "assets/licenses/*", "assets/locales/*.json", "backends/**/*.c", "core/shim_src/*.c"]

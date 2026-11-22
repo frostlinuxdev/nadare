@@ -1,17 +1,23 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Hermetic tests for the Arknights (Yostar) backend.
+"""Hermetic tests for the Arknights (Yostar) backend's Wine set-up and the shared
+installer/launcher route.
 
 Nothing here opens a socket or starts Wine: the installer/download paths are
 monkeypatched, and every path lives under the isolated ``tmp_path`` XDG tree.
+
+#1452 retired the launcher route for Arknights itself; the route still serves the
+``launcher-*`` kinds, so these tests drive it through :class:`OfficialRouteBackend`
+(Arknights' set-up with the old no-manifest switch). Arknights' own direct-only
+behaviour is in ``test_yostar_launcher_retired_1452.py``.
 """
 
 from __future__ import annotations
 
-import types
 from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _official_route import OfficialRouteBackend
 from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
@@ -22,7 +28,7 @@ from nadare.core.backends import BackendError, BackendUnsupported, get, kinds
 
 
 def _backend(tmp_path: Path, profile: dict | None = None, name: str = "test") -> ArknightsBackend:
-    return ArknightsBackend(make_context(tmp_path, ak.KIND, profile, name))
+    return OfficialRouteBackend(make_context(tmp_path, ak.KIND, profile, name))
 
 
 def _install_launcher(
@@ -108,8 +114,8 @@ class TestInstallerUrl:
 
     def test_default_used_when_unset(self, tmp_path):
         backend = _backend(tmp_path)
-        assert backend.installer_url() == ak.DEFAULT_INSTALLER_URL
-        assert ak.DEFAULT_INSTALLER_URL.endswith(".exe")
+        assert backend.installer_url() == wg.DEFAULT_INSTALLER_URL
+        assert wg.DEFAULT_INSTALLER_URL.endswith(".exe")
 
     @pytest.mark.parametrize(
         ("url", "ok"),
@@ -143,7 +149,7 @@ class TestInstallerUrl:
         payload = {"data": {"rows": [{"client": "https://cdn.test/Arknights-setup.exe"}]}}
         monkeypatch.setattr(wg.download, "fetch_json", lambda *a, **k: payload)
         backend = _backend(tmp_path)
-        assert backend.installer_url(resolve=True) == ak.DEFAULT_INSTALLER_URL
+        assert backend.installer_url(resolve=True) == wg.DEFAULT_INSTALLER_URL
 
     def test_api_failure_falls_back_to_pinned(self, tmp_path, monkeypatch):
         def boom(*a, **k):
@@ -151,13 +157,13 @@ class TestInstallerUrl:
 
         monkeypatch.setattr(wg.download, "fetch_json", boom)
         backend = _backend(tmp_path)
-        assert backend.installer_url(resolve=True) == ak.DEFAULT_INSTALLER_URL
+        assert backend.installer_url(resolve=True) == wg.DEFAULT_INSTALLER_URL
 
     def test_api_with_html_link_is_ignored(self, tmp_path, monkeypatch):
         payload = {"data": {"rows": [{"client": "https://www.arknights.global/"}]}}
         monkeypatch.setattr(wg.download, "fetch_json", lambda *a, **k: payload)
         backend = _backend(tmp_path)
-        assert backend.installer_url(resolve=True) == ak.DEFAULT_INSTALLER_URL
+        assert backend.installer_url(resolve=True) == wg.DEFAULT_INSTALLER_URL
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +333,7 @@ class TestInstall:
         installer = write_exe(tmp_path / "Arknights-setup.exe", "MZ")
         captured: list[tuple[list[str], dict[str, str]]] = []
 
-        def fake_stream(argv, env, on_line=None, cancel=None):
+        def fake_stream(argv, env, on_line=None, cancel=None, before_stop=None):
             captured.append((list(argv), dict(env)))
             return 0
 
@@ -446,30 +452,9 @@ class TestVerifyAndLogin:
         with pytest.raises(BackendUnsupported):
             _backend(tmp_path).login()
 
-    def test_uninstall_removes_prefix_and_purges_data(self, tmp_path):
-        backend = _backend(tmp_path)
-        prefix = backend.prefix()
-        _install_launcher(prefix)
-        data_dir = backend._data_dir()
-        assert data_dir.is_dir()
-        backend.uninstall(purge=True)
-        assert not prefix.exists()
-        assert not data_dir.exists()
-
-    def test_uninstall_removes_an_external_prefix(self, tmp_path):
-        """A prefix outside the profile data dir that this profile recorded at
-        install time (an imported/moved install) is removable."""
-        outside = tmp_path / "elsewhere"
-        _install_launcher(outside)
-        backend = _backend(tmp_path, {"prefix": str(outside), "installed_prefix": str(outside)})
-
-        backend.uninstall()
-
-        assert not outside.exists()
-
     def test_stellasora_install_records_the_prefix(self, tmp_path, monkeypatch):
         """N5: the Stella Sora install override must record ``installed_prefix``,
-        or an external prefix can never be uninstalled (fails closed)."""
+        or the profile cannot prove it made that prefix later (fails closed)."""
         from nadare.backends.stellasora import StellaSoraBackend
 
         outside = tmp_path / "elsewhere"
@@ -482,162 +467,6 @@ class TestVerifyAndLogin:
         backend.install()
 
         assert ctx.profile["installed_prefix"] == str(outside)
-        backend.uninstall()
-        assert not outside.exists()
-
-    def test_uninstall_refuses_an_unrecorded_external_prefix(self, tmp_path):
-        """A crafted/imported external prefix that was never installed by this
-        profile must not be deleted."""
-        outside = tmp_path / "elsewhere"
-        _install_launcher(outside)
-        backend = _backend(tmp_path, {"prefix": str(outside)})
-
-        with pytest.raises(BackendError):
-            backend.uninstall()
-
-        assert outside.exists()
-
-    def test_uninstall_refuses_another_profile_dir(self, tmp_path):
-        """A prefix pointing at another Nadare profile's tree is refused."""
-        other = wg.paths.profiles_dir() / "other-game"
-        _install_launcher(other)
-        backend = _backend(tmp_path, {"prefix": str(other), "installed_prefix": str(other)})
-
-        with pytest.raises(BackendError):
-            backend.uninstall()
-
-        assert other.exists()
-
-    def test_uninstall_refuses_unrecorded_symlinked_prefix(self, tmp_path):
-        """A symlinked external prefix is refused when not recorded, instead of
-        silently surviving an ``rmtree`` on the link (NEW-R4-3)."""
-        target = tmp_path / "real-prefix"
-        _install_launcher(target)
-        link = tmp_path / "linked"
-        link.symlink_to(target, target_is_directory=True)
-        backend = _backend(tmp_path, {"prefix": str(link)})
-
-        with pytest.raises(BackendError):
-            backend.uninstall()
-
-        assert target.exists()
-
-    def test_uninstall_through_a_symlinked_prefix_removes_only_the_link(self, tmp_path):
-        """#614: a prefix that is a link (moved to another disk, or swapped for a
-        link after install) may point at a folder holding other data. Only the
-        link goes; the folder it points at is left alone."""
-        victim = tmp_path / "victim"
-        _install_launcher(victim)
-        (victim / "user-data.txt").write_text("keep")
-        prefix = tmp_path / "prefix"
-        prefix.symlink_to(victim, target_is_directory=True)
-        backend = _backend(tmp_path, {"prefix": str(prefix), "installed_prefix": str(prefix)})
-
-        backend.uninstall()
-
-        assert not prefix.is_symlink()
-        assert (victim / "user-data.txt").exists()
-
-    def test_uninstall_purge_on_symlinked_profile_dir(self, tmp_path):
-        """Purging a profile whose data dir is a symlink removes the tree and
-        the link instead of raising ``OSError`` (NEW-R4-2)."""
-        backend = _backend(tmp_path)
-        data_dir = backend._data_dir()
-        other_disk = tmp_path / "other-disk"
-        other_disk.mkdir()
-        data_dir.rmdir()
-        data_dir.symlink_to(other_disk, target_is_directory=True)
-        _install_launcher(backend.prefix())
-        # The relocated tree is only purgeable when the install recorded it.
-        backend.ctx.set("installed_prefix", str(backend.prefix()))
-
-        (other_disk / "unrelated.txt").write_text("keep me")
-
-        backend.uninstall(purge=True)
-
-        # The link goes, but the folder it pointed at may hold other data.
-        assert not data_dir.exists()
-        assert (other_disk / "unrelated.txt").read_text() == "keep me"
-
-    def test_purge_refuses_profile_dir_symlinked_to_an_arbitrary_directory(self, tmp_path):
-        """N3: a profile dir symlinked to an arbitrary directory (here ``/opt``'s
-        stand-in) must be refused, not ``rmtree``'d."""
-        backend = _backend(tmp_path)
-        data_dir = backend._data_dir()
-        arbitrary = tmp_path / "arbitrary"
-        arbitrary.mkdir()
-        (arbitrary / "keep.txt").write_text("data")
-        data_dir.rmdir()
-        data_dir.symlink_to(arbitrary, target_is_directory=True)
-
-        with pytest.raises(BackendError):
-            backend.uninstall(purge=True)
-
-        assert (arbitrary / "keep.txt").is_file()
-
-    def test_purge_refuses_profile_dir_symlinked_to_another_profile(self, tmp_path):
-        """A profile data dir symlinked onto another profile's tree is refused."""
-        data_dir = _backend(tmp_path)._data_dir()
-        other = wg.paths.profiles_dir() / "other"
-        other.mkdir(parents=True)
-        (other / "keep.txt").write_text("data")
-        data_dir.rmdir()
-        data_dir.symlink_to(other, target_is_directory=True)
-        backend = _backend(tmp_path)
-
-        with pytest.raises(BackendError):
-            backend.uninstall(purge=True)
-
-        assert (other / "keep.txt").is_file()
-
-    def test_uninstall_refuses_catastrophic_targets(self, tmp_path):
-        """Only clearly dangerous targets are refused: the filesystem root, the
-        home dir, and the data dir or any of its ancestors."""
-        data_dir = _backend(tmp_path)._data_dir()
-        for target in (Path("/"), data_dir, data_dir.parent, Path.home()):
-            backend = _backend(tmp_path, {"prefix": str(target)})
-            with pytest.raises(BackendError):
-                backend.uninstall()
-            with pytest.raises(BackendError):
-                backend.uninstall(purge=True)
-        assert data_dir.is_dir()
-
-    def test_uninstall_works_when_profile_dir_is_symlinked(self, tmp_path):
-        """A profile relocated to another disk via a symlinked profile dir must
-        stay usable and uninstallable."""
-        backend = _backend(tmp_path)
-        data_dir = backend._data_dir()
-        other_disk = tmp_path / "other-disk"
-        other_disk.mkdir()
-        data_dir.rmdir()
-        data_dir.symlink_to(other_disk, target_is_directory=True)
-
-        prefix = backend.prefix()
-        _install_launcher(prefix)
-        assert (other_disk / "prefix" / ak.DEFAULT_INSTALL_SUBDIR / "game launcher.exe").is_file()
-
-        backend.uninstall()
-
-        assert not (other_disk / "prefix").exists()
-        # The profile dir symlink itself is data, not the game tree.
-        assert data_dir.is_symlink()
-
-    def test_uninstall_purge_does_not_swallow_rmtree_errors(self, tmp_path, monkeypatch):
-        backend = _backend(tmp_path)
-
-        def boom(path, *, ignore_errors=False):
-            if ignore_errors:
-                return
-            raise OSError("device busy")
-
-        from nadare.core import removal
-
-        monkeypatch.setattr(removal, "shutil", types.SimpleNamespace(rmtree=boom))
-        # No prefix/drive_c exists, so the only rmtree is the purge of the
-        # profile tree; its OSError must surface instead of being ignored.
-        assert not (backend.prefix() / "drive_c").is_dir()
-        with pytest.raises(OSError):
-            backend.uninstall(purge=True)
 
 
 # ---------------------------------------------------------------------------
@@ -676,7 +505,7 @@ class TestArknightsVcredist:
         calls: list = []
         monkeypatch.setattr(wg.vcredist, "ensure", lambda *a, **k: calls.append(k))
 
-        def fake_stream(argv, env, on_line=None, cancel=None):
+        def fake_stream(argv, env, on_line=None, cancel=None, before_stop=None):
             (prefix / "drive_c").mkdir(parents=True, exist_ok=True)
             return 0
 
@@ -756,7 +585,7 @@ class TestStellaSoraVcredist:
         calls: list = []
         monkeypatch.setattr(wg.vcredist, "ensure", lambda *a, **k: calls.append(k))
 
-        def fake_stream(argv, env, on_line=None, cancel=None):
+        def fake_stream(argv, env, on_line=None, cancel=None, before_stop=None):
             (prefix / "drive_c").mkdir(parents=True, exist_ok=True)
             return 0
 
@@ -788,55 +617,3 @@ class TestStellaSoraVcredist:
             backend._run_vcredist(created=False)
             assert calls == []
 
-
-class TestUninstallSafety:
-    """#947: the backend's own uninstall follows the same mount and running-game rules."""
-
-    def test_uninstall_leaves_a_mounted_personal_folder_alone(self, tmp_path, monkeypatch):
-        from nadare.core import removal
-
-        backend = _backend(tmp_path)
-        prefix = backend.prefix()
-        _install_launcher(prefix)
-        docs = prefix / "drive_c" / "users" / "me" / "Documents"
-        docs.mkdir(parents=True)
-        (docs / "thesis.txt").write_text("PERSONAL")
-        real = removal.os.path.ismount
-        monkeypatch.setattr(
-            removal.os.path, "ismount", lambda p: str(p) == str(docs.resolve()) or real(p)
-        )
-
-        with pytest.raises(BackendError, match="mounted"):
-            backend.uninstall()
-
-        assert (docs / "thesis.txt").read_text() == "PERSONAL"
-
-    def test_purge_leaves_a_mounted_folder_in_the_data_dir_alone(self, tmp_path, monkeypatch):
-        from nadare.core import removal
-
-        backend = _backend(tmp_path)
-        _install_launcher(backend.prefix())
-        data_dir = backend._data_dir()
-        docs = data_dir / "elsewhere" / "Documents"
-        docs.mkdir(parents=True)
-        (docs / "thesis.txt").write_text("PERSONAL")
-        real = removal.os.path.ismount
-        monkeypatch.setattr(
-            removal.os.path, "ismount", lambda p: str(p) == str(docs.resolve()) or real(p)
-        )
-
-        with pytest.raises(BackendError, match="mounted"):
-            backend.uninstall(purge=True)
-
-        assert (docs / "thesis.txt").read_text() == "PERSONAL"
-
-    def test_uninstall_refuses_while_the_game_is_running(self, tmp_path, monkeypatch):
-        backend = _backend(tmp_path)
-        _install_launcher(backend.prefix())
-        patch_everywhere(monkeypatch, wg, "scan_pids", lambda patterns: [1234])
-
-        with pytest.raises(BackendError) as exc:
-            backend.uninstall()
-
-        assert exc.value.code == 8
-        assert backend.prefix().exists()

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import time
 
 from test_nikke_launcherless_launch import AUTH, _NoProbe, make_install
 
@@ -24,17 +25,20 @@ def _run_launcherless(backend, monkeypatch):
     seen = []
 
     def fake_stream(argv, env, on_line=None, cancel=None, **kwargs):
-        if h.INTL_HOST_NAME in argv[0]:
-            out = argv[argv.index("--out") + 1]
-            relative = out.split(":\\", 1)[1].replace("\\", "/")
-            session_file = backend.prefix() / "drive_c" / relative
-            session_file.parent.mkdir(parents=True, exist_ok=True)
-            session_file.write_text(json.dumps(AUTH), encoding="utf-8")
+        assert h.SAIL_HOST_NAME in argv[0]
+        assert "SAIL_SIGNIN_CMD" in env
+        relative = argv[1].split(":\\", 1)[1].replace("\\", "/")
+        session_file = backend.prefix() / "drive_c" / relative
+        (session_file.parent / "session.enc.json").write_text(json.dumps(AUTH))
+        deadline = time.monotonic() + 2
+        while not session_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert session_file.exists()
         return 0
 
     def fake_prefix_command(self, args, extra_env=None, **kw):
         seen.append(self._wayland_default())
-        return args, {}
+        return args, extra_env or {}
 
     monkeypatch.setattr(launcher_module, "stream", fake_stream)
     monkeypatch.setattr(NikkeBackend, "_prefix_command", fake_prefix_command)
@@ -50,11 +54,10 @@ def _run_launcherless(backend, monkeypatch):
     return seen
 
 
-def test_a_launcherless_run_uses_wayland_for_the_game_only(tmp_path, monkeypatch):
-    """The sign-in helper stays on X11: NIKKE's intl_service hung under Wine's Wayland driver
-    (rig, 2026-11-10: the helper never answered on Wayland, finished in seconds on X11)."""
+def test_a_launcherless_runner_uses_wayland_for_the_game(tmp_path, monkeypatch):
+    """The combined runner keeps the game's Auto display choice."""
     backend = make_install(tmp_path)
-    assert _run_launcherless(backend, monkeypatch) == ["0", "1"]  # sign-in helper, then the game
+    assert _run_launcherless(backend, monkeypatch) == ["1"]  # Sail starts sign-in as its child
 
 
 def test_after_the_launcherless_run_auto_is_x11_again(tmp_path, monkeypatch):
@@ -72,7 +75,7 @@ def test_the_launcher_path_stays_on_x11(tmp_path):
 def test_a_display_choice_wins_in_a_launcherless_run(tmp_path, monkeypatch):
     backend = make_install(tmp_path)
     backend.ctx.profile["display"] = "x11"
-    assert _run_launcherless(backend, monkeypatch) == ["0", "0"]
+    assert _run_launcherless(backend, monkeypatch) == ["0"]
 
 
 def test_the_wayland_display_state_is_reported_during_a_launcherless_run(tmp_path, monkeypatch):

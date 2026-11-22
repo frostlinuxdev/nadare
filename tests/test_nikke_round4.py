@@ -189,21 +189,20 @@ def test_the_launcherless_game_output_goes_through_the_stop_noise_filter(tmp_pat
     backend._launcherless_plan()
     handlers = []
 
+    from test_nikke_game_auth_cache_1420 import Runner
+
+    runner = Runner(backend, auth=AUTH)
+
     def fake_stream(argv, env, on_line=None, cancel=None, **kwargs):
-        if h.INTL_HOST_NAME in argv[0]:
-            out = argv[argv.index("--out") + 1]
-            relative = out.split(":\\", 1)[1].replace("\\", "/")
-            session_file = backend.prefix() / "drive_c" / relative
-            session_file.parent.mkdir(parents=True, exist_ok=True)
-            session_file.write_text(json.dumps(AUTH), encoding="utf-8")
-        else:
-            handlers.append(on_line)
-            on_line("game says hello")  # the filter must exist while the game runs
-        return 0
+        code = runner(argv, env, on_line=on_line, cancel=cancel, **kwargs)
+        handlers.append(on_line)
+        on_line("game says hello")  # the filter must exist while the game runs
+        return code
 
     monkeypatch.setattr(launcher_module, "stream", fake_stream)
     monkeypatch.setattr(
-        NikkeBackend, "_prefix_command", lambda self, args, extra_env=None, **kw: (args, {})
+        NikkeBackend, "_prefix_command",
+        lambda self, args, extra_env=None, **kw: (args, extra_env or {})
     )
     monkeypatch.setattr(NikkeBackend, "_run_vcredist", lambda self, created=False: None)
     monkeypatch.setattr(NikkeBackend, "_log_launch_details", lambda self, env: None)

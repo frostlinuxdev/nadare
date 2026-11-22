@@ -3,7 +3,8 @@
 
 A big class split into mixins lives in ``<module>.py`` plus ``<module>_parts/``; each module looks
 names up in its own globals. A test that replaces a name of the module means every use of it, so
-this patches the module and every part module that has the name.
+this patches the module and every part module that has the name, plus
+:mod:`nadare.core.protoncmd`, the launch helpers every Wine-prefix backend shares (#1449).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ def patch_everywhere(monkeypatch, module, name: str, value) -> None:
             importlib.import_module(f"{parts.__name__}.{info.name}")
             for info in pkgutil.iter_modules(parts.__path__)
         ]
+    modules.append(importlib.import_module("nadare.core.protoncmd"))
     hits = [m for m in modules if name in vars(m)]
     assert hits, f"no module of {module.__name__} defines {name!r}"
     for m in hits:

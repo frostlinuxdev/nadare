@@ -66,7 +66,7 @@ def test_picker_marks_the_recommended_build_and_the_default(root):
     labels = list(entries)
     assert labels[0].startswith("Default · recommended") and entries[labels[0]] == ""
     assert "dwproton-11.0-17-x86_64 · recommended" in entries
-    assert "dwproton-11.0-13-x86_64 · untested" in entries
+    assert "dwproton-11.0-13-x86_64 · older" in entries  # an old pin, not untested
     assert "MyCustomProton" in entries
     assert SYSTEM_WINE not in entries  # the Proton games no longer offer system Wine
 
@@ -137,7 +137,7 @@ def test_human_size_and_status_text():
     assert human_size(512) == "512 B"
     assert human_size(1536 * 1024 * 1024) == "1.5 GiB"
     assert status_text(Path("dwproton-11.0-17-x86_64")) == "recommended (tested)"
-    assert status_text(Path("dwproton-11.0-13-x86_64")) == "untested"
+    assert status_text(Path("dwproton-11.0-13-x86_64")) == "older build"
     assert status_text(Path("Custom")) == "custom"
 
 

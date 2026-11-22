@@ -51,6 +51,32 @@ _OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
 _IPV4 = re.compile(rf"{_OCTET}(?:\.{_OCTET}){{3}}")
 #: A last label like this makes browsers read the host as a number (``0x7f.1`` is 127.0.0.1).
 _NUMERIC_TAIL = re.compile(r"[0-9]+|0[xX][0-9a-fA-F]*")
+#: Names that only the user's own network resolves (mDNS, home routers, RFC 8375, split DNS).
+_LAN_SUFFIXES = (".local", ".lan", ".home.arpa", ".internal", ".localdomain")
+
+
+def _reachable_address(text: str) -> bool:
+    """A literal address the browser may visit: public, or the machine itself (#1593).
+
+    Loopback stays allowed: the Sandbox shares the host network, so a game's own sign-in
+    listener on ``127.0.0.1`` is reached that way. Everything else that is not on the public
+    internet (the LAN, link-local, carrier-grade NAT, multicast, reserved) is refused, so a
+    game cannot aim the user's browser at their router, NAS or printer.
+    """
+    address = ipaddress.ip_address(text)
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    if address.is_loopback:
+        return True
+    return address.is_global and not address.is_multicast
+
+
+def _lan_name(host: str) -> bool:
+    """A host name that resolves only inside the user's network (``router``, ``nas.local``)."""
+    name = host.lower()
+    if name == "localhost" or name.endswith(".localhost"):
+        return False  # browsers pin these to loopback
+    return "." not in name or name.endswith(_LAN_SUFFIXES)
 
 
 def _good_host(url: str) -> bool:
@@ -65,14 +91,18 @@ def _good_host(url: str) -> bool:
     host = parts.hostname or ""
     if parts.netloc.startswith("["):
         try:
-            return "%" not in host and isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address)
+            return (
+                "%" not in host
+                and isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address)
+                and _reachable_address(host)
+            )
         except ValueError:
             return False
     if not host or len(host) > 253 or not _HOST.fullmatch(host):
         return False
     if _NUMERIC_TAIL.fullmatch(host.rsplit(".", 1)[-1]):
-        return bool(_IPV4.fullmatch(host))
-    return True
+        return bool(_IPV4.fullmatch(host)) and _reachable_address(host)
+    return not _lan_name(host)
 
 
 def parse_request(line: str) -> str | None:
@@ -141,7 +171,7 @@ class LinkRelay:
         return self._dir / "steam.pipe"
 
     def start(self) -> Path:
-        self._dir = Path(tempfile.mkdtemp(prefix="nadare-links-", dir=self._parent))
+        self._dir = Path(tempfile.mkdtemp(prefix=f"nadare-links-{os.getpid()}-", dir=self._parent))
         try:
             self._dir.chmod(0o700)
             os.mkfifo(self.path, 0o600)

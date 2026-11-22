@@ -320,6 +320,33 @@ def test_the_unit_budget_exceeds_the_publisher_deadline():
     assert minutes * 60 > module.DEFAULT_DEADLINE
 
 
+HEALTHCHECKS = "https://hc.example/ping/SECRET-TOKEN-123"
+
+
+def test_an_up_ping_uses_a_healthchecks_url_plainly(env):
+    """#1215: Healthchecks counts a plain GET as up; no /fail, no query string."""
+    result = env.run(NADARE_PIN_HEARTBEAT_URL=HEALTHCHECKS)
+
+    assert result.returncode == 0, result.stderr
+    assert len(env.pings()) == 1
+    assert HEALTHCHECKS in env.pings()[0]
+    assert "/fail" not in env.pings()[0]
+
+
+def test_a_down_ping_posts_the_message_to_the_healthchecks_fail_url(env):
+    """#1215: Healthchecks reads <url>/fail and takes the message as the POST body."""
+    env.set_publisher(1, write=False)
+
+    result = env.run(NADARE_PIN_HEARTBEAT_URL=HEALTHCHECKS)
+
+    assert result.returncode == 1
+    ping = env.pings()[-1]
+    assert f"{HEALTHCHECKS}/fail" in ping
+    assert "--data-raw" in ping
+    assert "status=down" not in ping
+    assert "boom" in ping
+
+
 def test_a_down_ping_names_the_node(env):
     """#1209 P0-4: sw1 and sw2 share one pin heartbeat; the message says which node failed."""
     import socket

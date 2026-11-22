@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -35,22 +36,28 @@ from ..core import (
     directdl,
     diskspace,
     endfield_shim,
+    gamedrive,
     graphics,
+    installlock,
     kuropatch,
     monitors,
     nte_launcher,
     paths,
     process,
+    psoguard,
     removal,
     webview2,
 )
-from ..core.backends import PREFIX_HELP, BackendError, Option, Status
+from ..core.backends import PREFIX_HELP, BackendError, BackendNotInstalled, Option, Status
+from ..core.config import as_bool, profile_value
 from ..core.events import Cancelled
 from ..core.gameversion import versions_equal
+from ..core.sandboxed import SANDBOX_EXEMPTION_OPTIONS
 from ..core.sources import (
     Fetch,
     aethergazer,
     bd2,
+    dna,
     endfield,
     gfl2,
     hoyo,
@@ -58,6 +65,7 @@ from ..core.sources import (
     nte,
     patch_list_fetch,
     pgr,
+    snowbreak,
     wuwa,
 )
 from . import (
@@ -70,15 +78,50 @@ from . import (
     mongil_news,
     nte_news,
 )
-from .arknights import INSTALLED_PREFIX_KEY
 from .nmlogin import NetmarbleLoginMixin
-from .wine import profile_setting, scan_pids, stream
-from .winegame import UPDATE_CHECK_INTERVAL, WineGameBackend, atomic_write_json
+from .wine import profile_setting, stream
+from .winegame import (
+    INSTALLED_PREFIX_KEY,
+    UPDATE_CHECK_INTERVAL,
+    WineGameBackend,
+    atomic_write_json,
+)
 
 #: A version that may name a predownload cache folder ("3.4.0", "3.8.0+pack-3.8.1"):
 #: no separators or leading dot. ``+`` is a valid filename character and keeps the name
 #: exactly as the version record stores it, so a Kuro tier plan and its cache agree (#W10-F5).
 _SAFE_VERSION = re.compile(r"[0-9A-Za-z][0-9A-Za-z._+-]{0,31}")
+
+
+def _plan_identity(plan: directdl.Plan) -> str:
+    """What a predownload of ``plan`` fetched: every file's path, size and hashes (#1497).
+
+    Two plans with one version can need different files (WuWa HD and UHD), and a publisher can
+    re-publish a version. Download addresses are left out: signed URLs change on every fetch.
+    """
+
+    def remote(rf: directdl.RemoteFile) -> list[object]:
+        return [rf.path, rf.size, (rf.md5 or "").lower(), (rf.sha256 or "").lower(), rf.crc32]
+
+    shape = {
+        "game": plan.game_tag,
+        "version": str(plan.version),
+        "files": sorted(remote(rf) for rf in plan.files),
+        "archives": [
+            [a.name, remote(a.source), [remote(p) for p in a.parts], list(a.unwrap)]
+            for a in plan.archives
+        ],
+        "sophon": [[p.name, p.manifest_id, p.size] for p in plan.sophon],
+    }
+    blob = json.dumps(shape, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+
+
+def _selection_key(kwargs: Mapping[str, Any]) -> str:
+    """The player's choices behind a plan (quality, token), hashed: a token is never stored."""
+    blob = json.dumps({str(k): str(v) for k, v in kwargs.items()}, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+
 
 #: Sizes below are decimal gigabytes, as the publishers and archive tables report them.
 GB = 10**9
@@ -86,6 +129,23 @@ GB = 10**9
 #: Written into a Kuro cleanup mark only when this release completed the cleanup. b23 wrote an
 #: empty mark even when it gave up, so an empty (or older) mark must not mean "done" (#1252).
 TIDY_MARK_GENERATION = "2\n"
+
+#: Games whose own command line has a splash/intro switch: game tag -> the arguments that
+#: skip it. Only a flag here is offered in Settings; every other game never sees the option.
+SKIP_INTRO_ARGS: dict[str, tuple[str, ...]] = {
+    "wuwa": ("-SkipSplash",),
+    "mongil": ("-nosplash",),
+}
+
+#: The per-game "Skip intro videos" switch, offered only to the games in ``SKIP_INTRO_ARGS``.
+SKIP_INTRO_OPTION = Option(
+    "skip_intro",
+    "Skip intro videos",
+    "bool",
+    "Starts the game without its logo videos. Turn it off if the game misbehaves after an "
+    "update.",
+    default=False,
+)
 
 log = logging.getLogger(__name__)
 
@@ -113,6 +173,9 @@ class DirectBackend(WineGameBackend):
     #: umu game id (``GAMEID``/``UMU_ID``) for the runner's per-game fixes; ``None`` sends none
     #: (umu's default). A profile ``extra_env`` GAMEID/UMU_ID always wins (#1334).
     umu_id: str | None = None
+    #: Drive letter for a game folder outside ``drive_c``, made at every launch; ``None`` keeps
+    #: Wine's ``Z:`` path (see :mod:`nadare.core.gamedrive`, #1608).
+    game_drive_letter: str | None = None
 
     def _prefix_command(
         self,
@@ -139,12 +202,20 @@ class DirectBackend(WineGameBackend):
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         # Settings must name the real default: an X11-default game is not "Auto (Wayland)".
+        # A game whose own help already names X11 (Stella Sora's swipe) keeps it.
         if getattr(cls, "default_display", "wayland") == "x11":
             cls.options = tuple(
-                _x11_display_option(o) if o.key == "display" else o for o in cls.options
+                _x11_display_option(o) if _says_auto_wayland(o) else o for o in cls.options
             )
+        # One table entry is all a new game needs: the same id gets the Settings switch and
+        # the launch flag (see ``skip_intro_args``).
+        if getattr(cls, "game_tag", None) in SKIP_INTRO_ARGS and not any(
+            option.key == "skip_intro" for option in cls.options
+        ):
+            cls.options = cls.options + (SKIP_INTRO_OPTION,)
 
     kind = "direct"
+    supports_resume = True
     supports_secure_mode = True
     install_size_hint = 20 * 1024**3
     #: The community publishes these without the vendor's blessing.
@@ -185,8 +256,8 @@ class DirectBackend(WineGameBackend):
             "download_workers",
             "Download workers",
             "int",
-            "Parallel downloads (1-16).",
-            default=6,
+            "Maximum parallel downloads (1-32); the plan may use fewer.",
+            default=32,
             advanced=True,
         ),
         Option("launch_args", "Launch arguments", "args"),
@@ -200,10 +271,28 @@ class DirectBackend(WineGameBackend):
         ),
         Option("wine_binary", "Wine binary", "path_file", advanced=True),
         Option("umu_binary", "umu-run binary", "path_file", advanced=True),
+        Option(
+            "stop_grace_seconds",
+            "Stop grace (seconds)",
+            "int",
+            "How long Stop asks the game to close before it is forced; 0 skips the request. "
+            "Only for the games Nadare launches itself.",
+            default=8,
+            advanced=True,
+        ),
         Option("extra_env", "Environment", "env", "One KEY=VALUE per line.", advanced=True),
         monitors.OPTION,
         Option("process_match", "Process match", "text", advanced=True),
+        *SANDBOX_EXEMPTION_OPTIONS,
     )
+
+    def skip_intro_args(self) -> list[str]:
+        """The splash-skip switch for this game, when the player turned it on (#1427)."""
+        args = SKIP_INTRO_ARGS.get(self.game_tag, ())
+        if not args or not as_bool(profile_setting(self.ctx.profile, "skip_intro"), False):
+            return []
+        given = self._extra_args("launch_args")
+        return [arg for arg in args if arg not in given]
 
     #: ``Plan`` factory for this game: ``(fetch) -> Plan``.
     plan_factory: Callable[[Fetch | None], directdl.Plan]
@@ -362,15 +451,24 @@ class DirectBackend(WineGameBackend):
         checked = payload.get("checked_at", 0)
         if not isinstance(checked, (int, float)):
             checked = 0
+        plan_id, selection = payload.get("plan"), payload.get("selection")
         return {
             "version": version,
             "checked_at": int(checked),
             # Only JSON true means ready: a hand-edited string "false" is truthy to bool().
             "ready": payload.get("ready") is True,
+            # What the ready receipt is for (#1497); absent in a version-only receipt.
+            "plan": plan_id if isinstance(plan_id, str) and plan_id else None,
+            "selection": selection if isinstance(selection, str) and selection else None,
         }
 
     def _write_predownload_state(
-        self, version: str | None, ready: bool, checked_at: int | None = None
+        self,
+        version: str | None,
+        ready: bool,
+        checked_at: int | None = None,
+        *,
+        plan_id: str | None = None,
     ) -> None:
         atomic_write_json(
             self._predownload_state_path(),
@@ -378,7 +476,36 @@ class DirectBackend(WineGameBackend):
                 "version": version,
                 "checked_at": int(time.time()) if checked_at is None else checked_at,
                 "ready": bool(ready),
+                "plan": plan_id,
+                "selection": self._predownload_selection(),
             },
+        )
+
+    def _legacy_receipt_holds(self, plan: directdl.Plan) -> bool:
+        """Whether a version-only receipt's cache provably holds ``plan`` (#1497 upgrade).
+
+        HoYo's Sophon packages mark each finished package with its manifest id, so that cache
+        answers exactly. Kuro's marker records only the version (not the quality), so a
+        Kuro receipt is not trusted: Predownload is offered again and keeps verified files.
+        """
+        if not plan.sophon:
+            return False
+        cache = self._usable_predownload_cache(str(plan.version))
+        return cache is not None and directdl.predownload_ready(plan, cache)
+
+    def _predownload_selection(self) -> str:
+        return _selection_key(self.plan_kwargs())
+
+    def _predownload_ready(self, state: Mapping[str, Any] | None) -> bool:
+        """A receipt is ready only for the plan it fetched under today's choices (#1497).
+
+        The plan check is in the refresh (it needs the publisher); this one is local, so a
+        quality switch shows at once, even offline. A version-only receipt is not trusted."""
+        return bool(
+            state
+            and state.get("ready")
+            and state.get("plan")
+            and state.get("selection") == self._predownload_selection()
         )
 
     def _refresh_predownload_state(self) -> None:
@@ -395,7 +522,9 @@ class DirectBackend(WineGameBackend):
         except AttributeError:
             pass
         old = self._read_predownload_state()
-        if old is not None:
+        # A receipt from 0.1.0b24 (version only) is checked at once, not after the interval:
+        # until then it cannot say which files it fetched (#1497).
+        if old is not None and old.get("plan") is not None:
             try:
                 age = time.time() - float(old.get("checked_at", 0))
             except (TypeError, ValueError):
@@ -413,10 +542,18 @@ class DirectBackend(WineGameBackend):
             if plan is None:
                 self._write_predownload_state(None, False)
             else:
-                same = old is not None and old.get("version") == str(plan.version)
-                self._write_predownload_state(
-                    str(plan.version), bool(same and old and old.get("ready"))
-                )
+                plan_id = _plan_identity(plan)
+                same_version = old is not None and old.get("version") == str(plan.version)
+                if same_version and old is not None and old.get("plan") is None:
+                    ready = bool(old.get("ready")) and self._legacy_receipt_holds(plan)
+                else:
+                    ready = bool(
+                        same_version
+                        and old is not None
+                        and old.get("plan") == plan_id
+                        and self._predownload_ready(old)
+                    )
+                self._write_predownload_state(str(plan.version), ready, plan_id=plan_id)
         except OSError as exc:
             log.debug("%s: could not cache the predownload state: %s", self.display_name, exc)
 
@@ -525,20 +662,16 @@ class DirectBackend(WineGameBackend):
         target = self.direct_target()
         record = self._read_version_file()
         if target is None or not target.is_file() or record is None:
-            raise BackendError(f"{self.display_name} is not installed")
+            raise BackendNotInstalled(f"{self.display_name} is not installed")
         try:
             plan = type(self).predownload_factory(None, **self.plan_kwargs())
         except directdl.DirectError as exc:
             raise BackendError(f"{self.display_name}: {exc}") from exc
         if plan is None or str(plan.version) == str(record["version"]):
-            raise BackendError(
-                f"{self.display_name}: no predownload is offered right now"
-            )
+            raise BackendError(f"{self.display_name}: no predownload is offered right now")
         cache = self._predownload_cache(plan.version)
         self._remove_other_predownload_caches(cache)
-        workers = int(
-            self.ctx.profile.get("download_workers") or directdl.plan_workers(plan)
-        )
+        workers = directdl.worker_cap(plan, profile_value(self.ctx.profile, "download_workers"))
         files = None
         if (
             not plan.sophon
@@ -564,7 +697,7 @@ class DirectBackend(WineGameBackend):
             )
         except directdl.DirectError as exc:
             raise BackendError(f"{self.display_name}: {exc}") from exc
-        self._write_predownload_state(str(plan.version), True)
+        self._write_predownload_state(str(plan.version), True, plan_id=_plan_identity(plan))
         self.info(
             f"{self.display_name}: downloaded {diskspace.human_size(result.get('bytes', 0))} "
             f"for {plan.version} ahead of its release"
@@ -588,7 +721,7 @@ class DirectBackend(WineGameBackend):
         published = str(latest["version"]) if latest else None
         if predownload != published:
             additions["predownload_version"] = predownload
-            additions["predownload_ready"] = bool(state and state.get("ready"))
+            additions["predownload_ready"] = self._predownload_ready(state)
         return additions, version, early
 
     def _sync_direct(self) -> dict[str, Any]:
@@ -601,9 +734,7 @@ class DirectBackend(WineGameBackend):
 
         for note in self._pin_notes:
             self.ctx.emit(Event("step", f"{self.display_name}: {note}"))
-        workers = int(
-            self.ctx.profile.get("download_workers") or directdl.plan_workers(plan)
-        )
+        workers = directdl.worker_cap(plan, profile_value(self.ctx.profile, "download_workers"))
         marker = self._install_marker_path()
         # An install that finished before (a version is recorded, no marker) stays usable if an
         # update fails before it replaced anything. Once a file was replaced, files may already have
@@ -688,7 +819,8 @@ class DirectBackend(WineGameBackend):
         self._remove_retired(plan, retired)
         if update is not None and update[0] and update[0] != update[1]:
             text, too_big = update_receipt(
-                update[0], str(plan.version),
+                update[0],
+                str(plan.version),
                 patch_bytes=int(self._patch_numbers.get("patch_bytes", 0)),
                 whole_bytes=fetched[0],
                 publisher_bytes=int(self._patch_numbers.get("publisher", 0)),
@@ -732,8 +864,13 @@ class DirectBackend(WineGameBackend):
                 )
             )
             outcome = kuropatch.apply(
-                patches, plan, self.install_dir(),
-                emit=self.ctx.emit, cancel=self.ctx.cancel, changed=changed, cache=cache,
+                patches,
+                plan,
+                self.install_dir(),
+                emit=self.ctx.emit,
+                cancel=self.ctx.cancel,
+                changed=changed,
+                cache=cache,
             )
             self._patch_numbers["patch_bytes"] = outcome.downloaded_bytes
             self.info(
@@ -766,9 +903,6 @@ class DirectBackend(WineGameBackend):
             raise
         except Exception as exc:  # noqa: BLE001 - a background check must never fail on this
             log.debug("%s: tidy-up skipped: %s", self.display_name, exc)
-
-    def _game_running(self) -> bool:
-        return bool(scan_pids(self._patterns()) or self._running_elsewhere())
 
     def _tidy_retired_once(self) -> None:
         """Remove retired files once per installed version, with no click needed (#1252).
@@ -878,7 +1012,7 @@ class DirectBackend(WineGameBackend):
         self.ctx.cancel.raise_if_cancelled()
         target = self.direct_target()
         if target is None or not target.is_file():
-            raise BackendError(f"{self.display_name} is not installed")
+            raise BackendNotInstalled(f"{self.display_name} is not installed")
         self._sync_direct()
 
     def launch(self) -> int:
@@ -887,7 +1021,17 @@ class DirectBackend(WineGameBackend):
         if target is None or not target.is_file():
             raise BackendError(f"game executable not found: {target}")
         self._ensure_default_runner(strict=True)
+        self._ensure_game_drive()
         return self._launch_direct()
+
+    def _ensure_game_drive(self) -> None:
+        if not self.game_drive_letter:
+            return
+        letter = gamedrive.ensure(
+            self.prefix(), self.install_dir(), self.game_drive_letter, exe=self.direct_exe or ""
+        )
+        if letter:
+            self.info(f"game folder is drive {letter.upper()}: in the prefix")
 
 
 #: An update this many times the publisher's own size (plus 1 GiB) is reported (#1252).
@@ -914,6 +1058,10 @@ def update_receipt(
             "report so we can fix it."
         )
     return text, ""
+
+
+def _says_auto_wayland(option: Option) -> bool:
+    return option.key == "display" and ("Auto (Wayland)", "auto") in (option.choices or ())
 
 
 def _x11_display_option(option: Option) -> Option:
@@ -952,6 +1100,87 @@ class AetherGazerBackend(DirectBackend):
     launcher_names = (direct_exe,)
     install_size_hint = int(10.4 * GB)
     plan_factory = staticmethod(aethergazer.resolve)
+
+
+DNA_ACCOUNT_NOTICE = """\
+BEFORE YOU PLAY: DUET NIGHT ABYSS
+
+Nadare is unofficial and not supported by Pan Studio or Hero Games. Using it may be against
+the game's terms of service, and your account could be restricted. Do not use an account you
+cannot afford to lose.
+
+The game uses Anti-Cheat Expert (ACE), a kernel-level anti-cheat on Windows. On Linux it runs
+under Wine/Proton like the rest of the game; whether the publisher treats that as allowed is
+their decision, not Nadare's.
+
+Nadare installs the game straight from the publisher's servers and never runs the publisher's
+launcher: on 2026-03-18 an update of that launcher shipped malware, which Pan Studio confirmed.
+For the same reason this game always runs in the Sandbox (your home folder stays hidden from it),
+and it does not start at all where the Sandbox cannot run.
+"""
+
+
+class DnaBackend(DirectBackend):
+    kind = "direct-dna"
+    game_tag = "dna"
+    display_name = "Duet Night Abyss"
+    install_subdir = _subdir("DuetNightAbyss")
+    direct_exe = dna.EXE
+    launcher_names = (direct_exe, dna.GAME_EXE)
+    #: The peak, not the final size: the 28.4 GB diff stays on disk until its 31 GB of files are
+    #: unpacked (``diskspace.install_space`` refuses a fresh install below this).
+    install_size_hint = int(60.0 * GB)
+    plan_factory = staticmethod(dna.resolve)
+    sandbox_required = True
+    #: DW-Proton's fix for DNA (gamefixes-umu/umu-3950020.py -> gamefixes-steam/3950020.py)
+    #: disables dcomp so the game's CEF pages draw, and sets PROTON_ENABLE_INT3_HACK; as
+    #: umu-default it never loaded and the window stayed white (2026-11-17, flxpc).
+    umu_id = "umu-3950020"
+    #: On native Wayland the window stays white (DXVK and wined3d alike); on X11 the same
+    #: prefix, runner and Sandbox reach the game (#1608, amdnode, 2026-11-18).
+    default_display = "x11"
+    #: From ``Z:\\home\\...`` (Add Game's ``<library>/<Game>/install``) the sign-in program
+    #: crashes on its first run and the game stays black; as ``D:`` it starts (#1608, amdnode).
+    game_drive_letter = "d"
+    account_notice = DNA_ACCOUNT_NOTICE
+    page_notice = (
+        "Installs straight from Pan Studio's servers: one 28 GB download that unpacks to about "
+        "31 GB (both are on disk for a while, so keep about 60 GB free). The publisher's launcher "
+        "never runs, and the game always runs in the Sandbox.",
+        "https://duetnightabyss.dna-panstudio.com/",
+        "Official site",
+    )
+
+
+class SnowbreakBackend(DirectBackend):
+    kind = "direct-snowbreak"
+    game_tag = "snowbreak"
+    display_name = "Snowbreak: Containment Zone"
+    #: Its sign-in is a full-screen layered window: black and off-centre on native Wayland,
+    #: centred and transparent on X11 (amdnode KDE, 2026-11-21).
+    default_display = "x11"
+    install_subdir = _subdir("Snowbreak")
+    direct_exe = snowbreak.EXE
+    launcher_names = (direct_exe,)
+    install_size_hint = int(54.0 * GB)
+    plan_factory = staticmethod(snowbreak.resolve)
+    #: What Seasun's own launcher passes (3.6.0: ``-FeatureLevelES31 -ChannelID=%s``). The PC
+    #: client renders with UE's ES3.1 feature level and ships only those global shaders: without
+    #: the flag it stops at "Game files required to initialize the global shader library are
+    #: missing" (seen on the amdnode, 2026-11-16). The channel picks the account SDK. A profile
+    #: that sets its own launch_args keeps control.
+    snowbreak_args: tuple[str, ...] = ("-FeatureLevelES31", "-ChannelID=seasun")
+    page_notice = (
+        "Installs straight from Seasun's servers (about 54 GB), file by file, with every file "
+        "checked against Seasun's list. You sign in inside the game.",
+        "https://snowbreak.amazingseasun.com/",
+        "Official site",
+    )
+
+    def launch_extra_args(self) -> list[str]:
+        if self._extra_args("launch_args"):
+            return []
+        return list(self.snowbreak_args)
 
 
 class MongilBackend(NetmarbleLoginMixin, DirectBackend):
@@ -998,6 +1227,7 @@ class WutheringWavesBackend(DirectBackend):
     launcher_names = (direct_exe,)
     install_size_hint = int(85.9 * GB)
     plan_factory = staticmethod(wuwa.resolve)
+    supports_predownload = True
     predownload_factory = staticmethod(wuwa.resolve_predownload)
     # Asked in the install confirm (#990), with the sizes from the option's help.
     install_choice = "wuwa_quality"
@@ -1017,8 +1247,7 @@ class WutheringWavesBackend(DirectBackend):
             "kuro_token",
             "Kuro download token",
             "text",
-            "Only needed if Kuro rotates the token Nadare ships "
-            "(see core/sources/wuwa.py).",
+            "Only needed if Kuro rotates the token Nadare ships (see core/sources/wuwa.py).",
             advanced=True,
         ),
     )
@@ -1085,15 +1314,24 @@ class WutheringWavesBackend(DirectBackend):
             found.append((quality, folder, size))
         return found
 
-    def remove_other_qualities(
-        self, only: Iterable[str] | None = None
-    ) -> tuple[int, list[str]]:
+    def remove_other_qualities(self, only: Iterable[str] | None = None) -> tuple[int, list[str]]:
         """Delete the unused resource tiers, never while the game runs (#990).
 
         ``only`` restricts the deletion to the tiers the user confirmed; each is still
         re-checked through :meth:`other_quality_folders` (symlinks and the chosen tier).
         """
         self._refuse_if_running("removing files")
+        # The same lock a download, update or predownload holds while it writes here: the
+        # cleanup runs on a pool thread and must never delete under a running sync (#1474).
+        with installlock.hold(
+            self.install_dir(),
+            BackendError,
+            f"{self.display_name} is being downloaded or updated right now; remove the other "
+            "quality when that has finished.",
+        ):
+            return self._remove_other_qualities_locked(only)
+
+    def _remove_other_qualities_locked(self, only: Iterable[str] | None) -> tuple[int, list[str]]:
         wanted = None if only is None else {str(name).lower() for name in only}
         freed = 0
         warnings: list[str] = []
@@ -1107,9 +1345,7 @@ class WutheringWavesBackend(DirectBackend):
                 warnings.append(removal._leftover_warning(folder, exc))
                 continue
             for mount in outcome.mounts:
-                warnings.append(
-                    f"{mount} is a separate mounted drive and was left alone"
-                )
+                warnings.append(f"{mount} is a separate mounted drive and was left alone")
             for path, exc in outcome.leftovers:
                 warnings.append(removal._leftover_warning(path, exc))
             if not folder.exists():
@@ -1118,9 +1354,7 @@ class WutheringWavesBackend(DirectBackend):
         recorded = self._recorded_tiers()
         if removed and recorded is not None:
             try:
-                self._write_recorded_tiers(
-                    {q: v for q, v in recorded.items() if q not in removed}
-                )
+                self._write_recorded_tiers({q: v for q, v in recorded.items() if q not in removed})
             except OSError as exc:
                 log.debug("%s: could not update the tier record: %s", self.display_name, exc)
         return freed, warnings
@@ -1137,6 +1371,8 @@ class WutheringWavesBackend(DirectBackend):
         ):
             return super().direct_target()
         return self.install_dir() / self.GAME_EXE
+
+    launch_extra_args_before_user = True
 
     def launch_extra_args(self) -> list[str]:
         # The launcher stub passes these; a profile that sets its own launch_args keeps control.
@@ -1201,8 +1437,7 @@ class WutheringWavesBackend(DirectBackend):
             record = self._read_version_file() or {}
             current = str(record.get("version") or "")
             candidates = [
-                q for q in wuwa.QUALITIES
-                if q in recorded and versions_equal(recorded[q], current)
+                q for q in wuwa.QUALITIES if q in recorded and versions_equal(recorded[q], current)
             ]
         return [q for q in candidates if self._tier_installed(q)]
 
@@ -1256,12 +1491,9 @@ class WutheringWavesBackend(DirectBackend):
     def _tidy_names(self, names: Iterable[str]) -> list[str]:
         """Never tidy inside another tier's folder; that is the cleanup offer's job (#990)."""
         chosen = wuwa.quality_of(profile_setting(self.ctx.profile, "wuwa_quality"))
-        others = tuple(
-            f"client/content/{q}/" for q in wuwa.QUALITIES if q != chosen
-        )
+        others = tuple(f"client/content/{q}/" for q in wuwa.QUALITIES if q != chosen)
         return [
-            n for n in names
-            if not str(n).replace("\\", "/").lstrip("/").lower().startswith(others)
+            n for n in names if not str(n).replace("\\", "/").lstrip("/").lower().startswith(others)
         ]
 
     def _direct_status_parts(
@@ -1297,9 +1529,7 @@ class WutheringWavesBackend(DirectBackend):
             # back instead of downloading a tier the player never chose.
             additions["update_available"] = True
             additions["pending_quality"] = chosen
-            additions["latest_version"] = (
-                f"{chosen.upper()} files (Resource quality in Settings)"
-            )
+            additions["latest_version"] = f"{chosen.upper()} files (Resource quality in Settings)"
         return additions, version, early
 
     def _launch_quality(self) -> str:
@@ -1367,7 +1597,7 @@ class Gfl2HaoplayBackend(Gfl2Backend):
     game_tag = "gfl2-haoplay"
     display_name = "Girls' Frontline 2 (Haoplay global build)"
     install_subdir = _subdir("GF2Haoplay")
-    install_size_hint = int(1 * GB)  # the small client; the game downloads ~88 GB itself
+    install_size_hint = int(94.0 * GB)  # the client plus ~93.7 GB of game data
     plan_factory = staticmethod(gfl2.resolve_haoplay)
     #: The game only starts under umu's id 0 (``wine start /wait /unix``); a named id or a Steam
     #: app id makes Proton run it through steam.exe and it hangs. A profile ``extra_env`` wins.
@@ -1384,9 +1614,7 @@ class Gfl2HaoplayBackend(Gfl2Backend):
 
         def run_in_prefix(args: list[str]) -> int:
             cmd, env = self._prefix_command(args, process.installer_env())
-            return stream(
-                cmd, env, on_line=self._on_line, cancel=self.ctx.cancel, cwd=prefix
-            )
+            return stream(cmd, env, on_line=self._on_line, cancel=self.ctx.cancel, cwd=prefix)
 
         def verify(path: Path) -> None:
             webview2.verify(
@@ -1452,14 +1680,13 @@ class Gfl2HaoplayBackend(Gfl2Backend):
         return {"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS": str(browser_args or "--no-sandbox")}
 
     page_summary = (
-        "The game downloads and updates itself on first start (about 90 GB). If the sign-in "
+        "Nadare downloads the game files (about 94 GB) from Haoplay's servers. If the sign-in "
         "page misbehaves, try the other Display backend in Settings."
     )
     page_notice = (
         "This is the Haoplay global build; the Darkwinter build is a separate listing. Nadare "
-        "installs only the small Haoplay client straight from Haoplay's servers "
-        "(no launcher); the game downloads and updates itself on first start, about 90 GB "
-        "with one voice language (more with others). "
+        "downloads the game files and the Haoplay client straight from Haoplay's servers "
+        "(no launcher), about 94 GB with one voice language (more with others). "
         "Nadare installs Microsoft's WebView2 Runtime into this game's prefix for sign-in. "
         "If the sign-in page misbehaves, try the other Display backend in Settings.",
         "https://gf2.haoplay.com/",
@@ -1489,6 +1716,25 @@ class EndfieldBackend(DirectBackend):
         "Official site",
     )
 
+    def launch(self) -> int:
+        """Play, with the shader cache kept from a cut-short save (#1421)."""
+        prefix = self.prefix()
+        guard = psoguard.Guard(
+            psoguard.endfield_cache(prefix),
+            self._data_dir() / "pso-backup",
+            self.info,
+            home=psoguard.wine_user_dir(prefix),
+        )
+        guard.before()
+        marker = getattr(self, "_launch_started", None)
+        try:
+            return super().launch()
+        finally:
+            # Only after a game this call started: when Play was refused (already running in
+            # another Nadare), that session may still be writing the file.
+            if getattr(self, "_launch_started", None) is not marker:
+                guard.after()
+
     def _direct_argv(self, target: Path) -> list[str]:
         argv = super()._direct_argv(target)
         if endfield_shim.is_steam_build(target.parent):
@@ -1508,6 +1754,7 @@ class EndfieldBackend(DirectBackend):
 
 
 class NteDirectBackend(DirectBackend):
+    game_process_names = ("HTGame.exe",)
     kind = "direct-nte"
     news_source = staticmethod(nte_news.fetch_nte_news)
     official_image_hosts = nte_news.IMAGE_HOSTS
@@ -1526,20 +1773,20 @@ class NteDirectBackend(DirectBackend):
         "itself; that is expected."
     )
     page_notice = (
-        "Installs straight from Perfect World's servers (about 98 GB). The game's Start and "
-        "login only work when Perfect World's launcher is running, so Nadare also fetches the "
-        "launcher files (7-Zip needed) and starts it with /autoplay: the launcher collapses to "
-        "a small bar and starts the game by itself, like Steam. The very first start may show "
-        "the launcher's Update button once, to register the install.",
+        "Installs straight from Perfect World's servers (about 98 GB), in two passes: the game "
+        "files first, then 7 smaller packs (about 2.3 GB). The game's Start and login only work "
+        "when Perfect World's launcher is running, so Nadare also fetches the launcher files "
+        "(7-Zip needed) and starts it with /autoplay: the launcher collapses to a small bar and "
+        "starts the game by itself, like Steam. On the very first start the launcher updates "
+        "itself once (a minute or two) and may show its Update button once, to register the "
+        "install.",
         "https://nte.perfectworld.com/",
         "Official site",
     )
 
     def _direct_argv(self, target: Path) -> list[str]:
         try:
-            launcher = nte_launcher.ensure_launcher(
-                self.install_dir(), data_dir=self._data_dir()
-            )
+            launcher = nte_launcher.ensure_launcher(self.install_dir(), data_dir=self._data_dir())
         except nte_launcher.NteLauncherError as exc:
             raise BackendError(f"cannot prepare the NTE launcher: {exc}") from exc
         self.info("NTE: starting the publisher launcher (/autoplay starts the game)")
@@ -1559,6 +1806,7 @@ class GenshinBackend(DirectBackend):
     art_source = staticmethod(hoyo_art.fetch_genshin_art)
     art_image_hosts = hoyo_art.IMAGE_HOSTS
     plan_factory = staticmethod(lambda fetch=None: hoyo.resolve("hk4e_global", fetch))
+    supports_predownload = True
     predownload_factory = staticmethod(
         lambda fetch=None: hoyo.resolve_predownload("hk4e_global", fetch)
     )
@@ -1576,6 +1824,7 @@ class PgrBackend(DirectBackend):
     launcher_names = (direct_exe,)
     install_size_hint = int(71.7 * GB)
     plan_factory = staticmethod(pgr.resolve)
+    supports_predownload = True
     predownload_factory = staticmethod(pgr.resolve_predownload)
     #: Native Wayland gave a white window in testing; the X11 path reached the game's own
     #: agreement screen. Not yet re-confirmed through Nadare with display set to x11.
@@ -1615,6 +1864,7 @@ class StarRailBackend(DirectBackend):
     art_source = staticmethod(hoyo_art.fetch_hsr_art)
     art_image_hosts = hoyo_art.IMAGE_HOSTS
     plan_factory = staticmethod(lambda fetch=None: hoyo.resolve("hkrpg_global", fetch))
+    supports_predownload = True
     predownload_factory = staticmethod(
         lambda fetch=None: hoyo.resolve_predownload("hkrpg_global", fetch)
     )
@@ -1633,6 +1883,7 @@ class Hi3Backend(DirectBackend):
     art_source = staticmethod(hoyo_art.fetch_hi3_art)
     art_image_hosts = hoyo_art.IMAGE_HOSTS
     plan_factory = staticmethod(lambda fetch=None: hoyo.resolve("bh3_global", fetch))
+    supports_predownload = True
     predownload_factory = staticmethod(
         lambda fetch=None, **kw: hoyo.resolve_predownload("bh3_global", fetch)
     )
@@ -1651,6 +1902,7 @@ class ZenlessBackend(DirectBackend):
     art_source = staticmethod(hoyo_art.fetch_zzz_art)
     art_image_hosts = hoyo_art.IMAGE_HOSTS
     plan_factory = staticmethod(lambda fetch=None: hoyo.resolve("nap_global", fetch))
+    supports_predownload = True
     predownload_factory = staticmethod(
         lambda fetch=None: hoyo.resolve_predownload("nap_global", fetch)
     )

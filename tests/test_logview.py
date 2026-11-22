@@ -206,7 +206,7 @@ def test_bundle_with_no_logs_still_writes_a_readme_and_no_partial_file_on_error(
     def boom(*_a, **_k):
         raise OSError("disk full")
 
-    monkeypatch.setattr(logview, "read_tail", boom)
+    monkeypatch.setattr(logview, "read_head_and_tail", boom)
     try:
         logview.bundle(["G"], logs, broken)
     except OSError:

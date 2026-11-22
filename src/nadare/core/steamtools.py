@@ -22,13 +22,12 @@ import hashlib
 import os
 import shlex
 import shutil
-import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-from . import paths
+from . import atomicfile, paths
 from .backends import BackendError
 
 #: The client command when the profile does not name one.
@@ -778,26 +777,7 @@ def _read(path: Path) -> str:
 
 def _write_atomic(path: Path, text: str) -> None:
     # A config that is a symlink (dotfiles) keeps being one: the file it points at is replaced.
-    path = Path(os.path.realpath(path))
-    try:
-        mode = path.stat().st_mode & 0o777
-    except OSError:
-        mode = 0o600
-    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(text.encode("utf-8", "surrogateescape"))
-            handle.flush()
-            os.fsync(handle.fileno())  # the data must be on disk before the name points at it
-        os.chmod(name, mode)
-        os.replace(name, path)
-        _sync_folder(path.parent)
-    except BaseException:
-        try:
-            os.unlink(name)
-        except OSError:
-            pass
-        raise
+    atomicfile.write(path, text, follow_symlink=True, sync_dir=True)
 
 
 def _sync_folder(folder: Path) -> None:

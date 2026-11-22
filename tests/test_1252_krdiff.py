@@ -207,3 +207,36 @@ def test_a_cover_writing_past_the_new_files_writes_nothing_first(tree):
     with pytest.raises(krdiff.KrDiffError, match="past its new files"):
         _apply(root, patch)
     assert (root / "out" / "Client" / "a.pak").stat().st_size == 0
+
+
+def test_an_empty_file_in_the_head_is_a_file_not_a_folder():
+    """HDiffPatch lists empty files without a data reference; only paths ending in "/" are
+    folders. An empty file read as a folder would leave a folder named like the file."""
+    files, dirs = krdiff._files(
+        ["", "a.bin", "sub/", "sub/empty.pak", "sub/b.bin", "keep/"], [1, 2], [5, 7]
+    )
+    got = [(e.path, e.size) for e in files]
+    assert got == [("a.bin", 5), ("sub/empty.pak", 0), ("sub/b.bin", 7)]
+    assert dirs == ["", "sub/", "keep/"]
+
+
+def test_a_non_utf8_header_field_is_a_damaged_patch_not_a_crash():
+    """#812 fuzz: a path that is not UTF-8 raised UnicodeDecodeError out of read_header."""
+    import io
+
+    with pytest.raises(krdiff.KrDiffError):
+        krdiff.read_header(io.BytesIO(b"HDIFF19&\xb9\xfe&x\x00"))
+
+
+def test_a_damaged_zstd_section_is_a_damaged_patch_not_a_crash():
+    """#812 fuzz: zstandard's own ZstdError escaped read_header."""
+    import io
+
+    good = build([("a", b"old")], [("a", b"new data")], [("new", b"new data")])
+    for i in range(len(good)):
+        bad = bytearray(good)
+        bad[i] ^= 0xFF
+        try:
+            krdiff.read_header(io.BytesIO(bytes(bad)))
+        except krdiff.KrDiffError:
+            pass

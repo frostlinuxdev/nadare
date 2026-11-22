@@ -89,6 +89,10 @@ _CHECK_IMAGE = f"image: {_qss_url(_CHECK_ICON)};" if _CHECK_ICON.is_file() else 
 # Its stroke is MUTED; keep the two in step.
 _ARROW_ICON = _CHECK_ICON.with_name("chevron-down.svg")
 _ARROW_IMAGE = f"image: {_qss_url(_ARROW_ICON)};" if _ARROW_ICON.is_file() else "image: none;"
+_UP_ARROW_ICON = _CHECK_ICON.with_name("chevron-up.svg")
+_UP_ARROW_IMAGE = (
+    f"image: {_qss_url(_UP_ARROW_ICON)};" if _UP_ARROW_ICON.is_file() else "image: none;"
+)
 
 STYLESHEET = f"""
 * {{
@@ -96,8 +100,10 @@ STYLESHEET = f"""
     font-size: 13px;
     font-family: "Inter", "Cantarell", "Noto Sans", "Segoe UI", sans-serif;
 }}
-QMainWindow, QWidget#Root, QWidget#Page {{ background: {BG}; }}
-QStackedWidget {{ background: {BG}; }}
+QMainWindow, QWidget#Root, QWidget#Page, QStackedWidget {{
+    background: qradialgradient(cx:0.16, cy:-0.06, radius:1.15, fx:0.12, fy:-0.10,
+        stop:0 #27406b, stop:0.38 #131d31, stop:0.75 #0a0e16, stop:1 #06080d);
+}}
 QLabel {{ background: transparent; }}
 QMessageBox, QDialog {{ background: {PANEL}; }}
 QMessageBox QLabel {{
@@ -160,7 +166,7 @@ QLabel#Pill[state="info"] {{
 
 /* ---- sidebar ---------------------------------------------------------- */
 QWidget#Sidebar {{
-    background: {PANEL};
+    background: rgba(5, 8, 13, 0.72);
     border-right: 1px solid {LINE_SOFT};
 }}
 QFrame#BrandMark {{
@@ -232,16 +238,39 @@ QFrame#StatsBar {{
     border: 1px solid {LINE_SOFT};
     border-radius: 10px;
 }}
-QFrame#GameCard {{
-    background: {PANEL_2};
-    border: 1px solid {LINE};
-    border-radius: {CARD_RADIUS}px;
+QFrame#GameCard, QFrame#GameCard:hover {{ background: transparent; border: none; }}
+QLabel#TileTitle {{ color: #eef3fb; font-size: 11px; font-weight: 600; }}
+QLabel#LibraryTitle {{ color: #dbe4f2; font-size: 10px; }}
+QLabel#LibraryMeta {{ color: #7d8aa0; font-size: 10px; }}
+/* A state on a library tile: a solid pill so it reads on any art. */
+QLabel#TileBadge {{
+    background: rgba(10, 14, 22, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 9px;
+    padding: 0px 8px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    color: #c3cbd9;
 }}
-QFrame#GameCard:hover {{
-    background: {PANEL_3};
-    border: 1px solid #27446b;
+QLabel#TileBadge[state="good"] {{ color: {ACCENT}; border-color: rgba(61, 139, 253, 0.6); }}
+QLabel#TileBadge[state="warn"] {{ color: {WARN}; border-color: rgba(245, 200, 106, 0.6); }}
+QLabel#TileBadge[state="bad"] {{ color: {BAD}; border-color: rgba(255, 138, 138, 0.6); }}
+QLabel#TileBadge[state="info"] {{ color: {INFO}; border-color: rgba(138, 180, 255, 0.6); }}
+QLabel#LibrarySection {{ color: #8194b0; font-size: 10px; font-weight: 700;
+                          letter-spacing: 2px; }}
+QLabel#NewPill {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #5b8cff, stop:1 #8a5cff);
+    color: white; border-radius: 7px; font-size: 9px; font-weight: 700;
 }}
-QFrame#GameCard[running="true"] {{ border: 1px solid rgba(61, 139, 253, 0.45); }}
+QLineEdit#LibrarySearch {{ background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; padding: 0px 16px; }}
+QPushButton#LibraryAdd {{ background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; padding: 0px 14px;
+    font-size: 11px; }}
+QPushButton#QuickPlay {{ background: #5b8cff; color: white; border-radius: 16px;
+    border: 1px solid rgba(255,255,255,0.4); padding: 0px; }}
+QPushButton#QuickPlay:hover {{ background: #8a5cff; }}
 QFrame#AddGameCard {{
     background: transparent;
     border: 1px dashed {BORDER};
@@ -425,7 +454,7 @@ QPushButton#Danger:hover {{ background: rgba(255, 138, 138, 0.22); }}
 QPushButton#Danger:pressed {{ background: rgba(255, 138, 138, 0.30); }}
 
 /* ---- inputs ----------------------------------------------------------- */
-QLineEdit, QComboBox, QSpinBox {{
+QLineEdit, QComboBox, QAbstractSpinBox {{
     background: {FIELD_BG};
     border: 1px solid {LINE};
     border-radius: 8px;
@@ -445,8 +474,8 @@ QPlainTextEdit {{
     selection-color: {ACCENT_INK};
 }}
 QPlainTextEdit:focus {{ border: 1px solid {ACCENT}; }}
-QLineEdit:hover, QComboBox:hover, QSpinBox:hover {{ border-color: {BORDER_HI}; }}
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border: 1px solid {ACCENT}; }}
+QLineEdit:hover, QComboBox:hover, QAbstractSpinBox:hover {{ border-color: {BORDER_HI}; }}
+QLineEdit:focus, QComboBox:focus, QAbstractSpinBox:focus {{ border: 1px solid {ACCENT}; }}
 QLineEdit:read-only, QLineEdit:disabled {{ color: {MUTED}; background: {PANEL}; }}
 QComboBox::drop-down {{ border: none; width: 26px; }}
 QComboBox::down-arrow {{
@@ -454,6 +483,23 @@ QComboBox::down-arrow {{
     width: 12px; height: 12px;
     margin-right: 8px;
 }}
+/* Styled spin boxes lose the native arrows (two dots on KDE): draw the chevrons. */
+QAbstractSpinBox {{ padding-right: 24px; }}
+QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{
+    subcontrol-origin: border;
+    width: 22px;
+    border: none;
+    background: transparent;
+}}
+QAbstractSpinBox::up-button {{ subcontrol-position: top right; margin: 3px 3px 0 0; }}
+QAbstractSpinBox::down-button {{ subcontrol-position: bottom right; margin: 0 3px 3px 0; }}
+QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {{
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 4px;
+}}
+QAbstractSpinBox::up-arrow {{ {_UP_ARROW_IMAGE} width: 10px; height: 10px; }}
+QAbstractSpinBox::down-arrow {{ {_ARROW_IMAGE} width: 10px; height: 10px; }}
+QAbstractSpinBox::up-arrow:disabled, QAbstractSpinBox::down-arrow:disabled {{ image: none; }}
 QComboBox QAbstractItemView {{
     background: {PANEL_2};
     border: 1px solid {LINE};
@@ -604,6 +650,16 @@ def _font_scale() -> float:
     return max(1.0, px / (10.0 * 4.0 / 3.0))
 
 
+#: Layout scale of the library's design pixels (1.0 = the design). Not a setting: tests vary it to
+#: prove the layout follows ``scaled()``; text size follows the desktop font (``_font_scale``).
+UI_SCALE = 1.0
+
+
+def scaled(value: float) -> int:
+    """Convert design pixels to the layout scale (at least 1 for a non-zero size)."""
+    return max(1, round(value * UI_SCALE)) if value else 0
+
+
 _FONT_SIZE_RE = re.compile(r"font-size:\s*(\d+)px")
 
 
@@ -611,10 +667,10 @@ def stylesheet() -> str:
     """Return the launcher stylesheet, scaled to the desktop's text size."""
     scale = _font_scale()
 
-    def scaled(match: re.Match[str]) -> str:
+    def scaled_font(match: re.Match[str]) -> str:
         return f"font-size: {round(int(match.group(1)) * scale)}px"
 
-    return _FONT_SIZE_RE.sub(scaled, STYLESHEET)
+    return _FONT_SIZE_RE.sub(scaled_font, STYLESHEET)
 
 
 FONTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
@@ -959,10 +1015,13 @@ BADGE_STATES = {
     "running": ("good", "PLAYING"),
     "installed": ("good", "READY"),
     "installing": ("info", "INSTALLING"),
+    "waiting": ("muted", "WAITING"),
     "updating": ("info", "UPDATING"),
+    "repairing": ("info", "REPAIRING"),
     "launching": ("info", "LAUNCHING"),
     "login": ("info", "LOGIN"),
     "verifying": ("info", "CHECKING"),
+    "cleaning": ("info", "CLEANING UP"),
     "not_installed": ("muted", "NOT INSTALLED"),
     "checking": ("muted", "CHECKING…"),
     "error": ("bad", "ERROR"),

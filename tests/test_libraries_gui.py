@@ -782,7 +782,7 @@ def test_picking_the_nadare_folder_finds_a_game_already_there(env, qapp):
     try:
         d.location_toggle.click()
         d.set_install_dir(str(home / "Games" / "Nadare"))
-        d._plan_paths(d._selected_game(), d.folder.text().strip(), d.prefix.text().strip(), False)
+        d._plan_paths(d._selected_game(), d.folder.text().strip(), d.prefix.text().strip())
         assert d.reused is not None and d.reused.game_dir == game_dir.resolve()
     finally:
         d.close()
@@ -793,7 +793,6 @@ def test_a_nadare_folder_in_home_stays_a_library_of_its_own(env):
     assert libraries.library_of(home / "Nadare") == home / "Nadare"
     assert libraries.library_of(home / "Games" / "Nadare") == home / "Games"
     assert libraries.library_of(home / "Games") == home / "Games"
-
 
 
 def test_picking_the_nadare_folder_for_nikke_uses_its_library(env, qapp):

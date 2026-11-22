@@ -24,5 +24,5 @@ def test_progress_with_an_unknown_total_shows_only_what_is_done():
 def test_progress_event_keeps_the_raw_numbers_for_callers():
     seen: list[Event] = []
     download._emit_progress(seen.append, "download", 50, 200)
-    assert seen[0].data == {"stage": "download", "done": 50, "total": 200}
+    assert seen[0].data == {"stage": "download", "done": 50, "total": 200, "connections": 0}
     assert seen[0].progress == 0.25

@@ -88,10 +88,28 @@ def test_removing_while_the_game_runs_is_refused(tmp_path, monkeypatch):
     assert uhd.is_dir()
 
 
+def _run_cleanup(app, window, tiers, profile="w"):
+    """Offer the cleanup and wait for the controller to end it (#1474: a controller operation,
+    which may queue behind the window's own status probe)."""
+    import time
+
+    ended: list[str] = []
+    window.controller.succeeded.connect(
+        lambda p, op, code: op == "remove_qualities" and ended.append("ok"))
+    window.controller.failed.connect(
+        lambda p, op, msg: op == "remove_qualities" and ended.append(msg))
+    window._offer_quality_cleanup(profile, tiers)
+    end = time.monotonic() + 10
+    while not ended and time.monotonic() < end:
+        app.processEvents()
+        time.sleep(0.01)
+    app.processEvents()
+    assert ended, "the cleanup did not finish"
+
+
 # ---- the window offers it after a successful update ---------------------------------------------
 def test_the_window_offers_to_remove_and_removes_on_yes(tmp_path, monkeypatch):
     pytest.importorskip("PyQt6.QtWidgets")
-    from PyQt6.QtCore import QThreadPool
     from PyQt6.QtWidgets import QApplication
 
     from nadare.core.config import Config
@@ -109,9 +127,7 @@ def test_the_window_offers_to_remove_and_removes_on_yes(tmp_path, monkeypatch):
     monkeypatch.setattr(WutheringWavesBackend, "remove_other_qualities",
                         lambda self, only=None: removed.append("yes") or (300, []))
     try:
-        window._offer_quality_cleanup("w", [("uhd", tmp_path / "wuwa/Client/Content/UHD", 300)])
-        QThreadPool.globalInstance().waitForDone(5000)
-        app.processEvents()
+        _run_cleanup(app, window, [("uhd", tmp_path / "wuwa/Client/Content/UHD", 300)])
         assert asked and asked[0][0] == "WuWa" and asked[0][2] == "sd"
         assert removed == ["yes"]
     finally:
@@ -157,10 +173,8 @@ def test_removing_named_tiers_only_touches_those_tiers(tmp_path, monkeypatch):
 
 def test_the_cleanup_worker_gets_a_snapshot_of_the_settings(tmp_path, monkeypatch):
     pytest.importorskip("PyQt6.QtWidgets")
-    from PyQt6.QtCore import QThreadPool
     from PyQt6.QtWidgets import QApplication
 
-    from nadare.core import backends as core_backends
     from nadare.core.config import Config
     from nadare.gui.main_window import MainWindow
 
@@ -169,25 +183,19 @@ def test_the_cleanup_worker_gets_a_snapshot_of_the_settings(tmp_path, monkeypatc
     config.profiles["w"] = {"backend": "direct-wuwa", "title": "WuWa",
                             "install_dir": str(tmp_path / "wuwa"), "wuwa_quality": "sd"}
     window = MainWindow(config)
-    seen: list[tuple[str, object]] = []
+    seen: list[object] = []
 
-    class _Backend:
-        def remove_other_qualities(self, only=None):
-            return (0, [])
+    def remove(self, only=None):
+        seen.append(self.ctx.config)
+        return (0, [])
 
-    def fake_create(profile, worker_config, *args, **kwargs):
-        seen.append((profile, worker_config))
-        return _Backend()
-
-    monkeypatch.setattr(core_backends, "create", fake_create)
+    monkeypatch.setattr(WutheringWavesBackend, "remove_other_qualities", remove)
     monkeypatch.setattr(window, "_ask_remove_qualities", lambda *a: True)
     try:
-        window._offer_quality_cleanup("w", [("uhd", tmp_path / "wuwa/Client/Content/UHD", 300)])
-        QThreadPool.globalInstance().waitForDone(5000)
-        app.processEvents()
-        assert seen and seen[-1][0] == "w"
-        assert seen[-1][1] is not window.config
-        assert seen[-1][1].profiles["w"]["wuwa_quality"] == "sd"
+        _run_cleanup(app, window, [("uhd", tmp_path / "wuwa/Client/Content/UHD", 300)])
+        assert len(seen) == 1
+        assert seen[0] is not window.config
+        assert seen[0].profiles["w"]["wuwa_quality"] == "sd"
     finally:
         window.close()
         window.deleteLater()

@@ -61,7 +61,7 @@ def test_each_setting_lives_on_its_tab(page):
     assert _tab_of(page, page.option_widget("renderer")) == "Game"
     assert _tab_of(page, page.language) == "Nadare (all games)"
     assert _tab_of(page, page.default_monitor) == "Nadare (all games)"
-    assert _tab_of(page, page.open_config_button) == "Nadare (all games)"
+    assert _tab_of(page, page.discord_button) == "Nadare (all games)"
 
 
 def test_the_footer_stays_outside_the_tabs(page):

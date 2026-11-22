@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -91,6 +92,14 @@ def _payload() -> bytes:
     return _tar_bytes({"umu/umu-run": b"#!/usr/bin/python3\nprint('umu')\n"})
 
 
+def _zipapp_payload() -> bytes:
+    """A minimal executable zipapp, like the real umu-run (runs with any Python 3)."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("__main__.py", "raise SystemExit(0)\n")
+    return _tar_bytes({"umu/umu-run": buffer.getvalue()})
+
+
 # ---------------------------------------------------------------------------
 # core/umu.py
 # ---------------------------------------------------------------------------
@@ -106,7 +115,9 @@ def test_managed_path_is_versioned_under_data_dir() -> None:
     )
 
 
-def test_managed_requires_an_executable_file_and_python3(monkeypatch, tmp_path) -> None:
+def test_managed_needs_an_executable_file_and_falls_back_without_python3(
+    monkeypatch, tmp_path
+) -> None:
     dest = umu.managed_path()
     dest.parent.mkdir(parents=True)
     dest.write_text("#!/usr/bin/python3\n")
@@ -124,7 +135,8 @@ def test_managed_requires_an_executable_file_and_python3(monkeypatch, tmp_path) 
     assert umu.managed() == dest
 
     monkeypatch.setattr(umu, "SHEBANG_PYTHON", str(tmp_path / "no-such-python3"))
-    assert umu.managed() is None
+    # No python3 for the shebang: `nadare --umu-run` still runs the zipapp (#1341 item 3).
+    assert umu.managed() == dest
 
 
 def test_ensure_extracts_only_umu_run_and_ignores_extras(monkeypatch) -> None:
@@ -199,12 +211,16 @@ def test_ensure_failing_smoke_test_removes_the_file(monkeypatch) -> None:
     assert not umu.managed_path().exists()
 
 
-def test_ensure_requires_python3_without_downloading(monkeypatch) -> None:
+def test_ensure_without_python3_still_installs_and_checks_the_zipapp(
+    monkeypatch, tmp_path
+) -> None:
+    """NixOS: no /usr/bin/python3; Nadare's own interpreter runs the check and the game."""
+    _fake_download(monkeypatch, _zipapp_payload())
     monkeypatch.setattr(umu.shutil, "which", lambda name, *a, **k: None)
-    monkeypatch.setattr(umu.download, "download", lambda *a, **k: pytest.fail("downloaded"))
+    monkeypatch.setattr(umu, "SHEBANG_PYTHON", str(tmp_path / "no-such-python3"))
 
-    with pytest.raises(umu.UmuError, match="python3"):
-        umu.ensure_managed()
+    dest = umu.ensure_managed()
+    assert dest == umu.managed_path() and dest.is_file()
 
 
 def test_second_ensure_is_a_no_op(monkeypatch) -> None:
@@ -217,20 +233,105 @@ def test_second_ensure_is_a_no_op(monkeypatch) -> None:
     assert umu.ensure_managed() == dest
 
 
-def test_resolve_prefers_system_then_managed_then_download(monkeypatch) -> None:
+def _system_umu(monkeypatch, path: str = "/usr/bin/umu-run") -> None:
     monkeypatch.setattr(
-        umu.shutil, "which", lambda name, *a, **k: "/usr/bin/umu-run" if name == "umu-run" else None
+        umu.shutil, "which", lambda name, *a, **k: path if name == "umu-run" else None
     )
-    monkeypatch.setattr(umu, "ensure_managed", lambda **k: pytest.fail("downloaded"))
-    assert umu.resolve(allow_download=True) == "/usr/bin/umu-run"
+    # A system copy that runs and is new enough.
+    monkeypatch.setattr(umu, "system", _real_system_with_version(path))
 
+
+def _real_system_with_version(path: str):
+    real = umu.system
+
+    def system(configured="umu-run", **kwargs):
+        class Ran:
+            returncode = 0
+            stdout = "umu-launcher version 1.4.9 (3.13)"
+            stderr = ""
+
+        kwargs.setdefault("run", lambda *a, **k: Ran())
+        return real(configured, **kwargs)
+
+    return system
+
+
+def _installed_managed(monkeypatch) -> Path:
     dest = umu.managed_path()
-    dest.parent.mkdir(parents=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text("#!/usr/bin/python3\n")
     dest.chmod(0o755)
     _only_python(monkeypatch)
+    return dest
+
+
+def test_resolve_prefers_nadares_own_copy_over_a_system_one(monkeypatch) -> None:
+    """One tested umu everywhere (user, 2026-11-16): a system umu-run is uncommon and untested."""
+    dest = _installed_managed(monkeypatch)
+    _system_umu(monkeypatch)
     monkeypatch.setattr(umu, "ensure_managed", lambda **k: pytest.fail("downloaded"))
+    assert umu.resolve(allow_download=True) == str(dest)
     assert umu.resolve(allow_download=False) == str(dest)
+
+
+def test_resolve_unpacks_the_bundled_archive_before_using_a_system_copy(monkeypatch, tmp_path):
+    bundle = tmp_path / "umu.tar"
+    bundle.write_bytes(b"x")
+    monkeypatch.setattr(umu, "_bundled_archive", lambda: bundle)
+    _system_umu(monkeypatch)
+    calls: list = []
+
+    def ensure(**kwargs):
+        calls.append(kwargs)
+        return Path("/data/nadare/umu/1.4.4/umu-run")
+
+    monkeypatch.setattr(umu, "ensure_managed", ensure)
+    assert umu.resolve(allow_download=True) == "/data/nadare/umu/1.4.4/umu-run"
+    assert len(calls) == 1
+
+
+def test_resolve_without_permission_does_not_unpack_the_bundle(monkeypatch, tmp_path):
+    bundle = tmp_path / "umu.tar"
+    bundle.write_bytes(b"x")
+    monkeypatch.setattr(umu, "_bundled_archive", lambda: bundle)
+    _system_umu(monkeypatch)
+    monkeypatch.setattr(umu, "ensure_managed", lambda **k: pytest.fail("unpacked"))
+    assert umu.resolve(allow_download=False) == "/usr/bin/umu-run"
+
+
+def test_a_bundle_that_cannot_be_set_up_falls_back_to_a_system_copy(monkeypatch, tmp_path):
+    bundle = tmp_path / "umu.tar"
+    bundle.write_bytes(b"x")
+    monkeypatch.setattr(umu, "_bundled_archive", lambda: bundle)
+    _system_umu(monkeypatch)
+
+    def boom(**_k):
+        raise umu.UmuError("data folder not writable")
+
+    monkeypatch.setattr(umu, "ensure_managed", boom)
+    assert umu.resolve(allow_download=True) == "/usr/bin/umu-run"
+
+
+def test_resolve_uses_a_system_copy_when_nadare_has_none_and_does_not_download(monkeypatch):
+    """A source or AUR install with umu-launcher installed: no second umu from the network."""
+    _system_umu(monkeypatch)
+    monkeypatch.setattr(umu, "ensure_managed", lambda **k: pytest.fail("downloaded"))
+    assert umu.resolve(allow_download=True) == "/usr/bin/umu-run"
+
+
+def test_a_umu_the_profile_names_wins_over_nadares_own(monkeypatch) -> None:
+    _installed_managed(monkeypatch)
+    monkeypatch.setattr(
+        umu.shutil, "which", lambda name, *a, **k: name if name == "/opt/my/umu-run" else None
+    )
+    monkeypatch.setattr(umu, "ensure_managed", lambda **k: pytest.fail("downloaded"))
+    assert umu.resolve("/opt/my/umu-run", allow_download=True) == "/opt/my/umu-run"
+
+
+def test_with_nothing_at_all_nadares_copy_is_downloaded(monkeypatch) -> None:
+    monkeypatch.setattr(umu.shutil, "which", lambda name, *a, **k: None)
+    monkeypatch.setattr(umu, "ensure_managed", lambda **k: Path("/d/umu-run"))
+    assert umu.resolve(allow_download=True) == "/d/umu-run"
 
 
 def test_resolve_does_not_download_when_not_allowed(monkeypatch) -> None:
@@ -254,7 +355,7 @@ def test_resolve_falls_back_cleanly_when_setup_fails(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 def _ak_backend(tmp_path, monkeypatch, missing):
     prefix = tmp_path / "prefix"
-    exe = write_exe(prefix / ak.DEFAULT_INSTALL_SUBDIR / "game launcher.exe", "MZ")
+    exe = write_exe(prefix / ak.DEFAULT_INSTALL_SUBDIR / "Arknights.exe", "MZ")
     proton = tmp_path / "Proton"
     proton.mkdir()
     (proton / "proton").write_text("")

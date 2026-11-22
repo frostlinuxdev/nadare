@@ -91,10 +91,10 @@ def test_storecatalog_does_not_import_qt() -> None:
 
 
 def test_store_lists_exactly_the_games_the_wizard_offers() -> None:
-    from nadare.gui.add_game import ADVANCED_GROUP, available_catalog
+    from nadare.gui.add_game import available_catalog
 
-    wizard = {game.kind for game in available_catalog() if game.group != ADVANCED_GROUP}
-    # Steam games are Store-only tiles: the wizard reaches them through its "Steam game" row.
+    wizard = {game.kind for game in available_catalog()}
+    # Steam games are Store-only tiles: the Store adds them with the Steam set-up checklist.
     assert {e.kind for e in entries() if not steamstore.app_id_of(e.kind)} == wizard
 
 
@@ -109,9 +109,9 @@ def test_older_games_get_their_tiers_and_delivery_labels() -> None:
     assert by_kind["stove-czn"].title == "Chaos Zero Nightmare"
     assert by_kind["stove-czn"].delivery_label == DIRECT_LABEL
     assert by_kind["arknights-yostar"].title == "Arknights"
-    assert by_kind["arknights-yostar"].delivery_label == "Publisher's installer"
+    assert by_kind["arknights-yostar"].delivery_label == DIRECT_LABEL
     assert by_kind["stellasora-yostar"].title == "Stella Sora"
-    assert by_kind["stellasora-yostar"].delivery_label == "Publisher's installer"
+    assert by_kind["stellasora-yostar"].delivery_label == DIRECT_LABEL
     if "fgo-lepton" in by_kind:
         assert by_kind["fgo-lepton"].title == "Fate/Grand Order"
         assert by_kind["fgo-lepton"].tier == TIER_EXPERIMENTAL

@@ -22,7 +22,7 @@ def qapp():
     yield app
 
 
-def dialog(tmp_path, qapp, *, kind="wine"):
+def dialog(tmp_path, qapp, *, kind="arknights-yostar"):
     instance = AddGameDialog(
         Config.load(tmp_path / "config.json"), data_root=tmp_path / "data", kind=kind
     )
@@ -39,14 +39,14 @@ def test_expanded_default_keeps_prefix_in_profile(tmp_path, qapp):
     d = dialog(tmp_path, qapp)
     try:
         d.location_toggle.click()
-        default_folder = tmp_path / "data" / "wine-proton-game" / "install"
-        default_prefix = tmp_path / "data" / "wine-proton-game" / "prefix"
+        default_folder = tmp_path / "data" / "arknights" / "install"
+        default_prefix = tmp_path / "data" / "arknights" / "prefix"
         assert not folder_row(d).isHidden()
         assert d.prefix_row.isHidden()
         assert d.prefix_summary.full_text() == f"Wine prefix: {default_prefix}"
         assert d.folder.text() == str(default_folder)
-        assert d.create_profile() == "wine-proton-game"
-        p = d.config.profile("wine-proton-game")
+        assert d.create_profile() == "arknights"
+        p = d.config.profile("arknights")
         assert p["install_dir"] == str(default_folder)
         assert p["prefix"] == str(default_prefix)
     finally:
@@ -84,14 +84,14 @@ def test_advanced_prefix_stops_following_and_persists(tmp_path, qapp):
         assert d.prefix_row.isHidden()
         d.set_install_dir(str(tmp_path / "other-game"))
         assert d.prefix.text() == custom
-        assert d.create_profile() == "wine-proton-game"
-        assert d.config.profile("wine-proton-game")["prefix"] == custom
+        assert d.create_profile() == "arknights"
+        assert d.config.profile("arknights")["prefix"] == custom
     finally:
         d.close()
 
 
 def test_game_change_closes_advanced_toggle_and_resets_default(tmp_path, qapp):
-    d = dialog(tmp_path, qapp)
+    d = dialog(tmp_path, qapp, kind="stellasora-yostar")
     try:
         d.location_toggle.click()
         d.prefix_toggle.click()
@@ -103,16 +103,7 @@ def test_game_change_closes_advanced_toggle_and_resets_default(tmp_path, qapp):
         d.close()
 
 
-def test_import_and_prefix_only_layouts_remain_unchanged(tmp_path, qapp):
-    d = dialog(tmp_path, qapp)
-    try:
-        d.set_mode(True)
-        assert not folder_row(d).isHidden() and not d.prefix_row.isHidden()
-        assert d.folder_label.text() == "Existing game folder"
-        assert d.prefix.text() == ""
-        assert not d.create_button.isEnabled()
-    finally:
-        d.close()
+def test_prefix_only_layout_remains_unchanged(tmp_path, qapp):
     czn = dialog(tmp_path, qapp, kind="stove-czn")
     try:
         czn.location_toggle.click()
@@ -165,7 +156,7 @@ def prefix_label(d):
 
 
 def test_default_expanded_view_has_no_orphan_wine_prefix_label(tmp_path, qapp):
-    d = dialog(tmp_path, qapp, kind="direct-bd2")
+    d = dialog(tmp_path, qapp, kind="arknights-yostar")
     try:
         d.location_toggle.click()
         qapp.processEvents()
@@ -180,14 +171,7 @@ def test_default_expanded_view_has_no_orphan_wine_prefix_label(tmp_path, qapp):
         d.close()
 
 
-def test_import_and_czn_still_show_their_prefix_row_with_its_label(tmp_path, qapp):
-    imported = dialog(tmp_path, qapp, kind="direct-bd2")
-    try:
-        imported.set_mode(True)
-        assert not prefix_label(imported).isHidden()
-        assert not imported.prefix_row.isHidden() and not imported.prefix_free.isHidden()
-    finally:
-        imported.close()
+def test_czn_shows_its_prefix_row_with_its_label(tmp_path, qapp):
     czn = dialog(tmp_path, qapp, kind="stove-czn")
     try:
         czn.location_toggle.click()
@@ -282,7 +266,7 @@ def test_the_untouched_default_location_is_not_nested(tmp_path, qapp):
         d.location_toggle.click()
         profile_name = d.create_profile()
         profile = d.config.profile(profile_name)
-        assert profile["install_dir"] == str(tmp_path / "data" / "wine-proton-game" / "install")
+        assert profile["install_dir"] == str(tmp_path / "data" / "arknights" / "install")
         assert "owned_dirs" not in profile
     finally:
         d.close()
@@ -305,23 +289,20 @@ def test_a_folder_with_other_things_in_it_gets_nadare_game_install_and_prefix(tm
         d.close()
 
 
-def test_a_second_profile_of_the_same_game_gets_the_next_free_folder(tmp_path, qapp):
+def test_a_taken_game_folder_gets_the_next_free_folder(tmp_path, qapp):
     library = tmp_path / "Games"
     (library / "other game").mkdir(parents=True)
     (library / "other game" / "x.exe").write_text("x")
-    first = dialog(tmp_path, qapp)
+    d = dialog(tmp_path, qapp)
     try:
-        name = add_game._folder_name(first._selected_game().title)
-        _create(first, library)
-    finally:
-        first.close()
-    second = dialog(tmp_path, qapp)
-    try:
-        second.set_profile_name("another")
-        profile = _create(second, library)
+        name = add_game._folder_name(d._selected_game().title)
+        taken = library / "Nadare" / name / "install"
+        taken.mkdir(parents=True)
+        (taken / "left-over.txt").write_text("x")
+        profile = _create(d, library)
         assert profile["install_dir"] == str(library / "Nadare" / f"{name} 2" / "install")
     finally:
-        second.close()
+        d.close()
 
 
 def test_the_chosen_paths_are_stored_not_recomputed(tmp_path, qapp):
@@ -348,22 +329,6 @@ def test_a_folder_that_already_holds_this_game_is_kept_but_not_owned(tmp_path, q
         profile = _create(d, folder)
         assert profile["install_dir"] == str(folder)
         assert "install_dir" not in profile.get("owned_trees", [])
-    finally:
-        d.close()
-
-
-def test_an_imported_game_is_never_recorded_as_created_by_nadare(tmp_path, qapp):
-    d = dialog(tmp_path, qapp, kind="arknights-yostar")
-    try:
-        game = d._selected_game()
-        root = tmp_path / "pfx" / "drive_c" / game.install_subdir.replace("\\", "/")
-        root.mkdir(parents=True)
-        (root / game.exes[0]).write_text("x")
-        d.set_mode(True)
-        d.set_install_dir(str(root))
-        name = d.create_profile()
-        assert name
-        assert not d.config.profile(name).get("owned_trees")
     finally:
         d.close()
 
@@ -414,7 +379,7 @@ def test_the_default_location_is_shown_as_is_and_keeps_the_prefix_text(tmp_path,
     d = dialog(tmp_path, qapp)
     try:
         d.location_toggle.click()
-        default = tmp_path / "data" / "wine-proton-game"
+        default = tmp_path / "data" / "arknights"
         assert d.install_summary.full_text() == f"Installs to: {default / 'install'}"
         assert d.prefix_summary.full_text() == f"Wine prefix: {default / 'prefix'}"
     finally:
@@ -453,14 +418,7 @@ def test_the_final_path_follows_the_selected_game(tmp_path, qapp):
         d.close()
 
 
-def test_no_final_path_is_shown_for_an_import_or_a_prefix_only_game(tmp_path, qapp):
-    d = dialog(tmp_path, qapp)
-    try:
-        d.import_existing.setChecked(True)
-        qapp.processEvents()
-        assert d.install_summary.isHidden()
-    finally:
-        d.close()
+def test_no_final_path_is_shown_for_a_prefix_only_game(tmp_path, qapp):
     czn = dialog(tmp_path, qapp, kind="czn")
     try:
         czn.location_toggle.click()
@@ -493,29 +451,5 @@ def test_a_catalog_game_in_the_default_place_gets_a_manifest(tmp_path, qapp):
         name = d.create_profile()
         assert name
         assert libraries.read_manifest(tmp_path / "data" / name) is not None
-    finally:
-        d.close()
-
-
-def test_a_generic_or_imported_game_gets_no_manifest(tmp_path, qapp):
-    from nadare.core import libraries
-
-    d = dialog(tmp_path, qapp)
-    try:
-        folder = tmp_path / "Games"
-        _create(d, folder)
-        assert not list(folder.rglob(libraries.MANIFEST_NAME))
-    finally:
-        d.close()
-    d = dialog(tmp_path / "second", qapp, kind="arknights-yostar")
-    try:
-        game = d._selected_game()
-        root = tmp_path / "pfx" / "drive_c" / game.install_subdir.replace("\\", "/")
-        root.mkdir(parents=True)
-        (root / game.exes[0]).write_text("x")
-        d.set_mode(True)
-        d.set_install_dir(str(root))
-        assert d.create_profile()
-        assert not list((tmp_path / "pfx").rglob(libraries.MANIFEST_NAME))
     finally:
         d.close()

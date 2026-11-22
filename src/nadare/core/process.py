@@ -22,13 +22,14 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import paths
+from . import launchenv, location, paths
+from .config import profile_value
 from .events import Cancel, Emitter, Event, emitter, mask
 
 #: How long ``run`` waits after a cancel before escalating to SIGKILL.
@@ -127,10 +128,12 @@ def drop_secret_env(env: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in env.items() if not _is_secret_name(key)}
 
 
-def sanitize_game_env(env: Mapping[str, str]) -> dict[str, str]:
+def sanitize_game_env(
+    env: Mapping[str, str], *, preserve: Iterable[str] = ()
+) -> dict[str, str]:
     """A copy of ``env`` that is safe to hand to Proton/Wine/umu.
 
-    Always drops credential-looking variables (``*_TOKEN``, ``*_SECRET``, ``*_API_KEY``,
+    Drops credential-looking variables (``*_TOKEN``, ``*_SECRET``, ``*_API_KEY``,
     ``*_PASSWORD`` and the like, and ``AWS_``/``SSH_``/``GPG_``/``CZN_`` names; a bare ``*KEY``
     stays, it names harmless graphics and input variables) and relative ``PATH`` entries (``.``
     lets a cwd binary shadow a bare Proton/umu helper). When there is a system
@@ -139,6 +142,7 @@ def sanitize_game_env(env: Mapping[str, str]) -> dict[str, str]:
     ``pyenv`` shim ahead of ``/usr/bin`` makes ``proton``'s ``env python3`` exit
     127). That last cleanup is skipped when there is no system ``python3`` to fall
     back to, so a machine whose only Python is a shim keeps working.
+    Names in ``preserve`` restore deliberate user/backend settings afterwards.
     """
     out = {key: value for key, value in env.items() if not _is_secret_name(key)}
     venv = out.get("VIRTUAL_ENV", "").rstrip("/")
@@ -165,6 +169,8 @@ def sanitize_game_env(env: Mapping[str, str]) -> dict[str, str]:
                 kept.append(system)
     if "PATH" in out:
         out["PATH"] = ":".join(kept)
+    # Explicit user/backend values have already passed the reserved-name checks.
+    out.update({key: env[key] for key in preserve if key in env})
     return out
 
 
@@ -234,8 +240,8 @@ def build_env(
 ) -> dict[str, str]:
     """Return a child environment.
 
-    The caller's environment is inherited, minus launcher secrets (see
-    :func:`child_environ`), so ``DISPLAY``, ``WAYLAND_DISPLAY``, ``XAUTHORITY``,
+    Only the host variables allowed by :mod:`launchenv` or profile ``pass_env``
+    are inherited, so ``DISPLAY``, ``WAYLAND_DISPLAY``, ``XAUTHORITY``,
     ``DBUS_SESSION_BUS_ADDRESS`` and friends survive; Nadare's XDG roots are then
     pinned so children never write to a hard-coded ``~/.local``. Profile
     ``prefix``/``runner`` become ``WINEPREFIX``/``PROTONPATH`` when set. ``extra``
@@ -245,7 +251,14 @@ def build_env(
     runner pins ``PROTONPATH``. A conflicting ``extra`` value for those is ignored
     with a warning.
     """
-    env: dict[str, str] = child_environ(base)
+    env = launchenv.inherit(os.environ if base is None else base, profile)
+    # Prefix allow-list entries must not implicitly opt host credentials in.
+    passed = launchenv.pass_names(profile)
+    dropped = tuple(sorted(key for key in env if key not in passed and _is_secret_name(key)))
+    for key in dropped:
+        del env[key]
+    if dropped:
+        log.debug("Launch environment dropped credential names: %s", ", ".join(dropped))
 
     env["XDG_DATA_HOME"] = _xdg_home(paths.data_dir())
     env["XDG_CONFIG_HOME"] = _xdg_home(paths.config_dir())
@@ -261,7 +274,7 @@ def build_env(
 
     reserved: set[str] = set()
     if profile:
-        prefix = str(profile.get("prefix") or "").strip()
+        prefix = (location._setting(profile, "prefix") or "").strip()
         if prefix:
             env["WINEPREFIX"] = str(Path(prefix).expanduser())
             reserved.update(("WINEPREFIX", "STEAM_COMPAT_DATA_PATH"))
@@ -271,6 +284,8 @@ def build_env(
             reserved.add("PROTONPATH")
         env.setdefault("WINEDEBUG", env.get("WINEDEBUG", "-all"))
 
+    configured = profile_value(profile or {}, "extra_env")
+    apply_extra_env(env, configured if isinstance(configured, dict) else None, reserved=reserved)
     apply_extra_env(env, extra, reserved=reserved)
     return env
 
@@ -401,13 +416,17 @@ class ProcessScanRound:
 
 
 def prefix_pids(
-    prefix: str | os.PathLike[str], proc_root: str | os.PathLike[str] = "/proc"
+    prefix: str | os.PathLike[str],
+    proc_root: str | os.PathLike[str] = "/proc",
+    *,
+    scan: ProcessScanRound | None = None,
 ) -> list[int]:
     """PIDs of this user's processes whose ``WINEPREFIX`` / ``STEAM_COMPAT_DATA_PATH`` is
-    ``prefix`` (or the ``pfx`` folder Proton keeps in it): whatever Wine runs in that prefix."""
+    ``prefix`` (or the ``pfx`` folder Proton keeps in it): whatever Wine runs in that prefix.
+    ``scan`` reuses one snapshot when many prefixes are asked at once."""
     want = {os.path.realpath(os.fspath(prefix)), os.path.realpath(os.path.join(prefix, "pfx"))}
     hits: list[int] = []
-    for record in ProcessScanRound(proc_root).records():
+    for record in (scan or ProcessScanRound(proc_root)).records():
         for key in ("WINEPREFIX", "STEAM_COMPAT_DATA_PATH"):
             value = record.environ.get(key)
             if value and os.path.realpath(value) in want:
@@ -596,6 +615,7 @@ def run(
     check: bool = False,
     stream: bool = True,
     forward_stderr: bool = True,
+    before_stop: Callable[[], object] | None = None,
     **popen_kwargs: Any,
 ) -> subprocess.CompletedProcess[str]:
     """Run a child to completion, forwarding output and honouring cancellation.
@@ -603,7 +623,9 @@ def run(
     ``emit`` receives one ``log`` event per output line (unless ``stream`` is
     False), a ``status`` event for the spawn, and an ``error`` event on failure.
     ``capture`` collects the same lines on ``CompletedProcess.stdout``. On
-    cancel the child's process group is told to stop and ``Cancelled`` is raised.
+    cancel ``before_stop`` runs first (a game is asked to close and given a
+    grace to save), then the child's process group is told to stop and
+    ``Cancelled`` is raised.
     """
     say = emitter(emit)
     say(Event("status", mask(f"$ {' '.join(str(a) for a in args)}"), data={"stage": "spawn"}))
@@ -654,22 +676,59 @@ def run(
         except subprocess.TimeoutExpired:
             log.warning("child %s not reaped %ss after SIGKILL", proc.pid, REAP_SECONDS)
 
+    def _consume(item: str | None) -> None:
+        if item is None:
+            return
+        if capture:
+            lines.append(item)
+        if stream:
+            say(Event("log", item))
+
+    def _run_before_stop() -> None:
+        try:
+            before_stop()
+        except Exception:  # noqa: BLE001 - a failed polite step escalates
+            log.warning("the polite stop step failed", exc_info=True)
+
     try:
         cancelled = False
+        polite_done = before_stop is None
+        polite: threading.Thread | None = None
         while proc.poll() is None:
             if cancel is not None and cancel.cancelled:
                 cancelled = True
-                _signal_group(proc)
+                if not polite_done:
+                    polite_done = True
+                    # In a thread so this loop keeps reading the child's output: a game
+                    # writing its shutdown log would otherwise block on the bounded queue
+                    # (or the pipe) and never reach the save the polite step waits for.
+                    polite = threading.Thread(
+                        target=_run_before_stop, name="nadare-run-polite", daemon=True
+                    )
+                    polite.start()
+                if polite is not None and polite.is_alive():
+                    try:
+                        _consume(line_q.get(timeout=0.1))
+                    except queue.Empty:
+                        pass
+                    continue
+                # The polite step is over: only signal what is still running.
+                if proc.poll() is None:
+                    _signal_group(proc)
                 break
             try:
                 item = line_q.get(timeout=0.1)
             except queue.Empty:
                 continue
-            if item is not None:
-                if capture:
-                    lines.append(item)
-                if stream:
-                    say(Event("log", item))
+            _consume(item)
+        while polite is not None and polite.is_alive():
+            # The child may have exited while the polite step waited for it: keep reading
+            # (its own grace bounds it) so a descendant still writing is not blocked, and
+            # the output is delivered before we return.
+            try:
+                _consume(line_q.get(timeout=0.1))
+            except queue.Empty:
+                pass
 
         try:
             proc.wait(timeout=GRACE_SECONDS)
@@ -677,10 +736,15 @@ def run(
             _signal_group(proc, force=True, pgid=pgid)
             _wait_reaped()
         if cancelled:
-            # The direct child may have exited on SIGTERM while a grandchild ignored
-            # it and keeps the stdout pipe open. Escalate after the wait so the
-            # group is gone and the reader thread can end with this operation.
-            _signal_group(proc, force=True, pgid=pgid)
+            # The direct child may have exited on the polite step or on SIGTERM while a
+            # grandchild ignored it and keeps the stdout pipe open. Give whatever is left
+            # in the saved group the same bounded TERM-then-KILL as below, instead of
+            # killing it out of hand: a descendant finishing its own shutdown must get the
+            # chance (#1421 review).
+            if pgid is not None:
+                _stop_orphaned_group(pgid)
+            elif proc.poll() is None:
+                _signal_group(proc, force=True, pgid=pgid)
         # Drain while the reader winds down: with a bounded queue it may be blocked
         # on a put until we take items out.
         deadline = time.monotonic() + (5.0 if cancelled else 1.0)

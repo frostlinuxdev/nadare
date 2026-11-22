@@ -9,6 +9,7 @@ expansion), #41 (hidden .old-* runner selection), #59 (_prune_stale guard).
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -185,5 +186,7 @@ def test_prune_stale_keeps_a_live_old_backup(tmp_path):
 def test_prune_stale_removes_an_unowned_old_backup(tmp_path):
     stale = tmp_path / ".GE-Proton11-7.old-deadbeef"
     stale.mkdir()
+    long_ago = time.time() - 7 * 3600  # unknown owner: only an old backup goes (#1494)
+    os.utime(stale, (long_ago, long_ago))
     core_runners._prune_stale(tmp_path)
     assert not stale.exists()

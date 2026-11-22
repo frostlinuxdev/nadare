@@ -26,7 +26,7 @@ game. It shows a checklist and does the first step that is still to do, least in
    "ready".
 
 5. **Native Wayland** (only on a Wayland session). Valve's own Proton ships only Wine's X11
-   driver, so its games run through XWayland, which flickers in some windows. DW-Proton also
+   driver, so its games run through XWayland. DW-Proton also
    ships `winewayland.so` and switches to it when the game's Steam launch option has
    `PROTON_ENABLE_WAYLAND=1`. The step adds `PROTON_ENABLE_WAYLAND=1` to that game's launch
    options in the signed-in account's `localconfig.vdf` (what the player already wrote stays),
@@ -55,10 +55,15 @@ Proton Experimental, no launch options, an ordinary account that owns the games.
 
 ### WebView2 installer pin
 
-The pinned checksum in `backends/czn/backend.py` (`2a6add76…`) is stale: Microsoft replaced the
-installer behind `https://go.microsoft.com/fwlink/?linkid=2124701`. The current file
-(215,017,168 bytes, sha256 `62863f0f…951249b`) is the first entry of the Nadare index list
-`webview2/latest.json`, which is what the fixer must verify against. Never skip verification.
+The pin ships as `PINNED_SHA256` in `src/nadare/core/webview2.py` and is refreshed with Nadare
+releases. Microsoft re-issues the installer behind `https://go.microsoft.com/fwlink/?linkid=2124701`
+with each Edge release, so a single built-in pin would reject a valid download as soon as that
+happens: when the digest differs, verification also accepts a hash published in the Nadare index
+(`webview2/latest.json`, refreshed by `scripts/publish_index.py`), and the index's `url` is used as
+the download source so the bytes and the published hash stay consistent. A user override
+(`NADARE_WEBVIEW2_SHA256`, or a profile's `webview2_sha256`) still wins over both. To check a file
+by hand, compare `sha256sum MicrosoftEdgeWebView2RuntimeInstallerX64.exe` with the first entry of
+the index. Never skip verification.
 
 ## Doing it by hand (no Nadare)
 

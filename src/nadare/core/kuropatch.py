@@ -27,9 +27,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 from . import directdl, diskspace, krdiff
+from .directdl import require_https
 from .events import Cancel, Cancelled, Event, emitter
 
 log = logging.getLogger(__name__)
@@ -92,10 +93,6 @@ def installed_versions(record: str, packs: list[str]) -> dict[str, str]:
     return versions
 
 
-def _https(url: str) -> str:
-    if urlparse(url).scheme != "https":
-        raise directdl.DirectError(f"refusing a non-https URL: {url!r}")
-    return url
 
 
 def _ref(item: Any) -> FileRef:
@@ -125,7 +122,7 @@ def prepare(
     info = plan.extra.get(EXTRA_KEY) if isinstance(plan.extra, Mapping) else None
     if not isinstance(info, Mapping):
         return PatchPlan()
-    root = _https(str(info.get("root") or ""))
+    root = require_https(str(info.get("root") or ""))
     packs = info.get("packs")
     if not isinstance(packs, Mapping):
         return PatchPlan()
@@ -155,7 +152,8 @@ def prepare(
             base_url = str(entry["baseUrl"]).rstrip("/") + "/"
         except KeyError as exc:
             raise directdl.DirectError(f"patch entry is missing {exc.args[0]!r}") from exc
-        listing = _json(fetch(_https(root + quote(index_file, safe="/")), None), "patch list")
+        list_url = require_https(root + quote(index_file, safe="/"))
+        listing = _json(fetch(list_url, None), "patch list")
         resources: dict[str, FileRef] = {}
         for item in listing.get("resource") or ():
             ref = _ref(item)
@@ -172,7 +170,7 @@ def prepare(
             groups.append(
                 Group(
                     directdl.RemoteFile(
-                        path=dest, url=_https(root + quote(base_url + dest, safe="/")),
+                        path=dest, url=require_https(root + quote(base_url + dest, safe="/")),
                         size=patch.size, md5=patch.md5,
                     ),
                     tuple(_ref(i) for i in info_group.get("srcFiles") or ()),
@@ -416,7 +414,7 @@ def retired_scan(
     candidates = _leftovers(plan, root)
     if not candidates:
         return RetiredScan((), ())
-    base = _https(str(info.get("root") or ""))
+    base = require_https(str(info.get("root") or ""))
     entries = [
         entry for configs in info["packs"].values() for entry in configs or ()
         if isinstance(entry, Mapping) and entry.get("indexFile")
@@ -427,8 +425,8 @@ def retired_scan(
     unreadable: list[str] = []
     for entry in entries[:MAX_CLEANUP_LISTS]:
         try:
-            listing = _json(fetch(_https(base + quote(str(entry["indexFile"]), safe="/")), None),
-                            "patch list")
+            list_url = require_https(base + quote(str(entry["indexFile"]), safe="/"))
+            listing = _json(fetch(list_url, None), "patch list")
         except directdl.DirectError as exc:
             log.info("cleanup: patch list %s unreadable: %s", entry.get("version"), exc)
             version = str(entry.get("version") or "")

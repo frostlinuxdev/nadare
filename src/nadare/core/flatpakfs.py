@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 from . import sandbox
+from .paths import inside as _inside
 
 FLATPAK_INFO = Path("/.flatpak-info")
 APP_ID = "io.github.frostlinuxdev.Nadare"
@@ -70,10 +71,6 @@ def _granted_roots(grants: list[str], home: Path) -> tuple[bool, list[Path]]:
     return False, roots
 
 
-def _inside(path: Path, root: Path) -> bool:
-    return path == root or root in path.parents
-
-
 def unreachable_reason(folder: str | os.PathLike[str]) -> str | None:
     """Why the Flatpak cannot keep a game in ``folder``; ``None`` when it can (or no Flatpak)."""
     if not sandbox.in_flatpak():
@@ -89,7 +86,13 @@ def unreachable_reason(folder: str | os.PathLike[str]) -> str | None:
         if _inside(path, home / ".var" / "app" / app_id):
             return None  # Nadare's own data folder is always there
         everything, roots = _granted_roots(grants, home)
-        if everything or any(_inside(path, root) for root in roots):
+        real = Path(os.path.realpath(path))
+        # A link inside a granted folder can point anywhere: both the name and where it leads
+        # must be reachable (storage review C4).
+        if everything or (
+            any(_inside(path, root) for root in roots)
+            and any(_inside(real, root) for root in roots)
+        ):
             return None
     shown = path if not portal else "that folder"
     return (

@@ -2,7 +2,8 @@
 // Copyright (C) 2026 Nadare contributors
 //
 // Portable (non-Windows-API) protocol logic of the CZN PCSDK handshake stub.
-// Behaviour mirrors src/nadare/backends/czn/stub_src/czn_pcsdk_stub.c:
+// Behaviour mirrors the retired C stub (src/nadare/backends/czn/stub_src/czn_pcsdk_stub.c,
+// in the git history before #1552):
 //
 //	game -> 1000  {"value":{"publicKey":<b64 SPKI>,...}}
 //	srv  -> 2000  value = b64(RSA-PKCS1(publicKey, {"aesKey":"<32 ASCII>"})), 72-col \n-wrapped

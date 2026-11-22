@@ -6,6 +6,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from nadare.core import logview, runlog
 
 
@@ -70,3 +72,18 @@ def test_run_name_parsing():
     assert runlog.operation_of(Path("update-20261105-120102-3.log")) == "update"
     assert runlog.operation_of(Path("background.log")) == "background"
     assert runlog.operation_of(Path("notes.txt")) is None
+
+
+# #1299 claimed that old log folders named after a profile with spaces or Unicode (``logs/<name>``,
+# from before the hashed ids) are not listed. They are: pin it.
+@pytest.mark.parametrize("name", ["Blue Archive", "ブルーアーカイブ", "Ünïcode game"])
+def test_a_legacy_folder_named_after_the_profile_is_listed(tmp_path, name):
+    from nadare.core import logview
+
+    (tmp_path / name).mkdir()
+    (tmp_path / name / "launch-20261101-101010.log").write_text("x")
+    everything = logview.list_logs([name, "other"], tmp_path)
+    assert [(log.profile, log.operation) for log in everything] == [(name, "launch")]
+    only = logview.list_logs([name, "other"], tmp_path, profile=name)
+    assert [log.profile for log in only] == [name]
+    assert logview.list_logs([name, "other"], tmp_path, profile="other") == []

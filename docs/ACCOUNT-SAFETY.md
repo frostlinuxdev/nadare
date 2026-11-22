@@ -110,6 +110,44 @@ update should retest an environment-only handoff.
 - Both run through `BackendController` (`OPERATIONS` includes `set_remember` and
   `logout`); the GUI never calls a backend from the main thread.
 
+## Safety check (read-only)
+
+The game page has a **Safety check** button, and the System check window shows the latest
+stored result. It looks for signs of known attacks in that game's own Wine prefix and install
+folder: a named file, a literal piece of text in a named file, or a file of a given size.
+The list's file patterns are globs, and `*` also matches across folders.
+
+- The signs are **data**, not code. They come from a signed list (`iocs.json`) delivered
+  through Nadare's index and checked with the release key. There is no built-in list.
+  Without a verified list the check says **"No indicator list yet"** and looks at nothing.
+- It is **read-only**: it never changes, deletes, downloads or uploads anything, and it
+  reads only the game's own prefix and install folder. Links that point outside those
+  folders are not followed, a file is read up to a size cap, and the run can be stopped.
+- The answer is **Clean**, **Exposed** (something bad looks like it ran, but no sign of the
+  agent itself) or **Compromised** (signs that the game's files were used to run malicious
+  code). The result names only the list entries that matched and how many files matched
+  them: never file content, tokens or login tickets.
+- **Incomplete** means some files were skipped because the check reached a limit or could
+  not read them. Run it again. Any signs already found are still shown. The list can also
+  intentionally limit how much of a named file is checked.
+- An incomplete check keeps a previous compromise warning, including after reopening the game.
+- A **Compromised** result shows a banner on the game page until you dismiss it. The result
+  is remembered per game with the date it ran.
+
+What it does **not** prove:
+
+- **Clean is weaker than it sounds.** It only means nothing matched the current signed list.
+  Old logs, caches and agent files can be wiped by reinstalling the game, deleting a cache,
+  or by the attacker. Missing evidence is not proof of safety.
+- It cannot see inside the game while it runs, and it does not scan your home folder, other
+  games, the network or the Wine prefix of a game it does not know about.
+- A new attack that is not in the list yet, or a sign in a file the list does not name, is
+  not found.
+
+If the result is **Exposed** or **Compromised**, follow the steps on the incident page linked
+from the result; changing the game account's password and clearing its sessions is the first
+step when the game's launcher was involved.
+
 ## 4. Tests to write first
 
 - `secrets`: tokens refuse plaintext fallback; keyring-absent → in-memory only +

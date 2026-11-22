@@ -37,20 +37,15 @@ log = logging.getLogger("nadare.backends.czn.backend")
 
 STUB_NAME = "czn_pcsdk_stub.exe"
 
-#: Both stubs ship prebuilt so users need no mingw-w64; each is used only when it
-#: matches its digest. The default is the Go build (``scripts/build_stub_go.sh``,
-#: reproducible in a pinned container); the C build (``scripts/build_stub.sh
-#: --container``) ships for one release as a fallback. A profile picks the C stub
-#: with ``pcsdk_stub = "c"``, or the environment with ``NADARE_CZN_STUB=c``.
+#: The stub ships prebuilt (the Go build, ``scripts/build_stub_go.sh``, reproducible in a
+#: pinned container) and is used only when it matches its digest.
 STUB_PREBUILT = Path(_MODULE_FILE).resolve().parents[2] / "assets" / STUB_NAME
 
 STUB_PREBUILT_SHA256 = "0a8cc27d2b6a7eb5097d65ca04214de997693da34483e11bc5d76211caddbdf7"
 
-STUB_C_NAME = "czn_pcsdk_stub_c.exe"
-
-STUB_C_PREBUILT = Path(_MODULE_FILE).resolve().parents[2] / "assets" / STUB_C_NAME
-
-STUB_C_PREBUILT_SHA256 = "fe4a5bad970750e974cf999e31e3b87132fbb25f9c04c9eea69e3acc2e243185"
+#: The C fallback stub shipped through 0.1.0b25 and is retired (#1552). Its digest stays only
+#: so the log can name an old profile copy when it is swapped for the Go stub.
+RETIRED_C_STUB_SHA256 = "fe4a5bad970750e974cf999e31e3b87132fbb25f9c04c9eea69e3acc2e243185"
 
 WEBVIEW2_URL = webview2.DEFAULT_URL
 
@@ -76,19 +71,19 @@ def stub_identity(path: Path) -> tuple[str | None, bool]:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return None, False
-    return digest[:12], digest in (STUB_PREBUILT_SHA256, STUB_C_PREBUILT_SHA256)
+    return digest[:12], digest == STUB_PREBUILT_SHA256
 
 
 def _stub_label(path: Path) -> str:
-    """``(Go)``, ``(C)`` or ``(not shipped)``: which build ``path`` is, for the launch log."""
+    """``(Go)``, ``(retired C)`` or ``(not shipped)``: which build ``path`` is, for the log."""
     try:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
         return "(unreadable)"
     if digest == STUB_PREBUILT_SHA256:
         return "(Go)"
-    if digest == STUB_C_PREBUILT_SHA256:
-        return "(C)"
+    if digest == RETIRED_C_STUB_SHA256:
+        return "(retired C)"
     return "(not shipped)"
 
 
@@ -99,14 +94,45 @@ class PrereqsMixin:
         return self.ctx.profile_dir("stub") / STUB_NAME
 
     def _shipped_stub(self) -> tuple[Path, str, str]:
-        """``(asset, digest, label)`` of the shipped stub this profile should run."""
-        raw = os.environ.get("NADARE_CZN_STUB") or _profile_setting(self.ctx.profile, "pcsdk_stub")
-        choice = str(raw or "").strip().lower()
-        if choice == "c":
-            return STUB_C_PREBUILT, STUB_C_PREBUILT_SHA256, "C"
+        """``(asset, digest, label)`` of the shipped stub: always the Go build (#1552)."""
         return STUB_PREBUILT, STUB_PREBUILT_SHA256, "Go"
 
-    def _stub_log(self) -> Path:
+    def _retired_c_choice(self) -> str:
+        """Where the profile or environment still asks for the retired C stub ("" if not)."""
+        env = os.environ.get("NADARE_CZN_STUB")
+        if str(env or "").strip().lower() == "c":
+            return "NADARE_CZN_STUB=c"
+        if str(_profile_setting(self.ctx.profile, "pcsdk_stub") or "").strip().lower() == "c":
+            return 'pcsdk_stub = "c" in this profile'
+        return ""
+
+    def _retired_c_notice_marker(self) -> Path:
+        """Marker next to the stub: this profile has already been told the choice is ignored."""
+        stub = self._stub()
+        return stub.with_name(stub.name + ".retired-c")
+
+    def _note_retired_c_choice(self, where: str) -> None:
+        """Say once per profile that the retired C choice is ignored; the Go stub is in place."""
+        if not where:
+            return
+        marker = self._retired_c_notice_marker()
+        if marker.exists():
+            return
+        self.info(f"PCSDK stub: {where} is ignored; the C stub was retired, the Go stub runs")
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("reported: the retired C stub choice is ignored\n", encoding="utf-8")
+        except OSError:
+            pass  # repeat the line on the next operation rather than fail the run
+
+    def _stub_log(self, *, sandboxed: bool = False) -> Path:
+        """Where the stub writes its log.
+
+        A Sandboxed launch hides Nadare's logs folder with the rest of the home, so the file
+        goes in the writable prefix instead; the launch monitor reads it there on the host.
+        """
+        if sandboxed:
+            return self.prefix() / f"{self.ctx.name}-czn-stub.log"
         d = paths.logs_dir()
         d.mkdir(parents=True, exist_ok=True)
         return d / f"{self.ctx.name}-czn-stub.log"
@@ -345,24 +371,27 @@ class PrereqsMixin:
 
     def _ensure_stub(self) -> Path:
         stub = self._stub()
+        where = self._retired_c_choice()
         source, digest, _ = self._shipped_stub()
         if stub.is_file():
-            return self._refresh_stub(stub)
-        if self._install_prebuilt_stub(stub, source, digest):
+            # A profile that still asks for the retired C stub needs the Go copy to replace it;
+            # failing that swap must be an error, not an old build kept behind a happy log line.
+            stub = self._refresh_stub(stub, requires_go=bool(where))
+        elif self._install_prebuilt_stub(stub, source, digest):
             self._note_stub(stub)
-            return stub
-        script = Path(_MODULE_FILE).with_name("build_stub.sh")
-        if not script.is_file():
-            raise BackendError("PCSDK stub is missing and build_stub.sh was not found", 1)
-        stub.parent.mkdir(parents=True, exist_ok=True)
-        env = self._env()
-        env["CZN_STUB_OUT"] = str(stub)
-        self.ctx.emit(Event("step", "Building the PCSDK stub (mingw-w64)…"))
-        code = self._stream(["bash", str(script)], env)
-        if code != 0 or not stub.is_file():
-            raise BackendError("PCSDK stub build failed (install mingw-w64)", 1)
-        self._note_stub(stub)
+        else:
+            # Nothing to build from any more (the C source is retired, #1552): the shipped copy
+            # is missing or damaged, which only a reinstall fixes.
+            self.info(f"PCSDK stub: the Go stub could not be installed; {source.name} is missing")
+            raise self._missing_stub_error(source)
+        self._note_retired_c_choice(where)
         return stub
+
+    @staticmethod
+    def _missing_stub_error(source: Path) -> BackendError:
+        return BackendError(
+            f"the shipped PCSDK stub ({source.name}) is missing or damaged: reinstall Nadare", 1
+        )
 
     def _note_stub(self, stub: Path) -> None:
         """Log which stub this profile runs; the log header names the build, this names the stub."""
@@ -371,16 +400,21 @@ class PrereqsMixin:
             kind = "the shipped one" if shipped else "not the shipped one"
             self.info(f"PCSDK stub {_stub_label(stub)}: sha256 {sha}… ({kind})")
 
-    def _refresh_stub(self, stub: Path) -> Path:
+    def _refresh_stub(self, stub: Path, *, requires_go: bool = False) -> Path:
         """Keep a profile's stub in step with the selected shipped one, never losing the old copy.
 
         A copy made by an older Nadare (or swapped in by hand) would otherwise run forever;
         that includes the other shipped build when the profile switched between them.
+
+        ``requires_go`` is set when the profile still asks for the retired C stub: the Go stub
+        must really replace it, so a failed swap raises instead of silently keeping the old one.
         """
         source, digest, _ = self._shipped_stub()
         try:
             current = hashlib.sha256(stub.read_bytes()).hexdigest()
         except OSError:
+            if requires_go:
+                self._refuse_retired_stub(source)
             return stub  # unreadable: let the launch report whatever is wrong with it
         sha = current[:12]
         if current == digest:
@@ -390,23 +424,35 @@ class PrereqsMixin:
         try:
             os.replace(stub, backup)
         except OSError:
+            if requires_go:
+                self._refuse_retired_stub(source)
             self._note_stub(stub)
             return stub
         if self._install_prebuilt_stub(stub, source, digest):
             self.info(
-                f"PCSDK stub {_stub_label(stub)}: sha256 {sha}… differed from the shipped one; "
-                f"replaced it (the old copy is kept as {backup.name})"
+                f"PCSDK stub {_stub_label(backup)}: sha256 {sha}… differed from the shipped one; "
+                f"replaced it with {_stub_label(stub)} (the old copy is kept as {backup.name})"
             )
             return stub
         try:
             os.replace(backup, stub)
         except OSError as exc:
             raise BackendError(f"could not restore the PCSDK stub: {exc}", 1) from exc
+        if requires_go:
+            self._refuse_retired_stub(source)
         self.info(
             f"PCSDK stub: sha256 {sha}… differs from the shipped one; kept "
             "(no verified copy to replace it)"
         )
         return stub
+
+    def _refuse_retired_stub(self, source: Path) -> None:
+        """The retired C choice stands but the Go stub could not be put in its place."""
+        self.info(
+            "PCSDK stub: the Go stub could not be installed; "
+            f"{source.name} is missing or damaged"
+        )
+        raise self._missing_stub_error(source)
 
     @staticmethod
     def _install_prebuilt_stub(

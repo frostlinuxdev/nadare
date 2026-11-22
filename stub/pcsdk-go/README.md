@@ -47,9 +47,8 @@ server.
 
 ## The C stub
 
-The C build stays available for one release as a fallback, in case a game
-update breaks the Go one. It is committed as
-`src/nadare/assets/czn_pcsdk_stub_c.exe`; select it per profile with
-`pcsdk_stub = "c"`, or for a run with `NADARE_CZN_STUB=c`. Its source is
-`src/nadare/backends/czn/stub_src/czn_pcsdk_stub.c`, built by
-`scripts/build_stub.sh`.
+The C build shipped as a fallback through 0.1.0b25 and is retired (#1552); its
+source is in the git history (`src/nadare/backends/czn/stub_src/czn_pcsdk_stub.c`).
+A profile with `pcsdk_stub = "c"`, or a run with `NADARE_CZN_STUB=c`, now gets
+the Go stub and one log line saying the setting is ignored. A profile's old C
+copy is swapped for the Go one and kept as `czn_pcsdk_stub.exe.old`.

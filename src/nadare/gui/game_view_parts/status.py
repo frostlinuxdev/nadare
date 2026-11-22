@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 
-from ...core import steamsetup
+from ...core import gamefacts, steamsetup
 from ...core.backends import (
     Status,
     supports_update,
@@ -43,6 +43,13 @@ def _version_text(version: object) -> str:
     return text if text[0] in "vV" and text[1:2].isdigit() else f"v{text}"
 
 
+#: Shown while another process holds this game's operation lock (r3b05/r3b07 F2).
+BUSY_ELSEWHERE = (
+    "Another Nadare window or command is installing, updating or removing this game. "
+    "This page catches up when it is done."
+)
+
+
 class StatusMixin:
     """Mixin for :class:`GameView`; see the module text."""
 
@@ -50,7 +57,8 @@ class StatusMixin:
     def set_status(self, status: Status) -> None:
         self._awaiting_status = False
         self._apply_status(status)
-        data = status.data or {}
+        facts = gamefacts.CommonStatus.from_status(status)
+        data = facts.extensions
         self._predownload_version = str(data.get("predownload_version") or "")
         self._predownload_ready = bool(data.get("predownload_ready"))
         self._refresh_predownload_button()
@@ -60,8 +68,9 @@ class StatusMixin:
 
     def _apply_status(self, status: Status) -> None:
         self._status = status
+        facts = gamefacts.CommonStatus.from_status(status)
         shown = display_state(status)
-        playing = status.running or status.state == "running"
+        playing = gamefacts.is_running(status)
         if playing:
             self.kicker.setText("NOW PLAYING")
         elif shown == "not_installed":
@@ -70,16 +79,16 @@ class StatusMixin:
             self.kicker.setText("GAME")
         # Only "now playing" says something; the other two just repeat the page.
         self.kicker.setVisible(playing)
-        self._set_badge(shown, status.message)
-        version = _version_text(status.version)
-        data = status.data or {}
-        latest = _version_text(data.get("latest_version")) if data.get("update_available") else ""
+        self._set_badge(shown, facts.message)
+        version = _version_text(facts.version)
+        data = facts.extensions
+        latest = _version_text(facts.latest_version) if facts.update_available else ""
         if version and latest:
             version = f"{version} · {latest} available"
         self.version_label.setText(version)
         self._mark_pending_quality(data.get("pending_quality"))
         self._set_account(status)
-        self._set_detail(status.message or "")
+        self._set_detail(facts.message or "")
         # The notice folds to one line once the game is installed; the snapshot status
         # arrives after set_profile has already rendered the whole notice.
         self._render_notice()
@@ -98,13 +107,13 @@ class StatusMixin:
 
     def _set_account(self, status: Status) -> None:
         """Say whether the account is logged in, for backends that track it."""
-        data = status.data or {}
-        known = "logged_in" in data and status.state != "not_installed"
+        facts = gamefacts.CommonStatus.from_status(status)
+        known = facts.logged_in is not None and facts.state != "not_installed"
         self.account_label.setVisible(known)
         if known:
-            text = "Logged in" if data["logged_in"] else "Not logged in"
-            account = data.get("account")
-            if data["logged_in"] and isinstance(account, str) and account:
+            text = "Logged in" if facts.logged_in else "Not logged in"
+            account = facts.account
+            if facts.logged_in and isinstance(account, str) and account:
                 text += f" as {account}"
             self.account_label.setText(text)
 
@@ -119,15 +128,42 @@ class StatusMixin:
     def set_found_copy(self, path: str | None) -> None:
         """Offer ``path`` as an existing copy of the game shown on this page (#1293)."""
         self._found_copy = path or None
-        if self._status is not None and self._status.state == "not_installed":
-            self._set_detail(self._status.message or "")
+        facts = gamefacts.CommonStatus.from_status(self._status)
+        if self._status is not None and facts.state == "not_installed":
+            self._set_detail(facts.message or "")
         self._refresh_actions()
+
+    def set_unfinished_removal(self, folders: list[str]) -> None:
+        """Say that an Uninstall did not finish and ``folders`` are still on disk (r3b01 F1)."""
+        self._unfinished_removal = list(folders)
+        if self._status is not None:
+            self._set_detail(gamefacts.CommonStatus.from_status(self._status).message or "")
+
+    def set_busy_elsewhere(self, busy: bool) -> None:
+        """Say another Nadare window or command is working on this game (r3b05/r3b07 F2)."""
+        self._busy_elsewhere = bool(busy)
+        if self._status is not None:
+            self._set_detail(gamefacts.CommonStatus.from_status(self._status).message or "")
+        self._refresh_actions()
+
+    def _unfinished_removal_detail(self) -> str:
+        if not self._unfinished_removal:
+            return ""
+        # A reinstall into the same folder leaves the old record: only a game that reads
+        # "not installed" is the half-removed one.
+        if gamefacts.CommonStatus.from_status(self._status).state != "not_installed":
+            return ""
+        return (
+            "Uninstall did not finish; still on disk: "
+            + ", ".join(self._unfinished_removal)
+            + ". Open Settings > Uninstall or remove to finish deleting."
+        )
 
     def _found_copy_detail(self) -> str:
         if not self._found_copy:
             return ""
         status = self._status
-        if status is None or status.state != "not_installed":
+        if status is None or gamefacts.CommonStatus.from_status(status).state != "not_installed":
             return ""
         return (
             f"Nadare found this game in another folder: {self._found_copy}. "
@@ -135,10 +171,26 @@ class StatusMixin:
         )
 
     def _set_detail(self, text: str) -> None:
+        if self._busy_op is not None:
+            # Backend status and recovery hints describe the idle game, not this operation.
+            text = self._operation_detail
+            self.detail_label.setText(text)
+            self.detail_label.setVisible(bool(text))
+            return
+        if self._busy_elsewhere:
+            # The backend's "incomplete, click RESUME" describes files another process is
+            # still writing; every action it suggests would end in the busy error.
+            text = BUSY_ELSEWHERE
+            self.detail_label.setText(text)
+            self.detail_label.setVisible(True)
+            return
         found = self._found_copy_detail()
         if found:
             text = f"{found} {text}" if text else found
-        data = (self._status.data if self._status else None) or {}
+        unfinished = self._unfinished_removal_detail()
+        if unfinished:
+            text = f"{text} {unfinished}" if text else unfinished
+        data = gamefacts.CommonStatus.from_status(self._status).extensions
         leftover = data.get("leftover_files")
         if isinstance(leftover, int) and not isinstance(leftover, bool) and leftover > 0:
             hint = (
@@ -155,7 +207,8 @@ class StatusMixin:
             return None
         status = self._status
         # A copy on disk is window knowledge, not a backend status: offer it before INSTALL.
-        if self._found_copy and status is not None and status.state == "not_installed":
+        facts = gamefacts.CommonStatus.from_status(status)
+        if self._found_copy and status is not None and facts.state == "not_installed":
             return "use_found"
         return primary_operation(status)
 
@@ -166,12 +219,12 @@ class StatusMixin:
         if self._busy_op is not None:
             self.pause_button.setVisible(self._can_pause())
             self.cancel_paused_button.setVisible(False)
-            # A launch that is busy means the game process is up: say so and
-            # offer Stop; every other busy operation is a cancellable one.
-            running = self._busy_op == "launch"
+            # An error event can arrive before the worker's final failure signal.
+            # Offer Stop during a launch, or Cancel once its failure is known.
+            running = self._busy_op == "launch" and getattr(self._status, "state", None) != "error"
             # Remove runs outside the controller: there is nothing to cancel.
             removing = self._busy_op == "remove"
-            self.stop_button.setVisible(running)
+            self.stop_button.setVisible(running or self._busy_op == "stop")
             if running:
                 self.primary.setText("PLAYING")
                 self.primary.setObjectName("Playing")
@@ -217,15 +270,15 @@ class StatusMixin:
         status = None if self._awaiting_status else self._status
         install = InstallFacts.from_status(status)
         installed = install.state() == "complete"
-        running = bool(status and (status.running or status.state == "running"))
+        running = gamefacts.is_running(status)
         # Signing in does not need the game files: STOVE and the login page are
         # remote, and an install started later keeps the saved login.
-        facts = (status.data if status else {}) or {}
+        facts = gamefacts.CommonStatus.from_status(status)
         # A backend whose sign-in runs the game's own service (NIKKE) says it needs the install.
-        can_login = facts.get("can_login") is not False
+        can_login = facts.can_login
         paused = self._paused_op is not None
         self.login.setEnabled(bool(status) and not running and can_login and not paused)
-        label = facts.get("login_label")
+        label = facts.login_label
         self.login.setText(label if isinstance(label, str) and label else "Log in")
         self.login.setToolTip(
             "Resume or cancel the paused download first."
@@ -238,11 +291,11 @@ class StatusMixin:
         # game is not installed (e.g. to drop a saved login), unless the backend
         # knows there is no sign-in to drop.
         # An expired saved login is still a saved login: Log out clears it.
-        signed_out = facts.get("logged_in") is False and not facts.get("login_expired")
+        signed_out = facts.logged_in is False and not facts.login_expired
         self.logout.setEnabled(bool(status) and not running and not signed_out and not paused)
         self.logout.setToolTip("Resume or cancel the paused download first." if paused else "")
         can_update = supports_update(str(self._profile_data.get("backend") or ""))
-        if ((status.data if status else {}) or {}).get("can_update") is False:
+        if not facts.can_update:
             can_update = False
         # Update starts its own download, which would drop the paused one's RESUME entry.
         self.update_btn.setEnabled(
@@ -258,16 +311,26 @@ class StatusMixin:
         self.verify.setEnabled(
             bool(status)
             and not running
-            and status.state not in ("error", "not_installed")
+            and facts.state not in ("error", "not_installed")
             and self._paused_op is None
         )
         # Verify and Repair start their own operation, which would drop the paused download
         # (its RESUME entry), so they wait until it is resumed or cancelled (#855).
         paused_tip = "Resume or cancel the paused download first."
         self.verify.setToolTip(paused_tip if self._paused_op else self._verify_tip)
-        can_repair = bool(((status.data if status else {}) or {}).get("can_repair"))
+        can_repair = facts.can_repair
         self.repair_btn.setEnabled(self.verify.isEnabled() and can_repair)
         self.repair_btn.setToolTip(paused_tip if self._paused_op else self._repair_tip)
+        if self._busy_elsewhere and self._paused_op is None:
+            # Play stays: a predownload elsewhere allows it, and launch checks the lock itself.
+            if op not in ("launch", "stop"):
+                self.primary.setEnabled(False)
+                self.primary.setToolTip(BUSY_ELSEWHERE)
+            for button in (self.update_btn, self.verify, self.repair_btn):
+                button.setEnabled(False)
+                button.setToolTip(BUSY_ELSEWHERE)
+        elif self.primary.toolTip() == BUSY_ELSEWHERE:
+            self.primary.setToolTip("")
 
     def _refresh_steam_setup(self) -> None:
         """Set up is offered only for a known Steam game with no operation running."""
@@ -277,7 +340,7 @@ class StatusMixin:
         if self._busy_op is not None:
             return False
         status = self._status
-        if status is not None and (status.running or status.state == "running"):
+        if gamefacts.is_running(status):
             return False  # the runner step closes Steam, which would end the play session
         if str(self._profile_data.get("backend") or "") != "steam":
             return False
@@ -320,6 +383,9 @@ class StatusMixin:
             self.action_requested.emit(op)
 
     def _on_stop_clicked(self) -> None:
+        if self._busy_op == "stop":
+            self.action_requested.emit("stop")
+            return
         if time.monotonic() < self._primary_grace_until:
             return  # the second click of the double-click that started the game
         answer = QMessageBox.question(

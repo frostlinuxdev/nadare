@@ -37,6 +37,7 @@ AUTH_EXIT_MESSAGES: dict[int, str] = {
     5: "This STOVE account has not accepted Chaos Zero Nightmare's terms of service yet. "
     "Read and accept them in Nadare when it asks, or open " + TERMS_URL + " in your browser "
     "while signed in to the same STOVE account, then try again.",
+    6: "STOVE did not confirm the terms yet. Try Play again in a minute.",
 }
 
 

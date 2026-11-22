@@ -52,6 +52,8 @@ Links Nadare only opens in your browser when you click them (the community Disco
 | Aether Gazer | `yongshigame.com`, `aethergazer.com` |
 | Brown Dust 2 | `pmang.cloud`, `browndust2.com` |
 | Mongil: Star Dive | `netmarble.com` |
+| Duet Night Abyss | `dna-panstudio.com` |
+| Snowbreak: Containment Zone | `amazingseasuncdn.com`, `amazingseasun.com` |
 | Chaos Zero Nightmare | `onstove.com` |
 | Arknights, Stella Sora | `yo-star.com`, `arknights.global`, `stellasora.global` |
 | NIKKE | `nikke-en.com`, `playerinfinite.com`, `jupiterlauncher.com` |

@@ -90,7 +90,7 @@ def test_interrupt_kills_child_that_ignores_sigterm(monkeypatch: pytest.MonkeyPa
                 emit=_interrupt_on_first_line(marks),
             )
         elapsed = time.monotonic() - started
-        assert _wait_dead(marks["pid"], process.GRACE_SECONDS + 5), (
+        assert _wait_dead(marks["pid"], process.GRACE_SECONDS + scaled(5)), (
             "child that ignored SIGTERM survived the interrupt"
         )
         assert elapsed < process.GRACE_SECONDS + scaled(5), "interrupt cleanup was not bounded"

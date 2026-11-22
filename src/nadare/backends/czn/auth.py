@@ -46,6 +46,7 @@ handed to the embedding backend through a 0600 file named by the
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -82,6 +83,10 @@ class ReloginRequired(RuntimeError):
 
 class TermsNotAccepted(RuntimeError):
     """STOVE wants the account to accept the game's terms of service first (exit 5)."""
+
+
+class TermsNotConfirmed(RuntimeError):
+    """STOVE still reports the terms as not agreed right after they were accepted (exit 6)."""
 
 
 #: STOVE's "the launcher session was invalidated" code. Every signed call can
@@ -703,6 +708,14 @@ class StoveAuth:
         )
         if not ok:
             raise RuntimeError("[terms_agree] STOVE did not confirm that the terms were accepted")
+        # The agree answer alone does not prove the game side took it; ask it once,
+        # the same way a launch does. A still-unagreed answer is reported, not retried.
+        try:
+            self.game_check()
+        except TermsNotAccepted as e:
+            raise TermsNotConfirmed(
+                "STOVE did not confirm the game's terms after accepting them"
+            ) from e
 
     def game_check(self):
         for attempt in range(2):
@@ -1108,7 +1121,14 @@ def main(argv=None) -> int:
     try:
         if args.action == "accept-terms":
             auth.renew()
-            auth.accept_terms()
+            try:
+                auth.accept_terms()
+            except Exception:
+                # renew() rotated the refresh token: hand it back even when accepting failed,
+                # or the next Play needs a new sign-in.
+                with contextlib.suppress(OSError):
+                    auth.write_credential()
+                raise
             auth.write_credential()
             event("terms_accepted")
             return 0
@@ -1131,6 +1151,8 @@ def main(argv=None) -> int:
         auth.write_credential()
     except ReloginRequired as e:
         return fail("relogin_required", 3, e)
+    except TermsNotConfirmed as e:
+        return fail("terms_not_confirmed", 6, e)
     except TermsNotAccepted as e:
         return fail("terms_required", 5, e)
     except RequestException as e:

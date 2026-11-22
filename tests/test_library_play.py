@@ -16,6 +16,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 try:
+    from PyQt6.QtCore import QEvent
+    from PyQt6.QtGui import QFocusEvent
     from PyQt6.QtWidgets import QApplication
 except Exception:  # pragma: no cover - optional GUI dependencies
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
@@ -64,8 +66,10 @@ def test_card_play_is_hidden_until_the_game_is_ready(qapp):
     try:
         assert card.play_button.isHidden()
         card.set_state("installed")
+        assert card.play_button.isHidden()  # READY alone does not show the hover action
+        card.focusInEvent(QFocusEvent(QEvent.Type.FocusIn))
         assert not card.play_button.isHidden()
-        assert card.play_button.text() == "Play"
+        assert card.play_button.accessibleName() == "Play My Game"
         assert card.badge.isHidden()  # Play already says it is ready
         card.set_state("installed", running=True)
         assert card.play_button.isHidden()

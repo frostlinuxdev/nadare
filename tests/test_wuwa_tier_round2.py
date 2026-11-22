@@ -242,5 +242,7 @@ def test_a_refused_cleanup_does_not_claim_files_were_removed(qapp):
         game=SimpleNamespace(append_line=lambda text, kind: None),
         _start=lambda *a, **k: True,
     )
-    CleanupMixin._quality_cleanup_finished(fake, "w", [("hd", "x", 100)], (0, []))
+    from nadare.gui.workers import QualityCleanupResult
+
+    CleanupMixin._quality_cleanup_finished(fake, "w", QualityCleanupResult(0, (), ("hd",)))
     assert lines and "Removed" not in lines[-1]

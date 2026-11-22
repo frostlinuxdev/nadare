@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Nadare contributors
 """Loading a profile into the form and saving the form back.
 
-Split out of :mod:`nadare.gui.settings`; the code is unchanged.
+Settings edits are persisted through detached Config drafts.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from ...core import artwork as artwork_core
 from ...core import flatpakfs, gamefolders
 from ...core import runners as runners_core
 from ...core.backends import kinds, supports_remake_prefix, supports_remember_me
-from ...core.config import Config
+from ...core.config import Config, ProfileRemovedElsewhere
 from .. import i18n
 from ..library import profile_title
 from .shared import (
@@ -45,8 +45,10 @@ class PersistenceMixin:
             "background": self.background.text(),
             "remember": self.remember.isChecked(),
             "language": self.language.currentData(),
+            "download_speed_limit": self.download_speed_limit.value(),
             "check_updates": self.check_updates.isChecked(),
             "check_notices": self.check_notices.isChecked(),
+            "check_holds": self.check_holds.isChecked(),
             "notify_when_done": self.notify_when_done.isChecked(),
             "hide_uninstalled": self.hide_uninstalled.isChecked(),
             "default_monitor": self.default_monitor.currentData(),
@@ -92,6 +94,7 @@ class PersistenceMixin:
         runner_text = runners_core.profile_runner_value(data)
         if not self._reload_runners(runner_text):
             self.runner.setEditText(runner_text)
+        self._update_runner_behind()
         self.background.setText(str(data.get("custom_background") or ""))
         self._load_options(kind, data)
         self._update_free_hints()
@@ -118,13 +121,20 @@ class PersistenceMixin:
         self._loaded_state = self._form_state()
 
     def _load_app_values(self, config: Config) -> None:
-        self.libraries_panel.load(config)
         """Fill the controls that belong to Nadare itself, not to one game."""
-        language = str(config.data.get("language") or i18n.DEFAULT_LANGUAGE)
+        self.download_speed_limit.setValue(float(config.data.get("download_speed_limit") or 0))
+        self.libraries_panel.load(config)
+        self.disk_space_panel.load(config)
+        if self.tabs.currentIndex() == self._app_tab:
+            self.disk_space_panel.refresh()
+        language = i18n.resolve_locale(config.data.get("language"))
+        # Unset follows the desktop; a save that leaves the combo alone keeps it unset.
+        self._language_followed = language if config.data.get("language") is None else None
         lang_index = self.language.findData(language)
         self.language.setCurrentIndex(lang_index if lang_index >= 0 else 0)
         self.check_updates.setChecked(bool(config.data.get("check_updates", True)))
         self.check_notices.setChecked(bool(config.data.get("check_notices", True)))
+        self.check_holds.setChecked(bool(config.data.get("check_holds", True)))
         self.notify_when_done.setChecked(bool(config.data.get("notify_when_done", True)))
         self.hide_uninstalled.setChecked(bool(config.data.get("sidebar_hide_uninstalled", False)))
         saved_monitor = config.data.get("default_monitor")
@@ -154,39 +164,33 @@ class PersistenceMixin:
 
     def _save_app_only(self) -> None:
         config = self._config
-        keys = (
-            "language",
-            "check_updates",
-            "check_notices",
-            "notify_when_done",
-            "sidebar_hide_uninstalled",
-            "default_monitor",
-        )
         try:
-            with config.locked():
-                backup = {key: config.data.get(key) for key in keys}
-                config.data["language"] = self.language.currentData() or i18n.DEFAULT_LANGUAGE
-                config.data["check_updates"] = bool(self.check_updates.isChecked())
-                config.data["check_notices"] = bool(self.check_notices.isChecked())
-                config.data["notify_when_done"] = bool(self.notify_when_done.isChecked())
-                config.data["sidebar_hide_uninstalled"] = bool(self.hide_uninstalled.isChecked())
-                if self.default_monitor.currentData():
-                    config.data["default_monitor"] = self.default_monitor.currentData()
-                else:
-                    config.data.pop("default_monitor", None)
-                config.save()
+            with config.edit_settings() as draft:
+                self._store_app_settings(draft.settings)
         except OSError as exc:
-            with config.locked():
-                for key, old in backup.items():
-                    if old is None:
-                        config.data.pop(key, None)
-                    else:
-                        config.data[key] = old
             QMessageBox.critical(self, "Settings", f"Could not save config: {exc}")
             return
         i18n.set_language(config.data["language"])
         self._loaded_state = self._form_state()
         self.saved.emit("")
+
+    def _store_app_settings(self, settings: dict[str, Any]) -> None:
+        """Copy the application controls into a detached settings draft."""
+        state = self._form_state()
+        for key in ("download_speed_limit", "check_holds"):
+            if self._loaded_state is not None and state[key] != self._loaded_state[key]:
+                settings[key] = state[key]
+        chosen = self.language.currentData() or i18n.DEFAULT_LANGUAGE
+        followed = getattr(self, "_language_followed", None)
+        settings["language"] = None if followed is not None and chosen == followed else chosen
+        settings["check_updates"] = bool(self.check_updates.isChecked())
+        settings["check_notices"] = bool(self.check_notices.isChecked())
+        settings["notify_when_done"] = bool(self.notify_when_done.isChecked())
+        settings["sidebar_hide_uninstalled"] = bool(self.hide_uninstalled.isChecked())
+        if self.default_monitor.currentData():
+            settings["default_monitor"] = self.default_monitor.currentData()
+        else:
+            settings.pop("default_monitor", None)
 
     def _confirm_environment(self, data: dict[str, Any]) -> bool:
         """Ask before saving a changed, non-empty Environment; True means go ahead.
@@ -282,28 +286,15 @@ class PersistenceMixin:
         if self._refuse_broken_values(backend, runner_text, index):
             return
 
-        # The mutation and the write are taken under the config lock (as the
-        # worker-side ``BackendContext.set`` does); otherwise a worker save can
-        # serialise this profile dict while it is being changed.
         old_quality = self._option_value(data, "wuwa_quality")
-        import copy as _copy
-
-        with config.locked():
-            backup = (
-                _copy.deepcopy(data),
-                config.data.get("language"),
-                config.data.get("check_updates"),
-                config.data.get("check_notices"),
-                config.data.get("notify_when_done"),
-                config.data.get("sidebar_hide_uninstalled"),
-                config.data.get("default_monitor"),
-            )
         warnings: list[str] = []
         install_dir_option = any(
             option.key == "install_dir" for option in self._backend_options(backend)
         )
         try:
-            with config.locked():
+            with config.edit_settings(self._profile) as draft:
+                data = draft.profile
+                assert data is not None
                 data["title"] = self.title.text().strip()
                 data["backend"] = backend
                 if install_dir_option and not catalog:
@@ -345,42 +336,27 @@ class PersistenceMixin:
                 else:
                     artwork.art_source(data).pop("custom_background", None)
                 data["remember_me"] = bool(self.remember.isChecked())
-                config.data["language"] = (
-                    self.language.currentData() or i18n.DEFAULT_LANGUAGE
-                )
-                config.data["check_updates"] = bool(self.check_updates.isChecked())
-                config.data["check_notices"] = bool(self.check_notices.isChecked())
-                config.data["notify_when_done"] = bool(self.notify_when_done.isChecked())
-                config.data["sidebar_hide_uninstalled"] = bool(self.hide_uninstalled.isChecked())
-                if self.default_monitor.currentData():
-                    config.data["default_monitor"] = self.default_monitor.currentData()
-                else:
-                    config.data.pop("default_monitor", None)
+                self._store_app_settings(draft.settings)
                 for kind, path in self._pending_art.items():
                     artwork.record_thirdparty(data, path, kind)
-                config.save()
+        except ProfileRemovedElsewhere:
+            # Another window or `nadare remove` took this game away while the form was open;
+            # saving would bring it back (user sim r3b05 F1). Nothing was written.
+            self._loaded_state = self._form_state()
+            QMessageBox.information(
+                self,
+                i18n.tr("Settings"),
+                i18n.tr(
+                    "This game was removed by another Nadare window or command while its "
+                    "settings were open, so nothing was saved. Add it again to use it."
+                ),
+            )
+            self.cancelled.emit()
+            return
         except OSError as exc:
-            with config.locked():
-                data.clear()
-                data.update(backup[0])
-                for key, old in zip(
-                    (
-                        "language",
-                        "check_updates",
-                        "check_notices",
-                        "notify_when_done",
-                        "sidebar_hide_uninstalled",
-                        "default_monitor",
-                    ),
-                    backup[1:],
-                    strict=True,
-                ):
-                    if old is None:
-                        config.data.pop(key, None)
-                    else:
-                        config.data[key] = old
             QMessageBox.critical(self, "Settings", f"Could not save config: {exc}")
             return
+        data = config.profile(self._profile)
         self._pending_art = {}
         i18n.set_language(config.data["language"])
         self.note.setText(f"Saved to {config.path}")

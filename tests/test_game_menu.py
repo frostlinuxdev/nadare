@@ -81,7 +81,7 @@ def test_a_library_card_has_a_remove_item_in_its_right_click_menu(qapp):
     card = page._cards["a"]
     assert isinstance(card, GameCard)
     menu = page.card_menu("a")
-    assert _texts(menu) == ["Open", "Uninstall or remove…"]
+    assert _texts(menu) == ["Open", "Uninstall or remove…", "Add to favourites"]
     menu.actions()[1].trigger()
     assert removed == ["a"]
     page.deleteLater()

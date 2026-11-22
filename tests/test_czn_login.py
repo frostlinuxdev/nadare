@@ -265,9 +265,25 @@ class TestProtonWithoutUmu:
         backend.ctx.profile["runner"] = str(proton)
         return backend, proton
 
-    def test_direct_proton_when_umu_missing(self, make_backend_context, tmp_path, monkeypatch):
+    def test_a_desktop_without_umu_refuses(self, make_backend_context, tmp_path, monkeypatch):
+        """No bare ``proton run`` outside the Flatpak (#1338, #1449): it skips the Steam
+        Runtime and every per-game fix."""
+        from nadare.core import umu
+
+        backend, _proton = self._backend(make_backend_context, tmp_path, monkeypatch)
+        monkeypatch.setattr(umu, "resolve", lambda *a, **k: None)
+        monkeypatch.setattr(czn_backend.sandbox, "in_flatpak", lambda: False)
+        with pytest.raises(BackendError):
+            backend._prefix_command(["game.exe"])
+
+    def test_the_flatpak_without_umu_runs_proton_directly(
+        self, make_backend_context, tmp_path, monkeypatch
+    ):
+        from nadare.core import umu
+
         backend, proton = self._backend(make_backend_context, tmp_path, monkeypatch)
-        monkeypatch.setattr(czn_backend.shutil, "which", lambda name, *a, **k: None)
+        monkeypatch.setattr(umu, "resolve", lambda *a, **k: None)
+        monkeypatch.setattr(czn_backend.sandbox, "in_flatpak", lambda: True)
         argv, env = backend._prefix_command(["game.exe"])
         assert argv == [str(proton / "proton"), "run", "game.exe"]
         assert env["STEAM_COMPAT_DATA_PATH"] == str(tmp_path / "prefix")
@@ -394,7 +410,7 @@ class TestWebView2IndexPins:
         monkeypatch.setenv("NADARE_INDEX_BASE", "https://example.test/")
 
         def serve(url):
-            body = json.dumps({"url": url}).encode()
+            body = json.dumps({"url": url, "sha256": ["ab" * 32]}).encode()
             monkeypatch.setattr(indexfetch, "open_bytes", lambda *_a, **_k: body)
 
         good = "https://msedge.sf.dl.delivery.mp.microsoft.com/files/g/Installer.exe"
@@ -549,23 +565,6 @@ class TestCancelAndOverlayOptions:
         assert backend._mangohud_wrap(["g"], {}) == ["g"]
 
 
-class TestPlainWinePromptSuppression:
-    def test_mono_and_gecko_prompts_are_disabled(self, make_backend_context, tmp_path, monkeypatch):
-        backend = _make_backend(make_backend_context, tmp_path / "prefix")
-        # The plain-Wine fallback (no Proton runner; CZN_WINE for advanced use).
-        monkeypatch.setattr(backend, "resolve_runner", lambda: ("", "wine"))
-        monkeypatch.setenv("CZN_WINE", "/usr/bin/wine")
-        monkeypatch.setenv("WINEDLLOVERRIDES", "winemenubuilder.exe=d")
-        argv, env = backend._prefix_command(["game.exe"])
-        assert argv == ["/usr/bin/wine", "game.exe"]
-        overrides = env["WINEDLLOVERRIDES"].split(";")
-        assert "mscoree,mshtml=" in overrides
-        assert "winemenubuilder.exe=d" in overrides, "an existing override must survive"
-        # idempotent
-        _argv, env2 = backend._prefix_command(["game.exe"])
-        assert env2["WINEDLLOVERRIDES"].count("mscoree,mshtml=") == 1
-
-
 class TestStreamDoesNotWaitForInheritedPipes:
     def test_returns_when_the_child_exits_even_if_a_daemon_holds_the_pipe(
         self, make_backend_context, tmp_path
@@ -600,3 +599,12 @@ class TestCrashHandlerIsNotTheGame:
         assert czn_backend._cmdline_has_exe(
             raw, self.PREFIX, exclude=czn_backend.GAME_HELPER_EXES
         )
+
+
+@pytest.fixture(autouse=True)
+def _umu_available(monkeypatch):
+    """CZN runs through umu like every Proton game (#1449): stand in Nadare's own copy."""
+    from nadare.core import umu
+
+    monkeypatch.setattr(umu, "resolve", lambda *a, **k: "/usr/bin/umu-run")
+    monkeypatch.setattr(umu, "note_first_runtime", lambda emit: None)

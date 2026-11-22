@@ -4,7 +4,7 @@
 The Arknights setup, the NIKKE miniloader and the Endfield launcher installer are rolling,
 publisher-hosted files with no published hash. An index node pins each one (trust on first
 use) under ``catalog/archive-pins/<tag>.json``; the client refuses a download that does not
-match a pin for its exact URL, and keeps the host check alone when there is none.
+match a pin for its exact URL, and refuses before downloading when there is none.
 """
 
 from __future__ import annotations
@@ -92,13 +92,14 @@ def test_verify_file_refuses_anything_else(tmp_path, served):
         installerpins.verify_file(path, pin(AK_URL))
 
 
-def test_check_without_a_pin_says_only_the_host_was_checked(tmp_path, monkeypatch):
+def test_check_without_a_pin_refuses(tmp_path, monkeypatch):
     serve_pins(monkeypatch, {})
     path = tmp_path / "setup.exe"
     path.write_bytes(DATA)
     notes: list[str] = []
-    installerpins.check("nikke-installer", NIKKE_URL, path, info=notes.append)
-    assert len(notes) == 1 and "host" in notes[0]
+    with pytest.raises(BackendError, match="no checksum"):
+        installerpins.check("nikke-installer", NIKKE_URL, path, info=notes.append)
+    assert notes == []
     assert path.read_bytes() == DATA
 
 
@@ -158,36 +159,46 @@ def test_a_user_pinned_sha256_wins_and_the_index_is_not_asked(tmp_path, monkeypa
     assert asked == []
 
 
-def test_an_unpinned_installer_still_downloads(tmp_path, monkeypatch):
+def test_an_unpinned_installer_is_refused(tmp_path, monkeypatch):
     serve_pins(monkeypatch, {})
     _fake_download(monkeypatch, DATA)
-    assert _nikke_backend(tmp_path)._download_installer(NIKKE_URL).read_bytes() == DATA
+    with pytest.raises(BackendError, match="no checksum"):
+        _nikke_backend(tmp_path)._download_installer(NIKKE_URL)
 
 
 def test_arknights_has_no_installer_pin_since_it_installs_from_the_signed_manifest(
     tmp_path, monkeypatch
 ):
-    """With the index on, Arknights installs file by file from the signed Yostar manifest;
-    the setup.exe path only runs with the index off, where no pin could be read anyway."""
+    """Arknights installs file by file from the signed Yostar manifest. Its setup.exe route
+    is retired (#1452): with the index off Install refuses, and no installer (or pin) is
+    ever fetched, even for a b25 profile that still names one."""
     asked = serve_pins(monkeypatch, {})
     _fake_download(monkeypatch, DATA)
     backend = ak.ArknightsBackend(make_context(tmp_path, ak.KIND, {"installer_url": AK_URL}))
     monkeypatch.setenv("NADARE_INDEX_BASE", "https://index.example/")
     assert backend.direct_mode()
     monkeypatch.setenv("NADARE_INDEX_BASE", "")
-    assert not backend.direct_mode()
-    backend._download_installer(backend.require_installer_url())
+    monkeypatch.delenv("YOSTAR_MANIFEST_INDEX", raising=False)
+    assert backend.direct_mode()
+    with pytest.raises(BackendError, match="index"):
+        backend.install()
     assert asked == []
 
 
-def test_a_launcher_game_without_a_pin_tag_never_asks_the_index(tmp_path, monkeypatch):
+def test_a_launcher_game_without_a_pin_tag_is_refused_before_download(
+    tmp_path, monkeypatch
+):
     asked = serve_pins(monkeypatch, {})
-    _fake_download(monkeypatch, DATA)
+    calls = []
+    monkeypatch.setattr(wg.download, "remote_size", lambda *a, **k: calls.append("HEAD"))
+    monkeypatch.setattr(wg.download, "download", lambda *a, **k: calls.append("GET"))
     from _backend_helpers import fake_launcher_backend
 
     launcher_cls = fake_launcher_backend()
     backend = launcher_cls(make_context(tmp_path, launcher_cls.kind, {}))
-    backend._download_installer(launcher_cls.default_installer_url)
+    with pytest.raises(BackendError, match="index entry for.*Fake launcher.*no checksum"):
+        backend._download_installer(launcher_cls.default_installer_url)
+    assert calls == []
     assert asked == []
 
 
@@ -239,10 +250,10 @@ def test_endfield_refuses_a_swapped_installer_at_the_fetch_step(tmp_path, monkey
     assert not (tmp_path / "data" / "Games.exe").exists()
 
 
-def test_endfield_without_a_pin_extracts_as_before(tmp_path, monkeypatch):
+def test_endfield_without_a_pin_refuses(tmp_path, monkeypatch):
     serve_pins(monkeypatch, {})
-    cache, extracted = _obtain(tmp_path, DATA, None)
-    assert extracted == [DATA]
+    with pytest.raises(BackendError, match="no checksum"):
+        _obtain(tmp_path, DATA, None)
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ from _czn_test_helpers import (  # noqa: F401  # noqa: F401 - pytest fixtures, f
     _no_webview2_index,
     _register_webview2,
     _reset_czn_process_state,
+    _webview2_ready,
     _write_matching,
     make_backend_context,
 )
@@ -41,6 +42,7 @@ class TestImpl2CznFixes:
     ):
         backend = _make_backend(make_backend_context, tmp_path / "prefix")
         _install_game(backend.prefix())
+        _webview2_ready(backend.prefix())
         (backend.prefix() / "drive_c").mkdir(parents=True, exist_ok=True)
         stub = backend._stub()
         stub.parent.mkdir(parents=True, exist_ok=True)
@@ -64,6 +66,7 @@ class TestImpl2CznFixes:
     ):
         backend = _make_backend(make_backend_context, tmp_path / "prefix")
         _install_game(backend.prefix())
+        _webview2_ready(backend.prefix())
         (backend.prefix() / "drive_c").mkdir(parents=True, exist_ok=True)
         stub = backend._stub()
         stub.parent.mkdir(parents=True, exist_ok=True)
@@ -84,6 +87,7 @@ class TestImpl2CznFixes:
     ):
         backend = _make_backend(make_backend_context, tmp_path / "prefix")
         _install_game(backend.prefix())
+        _webview2_ready(backend.prefix())
         (backend.prefix() / "drive_c").mkdir(parents=True, exist_ok=True)
         stub = backend._stub()
         stub.parent.mkdir(parents=True, exist_ok=True)

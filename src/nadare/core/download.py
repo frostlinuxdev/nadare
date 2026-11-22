@@ -30,9 +30,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
-from . import tls
+from . import tls, transfer
 from .diskspace import human_size
 from .events import Cancel, Emitter, Event, emitter
+
+current_transfer = transfer.current_transfer
+inherit_transfer = transfer.inherit_transfer
 
 DEFAULT_CHUNK = 1 << 20  # 1 MiB
 DEFAULT_TIMEOUT = 60
@@ -122,7 +125,7 @@ def _request(
     return urllib.request.Request(url, data=data, headers=hdrs)
 
 
-def _parse_retry_after(value: str | None) -> float | None:
+def parse_retry_after(value: str | None) -> float | None:
     """A numeric ``Retry-After`` in seconds, capped at :data:`RETRY_AFTER_MAX`."""
     if not value:
         return None
@@ -133,6 +136,20 @@ def _parse_retry_after(value: str | None) -> float | None:
     if seconds < 0:
         return None
     return min(seconds, RETRY_AFTER_MAX)
+
+
+def transient_status(status: int) -> bool:
+    """Whether an HTTP error status may succeed when asked again (5xx, 408, 425, 429).
+
+    One rule for every transfer, full downloads and ranged reads alike (#1496): a 403/404 is
+    permanent, and asking again only wastes time and can look like abuse.
+    """
+    return status >= 500 or status in _RETRYABLE_4XX
+
+
+def wait(seconds: float, cancel: Cancel | None) -> None:
+    """Sleep ``seconds`` between retries, stopping early with ``Cancelled`` when cancelled."""
+    _sleep(seconds, cancel)
 
 
 def retry_delay(
@@ -221,14 +238,16 @@ def http_open(
     """
     opener = _build_opener(redirect_allowed)
     try:
-        return opener.open(_request(url, headers, data), timeout=timeout)  # noqa: S310
+        response = opener.open(_request(url, headers, data), timeout=timeout)  # noqa: S310
+        final_url = getattr(response, "geturl", lambda: url)()
+        return transfer.Response(response, final_url)
     except DownloadError:
         raise
     except urllib.error.HTTPError as exc:
         raise HTTPStatusError(
             f"HTTP {exc.code} for {url}",
             status=exc.code,
-            retry_after=_parse_retry_after(
+            retry_after=parse_retry_after(
                 exc.headers.get("Retry-After") if exc.headers else None
             ),
             url=url,
@@ -286,7 +305,7 @@ def _open_pooled(
         raise HTTPStatusError(
             f"HTTP {response.status} for {url}",
             status=response.status,
-            retry_after=_parse_retry_after(response.header("Retry-After")),
+            retry_after=parse_retry_after(response.header("Retry-After")),
             url=url,
         )
     return response
@@ -337,11 +356,16 @@ def hash_file(
     algorithms: tuple[str, ...] = ("sha256",),
     *,
     chunk: int = DEFAULT_CHUNK,
+    cancel: Cancel | None = None,
 ) -> dict[str, str]:
-    """Stream ``path`` once, returning ``{algorithm: hexdigest}``."""
+    """Stream ``path`` once, returning ``{algorithm: hexdigest}``.
+
+    With ``cancel``, a large file stops between blocks (#1469): hashing a resumed archive can
+    take minutes."""
     hashers = {name: hashlib.new(name) for name in algorithms}
     with open(path, "rb") as fh:
         while True:
+            _check_cancel(cancel)
             block = fh.read(chunk)
             if not block:
                 break
@@ -356,6 +380,7 @@ def verify_file(
     sha256: str | None = None,
     sha512: str | None = None,
     size: int | None = None,
+    cancel: Cancel | None = None,
 ) -> bool:
     """Compare a file against any provided size/hash. Missing file -> False."""
     p = Path(path)
@@ -366,7 +391,7 @@ def verify_file(
     wanted = [a for a, v in (("sha256", sha256), ("sha512", sha512)) if v]
     if not wanted:
         return True
-    digests = hash_file(p, tuple(wanted))
+    digests = hash_file(p, tuple(wanted), cancel=cancel)
     if sha256 and digests["sha256"].lower() != sha256.lower():
         return False
     if sha512 and digests["sha512"].lower() != sha512.lower():
@@ -405,6 +430,8 @@ def _drop_symlinked_part(part: Path) -> None:
 
 
 def _emit_progress(emit: Emitter, stage: str, done: int, total: int) -> None:
+    measurement = transfer.current_transfer()
+    connections = measurement.active if measurement is not None else 0
     progress = (done / total) if total > 0 else None
     sizes = f"{human_size(done)} / {human_size(total)}" if total > 0 else human_size(done)
     emit(
@@ -412,7 +439,7 @@ def _emit_progress(emit: Emitter, stage: str, done: int, total: int) -> None:
             "progress",
             f"{stage}: {sizes}",
             progress=progress,
-            data={"stage": stage, "done": done, "total": total},
+            data={"stage": stage, "done": done, "total": total, "connections": connections},
         )
     )
 
@@ -470,6 +497,8 @@ def _download_once(
         resp_cm = open_url()
 
     with resp_cm as resp:
+        if isinstance(resp, transfer.Response):
+            resp.cancel = cancel
         status = getattr(resp, "status", None) or resp.getcode()
         # Missing Content-Length means "unknown", not zero: don't reject the body.
         length = resp.headers.get("Content-Length")
@@ -512,6 +541,159 @@ def _download_once(
         return resumed
 
 
+RANGE_THRESHOLD = 256 << 20
+
+
+class _RangeUnsupported(DownloadError):
+    """The origin stopped supporting ranges after the initial probe."""
+
+
+
+def _range_paths(part: Path, workers: int) -> list[Path]:
+    return [part.with_name(f"{part.name}-{i}") for i in range(workers)]
+
+
+def _clear_ranges(part: Path, workers: int) -> None:
+    # A resumed download may use a different worker count from the previous run.
+    prefix = part.name + "-"
+    for path in part.parent.iterdir():
+        suffix = path.name.removeprefix(prefix).removesuffix(".done")
+        if path.name.startswith(prefix) and suffix.isdecimal():
+            path.unlink(missing_ok=True)
+    part.with_name(part.name + ".ranges.json").unlink(missing_ok=True)
+
+
+def _download_ranges(url, part, *, expected_size, workers, headers, timeout,
+                     emit, cancel, chunk, redirect_allowed, pool):
+    """Return None for a server without Range support; otherwise join verified spans."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    own_pool = pool is None
+    clients = pool or HttpClientPool(timeout)
+    stop = threading.Event()
+
+    class RangeCancel:
+        def raise_if_cancelled(self):
+            _check_cancel(cancel)
+            if stop.is_set():
+                raise _cancelled()
+
+    combined = RangeCancel()
+    req_headers = {**dict(headers or {}), "Accept-Encoding": "identity"}
+    paths = _range_paths(part, workers)
+    metadata = part.with_name(part.name + ".ranges.json")
+    identity = hashlib.sha256(
+        json.dumps([url, expected_size, workers, req_headers], sort_keys=True).encode()
+    ).hexdigest()
+    try:
+        with _open_pooled(clients, url, headers={**req_headers, "Range": "bytes=0-0"},
+                          timeout=timeout, redirect_allowed=redirect_allowed) as response:
+            parsed = _parse_content_range(response.headers.get("Content-Range", ""))
+            # A valid 206/Content-Range is the proof that Range is honoured. Some
+            # origins send it without Accept-Ranges, so that header alone decides
+            # nothing; a server that ignores Range answers 200 and falls back.
+            if response.status != 206 or parsed != (0, 0, expected_size):
+                return None
+            response.cancel = combined
+            if len(response.read(2)) != 1:
+                return None
+        if metadata.is_symlink():
+            metadata.unlink()
+        try:
+            saved_identity = metadata.read_text() if metadata.exists() else None
+        except UnicodeError:
+            saved_identity = None
+        if saved_identity != identity:
+            _clear_ranges(part, workers)
+            metadata.parent.mkdir(parents=True, exist_ok=True)
+            metadata.write_text(identity)
+        resumed = any(p.exists() or p.with_name(p.name + ".done").exists() for p in paths)
+        progress_lock = threading.Lock()
+        amounts = [0] * workers
+
+        def fetch(index):
+            start = expected_size * index // workers
+            end = expected_size * (index + 1) // workers - 1
+            path = paths[index]
+            done_path = path.with_name(path.name + ".done")
+            _drop_symlinked_part(path)
+            _drop_symlinked_part(done_path)
+            if done_path.exists() and done_path.stat().st_size == end - start + 1:
+                with progress_lock:
+                    amounts[index] = end - start + 1
+                return
+            done_path.unlink(missing_ok=True)
+            combined.raise_if_cancelled()
+            offset = path.stat().st_size if path.exists() else 0
+            # Only .done proves that EOF was checked. A full unfinished span
+            # may have been interrupted before that check, so fetch it again.
+            if offset >= end - start + 1:
+                path.unlink()
+                offset = 0
+            if offset < end - start + 1:
+                with _open_pooled(
+                    clients, url, headers={**req_headers, "Range": f"bytes={start + offset}-{end}"},
+                                  timeout=timeout, redirect_allowed=redirect_allowed) as response:
+                    response.cancel = combined
+                    if (response.status != 206
+                            or _parse_content_range(response.headers.get("Content-Range", ""))
+                            != (start + offset, end, expected_size)):
+                        raise _RangeUnsupported("server stopped honouring download ranges")
+                    with open(path, "ab" if offset else "wb") as output:
+                        done = offset
+                        while True:
+                            combined.raise_if_cancelled()
+                            block = response.read(min(chunk, end - start + 2 - done))
+                            if not block:
+                                break
+                            done += len(block)
+                            if done > end - start + 1:
+                                path.unlink(missing_ok=True)
+                                raise DownloadError("range body is larger than requested")
+                            output.write(block)
+                            with progress_lock:
+                                amounts[index] = done
+                                _emit_progress(emit, "download", sum(amounts), expected_size)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    if done != end - start + 1:
+                        raise DownloadError("incomplete range body")
+            os.replace(path, done_path)
+            emit(Event("log", "Download part finished", data={"range_finished": index}))
+
+        with ThreadPoolExecutor(max_workers=workers, initializer=transfer.inherit_transfer,
+                                initargs=(transfer.current_transfer(),)) as executor:
+            futures = [executor.submit(fetch, i) for i in range(workers)]
+            try:
+                for future in as_completed(futures):
+                    future.result()
+            except BaseException:
+                stop.set()
+                for future in futures:
+                    future.cancel()
+                raise
+        _check_cancel(cancel)
+        _drop_symlinked_part(part)
+        with open(part, "wb") as output:
+            for path in paths:
+                with open(path.with_name(path.name + ".done"), "rb") as source:
+                    while block := source.read(chunk):
+                        _check_cancel(cancel)
+                        output.write(block)
+            output.flush()
+            os.fsync(output.fileno())
+        return resumed
+    except ProxyNotSupported:
+        # A redirect may reach a proxy the pool cannot use; urllib handles it.
+        return None
+    except _RangeUnsupported:
+        _clear_ranges(part, workers)
+        return None
+    finally:
+        if own_pool:
+            clients.close()
+
+
 def download(
     url: str,
     dest: str | os.PathLike[str],
@@ -529,6 +711,7 @@ def download(
     cancel: Cancel | None = None,
     redirect_allowed: Callable[[str], bool] | None = None,
     pool: HttpClientPool | None = None,
+    range_workers: int | None = None,
 ) -> DownloadResult:
     """Download ``url`` to ``dest`` atomically.
 
@@ -547,9 +730,11 @@ def download(
         resume
         and (expected_sha256 or expected_sha512 or expected_size is not None)
         and verify_file(
-            part, sha256=expected_sha256, sha512=expected_sha512, size=expected_size
+            part, sha256=expected_sha256, sha512=expected_sha512, size=expected_size,
+            cancel=cancel,
         )
     ):
+        _check_cancel(cancel)  # a cancelled call never promotes a cached part (#1469)
         os.replace(part, destination)
         digests = hash_file(destination, ("sha256", "sha512"))
         say(Event("log", f"reused verified download: {destination.name}"))
@@ -561,6 +746,14 @@ def download(
             resumed=True,
         )
 
+    measurement = transfer.current_transfer()
+    count = range_workers if range_workers is not None else getattr(measurement, "range_workers", 4)
+    count = max(1, min(32, count))
+    use_ranges = (expected_size is not None and expected_size > RANGE_THRESHOLD
+                  and count > 1 and _pool_can_serve(url))
+    if not resume:
+        _clear_ranges(part, count)
+
     last_error: Exception | None = None
     resumed = False
     attempts = max(1, retries)
@@ -569,7 +762,14 @@ def download(
     while attempt < attempts:
         completed = False
         try:
-            resumed = _download_once(
+            ranged = None
+            if use_ranges:
+                ranged = _download_ranges(url, part, expected_size=expected_size, workers=count,
+                                          headers=headers, timeout=timeout, emit=say, cancel=cancel,
+                                          chunk=chunk, redirect_allowed=redirect_allowed, pool=pool)
+                if ranged is None:
+                    use_ranges = False
+            resumed = ranged if ranged is not None else _download_once(
                 url,
                 part,
                 headers=headers,
@@ -584,7 +784,7 @@ def download(
             )
             completed = True
             size = part.stat().st_size
-            digests = hash_file(part, ("sha256", "sha512"))
+            digests = hash_file(part, ("sha256", "sha512"), cancel=cancel)
             if expected_size is not None and size != expected_size:
                 raise IntegrityError(
                     f"size mismatch for {destination.name}: {size} != {expected_size}"
@@ -593,8 +793,11 @@ def download(
                 raise IntegrityError(f"sha256 mismatch for {destination.name}")
             if expected_sha512 and digests["sha512"].lower() != expected_sha512.lower():
                 raise IntegrityError(f"sha512 mismatch for {destination.name}")
+            # The commit point: once renamed, the download is done, Cancel or not (#1469).
+            _check_cancel(cancel)
             os.replace(part, destination)
             _fsync_dir(destination.parent)
+            _clear_ranges(part, count)
             say(
                 Event(
                     "log",
@@ -613,6 +816,7 @@ def download(
             # transfer (e.g. an oversized body) are not retried: the server
             # would just repeat them.
             _remove(part)
+            _clear_ranges(part, count)
             if completed and not refetch_clean:
                 refetch_clean = True
                 say(
@@ -639,7 +843,7 @@ def download(
                     ) from exc
                 raise DownloadError(f"cannot write to {destination}") from exc
             status = getattr(exc, "status", None)
-            if status is not None and 400 <= status < 500 and status not in _RETRYABLE_4XX:
+            if status is not None and 400 <= status < 500 and not transient_status(status):
                 # A 403/404 (etc.) is permanent: re-requesting it only wastes
                 # time and can look like abuse. 408, 425 and 429 mean "try again
                 # later" (429 may carry Retry-After), so those keep retrying.
@@ -756,6 +960,11 @@ def _sleep(seconds: float, cancel: Cancel | None) -> None:
         time.sleep(max(0.0, min(0.2, deadline - time.monotonic())))
 
 
+def _check_cancel(cancel: Cancel | None) -> None:
+    if cancel is not None and cancel.cancelled:
+        raise _cancelled()
+
+
 def _cancelled() -> BaseException:
     from .events import Cancelled
 
@@ -833,6 +1042,13 @@ class HttpClientPool:
         self._local = threading.local()
         self._lock = threading.Lock()
         self._all: list[http.client.HTTPConnection] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
 
     def _store(self) -> dict[tuple[str, str, int], http.client.HTTPConnection]:
         store = getattr(self._local, "connections", None)
@@ -917,6 +1133,7 @@ class HttpClientPool:
                 # A plain-HTTP proxy wants the absolute URL and its own credentials.
                 path = current
                 send_headers = {**request_headers, **proxy[2]}
+            opened = getattr(conn, "sock", None) is None
             try:
                 conn.request("GET", path, headers=send_headers)
                 response = conn.getresponse()
@@ -930,6 +1147,7 @@ class HttpClientPool:
                 # peer; drop it and retry once on a fresh socket.
                 self._forget(scheme, host, port)
                 conn = self._connection(scheme, host, port, deadline)
+                opened = True
                 conn.request("GET", path, headers=send_headers)
                 response = conn.getresponse()
             if response.status in (301, 302, 303, 307, 308):
@@ -962,7 +1180,7 @@ class HttpClientPool:
                     raise DownloadError(f"redirect to disallowed URL: {target}")
                 current = target
                 continue
-            return HttpResponse(response, conn)
+            return transfer.Response(HttpResponse(response, conn), current, opened)
         raise DownloadError(f"too many redirects for {url}")
 
     def close(self) -> None:
@@ -1102,6 +1320,8 @@ def stream_download(
             cancel=cancel,
             on_progress=on_progress,
         )
+    if isinstance(response, transfer.Response):
+        response.cancel = cancel
     try:
         length = response.header("Content-Length")
         known_total = int(length) if length else -1

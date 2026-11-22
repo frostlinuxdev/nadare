@@ -16,9 +16,8 @@ This page is for running from a checkout, for FGO, and for the per-game requirem
   prebuilt, and runs Proton directly. `umu-launcher` is optional (used if
   found); when it is absent and the host lacks the 32-bit system libraries Proton needs
   (FreeType, udev, Xext, xkbcommon), Nadare downloads a pinned, verified copy of umu, whose
-  runtime brings its own. `mingw-w64` is only
-  needed to rebuild the C fallback of the stub from source (the shipped default
-  is the Go build, made in a pinned container).
+  runtime brings its own. `mingw-w64` is optional:
+  it rebuilds the Endfield launch helper from source (a prebuilt copy ships too).
   On Ubuntu 24.04+ that downloaded runtime needs one AppArmor profile (one command,
   see `docs/TESTERS.md`); `nadare doctor` shows it. Linux Mint turns that
   restriction off and is not affected.
@@ -35,7 +34,7 @@ checkout. FGO support is **experimental** (tested on NVIDIA + CachyOS only).
 
 The AppImage needs none of this for CZN. These packages are for
 running Nadare from source; `umu-launcher` is optional (used when present) and
-`mingw-w64` is only needed to rebuild the C fallback of the PCSDK stub.
+`mingw-w64` is optional (it rebuilds the Endfield launch helper; a prebuilt copy ships).
 
 **Arch / CachyOS / Manjaro**
 ```sh
@@ -136,7 +135,9 @@ set it.
 
 ### Run
 
-The CLI is the most reliable entry point in 0.1:
+The CLI is plumbing beside the GUI: shortcuts, diagnostics and automation use it, and
+it is the easiest way to drive a source checkout. `nadare --help` lists the supported
+commands; `login` and `remake-prefix` below are advanced ones it still runs.
 
 ```sh
 .venv/bin/nadare list                  # show profiles

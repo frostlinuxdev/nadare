@@ -10,6 +10,9 @@ from nadare.core.sources import gfl2
 
 FIXTURES = Path(__file__).parent / "fixtures" / "catalog"
 FLEX_URL = "https://gf2-launcher-intl.haoplay.com/flexible_config"
+VERSION_URL = (
+    "https://gf2-intl-cdn.17996cdn.com/prod/AssetBundles_Windows/28279/Version.txt"
+)
 
 
 def _plan_with_client_version(client_version: str):
@@ -18,8 +21,11 @@ def _plan_with_client_version(client_version: str):
     plug = json.loads(data["nexon_plug"])
     plug["game_client_version"] = client_version
     data["nexon_plug"] = json.dumps(plug)
-    payload = json.dumps(doc).encode()
-    return gfl2.resolve_haoplay(lambda url, _headers: payload if url == FLEX_URL else None)
+    routes = {
+        FLEX_URL: json.dumps(doc).encode(),
+        VERSION_URL: (FIXTURES / "gfl2_haoplay_Version.txt").read_bytes(),
+    }
+    return gfl2.resolve_haoplay(lambda url, _headers: routes[url])
 
 
 def test_plan_version_changes_when_only_client_version_changes():
@@ -29,5 +35,5 @@ def test_plan_version_changes_when_only_client_version_changes():
     assert first.version == "2.0.3936.14886.28279+client-2.0.3936"
     assert second.version == "2.0.3936.14886.28279+client-2.0.3937"
     assert first.version != second.version
-    assert first.files == second.files == ()
+    assert first.files == second.files and first.files
     assert first.archives[0].source.url != second.archives[0].source.url

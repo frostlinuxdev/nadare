@@ -37,7 +37,7 @@ def test_use_this_folder_is_refused_while_the_game_runs(
         window.open_game("g")
         from nadare.core.backends import Status
 
-        window._on_result("g", Status(state="running", running=True, message="Running"))
+        window._on_result("g", "status", Status(state="running", running=True, message="Running"))
         assert window.game._status.state == "running"
 
         copy = SimpleNamespace(game_dir=new.resolve())

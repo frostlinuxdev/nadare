@@ -165,29 +165,9 @@ def test_the_czn_prefix_marker_never_writes_through_a_link(tmp_path):
     assert (prefix / "czn-runner").read_text().strip() == "dwproton-11.0-15"
 
 
-def test_czn_uninstall_never_walks_into_a_mounted_drive(tmp_path, monkeypatch):
-    from _backend_helpers import make_context
-
-    from nadare.backends.czn.backend import CznBackend
-
-    backend = CznBackend(make_context(tmp_path, "stove-czn", {}))
-    prefix = backend.prefix()
-    (prefix / "drive_c").mkdir(parents=True)
-    monkeypatch.setattr(backend, "_game_running", lambda: False)
-    calls = []
-
-    def spy(root, keep=()):
-        calls.append(root)
-        return removal._RmTreeResult([], [])
-
-    monkeypatch.setattr(removal, "_rmtree_safely", spy)
-    backend.uninstall(purge=True)
-    assert prefix in calls
-
-
 def test_czn_never_stamps_a_users_non_empty_folder_as_its_prefix(tmp_path, monkeypatch):
     """Sweep b23r1 c03: wineboot in a folder the user picked that already held files stamped
-    it "created by Nadare", and uninstall then deleted the whole folder."""
+    it "created by Nadare", which then made it look like Nadare's to delete."""
     from _backend_helpers import make_context
 
     from nadare.backends.czn.backend import PREFIX_MARKER, CznBackend
@@ -204,8 +184,6 @@ def test_czn_never_stamps_a_users_non_empty_folder_as_its_prefix(tmp_path, monke
     monkeypatch.setattr(CznBackend, "_run_in_prefix", fake_wineboot)
     backend._ensure_prefix()
     assert not (mine / PREFIX_MARKER).exists()
-    assert backend._prefix_not_deletable(mine) != ""
-    backend.uninstall()
     assert (mine / "notes.txt").read_text() == "mine"
 
 

@@ -269,17 +269,161 @@ def test_move_moves_the_prefix_and_updates_the_profile(tmp_path, qapp, monkeypat
         qapp.processEvents()
 
 
-def test_a_cross_disk_move_keeps_the_old_copy_and_says_so(tmp_path, qapp, monkeypatch):
+def _wait(qapp, condition, seconds=10.0):
+    import time
+
+    end = time.monotonic() + seconds
+    while not condition() and time.monotonic() < end:
+        qapp.processEvents()
+        time.sleep(0.01)
+    return condition()
+
+
+def test_a_cross_disk_move_removes_the_original_after_the_check(tmp_path, qapp, monkeypatch):
+    """Move moves (user, 2026-11-14): the verified copy replaces the original."""
     from nadare.core import relocate
 
     monkeypatch.setattr(relocate, "_same_device", lambda a, b: False)
+    from nadare.core import removal
+
+    monkeypatch.setattr(removal, "prefix_made_by_nadare", lambda *a, **kw: True)
+    page, config, src, parent, texts = _move_setup(tmp_path, qapp, monkeypatch)
+    try:
+        assert not any("keeps your original" in t for t in texts)
+        page.move_button.click()
+        _settle(qapp)
+        assert _wait(qapp, lambda: not src.exists())
+        assert (parent / "pfx" / "drive_c" / "Game" / "a.bin").is_file()
+        assert config.profiles["sample"]["prefix"] == str(parent / "pfx")
+        assert _wait(qapp, lambda: "was removed" in page.note.text())
+        assert any("deletes the original" in t for t in texts)  # the question said so
+    finally:
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_pending_original_is_saved_with_the_new_location(tmp_path, qapp, monkeypatch):
+    """Round 2, C4: a crash after the save must leave a record a later start can finish."""
+    from nadare.core import relocate, removal
+    from nadare.gui.settings_parts import move as move_mod
+
+    monkeypatch.setattr(relocate, "_same_device", lambda a, b: False)
+    monkeypatch.setattr(removal, "prefix_made_by_nadare", lambda *a, **kw: True)
+    monkeypatch.setattr(move_mod, "_forget_pending", lambda *a, **kw: None)  # "crash"
+    monkeypatch.setattr(
+        relocate, "remove_original", lambda old, new: relocate.OriginalRemoval(False, "x")
+    )
     page, config, src, parent, texts = _move_setup(tmp_path, qapp, monkeypatch)
     try:
         page.move_button.click()
         _settle(qapp)
-        assert src.is_dir() and (parent / "pfx" / "drive_c").is_dir()
-        assert any(str(src) in t and "delete" in t.lower() for t in texts)
-        assert config.profiles["sample"]["prefix"] == str(parent / "pfx")
+        assert _wait(qapp, lambda: config.profiles["sample"]["prefix"] == str(parent / "pfx"))
+        saved = Config.load(tmp_path / "config.json").profiles["sample"]
+        (entry,) = saved[relocate.PENDING_ORIGINALS]
+        assert entry[:2] == [str(src), str(parent / "pfx")]
+        assert len(entry) == 4  # the original's device and inode (round 3)
+    finally:
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_copy_that_no_longer_matches_keeps_the_original(tmp_path, qapp, monkeypatch):
+    from nadare.core import relocate
+
+    monkeypatch.setattr(relocate, "_same_device", lambda a, b: False)
+    from nadare.core import removal
+
+    monkeypatch.setattr(removal, "prefix_made_by_nadare", lambda *a, **kw: True)
+    real = relocate.remove_original
+
+    def tampered(old, new):
+        (new / "drive_c" / "Game" / "a.bin").write_bytes(b"x")
+        return real(old, new)
+
+    monkeypatch.setattr(relocate, "remove_original", tampered)
+    page, config, src, parent, texts = _move_setup(tmp_path, qapp, monkeypatch)
+    try:
+        page.move_button.click()
+        _settle(qapp)
+        assert _wait(qapp, lambda: "still at" in page.note.text())
+        assert src.is_dir() and config.profiles["sample"]["prefix"] == str(parent / "pfx")
+        assert any("not removed" in t for t in texts)
+    finally:
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_prefix_nadare_did_not_make_is_moved_but_never_deleted(tmp_path, qapp, monkeypatch):
+    """Storage review A1: a player's own prefix (a shared ~/.wine, say) keeps its original."""
+    from nadare.core import relocate, removal
+
+    monkeypatch.setattr(relocate, "_same_device", lambda a, b: False)
+    monkeypatch.setattr(removal, "prefix_made_by_nadare", lambda *a, **k: False)
+    page, config, src, parent, texts = _move_setup(tmp_path, qapp, monkeypatch)
+    try:
+        page.move_button.click()
+        _settle(qapp)
+        assert _wait(qapp, lambda: config.profiles["sample"]["prefix"] == str(parent / "pfx"))
+        assert _wait(qapp, lambda: any("did not make it" in t for t in texts))
+        assert src.is_dir() and (src / "drive_c" / "Game" / "a.bin").is_file()
+    finally:
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_cancel_after_the_copy_keeps_the_original(tmp_path, qapp, monkeypatch):
+    """Storage review A7: a late Cancel still finishes the move but deletes nothing."""
+    from nadare.core import relocate
+
+    monkeypatch.setattr(relocate, "_same_device", lambda a, b: False)
+    from nadare.core import removal
+
+    monkeypatch.setattr(removal, "prefix_made_by_nadare", lambda *a, **kw: True)
+    real = relocate.move_tree
+
+    def then_cancel(*a, **k):
+        result = real(*a, **k)
+        k["cancel"].cancel()
+        return result
+
+    monkeypatch.setattr(relocate, "move_tree", then_cancel)
+    page, config, src, parent, texts = _move_setup(tmp_path, qapp, monkeypatch)
+    try:
+        page.move_button.click()
+        _settle(qapp)
+        assert _wait(qapp, lambda: any("pressed Cancel" in t for t in texts))
+        assert src.is_dir() and config.profiles["sample"]["prefix"] == str(parent / "pfx")
+    finally:
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_a_move_into_another_games_prefix_is_refused(tmp_path, qapp, monkeypatch):
+    """Storage review round 2, B3: the destination is checked against the other games."""
+    page, config, src, parent, texts = _move_setup(tmp_path, qapp, monkeypatch)
+    try:
+        config.add_profile("beta", backend="wine", title="Beta", prefix=str(parent))
+        page.move_button.click()
+        _settle(qapp)
+        assert src.is_dir() and not (parent / "pfx").exists()
+        assert any("Beta" in t for t in texts), texts
+        assert config.profiles["sample"]["prefix"] == str(src)
+    finally:
+        page.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_dialog_says_a_players_own_prefix_is_kept(tmp_path, qapp, monkeypatch):
+    """Storage review round 2, C3: no promise of a delete that does not happen."""
+    from nadare.core import removal
+
+    monkeypatch.setattr(removal, "prefix_made_by_nadare", lambda *a, **kw: False)
+    page, config, src, parent, texts = _move_setup(tmp_path, qapp, monkeypatch)
+    try:
+        page.move_button.click()
+        _settle(qapp)
+        question = texts[0]
+        assert "original is kept" in question and "deletes the original" not in question
     finally:
         page.deleteLater()
         qapp.processEvents()
@@ -445,7 +589,12 @@ def test_a_failed_config_save_after_the_move_says_where_the_folder_is_now(
     tmp_path, qapp, monkeypatch
 ):
     page, config, src, parent, texts = _move_setup(tmp_path, qapp, monkeypatch)
-    config.save = lambda *a, **k: (_ for _ in ()).throw(OSError(28, "No space left"))
+    save = config.save
+    def fail_after_move(*args, **kwargs):
+        if not src.exists():
+            raise OSError(28, "No space left")
+        return save(*args, **kwargs)  # permit the required pre-Move journal save
+    config.save = fail_after_move
     try:
         page.move_button.click()
         _settle(qapp)

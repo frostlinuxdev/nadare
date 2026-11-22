@@ -17,7 +17,6 @@ from nadare.core.config import Config
 from nadare.core.storecatalog import entries
 from nadare.gui.main_window import MainWindow
 from nadare.gui.store import StoreCard
-from nadare.gui.store_detail import StoreDetail
 
 
 @pytest.fixture(scope="module")
@@ -49,14 +48,22 @@ def _close(window, qapp) -> None:
     qapp.processEvents()
 
 
-def test_container_page_says_its_requirements_once(qapp):
-    widget = StoreDetail(_entry("fgo-lepton"))
+def test_the_install_dialog_says_a_containers_requirements_once(qapp):
+    """#1536: the Install dialog carries what the detail page said (once, not twice)."""
+    from nadare.gui.quick_install import QuickInstallDialog, StoreFacts
+
+    entry = _entry("fgo-lepton")
+    facts = StoreFacts(entry.tier, entry.tier_help, entry.delivery_label, entry.notice)
+    widget = QuickInstallDialog(
+        "FGO", notice="", describe=lambda _c: ("/games", "", ""), facts=facts
+    )
     shown = " ".join(
-        label.text().lower() for label in (widget.delivery_label, widget.notice_label)
+        label.text().lower() for label in (widget.delivery_label, widget.page_notice_label)
     )
     assert shown.count("podman") == 1
     assert shown.count("binder") == 1
     assert "android container" in widget.delivery_label.text().lower()
+    widget.deleteLater()
 
 
 def _top(card: StoreCard, widget) -> int:
@@ -108,47 +115,6 @@ def test_opening_the_store_focuses_the_search_box(tmp_path, qapp):
         _close(window, qapp)
 
 
-def test_back_from_a_detail_returns_focus_to_the_card_that_was_opened(tmp_path, qapp):
-    window = _window(tmp_path)
-    try:
-        window.show()
-        window.show_store()
-        qapp.processEvents()
-        grid = window.store.grid
-        grid.entry_activated.emit("direct-pgr")
-        qapp.processEvents()
-        window.store.detail.back_button.click()
-        qapp.processEvents()
-        assert window.focusWidget() is grid._cards["direct-pgr"]
-        # If a search hid that card meanwhile, focus falls back to the search box.
-        grid.entry_activated.emit("direct-pgr")
-        window.store.detail.back_button.click()
-        grid.search.setText("neverness")
-        qapp.processEvents()
-        window.store.show_detail("direct-nte")
-        window.store.detail.back_button.click()
-        qapp.processEvents()
-        assert window.focusWidget() is grid._cards["direct-nte"]
-    finally:
-        _close(window, qapp)
-
-
-def test_back_falls_back_to_the_search_box_when_the_card_is_gone(tmp_path, qapp):
-    window = _window(tmp_path)
-    try:
-        window.show()
-        window.show_store()
-        qapp.processEvents()
-        grid = window.store.grid
-        window.store.show_detail("direct-pgr")
-        grid.search.setText("zzz-no-such-game")
-        window.store.detail.back_button.click()
-        qapp.processEvents()
-        assert window.focusWidget() is grid.search
-    finally:
-        _close(window, qapp)
-
-
 def test_the_grid_fits_the_minimum_window_size(tmp_path, qapp):
     window = _window(tmp_path)
     try:
@@ -159,30 +125,9 @@ def test_the_grid_fits_the_minimum_window_size(tmp_path, qapp):
         grid = window.store.grid
         assert grid.scroll.horizontalScrollBar().maximum() == 0
         area = grid.rect()
-        for widget in (grid.search, grid.tier_filter, grid.own_game_button):
+        for widget in (grid.search, grid.tier_filter):
             assert area.contains(widget.mapTo(grid, widget.rect().topLeft()))
             assert area.contains(widget.mapTo(grid, widget.rect().bottomRight()))
-    finally:
-        _close(window, qapp)
-
-
-@pytest.mark.parametrize("kind", ["launcher-nikke", "fgo-lepton", "direct-pgr"])
-def test_the_install_button_stays_reachable_at_the_minimum_window_size(tmp_path, qapp, kind):
-    window = _window(tmp_path)
-    try:
-        window.resize(880, 560)
-        window.show_store()
-        window.show()
-        qapp.processEvents()
-        _entry(kind)
-        window.store.show_detail(kind)
-        qapp.processEvents()
-        detail = window.store.detail
-        button = detail.install_button
-        # The primary action must be visible in the viewport without scrolling.
-        bottom = button.mapTo(window.store, button.rect().bottomLeft()).y()
-        assert bottom <= window.store.height(), (kind, bottom, window.store.height())
-        assert button.isVisible()
     finally:
         _close(window, qapp)
 
@@ -196,30 +141,3 @@ def test_launcher_games_do_not_show_the_old_100_gib_placeholder(qapp):
     assert sizes["launcher-nikke"] == 27 * 1024**3
 
 
-def test_a_background_installed_change_does_not_move_keyboard_focus(qapp):
-    """#942: the page already shown must keep focus where the user put it."""
-    import dataclasses
-
-    entry = _entry("fgo-lepton")
-    widget = StoreDetail(dataclasses.replace(entry, installed=False))
-    widget.show()
-    widget.back_button.setFocus() if hasattr(widget, "back_button") else None
-    elsewhere = widget.install_button
-    elsewhere.setFocus()
-    qapp.processEvents()
-    widget.set_entry(dataclasses.replace(entry, installed=True))
-    # Install had focus, so the user's place moves to Play (their next step)...
-    assert widget.focusWidget() is widget.play_button
-    # ...but a later background refresh must not steal focus from wherever it now is.
-    widget.back_button.setFocus()
-    widget.set_entry(dataclasses.replace(entry, installed=True))
-    assert widget.focusWidget() is widget.back_button
-
-
-def test_opening_the_page_for_another_game_focuses_play(qapp):
-    import dataclasses
-
-    first = dataclasses.replace(_entry("fgo-lepton"), installed=True)
-    widget = StoreDetail(first)
-    widget.show()
-    assert widget.focusWidget() is widget.play_button

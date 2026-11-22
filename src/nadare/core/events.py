@@ -16,8 +16,22 @@ from typing import Any
 # Never surface these verbatim.
 _TOKEN_KEYS = re.compile(
     r"(?i)(access_token|refresh_token|client_secret|password|auth_code|"
-    r"authorization|captcha[-_]?token|rtCredential|api[-_]?key|token)"
+    r"authorization|captcha[-_]?token|rtCredential|api[-_]?key|token|"
+    # Sign-in cookies, login tickets and session ids are as good as the password (#1593).
+    r"(?:set-)?cookie|ticket|[a-z]*sessid|session[-_]?(?:id|key))"
 )
+
+#: An HTTP cookie header carries several ``name=value;`` pairs: an unquoted value runs to the
+#: end of the line, a quoted one to its closing quote, so no pair after the first leaks (#1593).
+_COOKIE_RE = re.compile(
+    r"""(?i)\b((?:set-)?cookie)(["']?\s*[:=]\s*)"""
+    r"""(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\r\n]*)"""
+)
+
+
+def _mask_cookies(text: str) -> str:
+    return _COOKIE_RE.sub(lambda m: f"{m.group(1)}={_REDACTED}", text)
+
 
 #: A ``key=value`` / ``key: value`` pair whose key names a secret.  The whole
 #: value is redacted: a short or punctuation-bearing secret would otherwise slip
@@ -62,6 +76,22 @@ _SECRET_OR_PLACEHOLDER_RE = re.compile(
 #: heuristic would mask it; a log that cannot name the crash is useless (#1126).
 _KNOWN_SIGNAL_RE = re.compile(r"signal=SIG(?:ILL|ABRT|BUS|FPE|SEGV)")
 
+#: Lines Wine and winedbg print for a crash: the page fault or exception line, a backtrace frame,
+#: the register dump, the module list and the faulting instruction. Their hex addresses say
+#: which module crashed and whether it was a null pointer; they are not secrets (#1724).
+_WINE_CRASH_LINE_RE = re.compile(
+    r"Unhandled (?:page fault|exception)"
+    r"|^\s*(?:=>)?\s*\d+ 0x[0-9a-fA-F]+ in "
+    r"|^\s*(?:[re]?[a-z]{2}|r\d{1,2}|eflags):[0-9a-fA-F]{4,16}(?:\s|$)"
+    r"|^(?:PE|ELF)\s+[0-9a-fA-F]+-[0-9a-fA-F]+\s"
+    r"|^0x[0-9a-fA-F]+ \S+\+0x[0-9a-fA-F]+: "
+)
+
+#: A hex address, a ``start-end`` module range or a ``module+0xoffset``, as such a line prints it.
+_HEX_ADDRESS_RE = re.compile(
+    r"(?:[A-Za-z_]\w*\+0x)?(?:0x)?[0-9a-fA-F]+(?:-(?:0x)?[0-9a-fA-F]+)?"
+)
+
 _REDACTED = "<redacted>"
 
 #: ``user:password@`` credentials embedded in a URL must never be logged; the
@@ -69,9 +99,32 @@ _REDACTED = "<redacted>"
 _USERINFO_RE = re.compile(r"(?<=//)[^/@:\s]*:[^/@\s]+@")
 
 
+#: A command-line flag whose name marks a secret (``--password``, ``--auth-token``, ``-pw``).
+_SECRET_FLAG_NAME = (
+    r"(?:[\w-]*?" + _TOKEN_KEYS.pattern.removeprefix("(?i)") + r"[\w-]*|passwd|pass|pwd|pw)"
+)
+_SECRET_FLAG_RE = re.compile(r"(?i)(?:--?|/)" + _SECRET_FLAG_NAME)
+
+#: ``--password hunter2``: the argument after such a flag is its value (#1592). The value is
+#: masked unless it is another flag; ``key=value`` is :data:`_TOKEN_VALUE_RE`'s job.
+_FLAG_VALUE_RE = re.compile(
+    r"(?i)(?<!\S)((?:--?|/)" + _SECRET_FLAG_NAME + r"\s+)"
+    r"""(?!-)(?:"(?:[^"\\]|\\.)*"\S*|'(?:[^'\\]|\\.)*'\S*|\S+)"""
+)
+
+
+def is_secret_flag(arg: Any) -> bool:
+    """True when ``arg`` is a flag (``--token``) whose next argument is a secret (#1592)."""
+    return bool(_SECRET_FLAG_RE.fullmatch(str(arg)))
+
+
+def _mask_flag_values(text: str) -> str:
+    return _FLAG_VALUE_RE.sub(lambda m: f"{m.group(1)}{_REDACTED}", text)
+
+
 #: A setting named ``*_token``, ``*_secret``, ``*_password`` or ``*_key`` holds a secret too
 #: (``nm_device_key``, ``sgdb_api_key``, #811).
-_SECRET_SUFFIX = re.compile(r"(?i).+[_-](token|secret|password|passwd|key)")
+_SECRET_SUFFIX = re.compile(r"(?i).+[_-](token|secret|password|passwd|key|ticket|cookie)")
 
 
 def is_secret_key(key: Any) -> bool:
@@ -101,9 +154,16 @@ class Cancel:
     def __init__(self) -> None:
         self._cancelled = False
         self._skip = False
+        self._cancel_count = 0
 
     def cancel(self) -> None:
+        self._cancel_count += 1
         self._cancelled = True
+
+    @property
+    def cancel_count(self) -> int:
+        """How many times Stop was pressed: a second press skips the polite close."""
+        return self._cancel_count
 
     def skip_step(self) -> None:
         """Ask the running step to stop on its own while the operation carries on.
@@ -141,8 +201,9 @@ def mask_known(text: str) -> str:
     Unlike :func:`mask` this leaves long hashes, paths and timestamps alone, so it suits text
     people read (the log viewer) while the length heuristic suits text written to disk.
     """
-    out = _USERINFO_RE.sub(f"{_REDACTED}@", text)
-    return _TOKEN_VALUE_RE.sub(lambda m: f"{m.group(1)}={_REDACTED}", out)
+    out = _mask_cookies(_USERINFO_RE.sub(f"{_REDACTED}@", text))
+    out = _TOKEN_VALUE_RE.sub(lambda m: f"{m.group(1)}={_REDACTED}", out)
+    return _mask_flag_values(out)
 
 
 _TRACEBACK_STRUCTURE = (
@@ -181,6 +242,15 @@ def mask_traceback(text: str) -> str:
     return "\n".join(out)
 
 
+def _on_wine_crash_line(match: re.Match[str]) -> bool:
+    """True when ``match`` sits on a line Wine prints for a crash (#1724)."""
+    text = match.string
+    start = text.rfind("\n", 0, match.start()) + 1
+    end = text.find("\n", match.end())
+    line = text[start : len(text) if end < 0 else end]
+    return bool(_WINE_CRASH_LINE_RE.search(line))
+
+
 def mask(text: str) -> str:
     """Mask anything that looks like a secret value. Used before logging.
 
@@ -202,10 +272,13 @@ def mask(text: str) -> str:
             return value
         if _KNOWN_SIGNAL_RE.fullmatch(value):
             return value
+        if _HEX_ADDRESS_RE.fullmatch(value) and _on_wine_crash_line(match):
+            return value
         return _masked_value(value)
 
-    out = _USERINFO_RE.sub(f"{_REDACTED}@", text)
+    out = _mask_cookies(_USERINFO_RE.sub(f"{_REDACTED}@", text))
     out = _TOKEN_VALUE_RE.sub(lambda m: f"{m.group(1)}={_REDACTED}", out)
+    out = _mask_flag_values(out)
     return _SECRET_OR_PLACEHOLDER_RE.sub(_replace, out)
 
 

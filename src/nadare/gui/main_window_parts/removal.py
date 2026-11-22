@@ -11,6 +11,7 @@ import copy
 import logging
 import textwrap
 
+from PyQt6 import sip
 from PyQt6.QtCore import (
     QThreadPool,
 )
@@ -53,12 +54,15 @@ def _removal_reason_text(reason: str) -> str:
 class RemovalMixin:
     """Mixin for :class:`MainWindow`; see the module text."""
 
-    def _on_remove_requested(self, profile: str, preselect: frozenset[str] = frozenset()) -> None:
+    def _on_remove_requested(
+        self, profile: str, preselect: frozenset[str] = frozenset(),
+        *, _selinux_note: str | None = None,
+    ) -> None:
         """Confirm, then remove ``profile`` from the library (files kept by default).
 
         ``preselect`` ticks those trees (``install_dir``, ``prefix``) when they are safe to delete.
         """
-        if profile not in self.config.profiles:
+        if sip.isdeleted(self) or profile not in self.config.profiles:
             return
         if profile in self._busy:
             QMessageBox.information(
@@ -67,17 +71,33 @@ class RemovalMixin:
                 f"{self._game_title(profile)} is busy. Stop it first, then remove it.",
             )
             return
+        if _selinux_note is None and self.config.profiles[profile].get("backend") == "fgo-lepton":
+            from ...core import fgo_selinux
+
+            snapshot = copy.deepcopy(self.config.profiles[profile])
+            task = CallTask(lambda: fgo_selinux.single_game_note(snapshot))
+            task.signals.done.connect(
+                lambda note: self._on_remove_requested(profile, preselect, _selinux_note=note)
+            )
+            task.signals.failed.connect(
+                lambda _message: self._on_remove_requested(profile, preselect, _selinux_note="")
+            )
+            QThreadPool.globalInstance().start(task)
+            return
         title = str(self.config.profiles[profile].get("title") or profile)
         data_dir = paths.profiles_dir() / profile
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("Uninstall or remove game")
         box.setText(f"Remove {title} from Nadare?")
-        box.setInformativeText(
+        info = (
             "This removes the game from your library, its shortcuts and its saved login. "
             "Your game files are kept unless you tick them below; to uninstall the game, "
             "tick its game folder and Wine prefix, and Nadare asks once more before deleting."
         )
+        if _selinux_note:
+            info = f"{info}\n\n{_selinux_note}"
+        box.setInformativeText(info)
         # One idea per line, the path on a line of its own: a single long line made the box
         # wider than the screen and cut the end off (b23-rc4 click-through).
         delete_data = QCheckBox(

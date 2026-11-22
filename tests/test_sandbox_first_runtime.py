@@ -117,7 +117,7 @@ def _backend(tmp_path, monkeypatch, *, umu_run="/data/nadare/umu/1.4.4/umu-run",
 def ran(monkeypatch):
     calls: list[tuple[list[str], dict[str, str]]] = []
 
-    def fake_stream(argv, env, on_line=None, cancel=None):
+    def fake_stream(argv, env, on_line=None, cancel=None, before_stop=None):
         calls.append((list(argv), dict(env)))
         return 0
 
@@ -129,7 +129,7 @@ def test_sandboxed_first_launch_lets_umu_set_up_its_runtime_first(
     tmp_path, monkeypatch, copies, ran
 ):
     backend = _backend(tmp_path, monkeypatch, secure_mode=True)
-    monkeypatch.setattr(umu, "runtime_downloaded", lambda: False)
+    monkeypatch.setattr(umu, "runtime_downloaded", lambda executable=None: False)
 
     def stream_then_runtime(argv, env, on_line=None, cancel=None):
         ran.append((list(argv), dict(env)))
@@ -144,21 +144,40 @@ def test_sandboxed_first_launch_lets_umu_set_up_its_runtime_first(
     assert Path(argv[0]).name == "srt-bwrap"  # the Sandbox found the runtime's copy
 
 
+@pytest.mark.parametrize("flags", [[], ["--dlsym"]])
+def test_a_mangohud_prefix_still_lets_umu_set_up_its_runtime_first(
+    tmp_path, monkeypatch, ran, flags,
+):
+    """CZN puts ``mangohud`` in front of umu-run before the Sandbox wraps it (#1556)."""
+    backend = _backend(tmp_path, monkeypatch, secure_mode=True)
+    monkeypatch.setattr(umu, "runtime_downloaded", lambda executable=None: False)
+    umu_run = "/data/nadare/umu/1.4.4/umu-run"
+    backend._runtime_before_sandbox(["/usr/bin/mangohud", *flags, umu_run, "game.exe"], {"A": "1"})
+    assert ran and ran[0][0] == [umu_run, ""]
+
+
+def test_a_mangohud_prefix_on_plain_wine_runs_nothing_first(tmp_path, monkeypatch, ran):
+    backend = _backend(tmp_path, monkeypatch, secure_mode=True)
+    monkeypatch.setattr(umu, "runtime_downloaded", lambda executable=None: False)
+    backend._runtime_before_sandbox(["/usr/bin/mangohud", "/usr/bin/wine", "game.exe"], {})
+    assert ran == []
+
+
 def test_runtime_on_disk_runs_nothing_first(tmp_path, monkeypatch, copies, ran):
     copies.append(str(_copy(tmp_path)))
-    monkeypatch.setattr(umu, "runtime_downloaded", lambda: True)
+    monkeypatch.setattr(umu, "runtime_downloaded", lambda executable=None: True)
     _backend(tmp_path, monkeypatch, secure_mode=True).build()
     assert ran == []
 
 
 def test_sandbox_off_runs_nothing_first(tmp_path, monkeypatch, copies, ran):
-    monkeypatch.setattr(umu, "runtime_downloaded", lambda: False)
+    monkeypatch.setattr(umu, "runtime_downloaded", lambda executable=None: False)
     _backend(tmp_path, monkeypatch, secure_mode=False).build()
     assert ran == []
 
 
 def test_a_plain_wine_launch_runs_nothing_first(tmp_path, monkeypatch, copies, ran, has_bwrap):
-    monkeypatch.setattr(umu, "runtime_downloaded", lambda: False)
+    monkeypatch.setattr(umu, "runtime_downloaded", lambda executable=None: False)
     game = tmp_path / "games" / "Thing"
     exe = write_exe(game / "thing.exe", "MZ")
     ctx = make_context(tmp_path, "wine", {
@@ -175,7 +194,7 @@ def has_bwrap(monkeypatch):
 
 
 def test_a_failed_runtime_setup_still_reaches_the_normal_check(tmp_path, monkeypatch, copies):
-    monkeypatch.setattr(umu, "runtime_downloaded", lambda: False)
+    monkeypatch.setattr(umu, "runtime_downloaded", lambda executable=None: False)
     monkeypatch.setattr(generic_wine, "stream", lambda *a, **k: 1)
     backend = _backend(tmp_path, monkeypatch, secure_mode=True)
     with pytest.raises(generic_wine.BackendError, match="bubblewrap"):
@@ -188,7 +207,7 @@ def test_the_catalog_games_take_the_same_first_step(tmp_path, monkeypatch, copie
     from nadare.core import backends
 
     monkeypatch.setattr(wg.sandbox, "in_flatpak", lambda: False)
-    monkeypatch.setattr(umu, "runtime_downloaded", lambda: False)
+    monkeypatch.setattr(umu, "runtime_downloaded", lambda executable=None: False)
     seen: list[list[str]] = []
 
     def fake_stream(argv, env, on_line=None, cancel=None, **_kw):
@@ -206,3 +225,31 @@ def test_the_catalog_games_take_the_same_first_step(tmp_path, monkeypatch, copie
     argv, _env = backend._secure_wrap(["/usr/bin/umu-run", "game.exe"], env)
     assert seen == [["/usr/bin/umu-run", ""]]
     assert Path(argv[0]).name == "srt-bwrap"
+
+
+@pytest.mark.parametrize(
+    "game_args",
+    [["--umu-run"], ["/home/me/tools/umu-run"], ["-opt", "umu-run"]],
+)
+def test_a_plain_wine_game_whose_arguments_name_umu_runs_nothing_first(
+    tmp_path, monkeypatch, ran, game_args,
+):
+    """Only the launcher position marks umu: a game argument must not run it outside the Sandbox."""
+    backend = _backend(tmp_path, monkeypatch, secure_mode=True)
+    monkeypatch.setattr(umu, "runtime_downloaded", lambda executable=None: False)
+    backend._runtime_before_sandbox(["/usr/bin/wine", "C:/game.exe", *game_args], {})
+    backend._runtime_before_sandbox(
+        ["/usr/bin/mangohud", "/usr/bin/wine", "C:/game.exe", *game_args], {}
+    )
+    assert ran == []
+
+
+@pytest.mark.parametrize("frozen", [True, False])
+def test_nadare_own_umu_wrapper_still_sets_up_the_runtime_first(
+    tmp_path, monkeypatch, ran, frozen,
+):
+    backend = _backend(tmp_path, monkeypatch, secure_mode=True)
+    monkeypatch.setattr(umu, "runtime_downloaded", lambda executable=None: False)
+    lead = ["/opt/nadare/nadare"] if frozen else ["/usr/bin/python3", "-m", "nadare"]
+    backend._runtime_before_sandbox([*lead, "--umu-run", "game.exe", "--umu-run"], {})
+    assert ran and ran[0][0] == [*lead, "--umu-run", ""]

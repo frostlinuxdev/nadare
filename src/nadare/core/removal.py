@@ -12,16 +12,29 @@ symlink pointing elsewhere).
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import os
 import re
 import shutil
-from collections.abc import Iterable, Sequence
+import stat
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
-from . import backends, libraries, paths, process, runlock, runlog, shortcuts
+from . import (
+    backends,
+    gamefacts,
+    libraries,
+    location,
+    paths,
+    process,
+    runlock,
+    runlog,
+    shadercache,
+    shortcuts,
+)
 
 _TREE_KEYS = ("install_dir", "prefix", "wineprefix")
 _PENDING_REMOVAL = "removal_pending"
@@ -78,25 +91,48 @@ def _setting(profile, key: str):
 
 
 def _shared_with(config_profiles, name: str, resolved: Path) -> str:
-    """Name of another profile whose configured tree overlaps ``resolved`` ("" if none)."""
-    for other, other_profile in config_profiles.items():
-        if other == name:
-            continue
-        for key in _TREE_KEYS:
-            value = _setting(other_profile, key)
-            if not value or not isinstance(value, str):
-                continue
-            try:
-                other_resolved = Path(value).expanduser().resolve()
-            except OSError:
-                continue
-            if (
-                other_resolved == resolved
-                or resolved in other_resolved.parents
-                or other_resolved in resolved.parents
-            ):
-                return other
-    return ""
+    """Name of another game whose folders overlap ``resolved`` ("" if none).
+
+    The one answer to "used by another game" (:func:`location.overlapping`, #1372 step 2):
+    recorded paths, ``owned_dirs``, its game folder and its ``profiles/<name>``. Every recorded
+    folder counts here, broad or not, so deletion only ever refuses more.
+    """
+    claim = location.overlapping(
+        config_profiles, resolved, excluding=name, direction="either", ignore_broad=False
+    )
+    return claim.owner if claim is not None else ""
+
+
+def _own_folder(name: str) -> Path:
+    """``profiles/<name>`` with only the profiles folder resolved, never ``<name>`` itself.
+
+    Resolving the game's own folder would follow a link put there (to Documents, say) and
+    call the link's target Nadare's (storage review B1). Resolving the profiles folder keeps
+    systems where ``/home`` is a link (Silverblue, Bazzite) working.
+    """
+    return paths.profiles_dir().resolve() / name
+
+
+def _adopted_game_folder(config_profiles, name: str) -> Path | None:
+    """``profiles/Nadare/<Game>`` when that is this game's recorded folder, else ``None``.
+
+    An older Move put a game folder there; Find games adopts it with ``owned_dirs`` (#1366
+    C-F2). Only that exact shape counts: the folder :func:`location.game_folder` names, directly
+    in ``profiles/Nadare`` and not a link, so nothing else inside Nadare's folders opens up.
+    """
+    profile = config_profiles.get(name) if isinstance(config_profiles, Mapping) else None
+    if not isinstance(profile, dict):
+        return None
+    try:
+        folder = location.game_folder(profile, name)
+        if folder is None or folder.is_symlink():
+            return None
+        real = folder.parent.resolve() / folder.name
+        if real.parent != paths.profiles_dir().resolve() / location.NADARE_DIR:
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return real
 
 
 def tree_safety(config_profiles, name: str, path) -> tuple[bool, str]:
@@ -119,9 +155,10 @@ def tree_safety(config_profiles, name: str, path) -> tuple[bool, str]:
     if resolved == home or resolved in home.parents or resolved == Path("/"):
         return False, "is home or an ancestor of home"
     try:
-        own = (paths.profiles_dir() / name).resolve()
+        own = _own_folder(name)
     except OSError:
         own = None
+    adopted = _adopted_game_folder(config_profiles, name)
     for nd in _nadare_dirs():
         if resolved == nd or resolved in nd.parents:
             return False, "is inside nadare's own directories"
@@ -129,8 +166,10 @@ def tree_safety(config_profiles, name: str, path) -> tuple[bool, str]:
             # Only this profile's own folder (and below) is deletable.
             if own is not None and (resolved == own or own in resolved.parents):
                 continue
+            if adopted is not None and (resolved == adopted or adopted in resolved.parents):
+                continue
             return False, "is inside nadare's own directories"
-    other = _shared_with(config_profiles, name, resolved)
+    other = _shared_with(config_profiles, name, expanded)
     if other:
         return False, f"shared with {other}"
     return True, ""
@@ -147,13 +186,15 @@ def _parse_mountinfo(text: str) -> frozenset[str]:
     return frozenset(points)
 
 
-def _mountinfo_points() -> frozenset[str]:
-    """Every mount point the kernel lists, including same-filesystem bind mounts."""
+def _mountinfo_points() -> frozenset[str] | None:
+    """Every mount point the kernel lists, including same-filesystem bind mounts.
+
+    ``None`` when the list cannot be read: an unknown inventory is not an empty one (#1483)."""
     try:
         with open("/proc/self/mountinfo", encoding="utf-8", errors="replace") as handle:
             return _parse_mountinfo(handle.read())
     except OSError:
-        return frozenset()
+        return None
 
 
 class _Mounts(NamedTuple):
@@ -180,24 +221,31 @@ def _is_mount(path: Path, mounts: _Mounts) -> bool:
             or os.path.realpath(path) in mounts.points
         )
     except OSError:
-        return False
+        return True  # cannot be inspected: kept like a mount, never descended into (#1483)
 
 
 def _has_mount_below(root: Path, mounts: _Mounts) -> bool:
-    """Whether any folder below ``root`` is a separate mounted drive (symlinks not followed)."""
-    try:
-        entries = list(os.scandir(root))
-    except OSError:
-        return False
-    for entry in entries:
+    """Whether any folder below ``root`` is a separate mounted drive (symlinks not followed).
+
+    A game can plant a tree deeper than Python's recursion limit; the walk keeps its
+    own stack so such a tree is scanned rather than crashing the Clear.
+    """
+    pending = [root]
+    while pending:
         try:
-            if not entry.is_dir(follow_symlinks=False):
-                continue
+            entries = list(os.scandir(pending.pop()))
         except OSError:
             continue
-        path = Path(entry.path)
-        if _is_mount(path, mounts) or _has_mount_below(path, mounts):
-            return True
+        for entry in entries:
+            try:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            path = Path(entry.path)
+            if _is_mount(path, mounts):
+                return True
+            pending.append(path)
     return False
 
 
@@ -232,31 +280,41 @@ def _rmtree_contents(
     kept: list[Path],
     failed: list[tuple[Path, OSError]],
 ) -> None:
-    """Delete ``root``'s contents, leaving mounts and the ``keep`` trees in place."""
-    for entry in root.iterdir():
-        if entry.is_symlink():
-            entry.unlink()
-            continue
-        try:
-            resolved = entry.resolve()
-        except OSError:
-            resolved = entry
-        if any(resolved == k or k in resolved.parents for k in keep):
-            continue  # the kept tree itself or something inside it
-        if entry.is_dir():
-            if _is_mount(entry, mounts):
-                kept.append(entry)
-                continue
-            _rmtree_contents(entry, mounts, keep, kept, failed)
+    """Delete ``root``'s contents, leaving mounts and the ``keep`` trees in place.
+
+    The walk keeps its own stack (a deep game-planted tree must not hit the recursion
+    limit) and removes a folder after everything inside it was handled.
+    """
+    pending: list[tuple[Path, bool]] = [(root, False)]
+    while pending:
+        folder, finished = pending.pop()
+        if finished:
             try:
-                entry.rmdir()
+                folder.rmdir()
             except OSError as exc:
                 # A mount or a kept tree inside it explains the failure; anything else is
                 # a folder the user has to remove by hand.
-                if not _explained_rmdir_failure(entry, keep, kept, failed):
-                    failed.append((entry, exc))
-        else:
-            entry.unlink()
+                if not _explained_rmdir_failure(folder, keep, kept, failed):
+                    failed.append((folder, exc))
+            continue
+        for entry in folder.iterdir():
+            if entry.is_symlink():
+                entry.unlink()
+                continue
+            try:
+                resolved = entry.resolve()
+            except OSError:
+                resolved = entry
+            if any(resolved == k or k in resolved.parents for k in keep):
+                continue  # the kept tree itself or something inside it
+            if entry.is_dir():
+                if _is_mount(entry, mounts):
+                    kept.append(entry)
+                    continue
+                pending.append((entry, True))
+                pending.append((entry, False))
+            else:
+                entry.unlink()
 
 
 def _rmtree_safely(root: Path, keep: Iterable[Path] = ()) -> _RmTreeResult:
@@ -272,12 +330,26 @@ def _rmtree_safely(root: Path, keep: Iterable[Path] = ()) -> _RmTreeResult:
     """
     kept: list[Path] = []
     failed: list[tuple[Path, OSError]] = []
+    if root.is_symlink():
+        # The walk below would follow it and empty whatever the link points at; a plain
+        # ``shutil.rmtree`` refuses a link too. The caller reports it as kept.
+        return _RmTreeResult(
+            [], [(root, OSError("the folder is a link, so nothing behind it was deleted"))]
+        )
     keep = [k.resolve() for k in keep]
     try:
         root_dev = root.stat().st_dev
     except OSError:
         root_dev = -1
-    mounts = _Mounts(root_dev, _mountinfo_points())
+    points = _mountinfo_points()
+    if points is None:
+        # Without the kernel's mount list a same-disk bind mount is invisible: delete nothing
+        # rather than cross one (#1483). The caller reports the folder as kept.
+        return _RmTreeResult(
+            [], [(root, OSError("could not read the mount list (/proc/self/mountinfo); "
+                                "nothing was deleted"))]
+        )
+    mounts = _Mounts(root_dev, points)
     if _is_mount(root, mounts):
         return _RmTreeResult([root], failed)
     if not keep and not _has_mount_below(root, mounts):
@@ -293,6 +365,148 @@ def _rmtree_safely(root: Path, keep: Iterable[Path] = ()) -> _RmTreeResult:
     return _RmTreeResult(kept, failed)
 
 
+def delete_tree(root: Path, keep: Iterable[Path] = ()) -> _RmTreeResult:
+    """The one way to delete a folder tree on the player's behalf (#1481): never crosses a
+    mounted drive or bind mount, never deletes without a readable mount list. Everything that
+    stayed is in the result; a caller reports it rather than claiming the folder is gone."""
+    return _rmtree_safely(Path(root), keep)
+
+
+def _is_mount_fd(fd: int, parent_fd: int, mounts: _Mounts) -> bool:
+    """Whether an open folder is a mount boundary (the rules of :func:`_is_mount`)."""
+    try:
+        if os.fstat(fd).st_dev != os.fstat(parent_fd).st_dev:
+            return True
+        real = os.path.realpath(f"/proc/self/fd/{fd}")
+    except OSError:
+        return True  # cannot be inspected: kept like a mount, never descended into
+    return real in mounts.points
+
+
+def _remove_fd_tree(
+    root: Path, root_fd: int, mounts: _Mounts
+) -> tuple[list[Path], list[tuple[Path, OSError]]]:
+    """Delete every entry below an open folder, opening each name afresh.
+
+    Names are opened with ``O_NOFOLLOW`` relative to the folder that listed them, so a
+    hostile process swapping a child for a link between the listing and the visit makes
+    the entry a leftover instead of redirecting the deletion outside the tree.
+    """
+    kept: list[Path] = []
+    failed: list[tuple[Path, OSError]] = []
+    pending: list[tuple[str, int, str | None, Path]] = [("scan", root_fd, None, root)]
+    while pending:
+        action, fd, name, path = pending.pop()
+        if action == "close":
+            os.close(fd)
+            continue
+        if action == "rmdir":
+            assert name is not None
+            try:
+                os.rmdir(name, dir_fd=fd)
+            except OSError as exc:
+                if not _explained_rmdir_failure(path, [], kept, failed):
+                    failed.append((path, exc))
+            continue
+        try:
+            entries = list(os.scandir(fd))
+        except OSError as exc:
+            failed.append((path, exc))
+            continue
+        for entry in entries:
+            child = path / entry.name
+            try:
+                mode = entry.stat(follow_symlinks=False).st_mode
+            except OSError as exc:
+                failed.append((child, exc))
+                continue
+            if not stat.S_ISDIR(mode):
+                try:
+                    os.unlink(entry.name, dir_fd=fd)
+                except OSError as exc:
+                    failed.append((child, exc))
+                continue
+            try:
+                child_fd = os.open(
+                    entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
+                )
+            except OSError as exc:
+                failed.append((child, exc))
+                continue
+            if _is_mount_fd(child_fd, fd, mounts):
+                kept.append(child)
+                os.close(child_fd)
+                continue
+            pending.append(("close", child_fd, None, child))
+            pending.append(("rmdir", fd, entry.name, child))
+            pending.append(("scan", child_fd, None, child))
+    return kept, failed
+
+
+class PinnedTree:
+    """A folder opened by descriptor, so measuring and deleting cannot be redirected."""
+
+    def __init__(self, root: Path, parent_fd: int, fd: int) -> None:
+        self.root = root
+        self._parent_fd = parent_fd
+        self._fd = fd
+
+    @property
+    def handle(self) -> Path:
+        """A stable path to the opened folder, safe to measure after a path swap."""
+        return Path(f"/proc/self/fd/{self._fd}")
+
+    def delete(self) -> _RmTreeResult:
+        """Delete the opened folder's contents and then the folder itself."""
+        points = _mountinfo_points()
+        if points is None:
+            return _RmTreeResult(
+                [],
+                [
+                    (
+                        self.root,
+                        OSError(
+                            "could not read the mount list (/proc/self/mountinfo); "
+                            "nothing was deleted"
+                        ),
+                    )
+                ],
+            )
+        mounts = _Mounts(os.fstat(self._fd).st_dev, points)
+        if _is_mount_fd(self._fd, self._parent_fd, mounts):
+            return _RmTreeResult([self.root], [])
+        kept, failed = _remove_fd_tree(self.root, self._fd, mounts)
+        try:
+            os.rmdir(self.root.name, dir_fd=self._parent_fd)
+        except OSError as exc:
+            if not _explained_rmdir_failure(self.root, [], kept, failed):
+                failed.append((self.root, exc))
+        return _RmTreeResult(kept, failed)
+
+
+@contextlib.contextmanager
+def pinned_tree(root: Path) -> Iterator[PinnedTree]:
+    """Open ``root`` itself and its parent, refusing a link in the final name.
+
+    Holding both descriptors means a later rename or symlink swap of that path cannot
+    redirect the folder's measurement or deletion to another one.
+    """
+    root = Path(root)
+    parent_fd = os.open(root.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fd = os.open(
+            root.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd
+        )
+    except OSError:
+        os.close(parent_fd)
+        raise
+    try:
+        yield PinnedTree(root, parent_fd, fd)
+    finally:
+        os.close(fd)
+        os.close(parent_fd)
+
+
 def _not_owned_reason(profile, key: str, path: Path, name: str) -> str:
     """Why ``path`` has no ownership record, or "" when Nadare made it.
 
@@ -304,7 +518,7 @@ def _not_owned_reason(profile, key: str, path: Path, name: str) -> str:
     deletion, even when it looks like a Wine prefix.
     """
     try:
-        own = (paths.profiles_dir() / name).resolve()
+        own = _own_folder(name)
         resolved = path.resolve()
     except OSError:
         return _NOT_CREATED
@@ -314,7 +528,7 @@ def _not_owned_reason(profile, key: str, path: Path, name: str) -> str:
         # The backend's default prefix lives in this profile's own folder: Nadare made it.
         default = paths.profiles_dir() / name / "prefix"
         try:
-            if not default.is_symlink() and resolved == default.resolve():
+            if not default.is_symlink() and resolved == _own_folder(name) / "prefix":
                 return ""
         except OSError:
             pass
@@ -354,6 +568,14 @@ _NOT_CREATED = (
 )
 
 
+def prefix_made_by_nadare(profile, path: Path, name: str) -> bool:
+    """Whether ``path``, the profile's Wine prefix, is one Nadare made (Move may delete it)."""
+    try:
+        return _created_by_nadare(profile, "prefix", Path(path), name)
+    except OSError:
+        return False
+
+
 def _created_by_nadare(profile, key: str, path: Path, name: str) -> bool:
     """Whether Nadare made ``path``, so deleting it cannot take anything of the user's."""
     return not _not_owned_reason(profile, key, path, name)
@@ -387,11 +609,55 @@ def _pending_removed_path(profile, key: str, name: str) -> Path | None:
     if not isinstance(recorded, str) or not recorded:
         return None
     candidate = _configured_tree_path(profile, key, name)
+    if candidate is None and key == "prefix" and not (
+        _setting(profile, "prefix") or _setting(profile, "wineprefix")
+    ):
+        # The default prefix is only "configured" while it exists, so the one a crash left
+        # half-removed must be named here, or the uninstall never finishes (review B4).
+        candidate = paths.profiles_dir() / name / "prefix"
     if candidate is None or not _same_tree_path(candidate, Path(recorded)):
         return None
     if _not_owned_reason(profile, key, candidate, name):
         return None  # only a tree Nadare owns may be treated as already removed
     return Path(recorded)
+
+
+def _unrecorded_rebuild_backups(profile, name: str) -> list[Path]:
+    """``<prefix>.broken-*`` folders next to the game's prefix that it did not record."""
+    if not isinstance(profile, dict):
+        return []
+    prefixes = [paths.profiles_dir() / name / "prefix"]
+    for key in ("prefix", "wineprefix"):
+        value = profile.get(key)
+        if isinstance(value, str) and value:
+            prefixes.append(Path(value).expanduser())
+    recorded = set()
+    for value in _recorded_backups(profile):
+        try:
+            recorded.add(Path(value).expanduser().resolve())
+        except (OSError, RuntimeError):
+            continue
+    found: list[Path] = []
+    for prefix in dict.fromkeys(prefixes):
+        if not prefix.is_absolute():
+            continue
+        try:
+            entries = list(prefix.parent.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if not entry.name.startswith(f"{prefix.name}.broken-"):
+                continue
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            try:
+                if entry.resolve() in recorded:
+                    continue
+            except (OSError, RuntimeError):
+                pass
+            if entry not in found:
+                found.append(entry)
+    return found
 
 
 def _recorded_backups(profile) -> list[str]:
@@ -469,6 +735,10 @@ def _outside_game_folder(config, name: str, path: Path) -> str:
         return "it could not be resolved, so it is kept"
     if resolved == folder or folder in resolved.parents:
         return ""
+    from . import relink  # removal is imported by relink's helpers: import late
+
+    if relink.moved_by_nadare(config.profiles.get(name) or {}, path):
+        return ""  # Nadare moved it there itself (path and folder identity match, #1366 A3)
     return (
         "it is outside the game's own folder, so it is kept (remove it yourself if you want "
         "it gone)"
@@ -549,16 +819,66 @@ def _drop_lone_manifest(folder: Path) -> None:
     With the game's files gone the manifest describes nothing. When files were kept it stays,
     so adding the library back finds the game again; a file the user put there keeps it too.
     """
-    manifest = folder / libraries.MANIFEST_NAME
+    ours = {libraries.MANIFEST_NAME, libraries.MANIFEST_TMP_NAME}
     try:
         entries = list(folder.iterdir())
-        if entries == [manifest] and manifest.is_file() and not manifest.is_symlink():
-            manifest.unlink()
+        # An interrupted write leaves the temp file next to it (#1362): Nadare's too.
+        if entries and all(
+            e.name in ours and e.is_file() and not e.is_symlink() for e in entries
+        ):
+            for entry in entries:
+                entry.unlink()
     except OSError:
         pass
 
 
-def _wrapper_folders(profile: dict) -> list[str]:
+def _default_library_folder(prefix: Path, install: Path, name: str | None) -> Path | None:
+    """This profile's own ``profiles/<name>`` when its prefix or install folder sits directly
+    inside it; never another profile's folder (storage review round 3, C-F3)."""
+    try:
+        root = paths.profiles_dir().resolve()
+    except OSError:
+        return None
+    for tree in (prefix, install):
+        if not str(tree) or not tree.is_absolute() or tree.name not in ("prefix", "install"):
+            continue
+        home = tree.parent
+        try:
+            if home.is_symlink() or home.parent.resolve() != root:
+                continue
+        except OSError:
+            continue
+        if name is None or home.name != name:
+            continue
+        return home
+    return None
+
+
+def _claimed_by_another(folder: Path, name: str, others: Mapping[str, Any]) -> bool:
+    """Whether another profile's folder is ``folder`` (by its name in the default library, or
+    by its own answer): never tidied for this one (C-F3, review of #1374)."""
+    try:
+        real = folder.resolve()
+        in_default = folder.parent.resolve() == paths.profiles_dir().resolve()
+    except OSError:
+        return True
+    for other, data in others.items():
+        if other == name or not isinstance(data, Mapping):
+            continue
+        if in_default and folder.name == other:
+            return True
+        theirs = location.game_folder(data, str(other))
+        try:
+            if theirs is not None and theirs.resolve() == real:
+                return True
+        except OSError:
+            return True
+    return False
+
+
+def _wrapper_folders(
+    profile: dict, name: str | None = None, others: Mapping[str, Any] | None = None
+) -> list[str]:
     """The per-game folders Nadare made around the game: ``owned_dirs``, else the Add Game shape.
 
     A profile older Nadare made recorded no ``owned_dirs``; its owned ``prefix`` and ``install``
@@ -570,7 +890,7 @@ def _wrapper_folders(profile: dict) -> list[str]:
         # (install folder, prefix, their recorded paths, prefix backups) or the folder directly
         # around one, as Add Game lays it out. A hand-edited or damaged entry pointing anywhere
         # else is ignored, so removal never rmdirs an unrelated empty folder.
-        recorded: list[object] = [profile.get("install_dir"), profile.get("prefix")]
+        recorded: list[object] = [_setting(profile, "install_dir"), _setting(profile, "prefix")]
         paths_map = profile.get("owned_paths")
         if isinstance(paths_map, dict):
             recorded += list(paths_map.values())
@@ -589,16 +909,41 @@ def _wrapper_folders(profile: dict) -> list[str]:
             if entry.is_absolute() and entry in allowed:
                 kept.append(str(d))
         return kept
+    if name is not None and location.catalog_kind(profile.get("backend")):
+        # The one answer to "which folder is this game's own" (#1372); nothing else for a
+        # catalog game, so Settings and Uninstall never disagree about it.
+        folder = location.game_folder(profile, name)
+        if folder is None:
+            # Not the game's own folder (the player's prefix is elsewhere, s21), but Nadare's
+            # install may still sit in profiles/<name>: tidy that once it is empty, so no stale
+            # manifest is left for Find games (#1366). Step 5c only rmdirs an empty folder.
+            folder = _default_library_folder(
+                *(
+                    Path(str(_setting(profile, k) or "")).expanduser()
+                    for k in ("prefix", "install_dir")
+                ),
+                name,
+            )
+        if folder is None or _claimed_by_another(folder, name, others or {}):
+            return []
+        return [str(folder)]
     owned = profile.get("owned_trees")
     prefix, install = (
-        Path(str(profile.get(k) or "")).expanduser() for k in ("prefix", "install_dir")
+        Path(str(_setting(profile, k) or "")).expanduser() for k in ("prefix", "install_dir")
     )
+    own = _default_library_folder(prefix, install, name)
+    if own is not None:
+        # The game's own profiles/<name> (#1362): step 5c only rmdirs it once it is empty,
+        # after dropping a lone manifest, so a kept data file keeps it.
+        return [str(own)]
     if not isinstance(owned, list) or "prefix" not in owned or prefix.name != "prefix":
         return []
     home = prefix.parent
     if home.parent.name != "Nadare":
         return []
-    if profile.get("install_dir") and (install != home / "install" or "install_dir" not in owned):
+    if _setting(profile, "install_dir") and (
+        install != home / "install" or "install_dir" not in owned
+    ):
         return []  # the game folder is somewhere else, so this is not the Add Game shape
     return [str(home)]
 
@@ -681,20 +1026,27 @@ def _running_problem(config, name: str) -> str | None:
         return _retired_running_problem(profile, name)
     try:
         backend = backends.create(name, config)
-    except Exception:  # noqa: BLE001 - no loadable backend: nothing of Nadare's can be running
-        return None
+    except Exception:  # noqa: BLE001 - this build cannot load it; the game may still run (#1493)
+        # Another Nadare (another build, another Flatpak window) may have started it: ask the
+        # prefix itself, as for a retired kind. Proved idle, the profile can still go.
+        return _retired_running_problem(profile, name)
+    return _running_problem_for(backend)
+
+
+def _running_problem_for(backend: Any) -> str | None:
     try:
-        state = getattr(backend.status(), "state", "")
+        status = backend.status()
     except Exception as exc:  # noqa: BLE001 - unknown means do not delete
         return f"could not check whether the game is running ({exc}); nothing was deleted"
-    if state == "running":
+    if gamefacts.is_running(status):
         return "the game is running (stop it first); nothing was deleted"
     return None
 
 
 def _retired_running_problem(profile: dict, name: str) -> str | None:
-    """Whether anything still runs in a retired-kind game's prefix (its Wine processes or a
-    run lock held by another Nadare); a scan that cannot answer refuses too."""
+    """Whether anything still runs in the game's prefix, asked without its backend (a retired
+    kind, or one this build cannot load): its Wine processes or a run lock held by another
+    Nadare. A scan that cannot answer refuses too."""
     raw = str(_setting(profile, "prefix") or _setting(profile, "wineprefix") or "").strip()
     prefix = Path(raw).expanduser() if raw else default_prefix(name)
     if prefix is None:
@@ -726,7 +1078,12 @@ def _remove_locked(
     result = RemovalResult(profile=name)
     # The game's wrapper folders, worked out before anything is deleted: the steps below drop
     # recorded backups (and maybe the profile), which would hide what the wrapper held.
-    wrappers = _wrapper_folders(copy.deepcopy(config.profiles.get(name, {})))
+    wrappers = _wrapper_folders(
+        copy.deepcopy(config.profiles.get(name, {})), name, others=config.profiles
+    )
+    # Old-prefix backups no version recorded (a rebuild killed before #1490): never chosen
+    # in the dialog, so "Nadare's data" keeps them rather than deleting them unseen.
+    unrecorded = _unrecorded_rebuild_backups(config.profiles.get(name, {}), name)
 
     # 1. Check every requested tree first. A missing or unsafe one is skipped
     # with a warning (and the profile is kept), but it must not cancel the safe
@@ -936,6 +1293,10 @@ def _remove_locked(
                         for t in removable_trees(config, name)
                         if t.key not in chosen and t.path.resolve().is_relative_to(resolved)
                     ]
+                    keep += [
+                        b for b in unrecorded
+                        if b.resolve().is_relative_to(resolved) and b not in keep
+                    ]
                     try:
                         if keep:
                             outcome = _rmtree_safely(resolved, keep)
@@ -954,6 +1315,38 @@ def _remove_locked(
                             result.data_dir_removed = target
                     except OSError as exc:
                         result.warnings.append(f"could not remove data dir: {exc}")
+
+    # The owned VKD3D cache is disposable even when the profile's data is kept.
+    # Check every component below cache_dir: resolving a linked parent could delete
+    # another game's cache or user files. Never follow profile environment overrides.
+    if not keep_profile:
+        try:
+            target = shadercache.vkd3d_dir(name)
+            relative = target.relative_to(paths.cache_dir())
+        except ValueError:
+            target = None
+            result.warnings.append(
+                f"not deleting shader cache: {name!r} is not a valid profile name"
+            )
+        if target is not None:
+            try:
+                current = paths.cache_dir()
+                linked = current.is_symlink()
+                for part in relative.parts:
+                    current = current / part
+                    linked = linked or current.is_symlink()
+                if linked:
+                    result.warnings.append(f"refusing to delete linked shader cache: {target}")
+                elif target.is_dir():
+                    outcome = _rmtree_safely(target)
+                    for mount in outcome.mounts:
+                        result.warnings.append(
+                            f"shader cache {mount} is a mounted drive, left alone"
+                        )
+                    for path, exc in outcome.leftovers:
+                        result.warnings.append(_leftover_warning(path, exc))
+            except OSError as exc:
+                result.warnings.append(f"could not remove shader cache: {exc}")
 
     # 5b2. The game's own log folder (``logs/<game-id>``) goes with its data; nothing else in
     # the logs folder does. A kept profile keeps its logs too: they are the evidence of

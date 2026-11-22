@@ -68,24 +68,27 @@ def _nvidia_check(version: str, gl64: Path, gl32: Path) -> GlCheck:
         refs.append(f"{base}GL.{name}")
     if not has_32:
         refs.append(f"{base}GL32.{name}")
-    newest = (
-        " If Flathub has no package for this driver yet, the driver is brand new: "
-        "use the Nadare AppImage until it appears."
+    # Most Nadare users are not terminal people (the user, 2026-11-15): say what to press,
+    # never a command, and never "use the AppImage" (not a fix). A brand-new driver only
+    # waits for Flathub, which adds it soon; Flatpak's own update fetches it too.
+    fix_words = (
+        " Press Install, or install the updates in your software center. If neither finds "
+        "it yet, Flathub has not added this driver yet; it usually does soon."
     )
     if not has_64 and not has_32:
         summary = (
-            f"Your NVIDIA driver is {version}, but the Flatpak has no matching graphics "
-            "package (64-bit and 32-bit), so games will not start." + newest
+            f"Your NVIDIA driver was updated to {version}, and the Flatpak does not have its "
+            "matching graphics package yet, so games will not start." + fix_words
         )
     elif not has_32:
         summary = (
             f"Your NVIDIA driver is {version}, but the Flatpak's 32-bit graphics package "
-            "for it is missing, so some games will not start." + newest
+            "for it is missing, so some games will not start." + fix_words
         )
     else:
         summary = (
             f"Your NVIDIA driver is {version}, but the Flatpak's 64-bit graphics package "
-            "for it is missing, so games will not start." + newest
+            "for it is missing, so games will not start." + fix_words
         )
     return _graphics_result(summary, tuple(refs))
 
@@ -141,8 +144,9 @@ def _install_failure(stderr: str) -> str:
     lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
     detail = lines[-1] if lines else "no reason was given"
     return (
-        f"The packages could not be installed: {detail}. If Flathub has no package "
-        "for a brand-new driver yet, use the Nadare AppImage until it appears."
+        f"The packages could not be installed: {detail}. If your driver is brand new, "
+        "Flathub may not have added it yet; it usually does soon, so try again later or "
+        "install the updates in your software center."
     )
 
 
@@ -207,12 +211,80 @@ def problem() -> GlCheck | None:
         return None
 
 
+#: Wait (up to 30 s) until the old Nadare has let go of its single-instance socket, then start
+#: the GUI: a start while the old one still runs would only hand over to it and exit.
+_RESTART_SCRIPT = (
+    'n=0; while [ -S "$1" ] && [ "$n" -lt 150 ]; do sleep 0.2; n=$((n+1)); done; '
+    "exec nadare gui"
+)
+
+
+def restart_argv(socket: str) -> list[str]:
+    """The command that starts a fresh Nadare once this one has quit.
+
+    Flatpak mounts its graphics packages when an instance starts, so a child inside this
+    sandbox would still miss the new ones. The portal (``flatpak-spawn`` without ``--host``)
+    starts a new instance of the app instead; ``--latest-version`` picks up an app update too.
+    """
+    return [
+        "flatpak-spawn",
+        "--latest-version",
+        "/bin/sh",
+        "-c",
+        _RESTART_SCRIPT,
+        "nadare-restart",
+        socket,
+    ]
+
+
+def restart_nadare(socket: str, *, popen=subprocess.Popen) -> bool:
+    """Start the fresh Nadare in the background; the caller quits right after. Never raises."""
+    try:
+        popen(  # noqa: S603 - fixed argv built above
+            restart_argv(socket),
+            env=process.child_environ(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def guard_launch(backend) -> None:
+    """Refuse to start a game while the Flatpak lacks the driver's graphics package.
+
+    Without it the game fails or runs without the GPU, and nothing says why. A Steam game
+    is started by the host's Steam (#1224), so the Flatpak's packages do not matter there.
+    Never raises anything but the refusal: an unexpected error lets the launch go ahead.
+    """
+    from .backends import BackendError
+
+    try:
+        if getattr(backend, "kind", "") == "steam":
+            return
+        found = problem()
+    except Exception:  # noqa: BLE001 - the check must never be what breaks a launch
+        return
+    if found is None or found.ok:
+        return
+    raise BackendError(
+        found.summary + " (The Install button is on the banner at the top of Nadare; "
+        "restart Nadare after it finishes.)"
+    )
+
+
 __all__ = [
     "ROOT",
     "GlCheck",
     "check",
     "extension_name",
+    "guard_launch",
     "install_missing",
     "parse_nvidia_version",
     "problem",
+    "restart_argv",
+    "restart_nadare",
 ]

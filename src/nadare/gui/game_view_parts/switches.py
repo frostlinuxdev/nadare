@@ -7,6 +7,7 @@ Split out of :mod:`nadare.gui.game_view`; the code is unchanged.
 
 from __future__ import annotations
 
+from ...core import gamefacts
 from ...core.gamefacts import SandboxFacts
 from .shared import (
     _SANDBOX_TIP,
@@ -39,18 +40,26 @@ class SwitchesMixin:
         self.remember_toggled.emit(bool(checked))
 
     def set_sandbox(
-        self, supported: bool, checked: bool, blocked: str = "", *, ready: bool = True
+        self,
+        supported: bool,
+        checked: bool,
+        blocked: str = "",
+        *,
+        ready: bool = True,
+        locked: str = "",
     ) -> None:
         """Show the Sandbox switch for games that offer it; ``blocked`` greys it out with why.
 
         ``ready`` is False when no bubblewrap exists here: the switch keeps the choice, the pill
-        does not claim protection the next launch cannot give.
+        does not claim protection the next launch cannot give. ``locked`` greys the switch out
+        while the Sandbox still runs (a game that requires it).
         """
         self.sandbox.blockSignals(True)
         self.sandbox.setVisible(bool(supported))
         self.sandbox.setChecked(bool(checked))
         self._sandbox_supported = bool(supported)
         self._sandbox_blocked = blocked
+        self._sandbox_locked = locked
         self._sandbox_ready = bool(ready)
         self.sandbox.blockSignals(False)
         self._apply_sandbox()
@@ -61,10 +70,11 @@ class SwitchesMixin:
             chosen=self.sandbox.isChecked(),
             # A game already running when the page opened counts too (final round).
             running=self._busy_op == "launch"
-            or bool(self._status and (self._status.running or self._status.state == "running")),
+            or gamefacts.is_running(self._status),
             active=self._sandbox_active,
             blocked=self._sandbox_blocked,
             ready=self._sandbox_ready,
+            locked=getattr(self, "_sandbox_locked", ""),
         )
 
     def _apply_sandbox(self) -> None:

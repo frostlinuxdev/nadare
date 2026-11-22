@@ -25,6 +25,7 @@ import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +115,10 @@ PROFILE_DEFAULTS: dict[str, Any] = {
     "launch_mode": "",  # backend-specific hint
     "remember_me": False,  # CZN: persist the launcher refresh token in the keyring
     "custom_background": "",
+    "favourite": False,
+    "added_at": "",
+    "last_played": "",
+    "hold_override": "",  # the signed hold ids this profile accepted with "start anyway"
     "extra": {},
 }
 
@@ -130,14 +135,23 @@ TOP_DEFAULTS: dict[str, Any] = {
     "lock_to_single_instance": True,
     "check_updates": True,
     "check_notices": True,  # safety notices; independent of check_updates
+    "check_holds": True,  # let the signed hold list stop a launch the maintainers marked dangerous
     "notify_when_done": True,  # a desktop notice when an install, update or repair ends
     "dismissed_update": "",  # release version whose banner the user closed
     "dismissed_notices": [],  # ids of notices the user closed
+    "sandbox_broad_seen": [],  # games told at start that their folder stops the Sandbox (#1299)
+    "flatpak_reach_seen": [],  # games told at start the Flatpak cannot see their folder (#1299)
     "sidebar_hide_uninstalled": False,  # hide games known not to be installed in the sidebar
-    "language": "en",
+    "language": None,  # no saved choice: follow the desktop locale
+    "download_speed_limit": 0,  # global MB/s; zero is unlimited
     "telemetry": False,  # always false; kept explicit for the record
     "wine_binary_migrated": False,  # generic Wine profiles were offered their old plain Wine
+    "own_games_retired": False,  # own-game profiles were dropped once (core/owngames.py)
 }
+
+#: Defaults that every reader takes with ``data.get(key, default)``. A save keeps them
+#: absent when the file never had them (following the default is not a choice).
+OPTIONAL_TOP_KEYS: frozenset[str] = frozenset({"download_speed_limit", "check_holds"})
 
 #: Set once a config has run the generic-profile Wine migration.
 LEGACY_WINE_FLAG = "wine_binary_migrated"
@@ -154,11 +168,12 @@ KNOWN_TOP_KEYS: frozenset[str] = frozenset(TOP_DEFAULTS) | {
     "page_notice_expanded",
     "unofficial_notice_ack",
     "libraries",  # game library roots the user added (core/libraries.py)
+    "interrupted_downloads",  # installs closing stopped, offered back once (gui window_state)
 }
 
 
 #: Profile keys that must be real booleans, even when hand-edited as strings.
-_PROFILE_BOOLS = ("remember_me", "accept_account_notice", "secure_mode")
+_PROFILE_BOOLS = ("remember_me", "accept_account_notice", "secure_mode", "favourite")
 
 
 def profile_value(profile: Mapping[str, Any], key: str, default: Any = None) -> Any:
@@ -195,9 +210,23 @@ def as_bool(value: Any, default: bool | None = None) -> bool | None:
     return default
 
 
+def bounded_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    """The same finite-integer/default/clamp rule for settings editors and consumers."""
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        count = default
+    return max(minimum, min(maximum, count))
+
+
 def _coerce_bool(value: Any, default: bool) -> bool:
     """Turn a hand-edited boolean into a real ``bool`` (or keep the default)."""
     return bool(as_bool(value, default))
+
+
+def _now_stamp() -> str:
+    """The moment, as the ISO-8601 UTC string the profile stamps use."""
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
 def _new_profile(values: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -213,6 +242,25 @@ def _new_profile(values: Mapping[str, Any] | None = None) -> dict[str, Any]:
 
 class ConfigReadError(OSError):
     """The config file exists but cannot be read; it is left untouched."""
+
+
+class ProfileRemovedElsewhere(Exception):
+    """A settings edit named a game that another Nadare process removed meanwhile.
+
+    The save is refused instead of bringing the game back (user sim r3b05 F1).
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"{name} was removed by another Nadare window or command")
+        self.name = name
+
+
+@dataclass(frozen=True)
+class SettingsDraft:
+    """Detached application settings and, optionally, one existing game profile."""
+
+    settings: dict[str, Any]
+    profile: dict[str, Any] | None
 
 
 @dataclass
@@ -236,6 +284,9 @@ class Config:
     #: Unsafe profile keys renamed by :meth:`load`, so a save still finds the
     #: on-disk entry instead of dropping the migrated profile.
     _renames: dict[str, str] = field(default_factory=dict, repr=False, compare=False)
+    #: Set only on the detached copy :meth:`edit_settings` saves: the one game that edit is
+    #: about, which must still be on disk if it was there when this process loaded it.
+    _edited_profile: str | None = field(default=None, repr=False, compare=False)
 
     # ---- lifecycle ---------------------------------------------------------
     @classmethod
@@ -342,6 +393,10 @@ class Config:
         if renames and isinstance(raw_active, str) and raw_active in renames:
             cfg._top_snapshot["active_profile"] = raw_active
         cfg._sweep_stale_temps()
+        from .transfer import limiter
+
+        limiter.attach(cfg.path.with_name(cfg.path.name + ".download-budget"))
+        limiter.set_limit(cfg.data.get("download_speed_limit", 0))
         return cfg
 
     def _migrate_profile_dirs(self, renames: dict[str, str]) -> list[tuple[str, str]]:
@@ -361,6 +416,10 @@ class Config:
                 continue
             old_dir = root / relative
             new_dir = root / new
+            if any(old_dir == root / other for other in self.profiles if other != new):
+                # "Game/" names the same folder as the valid profile "Game": that folder is
+                # Game's, never the renamed entry's (storage review round 2, B1).
+                continue
             if not old_dir.is_dir() and new_dir.is_dir():
                 # A previous run moved it but could not save the config (``nadare list``
                 # for one does not): point the stored paths at the moved folder too.
@@ -418,17 +477,23 @@ class Config:
         version = found
         while version < current:
             step = MIGRATIONS.get(version)
+            # Each step runs on a copy and is kept only when it finishes: a step that fails
+            # half way leaves the data as the last finished step left it, and the marker names
+            # that format, so a later Nadare with a fixed step runs it again (#1476).
+            candidate = copy.deepcopy(raw)
             try:
                 if step is not None:
-                    step(raw)
+                    step(candidate)
             except Exception as exc:  # noqa: BLE001 - a bad step must not lose the library
                 log.warning("config migration from format %s failed: %s", version, exc)
                 backup = cls._quarantine(p, keep=True)
                 saved = (
                     f"a copy was saved to {backup}" if backup else "a copy could not be backed up"
                 )
-                raw["schema"] = current
+                raw["schema"] = version
                 return f"{p} could not be updated from config format {version}; {saved}"
+            raw.clear()
+            raw.update(candidate)
             version += 1
         raw["schema"] = current
         return None
@@ -629,6 +694,59 @@ class Config:
         return {k: copy.deepcopy(v) for k, v in self.data.items() if k != "profiles"}
 
     @contextmanager
+    def edit_settings(self, name: str | None = None) -> Iterator[SettingsDraft]:
+        """Edit app settings and one optional profile, committing on normal exit.
+
+        The thread lock covers drafting, validation, persistence and publication.
+        A detached Config reuses save's file lock, three-way merge and durable
+        writer. Failed edits or writes leave all live dictionaries and merge
+        snapshots untouched. Retained drafts cannot mutate the committed data.
+        """
+        with self.locked():  # the lock BackendContext.set takes
+            profile = copy.deepcopy(self.profile(name)) if name is not None else None
+            draft = SettingsDraft(self._top_level(), profile)
+            yield draft
+            if "profiles" in draft.settings:
+                raise ValueError("edit_settings cannot replace profiles")
+            for values, defaults in (
+                (draft.settings, TOP_DEFAULTS),
+                (draft.profile or {}, PROFILE_DEFAULTS),
+            ):
+                for key, value in values.items():
+                    if not isinstance(key, str):
+                        raise TypeError("settings keys must be strings")
+                    if isinstance(defaults.get(key), bool) and not isinstance(value, bool):
+                        raise TypeError(f"{key} must be a boolean")
+            # Validate before invoking save or touching the filesystem.
+            json.dumps((draft.settings, draft.profile), allow_nan=False)
+            pending = copy.copy(self)
+            pending.data = copy.deepcopy(draft.settings)
+            pending.data["profiles"] = copy.deepcopy(self.profiles)
+            if name is not None:
+                pending.profiles[name] = copy.deepcopy(draft.profile)
+            pending._snapshot = copy.deepcopy(self._snapshot)
+            pending._top_snapshot = copy.deepcopy(self._top_snapshot)
+            pending._removed = self._removed.copy()
+            pending._edited_profile = name
+            pending.save()
+            self._publish_settings(self.data, pending.data)
+            self._snapshot = pending._snapshot
+            self._top_snapshot = pending._top_snapshot
+            self._removed.clear()
+
+    @staticmethod
+    def _publish_settings(live: dict[str, Any], saved: dict[str, Any]) -> None:
+        """Publish recursively in place so existing profile/extra holders stay live."""
+        for key in list(live):
+            if key not in saved:
+                del live[key]
+        for key, value in saved.items():
+            if isinstance(live.get(key), dict) and isinstance(value, dict):
+                Config._publish_settings(live[key], value)
+            else:
+                live[key] = copy.deepcopy(value)
+
+    @contextmanager
     def _file_lock(self) -> Iterator[None]:
         """Cross-process lock around the read-merge-write in :meth:`save`."""
         # Key the lock on the file a symlinked name points at, the same file
@@ -691,6 +809,7 @@ class Config:
             self.data[LEGACY_WINE_FLAG] = True
             with self._file_lock():
                 self._merge_disk_profiles()
+                self._refresh_location_records()
                 # The lock proves no other save is using an older temp: sweep a killed one.
                 self._sweep_temps(target.parent)
                 fd, tmp = tempfile.mkstemp(
@@ -710,7 +829,26 @@ class Config:
                 finally:
                     if os.path.exists(tmp):
                         os.unlink(tmp)
+            from .transfer import limiter
+
+            limiter.attach(self.path.with_name(self.path.name + ".download-budget"))
+            limiter.set_limit(self.data.get("download_speed_limit", 0))
             return self.path
+
+    def _refresh_location_records(self) -> None:
+        """Mirror each catalog game's legacy keys into its ``location`` record (#1372 2a).
+
+        The legacy keys stay the truth for now; the record is rebuilt from them on every save,
+        so it can never drift. Never fails a save: a record that cannot be built stays as is.
+        """
+        from . import location
+
+        for name, profile in self.profiles.items():
+            if isinstance(profile, dict):
+                try:
+                    location.refresh_record(profile, name)
+                except Exception as exc:  # noqa: BLE001 - a record must never cost a save
+                    log.warning("could not record where %s lives: %s", name, exc)
 
     def disk_profile_names(self) -> set[str] | None:
         """Profile names currently in the file, or ``None`` when it cannot be read.
@@ -847,8 +985,9 @@ class Config:
         """Fold in what another process wrote since we loaded.
 
         Profiles only on disk are adopted unless this process removed them; a
-        profile this process left untouched but the disk no longer has was
-        removed elsewhere and is dropped; profiles changed here win. Top-level
+        profile this process loaded from disk but the disk no longer has was
+        removed elsewhere and is dropped, even if it changed here; for profiles
+        on both sides, keys changed here win. Top-level
         settings this process did not change take the on-disk value. Called with
         the lock held, before writing.
         """
@@ -889,9 +1028,16 @@ class Config:
                     for key, value in prof.items()
                 }
         disk = disk_profiles
+        edited = self._edited_profile
+        if edited is not None and edited in self._snapshot and edited not in disk:
+            # Loaded from disk, gone from it now: another process removed this game. Its local
+            # edit must not bring it back (r3b05 F1). Raised before anything is written.
+            raise ProfileRemovedElsewhere(edited)
         for name in list(self.profiles):
-            untouched = name in self._snapshot and self._snapshot[name] == self.profiles[name]
-            if name not in disk and untouched:
+            # Loaded from disk and gone from it now: removed elsewhere, whatever this process
+            # wrote into it since (play time, favourite, art, a recorded folder). Keeping a
+            # locally changed one wrote the removed game back (C1, 2026-11-21).
+            if name in self._snapshot and name not in disk:
                 del self.profiles[name]
         for name, prof in disk.items():
             if not isinstance(prof, dict) or not valid_profile_name(name):
@@ -927,13 +1073,13 @@ class Config:
                 self.data[key] = value
         # A key this process left untouched but the disk no longer has was
         # deleted elsewhere; do not write our old value back. A setting with a
-        # default goes back to it (code reads ``data["language"]`` directly), any
-        # other key is dropped.
+        # default goes back to it (code reads ``data["language"]`` directly).
+        # Optional speed/hold choices keep their absence; their readers supply defaults.
         for key in list(self.data):
             if key == "profiles" or key in raw:
                 continue
             if key in self._top_snapshot and self.data[key] == self._top_snapshot[key]:
-                if key in TOP_DEFAULTS:
+                if key in TOP_DEFAULTS and key not in OPTIONAL_TOP_KEYS:
                     self.data[key] = copy.deepcopy(TOP_DEFAULTS[key])
                 else:
                     del self.data[key]
@@ -960,6 +1106,8 @@ class Config:
         if not valid_profile_name(name):
             raise ValueError(f"invalid profile name: {name!r}")
         prof = _new_profile(values)
+        if not prof.get("added_at"):
+            prof["added_at"] = _now_stamp()
         self.profiles[name] = prof
         self._removed.discard(name)
         if not self.active:
@@ -977,6 +1125,28 @@ class Config:
         if name not in self.profiles:
             raise KeyError(name)
         self.data["active_profile"] = name
+
+    def mark_played(self, name: str) -> bool:
+        """Stamp ``name`` as just played (the library's CONTINUE PLAYING order).
+
+        Called when a launch really starts the game, not when the button is pressed, so a refused
+        or failed launch does not push a game to the front. Returns False for an unknown profile.
+        """
+        prof = self.profiles.get(name)
+        if prof is None:
+            return False
+        with self.locked():
+            prof["last_played"] = _now_stamp()
+        return True
+
+    def set_favourite(self, name: str, favourite: bool) -> bool:
+        """Pin or unpin ``name`` in the library's FAVOURITES strip."""
+        prof = self.profiles.get(name)
+        if prof is None:
+            return False
+        with self.locked():
+            prof["favourite"] = bool(favourite)
+        return True
 
 
 def _sync_dir(path: Path) -> None:

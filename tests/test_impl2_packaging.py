@@ -165,18 +165,23 @@ def test_normal_user_gets_no_root_warning(monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 # F-08: the pip wheel carries the locale catalogue
 # ---------------------------------------------------------------------------
+#: pyproject's build floor (PEP 639 licence metadata, #1549); older copies reject it.
+_SETUPTOOLS_FLOOR = 77
+
+
 def _build_python() -> str:
-    for candidate in {sys.executable, shutil.which("python3"), "/usr/bin/python3"}:
+    # The dev extra brings setuptools into the test venv; the distro's copy may be older.
+    probe_code = (
+        "import sys, setuptools; "
+        f"sys.exit(int(setuptools.__version__.split('.')[0]) < {_SETUPTOOLS_FLOOR})"
+    )
+    for candidate in dict.fromkeys([sys.executable, shutil.which("python3"), "/usr/bin/python3"]):
         if not candidate:
             continue
-        probe = subprocess.run(
-            [candidate, "-c", "import setuptools, wheel"],
-            capture_output=True,
-            timeout=30,
-        )
+        probe = subprocess.run([candidate, "-c", probe_code], capture_output=True, timeout=30)
         if probe.returncode == 0:
             return candidate
-    pytest.skip("no interpreter with setuptools and wheel available")
+    pytest.skip(f"no interpreter with setuptools >= {_SETUPTOOLS_FLOOR} available")
 
 
 def test_wheel_includes_locale_assets(tmp_path):
@@ -185,6 +190,7 @@ def test_wheel_includes_locale_assets(tmp_path):
     work.mkdir()
     shutil.copy(repo / "pyproject.toml", work / "pyproject.toml")
     shutil.copy(repo / "README.md", work / "README.md")
+    shutil.copy(repo / "LICENSE", work / "LICENSE")  # license-files (#1549)
     shutil.copytree(repo / "src", work / "src")
     out = tmp_path / "wheel"
     out.mkdir()

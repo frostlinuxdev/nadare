@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _official_route import OfficialRouteBackend
 from _parts_patch import patch_everywhere
 
 from nadare.backends import winegame as wg
@@ -32,7 +33,7 @@ from nadare.core.backends import BackendError
 BACKENDS = (
     ("bd2", BrownDust2Backend, True),
     ("nikke", NikkeBackend, False),
-    ("arknights-official", ArknightsBackend, False),
+    ("official-route", OfficialRouteBackend, False),
     ("arknights-direct", ArknightsBackend, True),
     ("stellasora-direct", StellaSoraBackend, True),
 )
@@ -59,7 +60,7 @@ def _backend(tmp_path: Path, name: str, cls, direct: bool, profile: dict | None 
     values = dict(profile or {})
     # Arknights is only in direct mode when it has a manifest source; the file
     # itself is not read by status(), so a path is enough.
-    if direct and cls is ArknightsBackend:
+    if direct and issubclass(cls, ArknightsBackend):
         values.setdefault("manifest_file", str(tmp_path / "manifest.json"))
     return cls(make_context(tmp_path, cls.kind, values, name))
 

@@ -10,7 +10,7 @@ from nadare.backends.czn import update as czn_update
 
 
 def _fake_urlopen(calls, body):
-    def _open(url, timeout=None):
+    def _open(url, timeout=None, context=None):
         calls.append(url)
         return io.BytesIO(body)
 

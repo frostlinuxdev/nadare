@@ -144,6 +144,15 @@ def ensure_installer(
         if (repo / "install.sh").is_file():
             return repo
 
+    # The tarball URL comes from the Nadare index; the index entry is only usable with the
+    # pin that ships in this build. Refuse before the cache is trusted or anything is fetched.
+    digest = str(pin.sha256 or "").strip().lower()
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise LeptonError(
+            "the index entry for the lepton-fgo installer has no valid checksum; "
+            "Nadare will not run an unpinned installer"
+        )
+
     dest = paths.data_dir() / "lepton-fgo" / pin.version
     install_sh = dest / "install.sh"
     release_file = dest / "RELEASE"

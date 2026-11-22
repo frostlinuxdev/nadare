@@ -86,7 +86,10 @@ def _delim(f: BinaryIO, delim: int, limit: int) -> str:
         out.append(b)
         if len(out) > limit:
             raise KrDiffError("a header field is too long")
-    return out.decode("utf-8", "strict")
+    try:
+        return out.decode("utf-8", "strict")
+    except UnicodeDecodeError as exc:  # a damaged patch, not a crash (#812 fuzz)
+        raise KrDiffError("a header field is not UTF-8") from exc
 
 
 def _varint(f: BinaryIO, tag_bits: int = 0, first: int | None = None) -> int:
@@ -122,26 +125,34 @@ def _section(f: BinaryIO, raw: int, comp: int, limit: int) -> io.BytesIO:
     if not comp:
         return io.BytesIO(body)
     # Never more than the declared size (a tiny frame may claim gigabytes: #863).
-    out = _zstd().ZstdDecompressor().stream_reader(io.BytesIO(body)).read(raw + 1)
+    try:
+        out = _zstd().ZstdDecompressor().stream_reader(io.BytesIO(body)).read(raw + 1)
+    except _zstd().ZstdError as exc:  # a damaged patch, not a crash (#812 fuzz)
+        raise KrDiffError(f"a patch section is damaged: {exc}") from exc
     if len(out) != raw:
         raise KrDiffError("a patch section does not decompress to its declared size")
     return io.BytesIO(out)
 
 
 def _files(paths_: list[str], offsets: list[int], sizes: list[int]) -> tuple[list, list]:
-    """Split HDiffPatch's path list into files (the ``offsets`` say which) and folders."""
+    """Split HDiffPatch's path list into files and folders.
+
+    The ``offsets`` name the files that carry data. A folder's path ends with ``/`` (the root
+    is ``""``); any other path the offsets skip is an *empty* file, not a folder."""
     files: list[FileEntry] = []
     dirs: list[str] = []
     want = offsets[0] if offsets else -1
     k = 0
     for i, path in enumerate(paths_):
         if i == want:
-            files.append(FileEntry(path, sizes[len(files)]))
+            files.append(FileEntry(path, sizes[k]))
             k += 1
             want = want + offsets[k] + 1 if k < len(offsets) else -1
-        else:
+        elif path == "" or path.endswith("/"):
             dirs.append(path)
-    if len(files) != len(sizes):
+        else:
+            files.append(FileEntry(path, 0))
+    if k != len(sizes):
         raise KrDiffError("the patch's file list does not add up")
     return files, dirs
 
@@ -153,10 +164,28 @@ def _safe(path: str) -> str:
         raise KrDiffError(f"unsafe path in the patch: {path!r}") from exc
 
 
-def read_header(f: BinaryIO) -> Header:
-    """Parse the ``HDIFF19`` head and the ``HDIFF13`` body's header (no data is read)."""
+@dataclass(frozen=True)
+class DirHead:
+    """HDiffPatch's ``HDIFF19`` directory head: the old and new file lists (no data)."""
+
+    old_files: tuple[FileEntry, ...]
+    new_files: tuple[FileEntry, ...]
+    new_dirs: tuple[str, ...]
+    old_size: int
+    new_size: int
+    compression: str
+
+
+def read_dir_head(f: BinaryIO, *, allow_old: bool = True) -> DirHead:
+    """Parse the ``HDIFF19`` head; ``f`` is left at the start of the body that follows.
+
+    Shared by Kuro's ``.krpdiff`` (``HDIFF13`` body, :func:`read_header`) and a full install
+    diff (``HDIFFSF20`` body, :mod:`nadare.core.hdiffsf`). Kuro's variant stores the old
+    files' sizes in the head and upstream HDiffPatch does not, so the two layouts only agree
+    when there are no old files: ``allow_old=False`` (a full install) refuses any before the
+    head is read."""
     if _delim(f, ord("&"), 10) != "HDIFF19":
-        raise KrDiffError("not a Kuro directory patch (no HDIFF19)")
+        raise KrDiffError("not an HDiffPatch directory patch (no HDIFF19)")
     compression = _delim(f, ord("&"), 10)
     _delim(f, 0, 15)  # checksum name; Kuro's md5 list is what outputs are checked against
     if compression not in ("zstd", ""):
@@ -165,6 +194,8 @@ def read_header(f: BinaryIO) -> Header:
     _byte(f)
     fields = [_varint(f) for _ in range(17)]
     (old_count, _, new_count, _, old_refs, old_size, new_refs, new_size) = fields[:8]
+    if not allow_old and (old_refs or old_size or fields[8]):
+        raise KrDiffError("this diff needs old files; only a full install is supported")
     private_extern, extern, head_raw, head_comp, checksum_bytes = fields[12:17]
     if max(old_count, new_count, old_refs, new_refs) > MAX_PATHS:
         raise KrDiffError("the patch lists too many files")
@@ -184,6 +215,16 @@ def read_header(f: BinaryIO) -> Header:
     new_files = [FileEntry(_safe(e.path), e.size) for e in new_files]
     new_dirs = [_safe(d) for d in new_dirs if d.strip("/")]
     f.seek(private_extern + extern, os.SEEK_CUR)
+    return DirHead(
+        tuple(old_files), tuple(new_files), tuple(new_dirs), old_size, new_size, compression
+    )
+
+
+def read_header(f: BinaryIO) -> Header:
+    """Parse the ``HDIFF19`` head and the ``HDIFF13`` body's header (no data is read)."""
+    head = read_dir_head(f)
+    old_files, new_files, new_dirs = head.old_files, head.new_files, head.new_dirs
+    old_size, new_size = head.old_size, head.new_size
 
     if _delim(f, ord("&"), 10) != "HDIFF13":
         raise KrDiffError("not a Kuro directory patch (no HDIFF13)")
@@ -234,7 +275,10 @@ class _Exact:
             raise KrDiffError("the patch's new data runs out")
         out = bytearray()
         while len(out) < n:
-            chunk = self._reader.read(n - len(out))
+            try:
+                chunk = self._reader.read(n - len(out))
+            except _zstd().ZstdError as exc:
+                raise KrDiffError(f"the patch's new data is damaged: {exc}") from exc
             if not chunk:
                 raise KrDiffError("the patch's new data runs out")
             out += chunk

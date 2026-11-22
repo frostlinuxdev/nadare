@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _timing import scaled
 
 from nadare.core import vcredist
 from nadare.core.backends import BackendError
@@ -100,7 +101,7 @@ def test_skip_stops_the_installer_and_raises_step_skipped(tmp_path, monkeypatch)
     start = time.monotonic()
     with pytest.raises(vcredist.StepSkipped):
         _install(tmp_path, hang, cancel=token)
-    assert time.monotonic() - start < 5
+    assert time.monotonic() - start < scaled(5)
     assert stops == [1]
 
 

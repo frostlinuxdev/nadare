@@ -24,7 +24,11 @@ _OS_EXEC_PREFIXES = ("exec", "system")
 #: ``(path relative to src/nadare, function)`` -> one-line reason. Keep this
 #: short: a helper that never sees secrets should still get ``env=``, not an
 #: allowlist entry.
-ALLOWLIST: dict[tuple[str, str], str] = {}
+ALLOWLIST: dict[tuple[str, str], str] = {
+    ("core/diewithparent.py", "main"): (
+        "becomes the game command; its parent started it with the game's filtered environment"
+    ),
+}
 
 
 class _CallGuard(ast.NodeVisitor):

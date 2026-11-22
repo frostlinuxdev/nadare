@@ -56,7 +56,7 @@ class TestStubIsRebuiltInCI:
     def test_workflow_builds_the_stub_and_compares_it(self):
         for rel in (".github/workflows/ci.yml", ".forgejo/workflows/ci.yml"):
             text = _text(rel)
-            assert "build_stub.sh --container" in text, rel
+            assert "build_stub_go.sh" in text, rel
             assert "czn_pcsdk_stub.exe" in text, rel
             assert "cmp " in text or "sha256sum" in text, rel
 
@@ -156,7 +156,7 @@ class TestReviewFixes:
             line for line in _text("docs/TROUBLESHOOTING.md").splitlines() if "DXVK 3.1.1" in line
         )
         assert "every Wine/Proton profile" not in row
-        assert "extra_env" in row  # a custom Wine/Proton game profile still sets it by hand
+        assert "Wine / Proton game" not in row  # own games are gone (no hand-set step)
 
     def test_the_packaging_doc_does_not_point_at_a_privacy_section_that_is_not_there(self):
         assert "described in [PRIVACY.md]" not in _text("docs/PACKAGING.md")

@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
 )
 
-from ...core import gamefinder
+from ...core import gamefacts, gamefinder
 from ...core import libraries as core_libraries
 from ...core import process as process_core
 from ...core import relink as relink_core
@@ -31,6 +31,15 @@ from ..found_copies import FoundCopiesDialog
 from ..library_picker import resolve_other_folder
 from ..workers import CallTask
 
+
+def has_game_files(folder: Path) -> bool:
+    """Whether ``folder`` holds more than Nadare's own manifest (a partial download, say)."""
+    ours = {core_libraries.MANIFEST_NAME, core_libraries.MANIFEST_TMP_NAME}
+    return any(entry.name not in ours for entry in folder.iterdir())
+
+
+#: What the relink probe answers when the game runs (one rule: gamefacts.is_running).
+RUNNING = object()
 
 class PrefixToolsMixin:
     """Mixin for :class:`SettingsPage`; see the module text."""
@@ -76,12 +85,13 @@ class PrefixToolsMixin:
             )
             return
         state = getattr(status, "state", "")
-        self._game_idle = state != "running"
-        self._game_active = state in ("installed", "running")
+        running = gamefacts.is_running(status)
+        self._game_idle = not running
+        self._game_active = running or state == "installed"
         data = getattr(status, "data", None)
         # A profile with no prefix key uses a folder of Nadare's own; the status knows where.
         self._probed_prefix = str(data.get("prefix") or "") if isinstance(data, dict) else ""
-        self._set_prefix_locked(state in ("installed", "running"))
+        self._set_prefix_locked(self._game_active)
 
     def _set_prefix_locked(self, locked: bool, note: str | None = None) -> None:
         """Stop an installed game's prefix from being silently repointed."""
@@ -183,7 +193,7 @@ class PrefixToolsMixin:
             return
 
         recorded = core_libraries._game_folder(profile, name, None)
-        if recorded is not None and recorded.is_dir() and any(recorded.iterdir()):
+        if recorded is not None and recorded.is_dir() and has_game_files(recorded):
             # A partial download is there: only Move can keep it and its prefix together.
             self._move_prefix()
             return
@@ -204,6 +214,13 @@ class PrefixToolsMixin:
         home = relink_core.free_home(
             library_path, core_libraries.game_folder_name(title), config.profiles
         )
+        who = relink_core._inside_other(config.profiles, name, home)
+        if who:
+            # Never inside another game's folder (storage review round 3, A-1).
+            QMessageBox.warning(
+                self, "Change location", f"{home} is inside the folder of {who}. Pick another."
+            )
+            return
         backup = copy.deepcopy(profile)
         libraries_backup = copy.deepcopy(config.data.get(core_libraries.CONFIG_KEY))
         try:
@@ -212,12 +229,12 @@ class PrefixToolsMixin:
                     profile["install_dir"] = str(home / "install")
                 profile["prefix"] = str(home / "prefix")
                 profile["owned_dirs"] = [str(home)]
-                trees = profile.get("owned_trees")
-                if isinstance(trees, list):
-                    made = {"install_dir": home / "install", "prefix": home / "prefix"}
-                    profile["owned_paths"] = {
-                        key: str(made[key]) for key in trees if key in made
-                    }
+                # Nadare makes both folders new in the library, so they are its own: without
+                # the record Uninstall would refuse to delete them (storage review C1).
+                made = {"install_dir": home / "install", "prefix": home / "prefix"}
+                trees = [k for k in ("install_dir", "prefix") if profile.get(k) not in (None, "")]
+                profile["owned_trees"] = trees
+                profile["owned_paths"] = {key: str(made[key].resolve()) for key in trees}
                 try:
                     core_libraries.add_library(config, library_path)
                 except core_libraries.LibraryError:
@@ -335,7 +352,10 @@ class PrefixToolsMixin:
 
         def probe() -> object:
             try:
-                return ticket, getattr(create_backend(name, config).status(), "state", "")
+                status = create_backend(name, config).status()
+                if gamefacts.is_running(status):
+                    return ticket, RUNNING
+                return ticket, getattr(status, "state", "")
             except Exception:  # noqa: BLE001 - unknown means do not relink
                 return ticket, None
 
@@ -361,7 +381,7 @@ class PrefixToolsMixin:
             )
             return
         on_page = config is self._config and name == self._profile
-        if state == "running":
+        if state is RUNNING:
             if on_page:
                 self._game_idle = False
                 self._game_active = True

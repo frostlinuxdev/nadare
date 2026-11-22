@@ -54,7 +54,7 @@ MESSAGES: dict[int, str] = {
 #: ``verify`` then accepts a hash listed in the Nadare index (``webview2/latest.json``). The CZN
 #: backend re-exports both names (its tests patch them there); Steam Set up reads them here.
 DEFAULT_URL = "https://go.microsoft.com/fwlink/?linkid=2124701"
-PINNED_SHA256: str | None = "2a6add76c37bfa872eb8c2b22d45b3216b8e2a1f193e0774006340ff62ac5fa0"
+PINNED_SHA256: str | None = "d3cbe8fedb104282d745fff106993efead51ae94f5595a4e75804446a974f9c3"
 
 
 def installed(prefix: Path) -> bool:
@@ -122,7 +122,14 @@ def resolve_pin(profile: dict[str, Any], constant: str | None) -> str:
 
 def pin_error(pin: str) -> BackendError:
     """A fail-fast :class:`BackendError` for an absent/malformed pin."""
-    if pin and not _SHA256_RE.fullmatch(pin):
+    if not pin:
+        return BackendError(
+            "the index entry for Microsoft WebView2 has no checksum; "
+            "Nadare will not run an unpinned installer. "
+            + MESSAGES[EXIT_WEBVIEW2_UNVERIFIED],
+            EXIT_WEBVIEW2_UNVERIFIED,
+        )
+    if not _SHA256_RE.fullmatch(pin):
         return BackendError(
             "the configured WebView2 SHA-256 is malformed (expected 64 hex "
             "digits); refusing before the download",
@@ -181,10 +188,16 @@ def index_source() -> str:
     change under us. The index records the exact build URL the published
     hash belongs to; downloading that keeps hash and bytes consistent even
     right after a Microsoft release. Empty on any problem (https and a
-    Microsoft host are required).
+    Microsoft host are required), including a document whose URL comes without
+    a valid sha256: Nadare will not run bytes the index has not pinned (#1593).
     """
     payload = _index_document()
     if not isinstance(payload, dict):
+        return ""
+    hashes = payload.get("sha256")
+    if not isinstance(hashes, list) or not any(
+        isinstance(h, str) and _SHA256_RE.fullmatch(h.strip().lower()) for h in hashes
+    ):
         return ""
     source = payload.get("url")
     if not isinstance(source, str):

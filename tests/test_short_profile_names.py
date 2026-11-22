@@ -93,16 +93,6 @@ def test_a_taken_short_name_is_numbered_not_lengthened(tmp_path, qapp):
         qapp.processEvents()
 
 
-def test_a_generic_kind_still_uses_its_title(tmp_path, qapp):
-    dialog = _dialog(tmp_path)
-    try:
-        dialog.set_backend("wine")
-        assert dialog.name.text() == "wine-proton-game"
-    finally:
-        dialog.deleteLater()
-        qapp.processEvents()
-
-
 def test_a_user_typed_name_is_kept(tmp_path, qapp):
     dialog = _dialog(tmp_path)
     try:

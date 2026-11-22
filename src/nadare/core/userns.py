@@ -71,18 +71,15 @@ def restricted(path: str = SYSCTL_PATH) -> bool:
 def _srt_bwrap_paths() -> list[str]:
     """Return the Steam Runtime bwrap copies already downloaded, newest first.
 
-    umu writes to ``$HOME/.local/share/umu`` whatever ``XDG_DATA_HOME`` says (inside the Flatpak
-    that is the app's own data folder); both places are looked at.
+    Search Nadare's owned runtime and both shared locations used by older/system umu.
     """
-    roots = [os.path.normpath(os.path.join(os.path.expanduser("~"), ".local", "share"))]
-    xdg = os.environ.get("XDG_DATA_HOME")
-    if xdg:
-        roots.append(os.path.normpath(xdg))
+    from . import umu
+
+    roots = umu.runtime_roots()
     found: list[str] = []
     for root in roots:
         pattern = os.path.join(
             glob.escape(root),
-            "umu",
             "*",
             "pressure-vessel",
             "libexec",
@@ -107,7 +104,8 @@ def probe(run=subprocess.run) -> bool | None:  # noqa: ANN001
     """
     from . import gamesandbox  # late: gamesandbox imports this module
 
-    for path in gamesandbox.recorded_runtime_copies()[:1]:
+    copies = permitted_runtime_copies(gamesandbox.recorded_runtime_copies())
+    for path in copies[:1]:
         try:
             result = run(
                 [path, "--unshare-user", "--ro-bind", "/", "/", "/bin/true"],
@@ -129,6 +127,18 @@ def probe(run=subprocess.run) -> bool | None:  # noqa: ANN001
     return None
 
 
+def permitted_runtime_copies(copies: list[str]) -> list[str]:
+    """Do not run a new-location bwrap under the old Ubuntu profile."""
+    from pathlib import Path
+
+    from . import umu
+
+    if runtime_profile_outdated():
+        base = umu.runtime_base().resolve()
+        return [copy for copy in copies if not Path(copy).resolve().is_relative_to(base)]
+    return copies
+
+
 def profile_installed(path: str = PROFILE_PATH) -> bool:
     """Return True when Nadare's AppArmor profile file exists."""
     try:
@@ -147,27 +157,49 @@ def is_failure_line(line: str) -> bool:
 
 def profile_text() -> str:
     """Return the AppArmor profile, scoped to the bundled ``srt-bwrap``."""
-    return (
-        "abi <abi/4.0>,\n"
-        "include <tunables/global>\n"
-        f"profile {PROFILE_NAME} "
-        "@{HOME}/.local/share/umu/*/pressure-vessel/libexec/"
-        "steam-runtime-tools-0/srt-bwrap flags=(unconfined) {\n"
-        "  userns,\n"
-        "}\n"
-    )
+    from . import umu
+
+    legacy = "@{HOME}/.local/share/umu/*/pressure-vessel/libexec/steam-runtime-tools-0/srt-bwrap"
+    home_shared = umu.shared_runtime_roots()[0]
+    attachments = [legacy, *[_runtime_attachment(root) for root in umu.runtime_roots()
+                             if root != home_shared]]
+    profiles = []
+    for index, attachment in enumerate(dict.fromkeys(attachments)):
+        name = PROFILE_NAME if index == 0 else f"{PROFILE_NAME}-{index}"
+        profiles.append(f"profile {name} {attachment} flags=(unconfined) {{\n  userns,\n}}\n")
+    return "abi <abi/4.0>,\ninclude <tunables/global>\n" + "".join(profiles)
+
+
+def _runtime_attachment(root) -> str:  # noqa: ANN001
+    # Quote whitespace and escape AppArmor glob syntax in the literal data path.
+    literal = "".join("\\" + c if c in '\\"*?[]{}^' else c for c in str(root))
+    return '\"' + literal + '/*/pressure-vessel/libexec/steam-runtime-tools-0/srt-bwrap\"'
+
+
+RUNTIME_MOVED_MESSAGE = (
+    "Nadare moved its runtime. One more admin prompt is needed. "
+    "Until then, games keep using the shared runtime folder."
+)
+
+
+def runtime_profile_outdated() -> bool:
+    """Keep the old location until the installed Ubuntu profile permits the new one."""
+    from . import umu
+
+    if not restricted() or not profile_installed(PROFILE_PATH):
+        return False
+    try:
+        with open(PROFILE_PATH, encoding="utf-8") as profile:
+            return _runtime_attachment(umu.runtime_base() / "umu") not in profile.read()
+    except FileNotFoundError:
+        return False  # first install uses the existing initial-permission flow
+    except OSError:
+        return True  # cannot establish permission: retain the working shared location
 
 
 def install_command() -> str:
     """Return the shell snippet that writes and loads the AppArmor profile."""
-    return "\n".join(
-        [
-            f"sudo tee {PROFILE_PATH} >/dev/null <<'EOF'",
-            profile_text().strip(),
-            "EOF",
-            f"sudo apparmor_parser -r {PROFILE_PATH}",
-        ]
-    )
+    return "sudo /bin/sh -c " + shlex.quote(fix_script())
 
 
 def hint() -> str:
@@ -207,11 +239,16 @@ def split_hint(message: str) -> tuple[str, str]:
 def fix_script(path: str = PROFILE_PATH, parser: str = "apparmor_parser") -> str:
     """Return one shell command that writes and loads the profile.
 
-    It is built only from constants, so no user input ever reaches the shell.
+    Paths and profile contents are shell quoted. Publish only after the parser loads it:
+    a failed upgrade must leave the old profile detectable.
     """
     return (
-        f"printf '%s' {shlex.quote(profile_text())} > {shlex.quote(path)}"
-        f" && {shlex.quote(parser)} -r {shlex.quote(path)}"
+        f"tmp=$(mktemp {shlex.quote(path + '.XXXXXX')}) || exit 1; "
+        "trap 'rm -f -- \"$tmp\"' EXIT; "
+        f"printf '%s' {shlex.quote(profile_text())} > \"$tmp\""
+        f" && {shlex.quote(parser)} -r \"$tmp\""
+        ' && chmod 644 "$tmp"'
+        f" && mv -- \"$tmp\" {shlex.quote(path)}"
     )
 
 

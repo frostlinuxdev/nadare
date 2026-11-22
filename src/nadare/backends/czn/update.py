@@ -14,7 +14,9 @@ updates").
                       czn-manifests job publishes (probes STOVE from N upward)
 
 Exit codes: 0 up to date / updated, 1 a download failed, 2 setup or network
-error (CDN unreachable, no game dir), 3 the game is running (nothing written).
+error (CDN unreachable, no game dir), 3 the game is running (nothing written),
+5 the game folder is missing, 6 another install or update holds this game's
+folder (nothing written).
 
 This covers the client binaries (~20 files, ~270 MB). Game content is patched
 by the game itself at startup and needs nothing from here.
@@ -31,8 +33,16 @@ Mechanism (all from unauthenticated endpoints, headers caller-id + caller-detail
                   md5_unpacked | md5_packed | ...
                D: idx | D | /path
   chunks:   <CDN>/game/dpms_STOVE_CHAOSZERO/v<ver_folder>/<chunk>.gz
-            -> stream to a resumable .part.gz, verify md5_packed, gunzip to .part,
-               verify md5_unpacked, then atomically install at <root>/<path>.
+            -> the gzip of one client file.
+
+The download engine is the shared one (#1557): the manifest becomes a
+:class:`nadare.core.directdl.Plan` whose files are ``Packed("gzip")`` (md5 of the
+packed and of the unpacked bytes), :func:`directdl.sync` fetches it under the
+shared install lock, the on-disk check is directdl's hashing, and "the game is
+running" is the backend's own rule (``backend_parts.launching``). What stays here
+is CZN's own: finding the version, reading and refusing manifests, the stat cache
+that lets the launch-time check skip unchanged files, the game's version marker
+(the upf) and the manifest copy Verify uses.
 
 Files are synced by comparing each manifest file's md5_unpacked to the on-disk
 file, so it works for a fresh install or an update. vcredist/directx/dotnet
@@ -42,8 +52,6 @@ prereqs are skipped (Wine provides them).
 from __future__ import annotations
 
 import argparse
-import gzip
-import hashlib
 import json
 import os
 import re
@@ -51,6 +59,7 @@ import sys
 import tempfile
 import urllib.request
 from pathlib import Path
+from typing import NamedTuple
 
 try:
     from nadare.core import diskspace, tls
@@ -58,8 +67,11 @@ except Exception:  # pragma: no cover - standalone script use
     diskspace = None  # type: ignore[assignment]
     tls = None  # type: ignore[assignment]
 
-from nadare.core import hosting
+from nadare.core import directdl, hosting
+from nadare.core.events import Event
 from nadare.core.yostar import ManifestError, safe_relative_path
+
+from .backend_parts import launching
 
 try:
     from curl_cffi import requests as creq
@@ -151,12 +163,18 @@ PREREQ_PREFIXES = ("vcredist", "directx", "dotnet", "ueprereq", "addons")
 #: Safety cap on how many manifest probes one ``latest`` lookup may make, so a
 #: fresh install with no usable index cannot hammer the CDN.
 MAX_PROBES = 200
-#: Refuse to expand a manifest chunk beyond this many bytes: the unsigned
-#: manifest chooses the compression ratio, so a decompression bomb must not
-#: exhaust memory. Override with ``CZN_MAX_UNPACKED``.
-MAX_UNPACKED = int(os.environ.get("CZN_MAX_UNPACKED", str(4 << 30)))
+
+#: Exit codes the backend words for the user (``backend.UPDATE_EXIT_MESSAGES``).
+EXIT_RUNNING = 3
+EXIT_BUSY = 6
 #: A manifest md5 column must be exactly this, or the row is rejected (fail closed).
 _MD5_RE = re.compile(r"\A[0-9a-fA-F]{32}\Z")
+#: A version folder or chunk name goes into the chunk URL, so it must be a plain token.
+_TOKEN_RE = re.compile(r"\A[0-9A-Za-z_.-]{1,64}\Z")
+#: How the b27-and-older updater staged a download: ``<file>.part.gz`` held the packed bytes
+#: (resumable), ``<file>.part`` the unpacked ones. Adopted or removed once (#1557).
+_LEGACY_PACKED = ".part.gz"
+_LEGACY_UNPACKED = ".part"
 
 
 #: Default read cap for manifests/JSON; file downloads pass a larger one.
@@ -321,17 +339,6 @@ def parse_files(manifest: dict):
             yield ("F", path, p[3], p[4], p[8], p[9], usize)
 
 
-def _md5_file(path: Path) -> str | None:
-    try:
-        h = hashlib.md5()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
-        return h.hexdigest()
-    except Exception:
-        return None
-
-
 def _rel(path: str) -> Path:
     """Resolve a manifest path under GAME_DIR, refusing traversal.
 
@@ -389,18 +396,37 @@ def _write_stat_cache(files: dict[str, dict[str, int | str]]) -> None:
                 pass
 
 
+class Row(NamedTuple):
+    """One manifest file still to fetch, as :func:`plan` returns it."""
+
+    path: str
+    vf: str | None
+    ci: str | None
+    md5u: str | None
+    md5p: str | None
+    usize: int | None
+
+
+def _relative(path: str) -> str:
+    """A manifest path as directdl takes it: relative to GAME_DIR, no leading slash."""
+    return _rel(path).relative_to(GAME_DIR).as_posix()
+
+
 def plan(manifest: dict, trust_stat_cache: bool = True):
     """Return (to_download, dirs) comparing manifest md5s to on-disk files.
 
+    The check of a file's bytes is directdl's (:func:`directdl.plan_missing`, #1557).
     ``trust_stat_cache`` lets the launch-time check skip hashing a file whose stat
     fingerprint matches its last verified state. Verify and Repair pass ``False``:
     they must read every file, since silent corruption leaves the stat unchanged.
     The cache is still refreshed from what was actually hashed.
     """
-    to_download, dirs = [], []
+    dirs: list[str] = []
     stored = _load_stat_cache()
     cached = stored if trust_stat_cache else {}
     verified: dict[str, dict[str, int | str]] = {}
+    #: Manifest order; each entry: (row, fingerprint, what to check or None = fetch it).
+    entries: list[tuple[Row, dict[str, int | str], directdl.RemoteFile | None]] = []
     for kind, path, vf, ci, md5u, md5p, usize in parse_files(manifest):
         try:
             dst = _rel(path)  # reject absolute/traversal paths from the manifest
@@ -427,10 +453,32 @@ def plan(manifest: dict, trust_stat_cache: bool = True):
         if fingerprint and cached.get(path) == fingerprint:
             verified[path] = fingerprint
             continue
-        if _md5_file(dst) != expected:
-            to_download.append((path, vf, ci, md5u, md5p, usize))
+        row = Row(path, vf, ci, md5u, md5p, usize)
+        if not _MD5_RE.fullmatch(expected):
+            # No usable hash: never "matches"; fetching it then refuses the row (fail closed).
+            entries.append((row, fingerprint, None))
+            continue
+        try:
+            relative = _relative(path)
+            check = directdl.RemoteFile(relative, "", md5=expected)
+            directdl.safe_relative_path(relative)
+        except (ValueError, directdl.DirectError) as e:
+            raise ManifestError(f"invalid manifest path: {path!r}") from e
+        entries.append((row, fingerprint, check))
+    checks = tuple(check for _row, _fp, check in entries if check is not None)
+    try:
+        missing, _archives = directdl.plan_missing(
+            directdl.Plan(SERVICE, "check", files=checks), GAME_DIR, verify=True
+        )
+    except directdl.DirectError as e:  # a duplicate path
+        raise ManifestError(str(e)) from e
+    differ = {rf.path for rf in missing}
+    to_download: list[Row] = []
+    for row, fingerprint, check in entries:
+        if check is None or check.path in differ:
+            to_download.append(row)
         elif fingerprint:
-            verified[path] = fingerprint
+            verified[row.path] = fingerprint
     if verified != stored:
         _write_stat_cache(verified)
     return to_download, dirs
@@ -447,202 +495,102 @@ def _manifest_md5(value: str, path: str, kind: str) -> str:
     return value.lower()
 
 
-def _download_stream(
-    url: str, dest: Path, *, timeout: int = 300, max_bytes: int = MAX_UNPACKED
-) -> int:
-    """Append a streamed response, resuming a partial file when Range is honored."""
-    offset = dest.stat().st_size if dest.is_file() else 0
-    headers = dict(HEADERS)
-    if offset:
-        headers["Range"] = f"bytes={offset}-"
-    response = None
-    try:
-        if _SESS is not None:
-            response = _SESS.get(url, headers=headers, timeout=timeout, stream=True)
-            status = response.status_code
-        else:
-            req = urllib.request.Request(url, headers=headers)
-            response = (
-                tls.urlopen(req, timeout=timeout, context=tls.ssl_context())
-                if tls is not None
-                else urllib.request.urlopen(req, timeout=timeout)
-            )  # noqa: S310
-            status = response.status if hasattr(response, "status") else response.getcode()
+def to_plan(rows, version: object = "") -> directdl.Plan:
+    """The files of ``rows`` (from :func:`plan`) as a directdl plan of gzip chunks.
 
-        response_headers = response.headers
-        if status == 416 and offset:
-            match = re.fullmatch(r"bytes \*/(\d+)", response_headers.get("Content-Range", ""))
-            if match and int(match.group(1)) == offset:
-                return offset  # a completed packed part from an interrupted prior run
-            dest.unlink(missing_ok=True)
-            raise ValueError(f"invalid range response for {url}")
-        if status not in (200, 206):
-            raise FileNotFoundError(f"{status} {url}")
-
-        range_match = None
-        if status == 206:
-            match = re.fullmatch(
-                r"bytes (\d+)-(\d+)/(\d+|\*)", response_headers.get("Content-Range", "")
-            )
-            if (
-                not match
-                or int(match.group(1)) != offset
-                or int(match.group(2)) < offset
-                or (match.group(3) != "*" and int(match.group(2)) + 1 != int(match.group(3)))
-            ):
-                dest.unlink(missing_ok=True)
-                raise ValueError(f"invalid Content-Range for {url}")
-            range_match = match
-            mode = "ab" if offset else "wb"
-        else:
-            offset = 0  # the server ignored Range; restart from the response body
-            mode = "wb"
-
-        try:
-            expected_response = int(response_headers.get("Content-Length", ""))
-        except ValueError:
-            expected_response = None
-        if (
-            range_match
-            and expected_response is not None
-            and expected_response != int(range_match.group(2)) - offset + 1
-        ):
-            dest.unlink(missing_ok=True)
-            raise ValueError(f"invalid Content-Length for {url}")
-        received = 0
-        with dest.open(mode) as stream:
-            if hasattr(response, "iter_content"):
-                chunks = response.iter_content(chunk_size=1 << 20)
-            else:
-                def read_chunks():
-                    while True:
-                        read = getattr(response, "read1", response.read)
-                        chunk = read(1 << 20)
-                        if not chunk:
-                            break
-                        yield chunk
-
-                chunks = read_chunks()
-            for chunk in chunks:
-                if not chunk:
-                    continue
-                received += len(chunk)
-                if offset + received > max_bytes:
-                    dest.unlink(missing_ok=True)
-                    raise ValueError(f"response too large for {url}")
-                stream.write(chunk)
-        if expected_response is not None and received != expected_response:
-            raise OSError(f"incomplete response for {url}: {received}/{expected_response} bytes")
-        return offset + received
-    finally:
-        if response is not None:
-            close = getattr(response, "close", None)
-            if close:
-                close()
-
-
-def _fetch_verified_to_file(path, vf, ci, md5u, md5p, usize, packed_tmp, output_tmp) -> int:
-    """Stream, verify and decompress a chunk into its uncommitted output file."""
-    md5p = _manifest_md5(md5p, path, "packed")
-    md5u = _manifest_md5(md5u, path, "unpacked")
-    url = f"{BASE}/v{vf}/{ci}.gz"
-    _download_stream(url, packed_tmp, timeout=300, max_bytes=MAX_UNPACKED)
-    if _md5_file(packed_tmp) != md5p:
-        packed_tmp.unlink(missing_ok=True)
-        raise ValueError(f"packed md5 mismatch for {path} ({url})")
-
-    digest = hashlib.md5()
-    size = 0
-    try:
-        with gzip.open(packed_tmp, "rb") as source, output_tmp.open("wb") as target:
-            while chunk := source.read(1 << 20):
-                size += len(chunk)
-                if size > MAX_UNPACKED:
-                    raise ValueError(f"unpacked chunk exceeds {MAX_UNPACKED} bytes")
-                digest.update(chunk)
-                target.write(chunk)
-        if digest.hexdigest() != md5u:
-            raise ValueError(f"unpacked md5 mismatch for {path}")
-        if usize is not None and size != int(usize):
-            raise ValueError(f"unpacked size mismatch for {path}")
-    except BaseException:
-        output_tmp.unlink(missing_ok=True)
-        packed_tmp.unlink(missing_ok=True)
-        raise
-    packed_tmp.unlink(missing_ok=True)
-    return size
-
-
-def download_file(path, vf, ci, md5u, md5p, usize=None, attempts=3):
-    dst = _rel(path)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.with_suffix(dst.suffix + ".part")
-    packed_tmp = dst.with_suffix(dst.suffix + ".part.gz")
-    for i in range(attempts):
-        try:
-            size = _fetch_verified_to_file(
-                path, vf, ci, md5u, md5p, usize, packed_tmp, tmp
-            )
-            break
-        except ManifestError:
-            tmp.unlink(missing_ok=True)
-            packed_tmp.unlink(missing_ok=True)
-            raise  # a missing/invalid manifest md5 is not transient
-        except Exception as e:
-            tmp.unlink(missing_ok=True)
-            if i == attempts - 1:
-                raise
-            print(f"  [~] {path}: {e}; retrying ({i + 2}/{attempts})")
-            time.sleep(2 * (i + 1))
-    tmp.replace(dst)
-    packed_tmp.unlink(missing_ok=True)
-    return size
-
-
-#: Executables from the game's bin dir that are not "the game": the crash
-#: handler lingers after a normal exit and must not block install/update/launch
-#: (kept in step with ``backend.GAME_HELPER_EXES``).
-GAME_HELPER_EXES = frozenset({"crashpad_handler.exe"})
-
-
-def _cmdline_has_exe(raw: bytes, prefix: str) -> bool:
-    """Whether any NUL-separated argv token names a game exe under ``prefix``.
-
-    Matching whole argv tokens (not the raw cmdline) stops an unrelated process
-    that merely mentions the path inside one argument from counting as the game.
-    Helper exes (the crash handler) are ignored.
+    Every row must carry both md5s and a plain version folder and chunk name, or the
+    manifest is refused (:class:`ManifestError`): nothing is fetched unchecked.
     """
-    for token in raw.split(b"\0"):
-        if not token:
+    files = []
+    headers = tuple(HEADERS.items())
+    for row in rows:
+        path, vf, ci, md5u, md5p, usize = tuple(row)[:6]
+        md5p = _manifest_md5(md5p, path, "packed")
+        md5u = _manifest_md5(md5u, path, "unpacked")
+        if not (_TOKEN_RE.fullmatch(str(vf or "")) and _TOKEN_RE.fullmatch(str(ci or ""))):
+            raise ManifestError(f"manifest has no valid chunk name for {path}")
+        try:
+            relative = _relative(path)
+        except (ValueError, OSError) as e:
+            raise ManifestError(f"invalid manifest path: {path!r}") from e
+        files.append(
+            directdl.RemoteFile(
+                relative,
+                f"{BASE}/v{vf}/{ci}.gz",
+                int(usize) if usize is not None else None,
+                md5=md5u,
+                headers=headers,
+                packed=directdl.Packed("gzip", md5=md5p),
+            )
+        )
+    plan_ = directdl.Plan(SERVICE, str(version), files=tuple(files))
+    try:
+        directdl._validate_plan(plan_)
+    except directdl.DirectError as e:
+        raise ManifestError(str(e)) from e
+    return plan_
+
+
+def _settle_legacy_staging(manifest: dict, fetching: set[str]) -> None:
+    """Deal with what an interrupted b27-or-older download left (#1557 upgrade).
+
+    ``<file>.part.gz`` held the first bytes of the packed chunk: for a file this run fetches it
+    becomes directdl's resumable ``<file>.nadare-gz.part`` (the same bytes), otherwise it goes.
+    ``<file>.part`` (unpacked, never resumable) goes. Only names of manifest files are touched,
+    and a link is removed, never followed.
+    """
+    for kind, path, *_rest in parse_files(manifest):
+        if kind != "F":
             continue
-        text = token.decode("utf-8", "replace").lower()
-        if not text.startswith(prefix):
+        try:
+            dst = _rel(path)
+        except (ValueError, OSError):
             continue
-        if text.replace("/", "\\").rsplit("\\", 1)[-1] in GAME_HELPER_EXES:
+        old_unpacked = dst.with_name(dst.name + _LEGACY_UNPACKED)
+        old_packed = dst.with_name(dst.name + _LEGACY_PACKED)
+        if old_unpacked.is_symlink() or old_unpacked.is_file():
+            old_unpacked.unlink(missing_ok=True)
+        if not (old_packed.is_symlink() or old_packed.is_file()):
             continue
-        return True
-    return False
+        resume = dst.with_name(dst.name + directdl.PACKED_SUFFIX + ".part")
+        if path in fetching and not old_packed.is_symlink() and not resume.exists():
+            try:
+                os.replace(old_packed, resume)
+                continue
+            except OSError:
+                pass
+        old_packed.unlink(missing_ok=True)
+
+
+def _progress_printer():
+    """directdl events as this module's output lines (the backend reads ``[done/total]``)."""
+    last = {"step": -1}
+
+    def emit(event: Event) -> None:
+        data = event.data if isinstance(event.data, dict) else {}
+        if event.kind == "progress":
+            done, total = data.get("done"), data.get("total")
+            if not (isinstance(done, int) and isinstance(total, int) and total > 0):
+                return
+            step = done * 50 // total
+            if step == last["step"]:
+                return
+            last["step"] = step
+            print(f"  [{done // 1000}/{total // 1000}] kB downloaded", flush=True)
+        elif event.kind == "step":
+            print(f"[*] {event.message}", flush=True)
+        elif event.kind == "error":
+            print(f"[!] {event.message}", flush=True)
+        else:
+            print(f"  {event.message}", flush=True)
+
+    return emit
 
 
 def game_running() -> bool:
-    """True if a process runs an exe from *this* install's bin dir (other
-    prefixes don't count). Wine shows it as Z:\\<unix path with backslashes>."""
-    prefix = ("Z:" + str(GAME_DIR / "bin").replace("/", "\\") + "\\").lower()
-    uid = os.getuid()
-    for d in Path("/proc").iterdir():
-        if not d.name.isdigit():
-            continue
-        try:
-            # Only this user's processes can be the game; another user's argv
-            # must not be able to make updates/installs refuse to run.
-            if d.stat().st_uid != uid:
-                continue
-            raw = (d / "cmdline").read_bytes()
-        except OSError:
-            continue
-        if _cmdline_has_exe(raw, prefix):
-            return True
-    return False
+    """The game of *this* install runs: the backend's own rule (``launching.game_running``),
+    so the updater and the game page cannot disagree (#1557)."""
+    return launching.game_running(PREFIX, GAME_DIR)
 
 
 def _cache_manifest(manifest: dict) -> None:
@@ -776,7 +724,7 @@ def main(argv=None) -> int:
         print(f"[!] manifest rejected: {e}")
         return 2
 
-    total = sum(u for *_, u in to_dl)
+    total = sum(int(row[5] or 0) for row in to_dl)
     if not to_dl:
         count = sum(1 for _ in parse_files(manifest))
         print(f"[+] up to date — all {count} entries match on disk.")
@@ -784,21 +732,47 @@ def main(argv=None) -> int:
             # The files already match this manifest; still advance the marker,
             # or the status keeps showing the old number when a release
             # changed nothing under the client files.
-            _write_local_version(manifest, target)
+            try:
+                with directdl.install_lock(GAME_DIR):
+                    _write_local_version(manifest, target)
+            except directdl.InstallBusy as e:
+                print(f"[!] {e}")
+                return EXIT_BUSY
+            except directdl.DirectError as e:  # an unusable lock folder
+                print(f"[!] {e}")
+                return 1
         _cache_manifest(manifest)
         return 0
     print(f"[*] {len(to_dl)} file(s) differ / missing, {total / 1e6:.1f} MB to fetch:")
-    for path, vf, ci, *_ in to_dl[:40]:
-        print(f"    {path}  (v{vf}/{ci}.gz)")
+    for row in to_dl[:40]:
+        print(f"    {row[0]}  (v{row[1]}/{row[2]}.gz)")
     if len(to_dl) > 40:
         print(f"    … and {len(to_dl) - 40} more")
 
     if args.action != "update" or not args.apply:
         print("\n(dry-run — re-run `update --apply` to download and write)")
         return 0
+    try:
+        sync_plan = to_plan(to_dl, manifest.get("version_no", target))
+    except ManifestError as e:
+        print(f"[!] manifest rejected: {e}")
+        return 2
+    try:
+        with directdl.install_lock(GAME_DIR):
+            return _apply(manifest, target, sync_plan, to_dl, dirs, total)
+    except directdl.InstallBusy as e:  # another sync holds this folder; nothing written
+        print(f"[!] {e}")
+        return EXIT_BUSY
+    except directdl.DirectError as e:  # an unusable lock folder, or a failed download
+        print(f"[!] {e}")
+        return 1
+
+
+def _apply(manifest: dict, target: int, sync_plan, to_dl, dirs, total: int) -> int:
+    """Write the update; the caller holds the install lock for GAME_DIR."""
     if game_running():
         print("[!] the game is running; close it first (its files are in use)")
-        return 3
+        return EXIT_RUNNING
 
     if diskspace is not None:
         try:
@@ -813,18 +787,24 @@ def main(argv=None) -> int:
         except Exception as e:  # noqa: BLE001 - report, never traceback
             print(f"  [!] {p}: {e}")
             return 1
-    done = 0
-    for path, vf, ci, md5u, md5p, usize in to_dl:
-        try:
-            n = download_file(path, vf, ci, md5u, md5p, usize)
-            done += 1
-            print(f"  [{done}/{len(to_dl)}] {path}  ({n / 1e6:.1f} MB) ok")
-        except Exception as e:
-            print(f"  [!] {path}: {e}")
-            return 1
+    _settle_legacy_staging(manifest, {row[0] for row in to_dl})
+    try:
+        summary = directdl.sync(
+            sync_plan,
+            GAME_DIR,
+            emit=_progress_printer(),
+            workers=directdl.default_workers(len(sync_plan.files)),
+            lock=False,
+        )
+    except directdl.DirectError as e:
+        print(f"[!] {e}")
+        return 1
     _write_local_version(manifest, target)
     _cache_manifest(manifest)
-    print(f"[+] updated to v{manifest.get('version_no')} — {done} file(s).")
+    print(
+        f"[+] updated to v{manifest.get('version_no')} — "
+        f"{summary.get('downloaded', 0)} file(s) fetched."
+    )
     return 0
 
 

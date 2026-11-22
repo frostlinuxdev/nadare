@@ -49,9 +49,13 @@ def test_the_version_carries_both_the_asset_and_the_client_version():
 
 def test_haoplay_keeps_its_version_format():
     flexible = (FIXTURES / "gfl2_haoplay_flexible_config.json").read_bytes()
+    version = (FIXTURES / "gfl2_haoplay_Version.txt").read_bytes()
+    version_url = (
+        "https://gf2-intl-cdn.17996cdn.com/prod/AssetBundles_Windows/28279/Version.txt"
+    )
 
     def fetch(url, headers=None):
-        return flexible
+        return version if url == version_url else flexible
 
     assert gfl2.resolve_haoplay(fetch).version == "2.0.3936.14886.28279+client-2.0.3936"
 

@@ -18,7 +18,7 @@ def _run(tmp_path, monkeypatch, sizes, chunks=50, workers=6, skip=()):
     plan, files = _plan(sizes)
     monkeypatch.setattr(dd, "plan_missing", lambda *a, **k: (list(files), []))
 
-    def fake(rf, dest, *, emit=None, cancel=None, pool=None):
+    def fake(rf, dest, *, emit=None, cancel=None, pool=None, redirect_allowed=None):
         index = int(rf.path[1:-4])
         if index in skip:
             return  # already on disk and verified: no progress events at all

@@ -9,7 +9,7 @@ import pytest
 
 from nadare import app
 from nadare.core import graphics, hostlibs, process, runners, shortcuts
-from nadare.core.backends import BackendError
+from nadare.core.backends import BackendNotInstalled
 from nadare.core.config import Config
 
 
@@ -53,7 +53,7 @@ class _NotInstalledBackend:
         return False
 
     def launch(self) -> int:
-        raise BackendError("the game is not installed", 1)
+        raise BackendNotInstalled("Game files need to be acquired first", 1)
 
     def verify(self) -> dict:
         return {"verified": False, "message": "integrity check failed: prefix, game"}

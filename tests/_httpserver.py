@@ -21,8 +21,11 @@ class Server:
         self.ignore_range = False
         #: Answer HEAD with 405 (signing CDNs often do) while GET keeps working.
         self.refuse_head = False
-        #: The next N GETs are answered 503 (a flaky CDN).
+        #: The next N GETs are answered ``fail_status`` (a flaky CDN), with
+        #: ``Retry-After: fail_retry_after`` when that is set.
         self.fail_next = 0
+        self.fail_status = 503
+        self.fail_retry_after: str | None = None
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -57,7 +60,9 @@ class Server:
                 outer.headers.append({k.lower(): v for k, v in self.headers.items()})
                 if outer.fail_next > 0:
                     outer.fail_next -= 1
-                    self.send_response(503)
+                    self.send_response(outer.fail_status)
+                    if outer.fail_retry_after is not None:
+                        self.send_header("Retry-After", outer.fail_retry_after)
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return

@@ -84,8 +84,8 @@ def test_the_notice_is_shown_once_and_remembered(tmp_path, qapp, monkeypatch):
     try:
         window._store_install(KIND)
         assert shown[0].notice_text  # first time: the notice is part of the dialog
-        assert cfg.data["unofficial_notice_ack"] == [KIND]
-        assert Config.load(tmp_path / "config.json").data["unofficial_notice_ack"] == [KIND]
+        assert cfg.data["unofficial_notice_ack"] is True  # accepted once for the whole app
+        assert Config.load(tmp_path / "config.json").data["unofficial_notice_ack"] is True
         # Reinstalling after removing the game keeps the acknowledgement.
         (name,) = cfg.profiles
         cfg.remove_profile(name)
@@ -195,26 +195,6 @@ def test_an_unreadable_disk_does_not_crash_the_dialog(tmp_path, qapp, monkeypatc
         window.close()
 
 
-def test_I_already_have_it_opens_the_full_dialog_and_creates_nothing(
-    tmp_path, qapp, monkeypatch
-):
-    window, cfg, started, shown, _ = _window(tmp_path, monkeypatch)
-    opened = []
-    monkeypatch.setattr(window, "_add_game_dialog", lambda **k: opened.append(k))
-
-    def press_import(self):
-        self.import_button.click()
-        return QDialog.DialogCode.Rejected
-
-    monkeypatch.setattr(QuickInstallDialog, "exec", press_import)
-    try:
-        window._store_install(KIND)
-        assert opened == [{"kind": KIND, "importing": True}]
-        assert cfg.profiles == {} and started == []
-    finally:
-        window.close()
-
-
 def test_a_taken_name_gets_a_free_one(tmp_path, qapp, monkeypatch):
     window, cfg, started, shown, _ = _window(tmp_path, monkeypatch, acked=[KIND])
     cfg.add_profile("stellasora", backend="wine", title="Mine")
@@ -228,18 +208,6 @@ def test_a_taken_name_gets_a_free_one(tmp_path, qapp, monkeypatch):
         window.close()
 
 
-def test_the_sidebar_add_game_path_is_unchanged(tmp_path, qapp, monkeypatch):
-    window, cfg, started, shown, _ = _window(tmp_path, monkeypatch)
-    opened = []
-    monkeypatch.setattr(window, "_add_game_dialog", lambda **k: opened.append(k))
-    try:
-        window.store.own_game_requested.emit()
-        assert opened == [{"advanced": True}]
-        assert shown == [] and cfg.profiles == {}
-    finally:
-        window.close()
-
-
 def test_the_store_install_button_goes_to_the_one_step_path(tmp_path, qapp, monkeypatch):
     window, cfg, started, shown, _ = _window(tmp_path, monkeypatch)
     seen = []
@@ -247,30 +215,5 @@ def test_the_store_install_button_goes_to_the_one_step_path(tmp_path, qapp, monk
     try:
         window.store.install_requested.emit(KIND)
         assert seen == [KIND]
-    finally:
-        window.close()
-
-
-def test_i_already_have_it_opens_the_full_dialog_in_import_mode(tmp_path, qapp, monkeypatch):
-    from nadare.gui.add_game import AddGameDialog
-
-    window, cfg, started, shown, _ = _window(tmp_path, monkeypatch, acked=[KIND])
-
-    def ask_to_import(self):
-        self.import_requested = True
-        return QDialog.DialogCode.Rejected
-
-    modes = []
-
-    def fake_full_dialog(self):
-        modes.append((self.selected_kind(), self.import_existing.isChecked()))
-        return QDialog.DialogCode.Rejected
-
-    monkeypatch.setattr(QuickInstallDialog, "exec", ask_to_import)
-    monkeypatch.setattr(AddGameDialog, "exec", fake_full_dialog)
-    try:
-        window._store_install(KIND)
-        assert modes == [(KIND, True)]  # the user already said "import": do not ask again
-        assert not cfg.profiles
     finally:
         window.close()

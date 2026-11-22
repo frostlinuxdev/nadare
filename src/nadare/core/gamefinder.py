@@ -19,13 +19,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import gamefolders, libraries, relink
+from . import gamefolders, libraries, location, relink
 from .gameversion import (
     INCOMPLETE_MARKER,
     VERSION_FILE,
     read_czn_version,
     read_install_version,
 )
+from .paths import real as _real
 
 #: Manifest folder field -> profile key.
 _FIELDS = (("install", "install_dir"), ("prefix", "prefix"))
@@ -50,14 +51,6 @@ class Copy:
 # ---- paths and folders ------------------------------------------------------------------------
 
 
-def _real(value: str | os.PathLike[str]) -> Path:
-    try:
-        return Path(os.path.realpath(os.path.expanduser(str(value))))
-    except ValueError:
-        # A hand-edited path with a NUL byte cannot name a folder; /dev/null is never one.
-        return Path(os.devnull)
-
-
 def _path_text(value: object) -> str | None:
     """The value as a path string, or None when it cannot name anything (blank or a NUL)."""
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
@@ -65,13 +58,9 @@ def _path_text(value: object) -> str | None:
     return value
 
 
-def _inside(path: Path, folder: Path) -> bool:
-    return path == folder or folder in path.parents
-
-
 def _folder_values(profile: Mapping[str, Any]) -> Iterable[Path]:
     for key in ("install_dir", "prefix", "wineprefix"):
-        value = _path_text(profile.get(key))
+        value = location._setting(profile, key)
         if value is not None:
             yield _real(value)
 
@@ -104,13 +93,11 @@ def _profile_folders(profile: Mapping[str, Any], name: str) -> Iterable[Path]:
 
 
 def _used_by_other(profiles: Mapping[str, Any], name: str, game_dir: Path) -> bool:
-    """True when another profile keeps the copy itself or something inside it."""
-    for other_name, other in profiles.items():
-        if other_name == name or not isinstance(other, Mapping):
-            continue
-        if any(_inside(path, game_dir) for path in _profile_folders(other, str(other_name))):
-            return True
-    return False
+    """True when another game keeps the copy itself or something inside it (#1372 step 2)."""
+    claim = location.overlapping(
+        profiles, game_dir, excluding=name, direction="contains", ignore_broad=False
+    )
+    return claim is not None
 
 
 def _has_drive_c(prefix: Path) -> bool:
@@ -292,7 +279,7 @@ def folders_missing(profile: Mapping[str, Any]) -> tuple[str, ...]:
         return ()
     missing = []
     for key in gamefolders.FOLDER_KEYS:
-        value = _path_text(profile.get(key))
+        value = location._setting(profile, key)
         if value is None:
             continue
         try:
@@ -330,8 +317,7 @@ def _game_files_missing(profile: Mapping[str, Any]) -> bool:
     install: Nadare makes a new prefix at the next launch.
     """
     missing = folders_missing(profile)
-    install = profile.get("install_dir")
-    key = "install_dir" if isinstance(install, str) and install.strip() else "prefix"
+    key = "install_dir" if location._setting(profile, "install_dir") is not None else "prefix"
     return key in missing
 
 
@@ -373,9 +359,9 @@ def repairs(config, specs: Iterable[libraries.GameSpec]) -> dict[str, list[Copy]
 
 
 def _is_running(status: object | None) -> bool:
-    return status is not None and (
-        getattr(status, "state", "") == "running" or bool(getattr(status, "running", False))
-    )
+    from . import gamefacts
+
+    return gamefacts.is_running(status)
 
 
 def running_problem(
@@ -496,3 +482,119 @@ __all__ = [
     "use",
     "use_and_save",
 ]
+
+
+# ---- the copies not chosen (#1300 item 5) -----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Spare:
+    """One folder of a copy the player did not choose: its install or its prefix."""
+
+    game_dir: Path
+    #: ``install_dir`` or ``prefix``.
+    key: str
+    path: Path
+    size: int
+
+
+def _prefix_in_use(prefix: Path) -> bool:
+    """A program (the game, a launcher, wineserver) runs in ``prefix``."""
+    from . import process
+
+    return bool(process.prefix_pids(prefix))
+
+
+def _spare_problem(config, name: str, spare: Spare, chosen: Copy) -> str:
+    """Why ``spare`` must not be deleted ("" when it may). Reads everything again."""
+    from . import removal
+
+    game_dir = Path(spare.game_dir)
+    if _real(game_dir) == _real(chosen.game_dir):
+        return "That is the copy the game uses now."
+    manifest = libraries.read_manifest(game_dir)
+    profile = config.profiles.get(name)
+    if manifest is None or not isinstance(profile, Mapping):
+        return "That folder no longer says Nadare made it."
+    if manifest.kind != profile.get("backend"):
+        return "That folder belongs to a different game."
+    field = next((f for f, key in _FIELDS if key == spare.key), None)
+    if field is None or field not in manifest.made_by_nadare:
+        return "Nadare did not make that folder."
+    named = manifest.install_dir if field == "install" else manifest.prefix
+    path = Path(spare.path)
+    if path.is_symlink() or not path.is_dir():
+        return "That folder is not there any more, or it is a link."
+    if named is None or _real(path) != _real(named):
+        return "That is not the folder the copy's record names."
+    claim = location.overlapping(
+        config.profiles, path, excluding=None, direction="either", ignore_broad=False
+    )
+    if claim is not None:
+        return f"{claim.title} uses that folder."
+    safe, why = removal.tree_safety(config.profiles, name, path)
+    if not safe:
+        return f"That folder cannot be deleted safely ({why})."
+    if spare.key == "prefix" and _prefix_in_use(path):
+        return "A program is running in that Wine prefix. Close it first."
+    return ""
+
+
+def spares(config, name: str, copies: Iterable[Copy], chosen: Copy) -> list[Spare]:
+    """The install and prefix folders Nadare made in the copies not chosen, each with its size.
+
+    Only a copy whose manifest says Nadare made the folder; never a folder any game uses, a
+    link, or a prefix a program runs in. :func:`remove_spare` checks all of it again.
+    """
+    from . import diskspace
+
+    found: list[Spare] = []
+    for item in copies:
+        if not item.from_manifest or not item.made_by_nadare:
+            continue
+        for field, key in _FIELDS:
+            if field not in item.made_by_nadare:
+                continue
+            path = item.install_dir if field == "install" else item.prefix
+            if path is None:
+                continue
+            candidate = Spare(Path(item.game_dir), key, Path(path), 0)
+            try:
+                if _spare_problem(config, name, candidate, chosen):
+                    continue
+            except OSError:
+                continue
+            found.append(
+                Spare(candidate.game_dir, key, candidate.path, diskspace.tree_bytes(path))
+            )
+    return found
+
+
+def remove_spare(config, name: str, spare: Spare, chosen: Copy) -> str:
+    """Delete one spare folder after checking it again; "" when done, else why not.
+
+    When the copy has neither folder left, its manifest and the empty game folder go too.
+    """
+    from . import removal
+
+    try:
+        problem = _spare_problem(config, name, spare, chosen)
+    except OSError as exc:
+        return f"Could not check that folder ({exc})."
+    if problem:
+        return problem
+    result = removal._rmtree_safely(Path(spare.path))
+    if result.mounts or result.leftovers or Path(spare.path).exists():
+        return "Part of that folder could not be deleted (a mounted drive or a locked file)."
+    game_dir = Path(spare.game_dir)
+    manifest = libraries.read_manifest(game_dir)
+    if manifest is not None and not any(
+        folder is not None and Path(folder).exists()
+        for folder in (manifest.install_dir, manifest.prefix)
+    ):
+        try:
+            (game_dir / libraries.MANIFEST_NAME).unlink()
+            game_dir.rmdir()  # only when empty: anything else in it stays
+        except OSError:
+            pass
+    return ""

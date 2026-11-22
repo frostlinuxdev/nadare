@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 from pathlib import Path
 
 from ....core import (
@@ -132,14 +133,22 @@ def _profile_slug(name: str) -> str:
 
 
 def _write_private(path: Path, text: str) -> None:
-    """Atomically write a file that is 0600 from creation."""
+    """Atomically write a file that is 0600 from creation.
+
+    The temporary file has a unique name made with O_EXCL (``mkstemp``), so a link planted
+    at a predictable name is never written through; the final rename replaces a link at
+    ``path`` instead of following it (#1592, as ``czn/auth.py`` already does).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as fh:
-        fh.write(text)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 class CredentialsMixin:
@@ -188,6 +197,10 @@ class CredentialsMixin:
         partially bind-mounted and is invisible to the game.
         """
         return self._stub().parent / "session.json"
+
+    def _session_path(self) -> Path:
+        """Where :meth:`_session` is, without creating the stub folder (status reads it, #1465)."""
+        return self.ctx.data_path() / "stub" / "session.json"
 
     # ---- credentials (keyring only, never plaintext) -----------------------
     def _store(self) -> SecretStore:
@@ -360,7 +373,8 @@ class CredentialsMixin:
 
     def _migrate_legacy_state(self) -> None:
         """Move a legacy plaintext ``launcher_refresh`` out of czn_auth.json."""
-        path = self._auth_dir() / "czn_auth.json"
+        # Read through the pure path: building a backend must not create folders (#1465).
+        path = self.ctx.data_path() / "auth" / "czn_auth.json"
         try:
             state = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -392,11 +406,7 @@ class CredentialsMixin:
         """Write the live token to a 0600 file the worker reads and deletes."""
         if not self._refresh_token:
             return
-        path = self._input_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({"refresh_token": self._refresh_token}, f)
+        _write_private(self._input_path(), json.dumps({"refresh_token": self._refresh_token}))
 
     def _forget_credential(self) -> None:
         """Drop the stored and in-memory credential (keyring, live cache, ids)."""
@@ -427,7 +437,16 @@ class CredentialsMixin:
             lock.release()
 
     def _adopt_newer_credential(self) -> None:
-        """Under the lock, prefer the keyring token another process just rotated."""
+        """Under the lock, prefer a token another backend object or process just rotated.
+
+        The GUI builds a fresh backend per operation, so the in-process live session can be
+        newer than this object's copy; with Remember me off it is the only place a rotated
+        token lands (#1598). With it on, the keyring also carries other processes' rotations.
+        """
+        live = _live_get(self.ctx.name)
+        if live and live["refresh_token"] != self._refresh_token:
+            self._refresh_token = live["refresh_token"]
+            self._member_no = live["member_no"] or None
         if not self._remember_enabled():
             return
         try:

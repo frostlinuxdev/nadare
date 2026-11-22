@@ -85,7 +85,7 @@ def test_library_keeps_badges_after_refresh(tmp_path, qapp):
     window = _window(tmp_path)
     try:
         for name in ("a", "b"):
-            window._on_result(name, Status("installed"))
+            window._on_result(name, "status", Status("installed"))
         window.refresh_library()
         for name in ("a", "b"):
             assert window.library._cards[name].badge.text() == "READY"
@@ -103,8 +103,8 @@ def test_verify_dialog_message(tmp_path, qapp, monkeypatch):
         QMessageBox, "warning", staticmethod(lambda p, t, m: seen.append(("warn", m)))
     )
     try:
-        window._on_result("a", {"verified": True, "exe": "/g/game.exe"})
-        window._on_result("a", {"verified": False})
+        window._on_result("a", "verify", {"verified": True, "exe": "/g/game.exe"})
+        window._on_result("a", "verify", {"verified": False})
         assert seen[0] == ("info", "All checks passed")
         assert seen[1][0] == "warn" and "{" not in seen[1][1]
     finally:

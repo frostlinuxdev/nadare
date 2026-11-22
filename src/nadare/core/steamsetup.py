@@ -82,7 +82,9 @@ GAMES: tuple[SteamGame, ...] = (
         needs=(steamfix.KEY_WEBVIEW2,),
         note="the Haoplay build; its login SDK (haoplay-pcsdk, PnSDKCPP.dll) embeds WebView2. "
         "Its sign-in window rendered and took clicks on GE-Proton11-7 with native Wayland; "
-        "DW-Proton 11.0-15 froze there. Nothing past the sign-in is tested",
+        "DW-Proton 11.0-15 froze there. Nothing past the sign-in is tested. Nadare now "
+        "installs this build directly, so these Steam steps are only for people who own it "
+        "on Steam",
         runner="ge",
         launch_env=("UMU_ID=0",),
     ),
@@ -162,6 +164,17 @@ def vulkan_at_least_1_3(version: str | None) -> bool | None:
     return (int(match.group(1)), int(match.group(2))) >= (1, 3)
 
 
+def runner_family_for(game: SteamGame, vulkan_version: str | None) -> str:
+    """The runner family to set for ``game``: its own, except GE-Proton below Vulkan 1.3.
+
+    GE-Proton has no DXVK-Sarek; DW-Proton switches to it by itself on older Vulkan.
+    An unknown version keeps the game's own (its sign-in needs GE-Proton).
+    """
+    if game.runner == "ge" and vulkan_at_least_1_3(vulkan_version) is False:
+        return "dwproton"
+    return game.runner
+
+
 _H264_WARNING = (
     "Nadare will ask Steam to unlock H.264 video. This is a setting of your Steam account, "
     "not only of this game: Steam keeps it, and it lets Steam play videos such as the game's "
@@ -216,8 +229,8 @@ def _wayland_warning(extra: tuple[str, ...]) -> str:
 
 _WAYLAND_WARNING = (
     "Nadare will switch this game to native Wayland: it adds PROTON_ENABLE_WAYLAND=1{also} to the "
-    "game's launch options in Steam (anything you already wrote there stays). This gets rid of "
-    "the flicker some games show under X11. Side effects to know about: the Steam overlay may "
+    "game's launch options in Steam (anything you already wrote there stays). Side effects to "
+    "know about: the Steam overlay may "
     "not appear and Steam Input (controller support) can misbehave under native Wayland; if "
     "that happens, press Undo. It is a setting of your Steam account for this game "
     "only. Steam has to be closed for the change: if it is running it is closed first (a "
@@ -319,13 +332,14 @@ def plan_setup(
     if compat_text:
         entry = steamtools.read_compat_entry(compat_text, game.app_id)
         using = entry.tool if entry is not None else ""
-    name, tool_prefix = RUNNER_FAMILIES.get(game.runner, RUNNER_FAMILIES["dwproton"])
+    family = runner_family_for(game, vulkan_version)
+    name, tool_prefix = RUNNER_FAMILIES.get(family, RUNNER_FAMILIES["dwproton"])
     label = f"{name} runner"
     if not installed:
         items.append(blocked("runner", label))
     elif using.startswith(tool_prefix):
         items.append(SetupItem("runner", label, STATE_DONE, f"Using {using}."))
-    elif game.runner == "ge":
+    elif family == "ge":
         items.append(
             SetupItem(
                 "runner",
@@ -347,7 +361,7 @@ def plan_setup(
                 STATE_RECOMMENDED if old_vulkan else STATE_OPTIONAL,
                 "Recommended: this machine's Vulkan is older than 1.3."
                 if old_vulkan
-                else "Optional: only if the game does not start on Steam's default Proton.",
+                else "Optional: only if the game does not start.",
                 "set_runner",
                 needs_steam_closed=True,
                 warning=_RUNNER_WARNING if old_vulkan else _RUNNER_OPTIONAL_WARNING,
@@ -389,7 +403,7 @@ def plan_setup(
                     wayland_label,
                     STATE_OPTIONAL,
                     "This game's runner has no Wayland driver (Steam's default Proton has "
-                    "none). Use the DW-Proton step first to get rid of X11 flicker.",
+                    "none). Use the DW-Proton step first.",
                 )
             )
         else:
@@ -398,7 +412,7 @@ def plan_setup(
                     "wayland",
                     wayland_label,
                     STATE_OPTIONAL,
-                    "Optional: gets rid of flicker some games show under X11.",
+                    "Optional: only if the game does not start.",
                     "set_wayland",
                     needs_steam_closed=True,
                     warning=_wayland_warning(game.launch_env),

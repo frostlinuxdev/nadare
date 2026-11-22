@@ -77,9 +77,18 @@ def test_other_operations_have_no_notification(operation):
     assert notify.finished_text(operation, "Game", False) is None
 
 
-def test_send_never_raises_without_a_notification_service(monkeypatch):
-    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/bus")
-    assert notify.send("hello", "body") in (True, False)
+def test_send_never_raises_without_a_notification_service():
+    # The suite's guard (tests/conftest.py) hands out a session bus that is never connected.
+    # Setting DBUS_SESSION_BUS_ADDRESS here did nothing: Qt caches the session bus per process,
+    # so inside a desktop session this test posted a real "hello" (flxpc, 2026-11-15).
+    assert notify.send("Nadare test", "body") is False
+
+
+def test_no_test_can_reach_the_real_session_bus():
+    from PyQt6.QtDBus import QDBusConnection
+
+    assert "_no_real_session_bus" in QDBusConnection.sessionBus.__qualname__  # the guard is on
+    assert not QDBusConnection.sessionBus().isConnected()
 
 
 # ---- the window ---------------------------------------------------------------------------

@@ -44,6 +44,35 @@ def _head(table):
 OK = (200, "image/jpeg", 400_000)
 
 
+def test_a_document_with_no_wide_art_is_fine():
+    """Wide is optional: the store tile and hero fall back to the cover."""
+    canary = _canary()
+    head, _ = _head({URL_A: OK})
+    assert canary.check(_doc(URL_A), head) == []
+
+
+def test_a_wide_list_the_app_refuses_is_a_problem():
+    canary = _canary()
+    head, _ = _head({"https://evil.example/w.jpg": OK})
+    doc = _doc(URL_A)
+    doc["games"]["direct-genshin"]["wide"] = [
+        {"url": "https://evil.example/w.jpg", "orientation": "wide", "width": 1920, "height": 1080}
+    ]
+    problems = canary.check(doc, head)
+    assert any("wide" in problem for problem in problems)
+
+
+def test_a_dead_wide_list_is_a_problem_even_when_the_cover_works():
+    canary = _canary()
+    head, _ = _head({URL_A: OK})
+    doc = _doc(URL_A)
+    doc["games"]["direct-genshin"]["wide"] = [
+        {"url": URL_B, "orientation": "wide", "width": 1920, "height": 1080}
+    ]
+    problems = canary.check(doc, head)
+    assert len(problems) == 1 and "wide" in problems[0]
+
+
 def test_a_game_whose_first_candidate_works_is_fine():
     canary = _canary()
     head, calls = _head({URL_A: OK})
@@ -130,7 +159,14 @@ def test_the_seed_document_has_the_shape_the_canary_reads():
     seed = json.loads((REPO / "docs" / "art-index.seed.json").read_text("utf-8"))
     head, calls = _head({})
     problems = canary.check(seed, head)
-    assert len(problems) == len(seed["games"]), "every game is probed (and fails with no network)"
+    # Every cover, and every wide list that exists, is probed (and fails with no network).
+    expected = sum(
+        1
+        for entry in seed["games"].values()
+        for art in ("cover", "wide")
+        if isinstance(entry.get(art), list)
+    )
+    assert len(problems) == expected
 
 
 # ---- review fixes: redirects, shapes, blind handling ------------------------------------------

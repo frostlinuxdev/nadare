@@ -86,14 +86,44 @@ def _probe(url: str, method: str) -> tuple[int, str, int | None]:
         return _answer(exc.code, exc.headers)
 
 
+#: Generic types some CDNs (Netmarble, STOVE) serve real images with; the app sniffs the bytes.
+_GENERIC_TYPES = ("application/octet-stream", "binary/octet-stream")
+#: The magic bytes the app's own check (``artwork._looks_like_image``) accepts, with their type.
+_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"BM", "image/bmp"),
+)
+
+
+def _sniff(url: str) -> str:
+    """The image type ``url``'s first bytes show, or ``""``."""
+    request = urllib.request.Request(  # noqa: S310
+        url, headers={"User-Agent": "nadare-art-canary", "Range": "bytes=0-15"}
+    )
+    with _OPENER.open(request, timeout=TIMEOUT) as response:  # noqa: S310
+        head = response.read(16)
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return next((kind for magic, kind in _MAGIC if head.startswith(magic)), "")
+
+
 def _head(url: str) -> tuple[int, str, int | None]:
     """What ``url`` answers, without following a redirect.
 
-    Some CDNs refuse HEAD (403, 405, 501) but serve a ranged GET; that is tried next.
+    Some CDNs refuse HEAD (403, 405, 501) but serve a ranged GET; that is tried next. An answer
+    with a generic octet-stream type is judged by its first bytes, as the app judges it.
     """
     answer = _probe(url, "HEAD")
     if answer[0] in (403, 405, 501):
         answer = _probe(url, "GET")
+    status, content_type, size = answer
+    if status in (200, 206) and content_type.split(";")[0].strip().lower() in _GENERIC_TYPES:
+        sniffed = _sniff(url)
+        if sniffed:
+            return status, sniffed, size
     return answer
 
 
@@ -105,51 +135,62 @@ def _works(answer: tuple[int, str, int | None]) -> bool:
 
 
 def check(doc: Any, head: Head) -> list[str]:
-    """Probe every game's candidates and list the problems."""
+    """Probe every game's cover and wide candidates and list the problems."""
     artindex = _artindex()
     games = doc.get("games") if isinstance(doc, dict) else None
     if not isinstance(games, dict) or not games:
         return ["art index: art.json lists no games, so the app has no index art"]
-    accepted = artindex.parse(doc)
     problems: list[str] = []
-    for kind, entry in sorted(games.items()):
-        if kind not in artindex.ALLOWED_HOSTS:
-            continue
-        offered = entry.get("cover") if isinstance(entry, dict) else None
-        count = len(offered) if isinstance(offered, list) else 0
-        if kind not in accepted:
-            problems.append(
-                f"art index: every candidate for {kind} is not acceptable to the app "
-                "(wrong host, not https, or bad size)"
-            )
-        elif count > len(accepted[kind]):
-            print(
-                f"art index: {count - len(accepted[kind])} candidate(s) of {kind} are not "
-                "acceptable to the app and are ignored",
-                file=sys.stderr,
-            )
-    if not accepted:
-        problems.append("art index: no candidate in art.json is acceptable to the app")
-    for kind in sorted(accepted):
-        outcomes: list[bool] = []
-        failure: Exception | None = None
-        for candidate in accepted[kind]:
-            try:
-                answer = head(candidate.url)
-            except Exception as exc:  # noqa: BLE001 - one flaky host must not hide a good fallback
-                failure = exc
-                outcomes.append(False)
+    for art, parse in (("cover", artindex.parse), ("wide", artindex.parse_wide)):
+        accepted = parse(doc)
+        listed = False
+        for kind, entry in sorted(games.items()):
+            if kind not in artindex.ALLOWED_HOSTS:
                 continue
-            outcomes.append(_works(answer))
-            if outcomes[-1]:
-                break  # one working candidate is enough; the rest are not probed
-        if any(outcomes):
-            if not outcomes[0]:
-                print(f"art index: the first cover candidate of {kind} is dead", file=sys.stderr)
-        elif failure is not None:
-            _blind(f"could not check {kind}: {failure}")
-        else:
-            problems.append(f"art index: no working cover for {kind} (all candidates fail)")
+            offered = entry.get(art) if isinstance(entry, dict) else None
+            if art == "wide" and not isinstance(offered, list):
+                continue  # wide art is optional; many games only have a cover
+            count = len(offered) if isinstance(offered, list) else 0
+            listed = listed or bool(count)
+            if kind not in accepted:
+                problems.append(
+                    f"art index: every {art} candidate for {kind} is not acceptable to the app "
+                    "(wrong host, not https, or bad size)"
+                )
+            elif count > len(accepted[kind]):
+                print(
+                    f"art index: {count - len(accepted[kind])} candidate(s) of {kind} {art} are "
+                    "not acceptable to the app and are ignored",
+                    file=sys.stderr,
+                )
+        if not accepted and (art == "cover" or listed):
+            # A missing wide list is normal (the store tile and hero fall back to the cover);
+            # a wide list whose every entry the app refuses is not.
+            problems.append(f"art index: no {art} candidate in art.json is acceptable to the app")
+        for kind in sorted(accepted):
+            outcomes: list[bool] = []
+            failure: Exception | None = None
+            for candidate in accepted[kind]:
+                try:
+                    answer = head(candidate.url)
+                except Exception as exc:  # noqa: BLE001 - one flaky host must not hide a fallback
+                    failure = exc
+                    outcomes.append(False)
+                    continue
+                outcomes.append(_works(answer))
+                if outcomes[-1]:
+                    break  # one working candidate is enough; the rest are not probed
+            if any(outcomes):
+                if not outcomes[0]:
+                    print(
+                        f"art index: the first {art} candidate of {kind} is dead", file=sys.stderr
+                    )
+            elif failure is not None:
+                _blind(f"could not check the {art} art for {kind}: {failure}")
+            else:
+                problems.append(
+                    f"art index: no working {art} for {kind} (all candidates fail)"
+                )
     return problems
 
 

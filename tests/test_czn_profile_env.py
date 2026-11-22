@@ -114,3 +114,12 @@ def test_the_game_keeps_gameid_zero_unless_the_profile_names_one(
     assert backend._prefix_command(["g.exe"])[1]["GAMEID"] == "0"
     backend = _backend(make_backend_context, tmp_path, monkeypatch, {"GAMEID": "umu-123"})
     assert backend._prefix_command(["g.exe"])[1]["GAMEID"] == "umu-123"
+
+
+@pytest.fixture(autouse=True)
+def _umu_available(monkeypatch):
+    """CZN runs through umu like every Proton game (#1449): stand in Nadare's own copy."""
+    from nadare.core import umu
+
+    monkeypatch.setattr(umu, "resolve", lambda *a, **k: "/usr/bin/umu-run")
+    monkeypatch.setattr(umu, "note_first_runtime", lambda emit: None)

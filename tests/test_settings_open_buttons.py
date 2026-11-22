@@ -99,11 +99,14 @@ def test_open_prefix_falls_back_to_the_folder_the_status_reports(tmp_path, page,
     assert opened == [str(own)]
 
 
-def test_open_config_file_opens_the_config_file(tmp_path, page, opened):
-    config = _load(page, tmp_path)
-    config.save()
-    page.open_config_button.click()
-    assert opened == [str(config.path)]
+def test_settings_offers_no_button_to_open_the_config_file(tmp_path, page):
+    """Hand edits can break every game's settings; nothing in normal use needs them (user 11-20)."""
+    from PyQt6.QtWidgets import QPushButton
+
+    _load(page, tmp_path)
+    assert not hasattr(page, "open_config_button")
+    texts = [button.text().lower() for button in page.findChildren(QPushButton)]
+    assert not any("config" in text for text in texts)
 
 
 def test_buttons_follow_the_backend(tmp_path, page, opened):

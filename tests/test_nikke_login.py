@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from test_nikke_game_auth_cache_1420 import Runner
 
 from nadare.backends import launcher as launcher_module
 from nadare.backends.launcher import NikkeBackend
@@ -51,7 +52,8 @@ def make_install(tmp_path, *, signed_in: bool = False) -> NikkeBackend:
 
 def _quiet(backend: NikkeBackend, monkeypatch) -> list:
     monkeypatch.setattr(
-        NikkeBackend, "_prefix_command", lambda self, args, extra_env=None, **kw: (args, {})
+        NikkeBackend, "_prefix_command",
+        lambda self, args, extra_env=None, **kw: (args, extra_env or {})
     )
     monkeypatch.setattr(NikkeBackend, "_run_vcredist", lambda self, created=False: None)
     notes: list = []
@@ -267,15 +269,12 @@ def test_a_launcherless_launch_runs_both_hosts_inside_the_sandbox(tmp_path, monk
     wraps = _recording_wrap(monkeypatch)
     calls: list = []
 
+    runner = Runner(backend, auth=AUTH)
+
     def fake_stream(argv, env, on_line=None, cancel=None, **kwargs):
         calls.append(list(argv))
-        if any(h.INTL_HOST_NAME in part for part in argv):
-            out = argv[argv.index("--out") + 1]
-            relative = out.split(":\\", 1)[1].replace("\\", "/")
-            session_file = backend.prefix() / "drive_c" / relative
-            session_file.parent.mkdir(parents=True, exist_ok=True)
-            session_file.write_text(json.dumps(AUTH), encoding="utf-8")
-        return 0
+        assert "SAIL_SIGNIN_CMD" in env
+        return runner(argv[1:], env, on_line=on_line, cancel=cancel, **kwargs)
 
     class _NoProbe:
         result = None
@@ -298,9 +297,9 @@ def test_a_launcherless_launch_runs_both_hosts_inside_the_sandbox(tmp_path, monk
     )
 
     assert backend.launch() == 0
-    assert len(calls) == 2
-    assert all(argv[0] == "SANDBOX" for argv in calls)  # sign-in host and Sail host (the game)
-    assert len(wraps) == 2
+    assert len(calls) == 1
+    assert calls[0][0] == "SANDBOX"  # Sail and its INTL child share this sandbox
+    assert len(wraps) == 1
 
 
 # ---- no console window --------------------------------------------------------------------------
@@ -329,22 +328,10 @@ def test_a_successful_play_keeps_the_sail_helper_log(tmp_path, monkeypatch):
     notes = _quiet(backend, monkeypatch)
     monkeypatch.setattr(NikkeBackend, "_secure_wrap", lambda self, argv, env, **kw: (argv, env))
 
-    def fake_stream(argv, env, on_line=None, cancel=None, **kwargs):
-        if any(h.INTL_HOST_NAME in part for part in argv):
-            out = argv[argv.index("--out") + 1]
-            relative = out.split(":\\", 1)[1].replace("\\", "/")
-            session_file = backend.prefix() / "drive_c" / relative
-            session_file.parent.mkdir(parents=True, exist_ok=True)
-            session_file.write_text(json.dumps(AUTH), encoding="utf-8")
-        else:  # the Sail host writes its log next to the session
-            stage = backend.prefix().joinpath(*h.STAGE_PARTS)
-            (work,) = list(stage.glob("session-*"))
-            (work / "sail_host.log").write_text(
-                "*** game accepted init (cmd=101)\n<< frame (7 proto bytes) cmd=102\n"
-                "<< frame (9 proto bytes) cmd=106\n",
-                encoding="utf-8",
-            )
-        return 0
+    fake_stream = Runner(backend, auth=AUTH, sail_logs=[
+        "*** game accepted init (cmd=101)\n<< frame (7 proto bytes) cmd=102\n"
+        "<< frame (9 proto bytes) cmd=106\n"
+    ])
 
     class _NoProbe:
         result = None

@@ -17,8 +17,6 @@ except Exception:  # noqa: BLE001
 from nadare.core import artwork
 from nadare.core.storecatalog import entries, game_of, store_games
 from nadare.gui.store import StorePage
-from nadare.gui.store_detail import StoreDetail
-from nadare.gui.store_flow import StoreFlow
 
 GFL2 = {"direct-gfl2", "direct-gfl2-haoplay"}
 
@@ -153,7 +151,9 @@ def test_a_grouped_card_still_fetches_art_by_the_real_title(qapp, monkeypatch):
     monkeypatch.setattr(
         artwork,
         "fetch",
-        lambda profile, title=None, kind="cover": asked.append((profile["backend"], title)),
+        lambda profile, title=None, kind="cover", **kwargs: asked.append(
+            (profile["backend"], title)
+        ),
     )
     page = _shown_page(qapp)
     try:
@@ -164,48 +164,6 @@ def test_a_grouped_card_still_fetches_art_by_the_real_title(qapp, monkeypatch):
 
 
 # ---- the detail page ----------------------------------------------------------------------
-def test_the_detail_page_offers_a_version_picker_for_a_game_with_several_builds(qapp):
-    game = game_of("direct-gfl2")
-    detail = StoreDetail(game.primary)
-    detail.set_entry(game.primary, game.entries)
-    try:
-        assert not detail.variant_box.isHidden()
-        assert detail.variant_box.count() == 2
-        seen = []
-        detail.variant_requested.connect(seen.append)
-        detail.variant_box.setCurrentIndex(1)
-        assert seen == [game.entries[1].kind]
-    finally:
-        detail.deleteLater()
-
-
-def test_a_single_build_game_has_no_version_picker(qapp):
-    game = next(g for g in store_games() if g.primary.kind == "direct-pgr")
-    detail = StoreDetail(game.primary)
-    try:
-        assert detail.variant_box.isHidden()
-    finally:
-        detail.deleteLater()
-
-
-def test_the_flow_shows_the_chosen_build_and_keeps_the_picker_on_it(qapp):
-    flow = StoreFlow()
-    try:
-        flow.show_detail("direct-gfl2")
-        flow.detail.variant_box.setCurrentIndex(1)
-        qapp.processEvents()
-        chosen = game_of("direct-gfl2").entries[1]
-        assert flow.detail.entry.kind == chosen.kind
-        assert flow.detail.variant_box.currentIndex() == 1
-        assert flow.detail.install_button.isEnabled()
-        got = []
-        flow.install_requested.connect(got.append)
-        flow.detail.install_button.click()
-        assert got == [chosen.kind]
-    finally:
-        flow.deleteLater()
-
-
 def test_a_grouped_card_stays_marked_added_when_a_filter_hides_the_installed_build(qapp):
     page = StorePage()
     page.resize(1400, 900)

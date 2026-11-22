@@ -18,7 +18,6 @@ import json
 import os
 import re
 import stat
-import tempfile
 import threading
 import time
 import uuid
@@ -30,6 +29,7 @@ from pathlib import Path
 from types import TracebackType
 from urllib.parse import parse_qs, parse_qsl, quote, urlsplit
 
+from . import atomicfile
 from .events import Cancel
 
 CLIENT_ID = "mq5RG0PGw6ipw35A"
@@ -393,18 +393,7 @@ def _drop_empty_test_home(prefix: Path) -> None:
 
 
 def _atomic_write(path: Path, text: str, mode: int) -> None:
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".user.reg.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape", newline="") as fh:
-            fh.write(text)
-        os.chmod(tmp_name, mode)
-        os.replace(tmp_name, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+    atomicfile.write(path, text, mode=mode)
 
 
 def ensure_wine_device_key(prefix: Path | str, device_key: str) -> bool:

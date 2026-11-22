@@ -141,6 +141,23 @@ class SingleInstance(QObject):
     def start(self) -> bool:
         """Try to become the primary instance. Returns ``False`` if another runs."""
         self.status = ""
+        path = _socket_path(self._name)
+        # Qt can unlink an occupied path while failing an overlong listen. Refuse
+        # invalid names and non-socket files before asking Qt to touch the path.
+        if len(os.fsencode(path)) > _SOCKET_PATH_MAX:
+            self.status = "the single-instance socket path is too long"
+            return False
+        try:
+            occupied = path.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            self.status = f"could not inspect the single-instance socket: {exc}"
+            return False
+        else:
+            if not stat.S_ISSOCK(occupied.st_mode):
+                self.status = "the single-instance path is not a socket; it was kept"
+                return False
         with self._start_lock() as acquired:
             if not acquired:
                 self.status = "another instance is starting"

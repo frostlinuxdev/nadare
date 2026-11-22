@@ -10,13 +10,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 try:  # pragma: no cover - only when PyQt6 is missing
-    from PyQt6.QtWidgets import QApplication, QMessageBox
+    from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
 except Exception:  # noqa: BLE001
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
 from nadare.core.backends import Status
 from nadare.gui.game_view import GameView
 from nadare.gui.main_window import MainWindow
+from nadare.gui.quick_install import QuickInstallDialog
 
 
 @pytest.fixture(scope="module")
@@ -79,17 +80,17 @@ def test_resume_asks_nothing(qapp, tmp_path, monkeypatch):
 
 def test_a_fresh_install_names_the_folder(qapp, tmp_path, monkeypatch):
     window = _window(tmp_path, monkeypatch)
-    seen: list[str] = []
+    shown: list = []
     try:
         monkeypatch.setattr(
-            QMessageBox,
+            QuickInstallDialog,
             "exec",
-            lambda self: seen.append(self.text()) or QMessageBox.StandardButton.Cancel,
+            lambda self: shown.append(self) or QDialog.DialogCode.Rejected,
         )
         window._snapshot("pgr")["status"] = Status(state="not_installed")
         assert window._confirm_download("pgr") is False
-        assert seen and str(tmp_path / "pgr-files") in seen[0]
-        assert "GiB" in seen[0] or "GB" in seen[0]
+        assert shown and str(tmp_path / "pgr-files") in shown[0].folder_text
+        assert "GiB" in shown[0].summary_text or "GB" in shown[0].summary_text
     finally:
         window.close()
         window.deleteLater()

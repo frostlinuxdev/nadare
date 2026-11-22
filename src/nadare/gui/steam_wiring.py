@@ -17,9 +17,11 @@ from pathlib import Path
 from typing import Any
 
 from ..core import (
+    config,
     graphics,
     paths,
     process,
+    protoncmd,
     steamfix,
     steamglue,
     steamrun,
@@ -31,7 +33,7 @@ from ..core import (
 )
 from ..core.backends import BackendError
 from ..core.diskspace import human_size
-from ..core.events import Cancel
+from ..core.events import Cancel, Event
 from .steam_setup import SteamSetupDialog
 
 
@@ -71,11 +73,8 @@ def steam_app_id(profile: Mapping[str, Any]) -> str:
 
 def profile_value(profile: Mapping[str, Any], key: str) -> str:
     """A profile setting stored at the top level or under ``extra``, as text (``""`` if unset)."""
-    extra = profile.get("extra")
-    value = profile.get(key)
-    if not value and isinstance(extra, Mapping):
-        value = extra.get(key)
-    return str(value or "").strip()
+    value = config.profile_value(profile, key)
+    return "" if value is None else str(value).strip()
 
 
 def install_webview2(
@@ -111,7 +110,18 @@ def install_webview2(
     cancel = cancel if cancel is not None else Cancel()
     constant = webview2.PINNED_SHA256
     profile: dict[str, Any] = {}
-    base_env = process.child_environ(run_env)
+    base_env = process.build_env(base=run_env)
+
+    runner: dict[str, str | None] = {"umu": None}
+
+    def preflight() -> str | None:
+        # Before the prefix is copied: no display, or no way to run the game's Proton through
+        # umu, means the install cannot work at all.
+        reason = _no_display_reason()
+        if reason:
+            return reason
+        reason, runner["umu"] = _umu_for_installer(cancel)
+        return reason
 
     def run_in_prefix(args: list[str]) -> int:
         # The download before this took minutes: the game may have been started in the meantime,
@@ -121,12 +131,14 @@ def install_webview2(
                 "The game started while the installer was downloading, so the installer was "
                 "not started. Close it and try again"
             )
-        argv, env = steamrun.proton_run_command(
+        env_in = {**base_env, "PROTON_ENABLE_WAYLAND": "0"}
+        argv, env = steamrun.installer_command(
+            umu_run=runner["umu"],
             proton=proton,
             compat_data=prefix.parent,
             client_path=root,
             args=args,
-            base_env={**base_env, "PROTON_ENABLE_WAYLAND": "0"},
+            base_env=env_in,
         )
         return subprocess.run(argv, env=env, cwd=prefix.parent, check=False).returncode  # noqa: S603
 
@@ -175,9 +187,25 @@ def install_webview2(
         ensure_fn=ensure,
         running_blockers=lambda: steamfix.running_blockers(app_id, prefix),
         backup_fn=steamfix.make_backup,
-        preflight=_no_display_reason,
+        preflight=preflight,
         cancelled=lambda: cancel.cancelled,
     )
+
+
+def _umu_for_installer(cancel: Cancel) -> tuple[str | None, str | None]:
+    """``(reason it cannot run, umu-run)`` for the installer in a Steam game's prefix.
+
+    Every Proton launch goes through umu (#1338, #1341 item 2): Nadare's own pinned copy
+    first, a system umu-run only without it. The decision is the one every Play makes
+    (:func:`protoncmd.resolve_umu`). Outside the Flatpak a missing umu or Ubuntu's
+    user-namespace block stops the install with the same text a Play gets; inside the
+    Flatpak the game's Proton runs directly when umu is not usable there, as Plays do.
+    """
+    try:
+        found = protoncmd.resolve_umu("umu-run", cancel=cancel)
+    except BackendError as exc:
+        return str(exc), None
+    return None, found
 
 
 def _no_display_reason() -> str | None:
@@ -209,6 +237,7 @@ def build_dialog(
     run: Callable[[list[str]], int] = steamglue.run,
     restore_fn: Callable[..., steamrun.ActionResult] = steamrun.restore_runner,
     install_prefix_fn: Callable[[str, str], steamrun.ActionResult] | None = None,
+    runner_events: Callable[[Cancel, Event], None] | None = None,
     binary: str = "",
     async_plan: bool = True,
     steam_running: Callable[[], bool] = steamtools.steam_running,
@@ -231,14 +260,28 @@ def build_dialog(
             probed.append(vulkan_version_fn())
         return steamglue.plan_for(app_id, root=steam_root, vulkan_version=probed[0])
 
+    #: The token of the step that is running now (each step gets a fresh one).
+    current_cancel: list[Cancel] = [Cancel()]
     #: The dialog, once made: the runner download reports its progress to it.
     shown: list[SteamSetupDialog] = []
 
-    def progress(event) -> None:
+    def report_runner(token: Cancel, event: Event) -> None:
+        """Tell the window about a runner download; a destroyed window is nobody to tell."""
+        if runner_events is None:
+            return
+        try:
+            runner_events(token, event)
+        except RuntimeError:
+            pass
+
+    def progress(event: Event) -> None:
+        # Also reports to the window, which turns it into a Downloads row (#1625).
+        report_runner(current_cancel[0], event)
         if event.kind != "progress" or event.progress is None or not shown:
             return
-        done = event.data.get("done") if isinstance(event.data, dict) else None
-        total = event.data.get("total") if isinstance(event.data, dict) else None
+        data = event.data if isinstance(event.data, dict) else {}
+        done = data.get("done")
+        total = data.get("total")
         sizes = ""
         if isinstance(done, int) and isinstance(total, int) and total > 0:
             sizes = f" ({human_size(done)} of {human_size(total)})"
@@ -246,8 +289,6 @@ def build_dialog(
             f"Downloading the runner: {int(event.progress * 100)} %{sizes}"
         )
 
-    #: The token of the step that is running now (each step gets a fresh one).
-    current_cancel: list[Cancel] = [Cancel()]
     #: The Steam account file the last launch-option change in this window was made in.
     acted_on: list[str] = []
 
@@ -273,7 +314,11 @@ def build_dialog(
             cancel=token,
             emit=progress,
         )
-        result = do_action(item)
+        try:
+            result = do_action(item)
+        finally:
+            # The Downloads row can leave at once; a finished one keeps its own short timer.
+            report_runner(token, Event("runner_end"))
         if item.action in steamundo.UNDOABLE and result.ok and result.changed:
             if item.action == "set_runner":
                 made_in = str(steamglue.config_vdf(steam_root))  # this Steam installation

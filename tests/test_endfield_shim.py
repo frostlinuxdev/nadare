@@ -11,14 +11,29 @@ from pathlib import Path
 
 import pytest
 
+from nadare.core import archivepins, installerpins, sevenzip
 from nadare.core import endfield_shim as es
-from nadare.core import sevenzip
 
 
 @pytest.fixture(autouse=True)
 def no_bundled_7zip(tmp_path, monkeypatch):
     """Unit tests must never pick up the real bundled 7-Zip a release build fetched."""
     monkeypatch.setattr(sevenzip, "BUNDLED", tmp_path / "no-bundled-7zzs")
+
+
+@pytest.fixture(autouse=True)
+def installer_index_pin(monkeypatch):
+    """Serve a real index pin for the fake installer bytes these tests download (#1593).
+
+    The pin itself is still validated and the downloaded file still checked against it;
+    only the tag-to-URL lookup is stubbed, because the tests build their own URLs.
+    """
+    monkeypatch.setattr(
+        installerpins,
+        "pin_for",
+        lambda tag, url: archivepins.pin_from_bytes(url, b"nsis", 4096),
+    )
+
 
 MZ = b"MZ" + b"\0" * 2048
 

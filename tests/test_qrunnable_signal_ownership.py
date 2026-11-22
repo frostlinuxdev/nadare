@@ -78,7 +78,7 @@ def test_a_decode_finishing_after_its_loader_died_does_not_raise(tmp_path, qapp)
 
 def test_store_art_fetches_report_through_the_pages_signals(tmp_path, qapp, monkeypatch):
     art = _png(tmp_path / "cover.png")
-    monkeypatch.setattr(artwork, "fetch", lambda profile, title=None, kind="cover": art)
+    monkeypatch.setattr(artwork, "fetch", lambda profile, title=None, kind="cover", **kwargs: art)
     page = store.StorePage()
     try:
         task = store._FetchArt("direct-pgr", "Punishing: Gray Raven", page._art_signals)
@@ -93,7 +93,7 @@ def test_store_art_fetches_report_through_the_pages_signals(tmp_path, qapp, monk
 
 def test_a_store_fetch_finishing_after_its_page_died_does_not_raise(tmp_path, qapp, monkeypatch):
     art = _png(tmp_path / "cover.png")
-    monkeypatch.setattr(artwork, "fetch", lambda profile, title=None, kind="cover": art)
+    monkeypatch.setattr(artwork, "fetch", lambda profile, title=None, kind="cover", **kwargs: art)
     page = store.StorePage()
     task = store._FetchArt("direct-pgr", "Punishing: Gray Raven", page._art_signals)
     sip.delete(page)

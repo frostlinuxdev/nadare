@@ -21,7 +21,6 @@ import os
 import re
 import shutil
 import stat
-import tempfile
 import threading
 import time
 from collections.abc import Iterable
@@ -31,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import diskspace, paths
+from . import atomicfile, diskspace, paths
 from . import download as download_module
 from .download import DownloadError
 from .events import Cancel, Cancelled, Emitter, Event, emitter
@@ -406,25 +405,39 @@ def _read_ledger(pkg: SophonPackage, root: Path) -> tuple[list[str], str | None]
     return entries, raw
 
 
+@dataclass(frozen=True)
+class Ownership:
+    """Which files a package's receipt says Nadare installed (#1464).
+
+    ``certain`` is False when the receipt is missing, unreadable, a link, or lists a path that
+    is not safe; ``paths`` is then empty and ``reason`` says why. Callers must treat an
+    uncertain answer as "anything could be ours" and delete nothing on its strength.
+    """
+
+    paths: frozenset[str]
+    certain: bool
+    reason: str = ""
+
+
+def owned_files(pkg: SophonPackage, root: Path) -> Ownership:
+    """The validated member paths ``pkg``'s receipt in ``root`` records, or why it cannot say.
+
+    The one reader of the receipt outside an install: its format and checks stay here.
+    """
+    try:
+        entries, raw = _read_ledger(pkg, root)
+    except SophonError as exc:
+        return Ownership(frozenset(), False, str(exc))
+    if raw is None:
+        return Ownership(frozenset(), False, f"no receipt for {pkg.name}")
+    return Ownership(frozenset(entries), True)
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     """Write ``text`` through a temporary file and ``os.replace`` (never the target)."""
     if path.parent.name == STATE_DIR:
         _check_state_storage(path.parent.parent, path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    temporary_path = Path(temporary)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(temporary_path, path)
-    except BaseException:
-        try:
-            temporary_path.unlink()
-        except OSError:
-            pass
-        raise
+    atomicfile.write(path, text, make_parent=True)
 
 
 def _superseded_ledgers(pkg: SophonPackage, root: Path) -> list[Path]:
@@ -601,6 +614,8 @@ def _fetch_bytes(
             time.sleep(min(0.5 * 2**attempt, 8.0))
         try:
             with pool.open(url) as resp:
+                if isinstance(resp, download_module.transfer.Response):
+                    resp.cancel = cancel
                 if resp.status != 200:
                     raise SophonError(f"HTTP {resp.status} for {url}")
                 body = resp.read(limit + 1)
@@ -717,6 +732,7 @@ def _fetch_chunk_cached(
     return _fetch_chunk(pool, pkg, chunk, cancel)
 
 
+@download_module.transfer.measured
 def sync_package(
     pkg: SophonPackage,
     root: Path,
@@ -866,7 +882,11 @@ def sync_package(
             combined = _CombinedCancel(cancel, stop)
             errors: list[BaseException] = []
             limit = max(1, min(workers, _MAX_WORKERS, len(task_items)))
-            with ThreadPoolExecutor(max_workers=limit) as executor:
+            with ThreadPoolExecutor(
+                initializer=download_module.inherit_transfer,
+                initargs=(download_module.current_transfer(),),
+                max_workers=limit,
+            ) as executor:
                 futures = [
                     executor.submit(install_chunks, entry, chunks, output, old, matched, combined)
                     for entry, chunks, output, old, matched in task_items
@@ -1118,7 +1138,11 @@ def predownload_package(
             tasks = list(to_fetch.values())
             limit = max(1, min(workers, _MAX_WORKERS, len(tasks)))
             errors: list[BaseException] = []
-            with ThreadPoolExecutor(max_workers=limit) as executor:
+            with ThreadPoolExecutor(
+                initializer=download_module.inherit_transfer,
+                initargs=(download_module.current_transfer(),),
+                max_workers=limit,
+            ) as executor:
                 futures = [executor.submit(fetch, chunk, combined) for chunk in tasks]
                 for future in as_completed(futures):
                     try:

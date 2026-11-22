@@ -16,6 +16,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFormLayout,
     QLabel,
     QLineEdit,
@@ -30,14 +31,15 @@ from PyQt6.QtWidgets import (
 from ...core import runners as runners_core
 from ...core.backends import Option, config_only
 from ...core.backends import get as backend_get
-from ...core.config import as_bool, profile_value
+from ...core.config import as_bool, bounded_int, profile_value
+from ..i18n import tr
 from .shared import (
     _fill_monitor_combo,
     _text_to_env,
 )
 
 #: ``(min, max)`` for ``int`` options that need a tighter bound than the default.
-INT_RANGES: dict[str, tuple[int, int]] = {"download_workers": (1, 16)}
+INT_RANGES: dict[str, tuple[int, int]] = {"download_workers": (1, 32)}
 
 DEFAULT_INT_RANGE = (0, 999999)
 
@@ -136,6 +138,7 @@ class OptionsMixin:
         self._option_rows = []
         self._option_free = {}
         self._option_browse = {}
+        self._speed_editors = []
         self._prefix_lock_note = None
         self._backup_label = None
         self._backup_button = None
@@ -151,6 +154,9 @@ class OptionsMixin:
             self._files_form.setRowVisible(self._install_dir_row, has_install_dir)
             uses_runner = kind in runners_core.PROTON_DEFAULT_BACKENDS or kind == "wine"
             self._files_form.setRowVisible(self._runner_row, uses_runner)
+            behind = getattr(self, "runner_behind", None)
+            if behind is not None and not uses_runner:
+                behind.setVisible(False)
         if not has_install_dir:
             # Steam/CZN/FGO never read this key; an old value must not look live.
             self.install_dir.clear()
@@ -172,6 +178,16 @@ class OptionsMixin:
             self._option_rows.append(
                 (option.advanced or option.key in PLAYER_ADVANCED, form.rowCount() - 1)
             )
+            if option.key == "download_workers":
+                speed = QDoubleSpinBox()
+                speed.setRange(0, 100000)
+                speed.setDecimals(2)
+                speed.setValue(self.download_speed_limit.value())
+                speed.setToolTip(tr("Applies to every download in Nadare."))
+                speed.valueChanged.connect(self.download_speed_limit.setValue)
+                self._speed_editors.append(speed)
+                form.addRow(tr("Download speed limit (MB/s, 0 = none)"), speed)
+                self._option_rows.append((option.advanced, form.rowCount() - 1))
         self.open_game_button.setVisible(has_install_dir)
         self.open_prefix_button.setVisible(any(option.key == "prefix" for option in options))
         self._apply_advanced(self.show_advanced.isChecked())
@@ -282,12 +298,8 @@ class OptionsMixin:
         elif kind == "env":
             editor.setPlainText(_env_to_text(value))
         elif kind == "int":
-            try:
-                editor.setValue(int(value))
-            except (TypeError, ValueError):
-                editor.setValue(
-                    int(option.default) if option.default is not None else editor.minimum()
-                )
+            default = int(option.default) if option.default is not None else editor.minimum()
+            editor.setValue(bounded_int(value, default, editor.minimum(), editor.maximum()))
         elif kind == "bool":
             # An unset key means "use the option's default", not "off".
             editor.setChecked(

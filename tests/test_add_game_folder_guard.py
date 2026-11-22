@@ -31,7 +31,7 @@ def home(tmp_path, monkeypatch):
 
 def _dialog(tmp_path, qapp):
     instance = AddGameDialog(
-        Config.load(tmp_path / "config.json"), data_root=tmp_path / "data", kind="wine"
+        Config.load(tmp_path / "config.json"), data_root=tmp_path / "data", kind="arknights-yostar"
     )
     instance.show()
     qapp.processEvents()

@@ -124,22 +124,13 @@ Then press Install again. The blunt alternative,
 the restriction off for every program. Having Steam installed does not help: its profile
 is attached to the Steam binaries only.
 
-### umu-launcher (recommended)
+### umu-launcher (nothing to install)
 
-Without `umu-run`, Nadare runs the Proton build directly against your system
-libraries. That works on many setups, but it is the less-tested path: on a
-Fedora 43 container with an NVIDIA GPU the game stopped at
-`GLFW ... WGL: The driver does not appear to support OpenGL` until
-`umu-launcher` was installed, after which it launched and stopped normally. If
-the game window shows an OpenGL/WGL error, install `umu-launcher` first.
-
-- Arch/CachyOS: `sudo pacman -S umu-launcher`
-- Fedora: the release RPM, e.g.
-  `sudo dnf install https://github.com/Open-Wine-Components/umu-launcher/releases/download/1.4.4/umu-launcher-1.4.4.fc43.x86_64.rpm`
-  (it is not in the main Fedora repositories)
-- Debian/Ubuntu/Mint: `sudo apt install ./python3-umu-launcher_*.deb` from the
-  [releases page](https://github.com/Open-Wine-Components/umu-launcher/releases)
-  (pick the file for your release; `sudo dpkg --add-architecture i386` first)
+Every Proton game runs through umu-launcher and the Steam Linux Runtime. Nadare
+brings its own tested copy (umu-launcher 1.4.4, inside the AppImage) and uses it
+even when your distro has `umu-run` installed; a system copy is used only when
+Nadare's own cannot be set up. It needs `/usr/bin/python3`, which almost every
+desktop has. There is nothing to choose in Settings.
 
 The first launch through umu downloads the Steam Linux Runtime (a few hundred
 MB), so expect a pause.

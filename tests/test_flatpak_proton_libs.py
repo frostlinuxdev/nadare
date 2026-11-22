@@ -147,7 +147,8 @@ def test_proton_direct_puts_the_shipped_libraries_on_the_library_path(tmp_path, 
     _argv, env = sandbox.proton_direct(tmp_path / "runner", tmp_path / "prefix", ["game.exe"])
     parts = env["LD_LIBRARY_PATH"].split(":")
     assert parts[:2] == [str(libs / "x86_64"), str(libs / "i386")]
-    assert "/already/there" in parts
+    # Host loader paths are not inherited by games (#1590); only the shipped folders.
+    assert "/already/there" not in parts
 
 
 def test_without_the_folder_nothing_is_added(tmp_path, monkeypatch):

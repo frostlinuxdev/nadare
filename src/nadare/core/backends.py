@@ -13,14 +13,24 @@ import logging
 import re
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Protocol
 
-from .config import Config, valid_profile_name
-from .directkinds import CATALOG_BACKENDS, RETIRED_KINDS
+from . import artindex
+from .config import Config, profile_value, valid_profile_name
+from .directkinds import (
+    BUILTIN_BACKENDS,
+    CATALOG_KINDS,
+    OPTIONAL_KINDS,
+    RETIRED_KINDS,
+    UNLIMITED_KINDS,
+    one_per_game,
+    register_storage_kind,
+)
 from .events import Cancel, Cancelled, Emitter, emitter
+from .verification import VerifyResult
 
 
 class BackendError(Exception):
@@ -30,6 +40,10 @@ class BackendError(Exception):
         super().__init__(message)
         self.message = message
         self.code = code
+
+
+class BackendNotInstalled(BackendError):
+    """Game files are absent; recovery is Install regardless of the message."""
 
 
 class BackendUnsupported(BackendError):
@@ -55,7 +69,8 @@ class BackendContext:
     emit: Emitter = emitter(None)
     cancel: Cancel = field(default_factory=Cancel)
 
-    def data_dir(self) -> Path:
+    def data_path(self) -> Path:
+        """The profile folder's path, without creating it (#1465: queries must not write)."""
         from . import paths
 
         root = paths.profiles_dir()
@@ -65,7 +80,11 @@ class BackendContext:
         # disk). The name is joined onto the trusted root, so it cannot escape.
         if not valid_profile_name(self.name):
             raise BackendError(f"unsafe profile name {self.name!r}")
-        d = root / self.name
+        return root / self.name
+
+    def data_dir(self) -> Path:
+        """The profile folder, created if missing: for the paths that write (setup, install)."""
+        d = self.data_path()
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -84,6 +103,20 @@ class BackendContext:
         with self.config.locked():
             self.profile[key] = value
             self.config.save()
+
+
+def wine_prefix(profile: Mapping[str, Any], data_path: Path) -> Path:
+    """The Wine prefix a profile uses: its configured path, else ``data_path / "prefix"``.
+
+    Pure path resolution shared by the Wine backends and the Safety check (#806), so a
+    profile that never wrote ``prefix`` is still scanned where its backend keeps it.
+    Nothing is created or resolved here.
+    """
+    configured = profile_value(profile, "prefix") or profile_value(profile, "wineprefix")
+    raw = str(configured).strip() if configured not in (None, "") else ""
+    if raw:
+        return Path(raw).expanduser()
+    return data_path / "prefix"
 
 
 #: Widget kinds an :class:`Option` can request from the Settings page.
@@ -135,7 +168,7 @@ PREFIX_HELP = (
 
 #: Real profile settings a backend honours that Settings does not show: installer and
 #: manifest overrides, a download token, the Fate/Grand Order installer internals, and the
-#: Wine, umu-run and download-worker overrides almost nobody needs.
+#: Wine and umu-run overrides almost nobody needs.
 #: Nothing is deleted; a value already in the profile keeps working and survives a Save.
 #: ``docs/CONFIG-ONLY-OPTIONS.md`` documents each one (a test keeps the two in step).
 CONFIG_ONLY_KEYS = frozenset(
@@ -161,7 +194,9 @@ CONFIG_ONLY_KEYS = frozenset(
         "uninstall_all",
         "wine_binary",
         "umu_binary",
-        "download_workers",
+        "sandbox_share_pid",
+        "sandbox_host_tmp",
+        "stop_grace_seconds",
     }
 )
 
@@ -171,10 +206,6 @@ PROCESS_MATCH_SHOWN = frozenset({"script"})
 #: Backends where the user picks the executable (nothing else knows it), so it is shown.
 EXE_NAME_SHOWN = frozenset({"wine", "script"})
 
-#: Kinds where each profile is a different game (the user's own .exe, script, or Steam app),
-#: so any number of profiles is allowed.
-UNLIMITED_KINDS = frozenset({"wine", "script", "steam"})
-
 
 def config_only(kind: str, key: str) -> bool:
     """True when option ``key`` of backend ``kind`` is honoured but not shown in Settings."""
@@ -183,6 +214,14 @@ def config_only(kind: str, key: str) -> bool:
     if key == "exe_name":
         return kind not in EXE_NAME_SHOWN
     return key in CONFIG_ONLY_KEYS
+
+
+class PredownloadBackend(Protocol):
+    """Optional operation for backends advertising ``supports_predownload``."""
+
+    def predownload(self) -> dict[str, Any]:
+        """Cache the next version; raise BackendError when no window is open."""
+        ...
 
 
 class GameBackend(ABC):
@@ -210,6 +249,27 @@ class GameBackend(ABC):
     #: True when ``update()`` can bring the game up to date. The GUI disables
     #: the Update button for backends that leave updates to the game/Steam.
     supports_update: ClassVar[bool] = True
+
+    #: True when a predownload source is configured and ``predownload()`` is available.
+    #: An open download window and an installed game are still required at call time.
+    supports_predownload: ClassVar[bool] = False
+
+    #: Install/update/repair keep partial downloads on cancellation; calling the same
+    #: operation again resumes them. Pause uses the context's Cancel, with no extra method.
+    supports_resume: ClassVar[bool] = False
+
+    #: True when ``remake_prefix()`` rebuilds this backend's Wine prefix.
+    supports_remake_prefix: ClassVar[bool] = False
+
+    #: True when the backend keeps a Wine prefix at ``<profile folder>/prefix`` unless the
+    #: profile sets ``prefix``/``wineprefix`` (read by the Safety check, #806).
+    uses_wine_prefix: ClassVar[bool] = False
+
+    #: True when this backend can launch in the Sandbox.
+    supports_secure_mode: ClassVar[bool] = False
+    #: The game only ever runs in the Sandbox: no saved choice turns it off, and a missing or
+    #: blocked bubblewrap stops Play instead of starting it unprotected (#1330).
+    sandbox_required: ClassVar[bool] = False
 
     #: Callable returning this backend's official news feed (``NewsResult`` or a
     #: list of items), or ``None`` when the backend has no news source.
@@ -289,12 +349,24 @@ class GameBackend(ABC):
     def stop(self) -> None:
         """Stop a running game for this profile."""
 
+    def game_pids(self) -> Callable[[], list[int]] | None:
+        """A function returning the live pids Stop would treat as this game's (#1654).
+
+        ``None`` when the backend has no reliable process rule: the launch monitor then
+        does nothing and the launch sheet's timeout takes over.
+        """
+        return None
+
     def login(self) -> None:
         """Optional; raise BackendUnsupported if the backend has no login step."""
         raise BackendUnsupported("this backend has no login step")
 
-    def set_remember(self, enabled: bool) -> None:
-        """Optional; persist/surrender this profile's login. Default: unsupported."""
+    def set_remember(self, enabled: bool, persist_flag: bool = True) -> None:
+        """Optional; persist/surrender this profile's login. Default: unsupported.
+
+        With ``persist_flag=False``, apply credential side effects only: the caller
+        owns writing the ``remember_me`` setting.
+        """
         raise BackendUnsupported("this backend cannot remember a login")
 
     def logout(self) -> None:
@@ -310,9 +382,9 @@ class GameBackend(ABC):
         network failure.
         """
 
-    def verify(self) -> dict[str, Any]:
-        """Optional integrity report. Default: nothing to verify."""
-        return {"verified": False, "message": "nothing to verify"}
+    def verify(self) -> VerifyResult | dict[str, Any]:
+        """Optional integrity result; consumers adapt legacy reports with VerifyResult."""
+        return {"outcome": "nothing_to_verify", "verified": False, "message": "nothing to verify"}
 
     def repair(self) -> None:
         """Optional; re-check every game file and download damaged ones."""
@@ -321,10 +393,6 @@ class GameBackend(ABC):
     def remake_prefix(self) -> None:
         """Optional; rebuild the Wine prefix while keeping the game files."""
         raise BackendUnsupported("Rebuilding the Wine prefix is not available for this game")
-
-    def uninstall(self, purge: bool = False) -> None:
-        """Remove the game tree / prefix. Keep user data unless purge."""
-        raise BackendUnsupported("this backend cannot uninstall")
 
 
 # --------------------------------------------------------------------------
@@ -339,26 +407,13 @@ _REGISTRY_LOCK = threading.Lock()
 
 # Import path per kind. Imported lazily so a missing optional dep (e.g. PyQt6 in
 # a headless CLI) never breaks unrelated backends.
-_BUILTINS = {
-    "stove-czn": "nadare.backends.czn.backend:CznBackend",
-    "fgo-lepton": "nadare.backends.fgo.backend:FgoLeptonBackend",
-    "wine": "nadare.backends.wine:WineBackend",
-    "steam": "nadare.backends.steam:SteamBackend",
-    "script": "nadare.backends.script:ScriptBackend",
-    "arknights-yostar": "nadare.backends.arknights:ArknightsBackend",
-    "stellasora-yostar": "nadare.backends.stellasora:StellaSoraBackend",
-    **CATALOG_BACKENDS,
-}
-
-
-#: Built-in kinds a build may deliberately leave out (``NADARE_WITHOUT_FGO=1``).
-#: ``nadare doctor`` reports these as "not in this build", not as a fault.
-OPTIONAL_KINDS = frozenset({"fgo-lepton"})
+_BUILTINS = dict(BUILTIN_BACKENDS)
 
 
 def register(kind: str, cls: type[GameBackend]) -> None:
     with _REGISTRY_LOCK:
         _REGISTRY[kind] = cls
+        register_storage_kind(kind)
 
 
 def kinds() -> list[str]:
@@ -523,10 +578,17 @@ def install_choice_label(kind: str, profile: Mapping[str, Any]) -> str:
 def supports_remake_prefix(kind: str) -> bool:
     """Whether ``kind`` implements Rebuild prefix (safe for unknown kinds)."""
     try:
-        cls = get(kind)
+        return bool(get(kind).supports_remake_prefix)
     except BackendError:
         return False
-    return getattr(cls, "remake_prefix", None) is not GameBackend.remake_prefix
+
+
+def supports_resume(kind: str) -> bool:
+    """Whether cancelled downloads of ``kind`` resume (safe for unknown kinds)."""
+    try:
+        return bool(get(kind).supports_resume)
+    except BackendError:
+        return False
 
 
 def supports_update(kind: str) -> bool:
@@ -540,20 +602,9 @@ def supports_update(kind: str) -> bool:
 def supports_sandbox(kind: str) -> bool:
     """Whether ``kind`` can run its game in the Sandbox (safe for unknown kinds)."""
     try:
-        return bool(getattr(get(kind), "supports_secure_mode", False))
+        return bool(get(kind).supports_secure_mode)
     except BackendError:
         return False
-
-
-def one_per_game(kind: str) -> bool:
-    """Whether ``kind`` is a catalog game with only one profile (safe for unknown kinds)."""
-    if not isinstance(kind, str) or not kind or kind in UNLIMITED_KINDS:  # #1207 b046
-        return False
-    try:
-        get(kind)
-    except BackendError:
-        return False
-    return True
 
 
 def existing_profile(kind: str, profiles: dict[str, Any]) -> str | None:
@@ -564,6 +615,16 @@ def existing_profile(kind: str, profiles: dict[str, Any]) -> str | None:
         if isinstance(data, dict) and data.get("backend") == kind:
             return name
     return None
+
+
+def sandbox_required(kind: str) -> bool:
+    """Whether ``kind`` must always run in the Sandbox (safe for unknown kinds)."""
+    if not supports_sandbox(kind):
+        return False
+    try:
+        return bool(getattr(get(kind), "sandbox_required", False))
+    except BackendError:
+        return False
 
 
 def sandbox_default(kind: str) -> bool:
@@ -590,6 +651,17 @@ def supports_media(kind: str) -> bool:
         return bool(getattr(get(kind), "official_media", False))
     except BackendError:
         return False
+
+
+def supports_hero(kind: str) -> bool:
+    """Whether a game page of ``kind`` can be given a hero (safe for unknown kinds).
+
+    A publisher media feed, the curated index's wide art, or Steam's library art can fill the
+    page. Generic Wine and script profiles have none of those, so no worker starts for them.
+    """
+    if supports_media(kind):
+        return True
+    return kind == "steam" or kind in CATALOG_KINDS or kind in artindex.ALLOWED_HOSTS
 
 
 def page_notice(kind: str) -> tuple[str, str] | tuple[str, str, str] | None:
@@ -655,10 +727,12 @@ def create(
 # Re-export so backends can `from nadare.core.backends import Cancelled`.
 __all__ = [
     "BackendError",
+    "BackendNotInstalled",
     "BackendUnsupported",
     "Status",
     "BackendContext",
     "GameBackend",
+    "PredownloadBackend",
     "Option",
     "OPTION_KINDS",
     "register",
@@ -669,11 +743,13 @@ __all__ = [
     "supports_remember_me",
     "supports_login",
     "supports_update",
+    "supports_resume",
     "UNLIMITED_KINDS",
     "one_per_game",
     "existing_profile",
     "unofficial_notice",
     "install_size_hint",
+    "wine_prefix",
     "install_choice_label",
     "install_choice",
     "UNOFFICIAL_NOTICE",
@@ -682,6 +758,7 @@ __all__ = [
     "page_summary",
     "supports_news",
     "supports_media",
+    "supports_hero",
     "sandbox_default",
     "unavailable",
     "is_available",

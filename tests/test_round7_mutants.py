@@ -200,7 +200,7 @@ def test_an_interrupted_arknights_sync_stays_marked_after_a_refusal(tmp_path, mo
     from test_backends_yostar_direct import _ak, _multi_manifest
 
     from nadare.backends import arknights as ak
-    from nadare.core import yostar
+    from nadare.core import directdl
 
     manifest = _multi_manifest(tmp_path, "Arknights_EN", {"Arknights.exe": b"MZ"})
     backend = _ak(tmp_path, {"manifest_file": str(manifest)})
@@ -212,9 +212,9 @@ def test_an_interrupted_arknights_sync_stays_marked_after_a_refusal(tmp_path, mo
 
     def refused(man, d, **kw):
         seen.append("sync")
-        raise yostar.ManifestRefused("another install or update is already running")
+        raise directdl.InstallBusy("another install or update is already running")
 
-    monkeypatch.setattr(ak.yostar, "sync", refused)
+    monkeypatch.setattr(ak.directdl, "sync", refused)
     with pytest.raises(BackendError):
         backend.update()
     assert seen == ["sync"]

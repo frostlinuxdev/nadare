@@ -21,7 +21,7 @@ from nadare.backends import winegame as wg
 from nadare.backends.arknights import ArknightsBackend
 from nadare.backends.stellasora import StellaSoraBackend
 from nadare.backends.winegame import WineGameBackend
-from nadare.core import yostar
+from nadare.core import directdl, yostar
 from nadare.core.backends import BackendError, get, kinds
 from nadare.core.events import Cancelled
 
@@ -74,10 +74,11 @@ class TestRegistration:
 
 
 class TestArknightsMode:
-    def test_official_by_default(self, tmp_path):
+    def test_direct_even_without_a_manifest(self, tmp_path):
+        """#1452: no official launcher route any more; Install refuses instead."""
         backend = _ak(tmp_path)
-        assert backend.direct_mode() is False
-        assert backend.status().data["mode"] == "official"
+        assert backend.direct_mode() is True
+        assert backend.status().data["mode"] == "direct"
 
     def test_direct_when_manifest_configured(self, tmp_path):
         manifest = _manifest_file(tmp_path, "Arknights_EN")
@@ -99,7 +100,7 @@ class TestArknightsMode:
             seen.append((man.game_tag, Path(install_dir)))
             return {"downloaded": 1, "skipped": 0}
 
-        monkeypatch.setattr(ak.yostar, "sync", fake_sync)
+        monkeypatch.setattr(ak.directdl, "sync", fake_sync)
 
         def no_installer(*a, **k):
             raise AssertionError("direct mode must not run the installer")
@@ -115,7 +116,7 @@ class TestArknightsMode:
         write_exe(target, "MZ")
         seen: list = []
         monkeypatch.setattr(
-            ak.yostar,
+            ak.directdl,
             "sync",
             lambda man, d, emit=None, cancel=None, **k: (
                 seen.append(man.version) or {"downloaded": 0, "skipped": 0}
@@ -130,7 +131,7 @@ class TestArknightsMode:
         exe = write_exe(backend.install_dir() / "Arknights.exe", "MZ")
         captured: list[list[str]] = []
 
-        def fake_stream(argv, env, on_line=None, cancel=None):
+        def fake_stream(argv, env, on_line=None, cancel=None, before_stop=None):
             captured.append(list(argv))
             return 0
 
@@ -140,13 +141,20 @@ class TestArknightsMode:
         assert captured[0][1] == str(exe)
 
     def test_official_install_still_emits_finish_step(self, tmp_path, monkeypatch):
+        """The shared installer route (launcher-* kinds; Arknights' own is retired, #1452)."""
+        from _official_route import OfficialRouteBackend
+
         installer = write_exe(tmp_path / "Arknights-setup.exe", "MZ")
-        backend = _ak(
-            tmp_path,
-            {
-                "wine_binary": "/usr/bin/wine",
-                "installer_url": "https://launcher-pkg-ark-en.yo-star.com/Arknights-setup.exe",
-            },
+        backend = OfficialRouteBackend(
+            make_context(
+                tmp_path,
+                ak.KIND,
+                {
+                    "wine_binary": "/usr/bin/wine",
+                    "installer_url": "https://launcher-pkg-ark-en.yo-star.com/Arknights-setup.exe",
+                },
+                "ak",
+            )
         )
         monkeypatch.setattr(WineGameBackend, "_ensure_prefix", lambda self: None)
         monkeypatch.setattr(WineGameBackend, "_download_installer", lambda self, url: installer)
@@ -211,7 +219,7 @@ class TestStellaSora:
         backend = _stella(tmp_path, {"manifest_file": str(manifest)})
         seen: list = []
         monkeypatch.setattr(
-            ak.yostar,
+            ak.directdl,
             "sync",
             lambda man, d, emit=None, cancel=None, **k: (
                 seen.append(Path(d)) or {"downloaded": 0, "skipped": 0}
@@ -228,7 +236,7 @@ class TestStellaSora:
         exe = write_exe(backend.install_dir() / "StellaSora.exe", "MZ")
         captured: list[list[str]] = []
         patch_everywhere(monkeypatch, wg, "stream",
-            lambda argv, env, on_line=None, cancel=None: (captured.append(list(argv)), 0)[1],
+            lambda argv, env, **_kw: (captured.append(list(argv)), 0)[1],
         )
         assert backend.launch() == 0
         assert captured[0] == ["/usr/bin/wine", str(exe)]
@@ -242,7 +250,7 @@ class TestStellaSora:
         monkeypatch.setattr(
             wg.runners, "ensure_pinned", lambda *a, **k: calls.append(1) or tmp_path
         )
-        monkeypatch.setattr(ak.yostar, "sync", lambda *a, **k: {"downloaded": 0, "skipped": 0})
+        monkeypatch.setattr(ak.directdl, "sync", lambda *a, **k: {"downloaded": 0, "skipped": 0})
         backend.install()
         assert calls == [1]
 
@@ -272,7 +280,8 @@ class TestStellaSora:
         monkeypatch.setattr(backend, "resolve_runner", lambda: (str(tmp_path), "proton"))
         patch_everywhere(monkeypatch, wg, "umu", SimpleNamespace(
             system=lambda *a, **k: "/usr/bin/umu-run", resolve=lambda *a, **k: "/usr/bin/umu-run",
-            managed=lambda: None, note_first_runtime=lambda emit: None))
+            managed=lambda: None, note_first_runtime=lambda emit: None,
+            run_argv=lambda exe, args: [str(exe), *args]))
         backend.launch()
         assert calls == [1]
 
@@ -289,7 +298,7 @@ class TestStellaSora:
         exe = write_exe(backend.install_dir() / "bin" / "StellaSora.exe", "MZ")
         captured: list[list[str]] = []
         patch_everywhere(monkeypatch, wg, "stream",
-            lambda argv, env, on_line=None, cancel=None: (captured.append(list(argv)), 0)[1],
+            lambda argv, env, **_kw: (captured.append(list(argv)), 0)[1],
         )
         backend.launch()
         assert captured[0][1] == str(exe)
@@ -392,7 +401,7 @@ class TestDirectInstallCompletion:
             _write_files(Path(d), self.GAME_FILES, stop_after="Arknights.exe")
             return {"downloaded": 1, "skipped": 0}
 
-        monkeypatch.setattr(ak.yostar, "sync", interrupted)
+        monkeypatch.setattr(ak.directdl, "sync", interrupted)
         with pytest.raises(Cancelled):
             backend.install()
 
@@ -406,7 +415,7 @@ class TestDirectInstallCompletion:
     def test_interrupted_update_is_not_reported_installed(self, tmp_path, monkeypatch):
         backend, _manifest = self._backend(tmp_path)
         monkeypatch.setattr(
-            ak.yostar,
+            ak.directdl,
             "sync",
             lambda man, d, emit=None, cancel=None, **kw: (
                 _write_files(Path(d), self.GAME_FILES)
@@ -423,7 +432,7 @@ class TestDirectInstallCompletion:
             _write_files(Path(d), {"Arknights.exe": b"MZ2"}, stop_after="Arknights.exe")
             return {"downloaded": 1, "skipped": 0}
 
-        monkeypatch.setattr(ak.yostar, "sync", interrupted)
+        monkeypatch.setattr(ak.directdl, "sync", interrupted)
         with pytest.raises(Cancelled):
             backend.update()
 
@@ -436,7 +445,7 @@ class TestDirectInstallCompletion:
     ):
         backend, _manifest = self._backend(tmp_path)
         monkeypatch.setattr(
-            ak.yostar,
+            ak.directdl,
             "sync",
             lambda man, d, emit=None, cancel=None, **kw: (
                 _write_files(Path(d), self.GAME_FILES)
@@ -454,7 +463,7 @@ class TestDirectInstallCompletion:
     def test_verify_names_a_missing_game_file(self, tmp_path, monkeypatch):
         backend, _manifest = self._backend(tmp_path)
         monkeypatch.setattr(
-            ak.yostar,
+            ak.directdl,
             "sync",
             lambda man, d, emit=None, cancel=None, **kw: (
                 _write_files(Path(d), self.GAME_FILES)
@@ -524,7 +533,7 @@ class TestLaunchExplainsRuntimeFailures:
         )
         write_exe(backend.install_dir() / "StellaSora.exe", "MZ")
 
-        def fake_stream(argv, env, on_line=None, cancel=None):
+        def fake_stream(argv, env, on_line=None, cancel=None, before_stop=None):
             on_line(line)
             return code
 
@@ -547,21 +556,23 @@ class TestLaunchExplainsRuntimeFailures:
 
 
 def test_an_update_refused_before_any_download_leaves_the_game_playable(tmp_path, monkeypatch):
-    """Sweep round 4: the marker went down before yostar.sync validated the manifest (host,
-    lock), so "Nothing was changed" left a complete install reported as incomplete."""
+    """Sweep round 4: the marker went down before the sync validated the manifest (host,
+    lock), so "Nothing was changed" left a complete install reported as incomplete.
+    #1452: the host check is in to_plan now; a sync that fails before replacing anything
+    is the same case."""
     files = {"Arknights.exe": b"MZ", "data.bin": b"1234"}
     manifest = _multi_manifest(tmp_path, "Arknights_EN", files)
     backend = _ak(tmp_path, {"manifest_file": str(manifest)})
     monkeypatch.setattr(
-        ak.yostar, "sync", lambda man, d, **kw: _write_files(Path(d), files) or {"downloaded": 2}
+        ak.directdl, "sync", lambda man, d, **kw: _write_files(Path(d), files) or {"downloaded": 2}
     )
     backend.install()
     assert backend.status().state == "installed"
 
     def refused(man, d, **kw):
-        raise yostar.ManifestRefused("refusing to download from untrusted host 'evil'")
+        raise directdl.DirectError("download failed for data.bin: HTTP 503")
 
-    monkeypatch.setattr(ak.yostar, "sync", refused)
+    monkeypatch.setattr(ak.directdl, "sync", refused)
     with pytest.raises(BackendError, match="Nothing was changed"):
         backend.update()
     assert not backend._install_marker_path().exists()
@@ -574,9 +585,9 @@ def test_a_refused_first_install_stays_not_installed(tmp_path, monkeypatch):
     backend = _ak(tmp_path, {"manifest_file": str(manifest)})
 
     def refused(man, d, **kw):
-        raise yostar.ManifestRefused("lock busy")
+        raise directdl.DirectError("could not reach the CDN")
 
-    monkeypatch.setattr(ak.yostar, "sync", refused)
+    monkeypatch.setattr(ak.directdl, "sync", refused)
     with pytest.raises(BackendError):
         backend.install()
     assert backend.status().state == "not_installed"
@@ -589,11 +600,12 @@ def test_a_download_that_fails_after_writing_keeps_the_marker(tmp_path, monkeypa
     manifest = _multi_manifest(tmp_path, "Arknights_EN", files)
     backend = _ak(tmp_path, {"manifest_file": str(manifest)})
 
-    def half(man, d, **kw):
+    def half(man, d, changed=None, **kw):
         _write_files(Path(d), {"Arknights.exe": b"MZ"})  # the first file is in place
-        raise yostar.ManifestError("crc64 mismatch for data.bin")
+        changed.set()  # as the real sync reports a finished file
+        raise directdl.DirectError("hash mismatch for data.bin")
 
-    monkeypatch.setattr(ak.yostar, "sync", half)
+    monkeypatch.setattr(ak.directdl, "sync", half)
     with pytest.raises(BackendError):
         backend.install()
     assert backend._install_marker_path().exists()

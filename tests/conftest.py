@@ -51,6 +51,11 @@ def _isolated_environment(
     # falls back to one name shared by every parallel worker.
     runtime = tmp_path_factory.mktemp("runtime")
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime))
+    # The start-up leftover sweep (#1417) must never sweep the host's real /tmp.
+    from nadare.core import leftovers
+
+    systmp = tmp_path_factory.mktemp("systmp")  # outside tmp_path: some tests list it
+    monkeypatch.setattr(leftovers, "_system_temp", lambda: systmp)
 
     # The desktop session the tests run in must not change what they expect (the Steam Set up
     # checklist has an extra step on a Wayland session); a test that needs one sets it itself.
@@ -92,13 +97,24 @@ def _isolated_environment(
 
     # Logging may already have been configured at import time (with the real
     # state dir). Tear it down and re-point the file handler at this test's
-    # tmp tree so the suite never appends to the user's real log.
+    # tmp tree so the suite never appends to the user's real log. Keep it outside
+    # tmp_path: tests may install there and compare every resulting file.
     from nadare.core import logging as nadare_logging
 
     nadare_logging.reset()
-    nadare_logging.setup(filename=tmp_path / "nadare.log")
+    nadare_logging.setup(filename=tmp_path_factory.mktemp("logs") / "nadare.log")
     yield
     nadare_logging.reset()
+
+
+def _production_lane(request: pytest.FixtureRequest) -> bool:
+    """A ``lifecycle`` test (#1463) keeps the production policies the unit stubs below turn off.
+
+    Only the four policy stubs read this (Sandbox default, cover migration, the per-game update
+    check, the start-up found-copies check). Every safety guard (HOME/XDG, DNS, session bus,
+    modal boxes, offscreen display) applies to it as to every other test.
+    """
+    return request.node.get_closest_marker("lifecycle") is not None
 
 
 @pytest.fixture(autouse=True)
@@ -116,14 +132,15 @@ def _host_userns_unrestricted(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
-def _sandbox_default_off(monkeypatch):
+def _sandbox_default_off(monkeypatch, request):
     """Older tests expect no bubblewrap; tests of the default turn it back on.
 
     The once-per-run ``ready()`` answer is cleared too, so no test sees another's.
     """
     from nadare.core import gamesandbox
 
-    monkeypatch.setattr(gamesandbox, "DEFAULT_ON", False)
+    if not _production_lane(request):
+        monkeypatch.setattr(gamesandbox, "DEFAULT_ON", False)
     gamesandbox._READY_CACHE.clear()
     yield
     gamesandbox._READY_CACHE.clear()
@@ -166,6 +183,60 @@ def _http_open_follows_patched_urlopen(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_locale_tool(monkeypatch):
+    """No test runs the Steam Runtime's pv-locale-gen from the machine's umu download."""
+    from nadare.core import pvlocales
+
+    monkeypatch.setattr(pvlocales, "locale_gen_tool", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_gpus_or_input_devices(monkeypatch, tmp_path_factory):
+    """No test reads this machine's GPUs or input devices (FSR4 choice, winebus SDL switch):
+    results would depend on the box that runs the suite."""
+    from nadare.core import fsr4, nvidiarestart, winebus
+
+    empty = tmp_path_factory.mktemp("no-sysfs") / "missing"
+    monkeypatch.setattr(fsr4, "DRM_ROOT", empty)
+    monkeypatch.setattr(winebus, "INPUT_ROOT", empty)
+    # A launch must not be refused because the test machine's NVIDIA driver waits for a restart.
+    monkeypatch.setattr(nvidiarestart, "ROOT", empty)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_dns(monkeypatch):
+    """No test asks a real resolver (#1411).
+
+    A GUI test run resolved the art hosts ~1,000 times a minute and a Pi-hole on the network
+    then refused every name from the machine. Numeric addresses and local names still resolve
+    (tests run local servers); anything else fails at once, as with no network. A test that
+    needs a particular answer patches ``artwork._RESOLVER`` (or ``socket.getaddrinfo``) itself.
+    """
+    import ipaddress
+    import socket
+
+    from nadare.core import artwork
+
+    real = socket.getaddrinfo
+
+    def offline(host, port, *args, **kwargs):
+        name = host.decode() if isinstance(host, bytes) else host
+        name = (name or "").rstrip(".").lower()
+        try:
+            ipaddress.ip_address(name.split("%", 1)[0])
+            return real(host, port, *args, **kwargs)
+        except ValueError:
+            pass
+        if not name or name == "localhost" or name.endswith(".localhost"):
+            return real("localhost" if name else host, port, *args, **kwargs)
+        raise socket.gaierror(socket.EAI_NONAME, f"no real DNS in tests: {name}")
+
+    monkeypatch.setattr(socket, "getaddrinfo", offline)
+    monkeypatch.setattr(artwork, "_RESOLVER", offline)
+    artwork._RESOLVED.clear()
+
+
+@pytest.fixture(autouse=True)
 def _no_live_hoyo_art_feed(monkeypatch):
     """The HoYoverse launcher art feed is never fetched for real in tests."""
     from nadare.backends import hoyo_art
@@ -175,6 +246,38 @@ def _no_live_hoyo_art_feed(monkeypatch):
         raise NewsError("network is disabled in tests")
 
     monkeypatch.setattr(hoyo_art, "http_get_json", offline)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_publisher_news(monkeypatch):
+    """Background GUI news uses curl, bypassing the Python DNS guard."""
+    from urllib.parse import urlsplit
+
+    from nadare.core import news
+
+    request, real_curl = news._request, news._curl
+
+    def offline(method, url, **kwargs):
+        if (news._curl is real_curl
+                and urlsplit(url).hostname not in ("127.0.0.1", "localhost", "::1")):
+            raise news.NewsError("network is disabled in tests")
+        return request(method, url, **kwargs)
+
+    monkeypatch.setattr(news, "_request", offline)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_steam_asset_cache():
+    """Steam's hashed asset table is process-wide; one test must not answer for the next.
+
+    ``artwork.steam_library_assets`` caches for hours (a 404 answer included), so without this
+    a test that faked the request decided what a later test saw.
+    """
+    from nadare.core import artwork
+
+    artwork._STEAM_ASSETS.clear()
+    yield
+    artwork._STEAM_ASSETS.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -213,7 +316,7 @@ def _no_background_cover_migration(request, monkeypatch):
     themselves, restore ``artwork._real_schedule_cover_migration``, or carry the
     ``real_cover_migration`` marker.
     """
-    if request.node.get_closest_marker("real_cover_migration"):
+    if request.node.get_closest_marker("real_cover_migration") or _production_lane(request):
         return
     from nadare.core import artwork
 
@@ -225,7 +328,7 @@ def _no_background_cover_migration(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_automatic_update_checks(monkeypatch):
+def _no_automatic_update_checks(monkeypatch, request):
     """Window tests never start the background version check (#1024).
 
     Opening a direct game started ``check_update`` on a worker, which asked the publisher's real
@@ -233,6 +336,8 @@ def _no_automatic_update_checks(monkeypatch):
     ("Fatal Python error: Aborted", seen on CI 2026-11-08 in ``kuro.resolve_game``). Tests of the
     check call ``backend.check_update()`` themselves.
     """
+    if _production_lane(request):
+        return
     try:
         from nadare.gui.main_window import MainWindow
     except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
@@ -246,7 +351,7 @@ def _no_automatic_update_checks(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_automatic_found_copies_check(monkeypatch):
+def _no_automatic_found_copies_check(monkeypatch, request):
     """Window tests never start the start-up "game found in another folder" check (#1293).
 
     It reads the libraries on a thread and can raise a banner; tests of it call
@@ -259,10 +364,73 @@ def _no_automatic_found_copies_check(monkeypatch):
     real = getattr(MainWindow, "_start_found_copies_check", None)
     if real is None:
         return
-    monkeypatch.setattr(MainWindow, "_real_start_found_copies_check", real, raising=False)
-    monkeypatch.setattr(MainWindow, "_start_found_copies_check", lambda self: None)
     # The real chooser is a modal dialog: a test that reaches it unstubbed would hang.
     monkeypatch.setattr(MainWindow, "_choose_found_copy", lambda self, name, copies: None)
+    if _production_lane(request):
+        return
+    monkeypatch.setattr(MainWindow, "_real_start_found_copies_check", real, raising=False)
+    monkeypatch.setattr(MainWindow, "_start_found_copies_check", lambda self: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_startup_leftover_sweep(monkeypatch, request):
+    """A real window's 5 s start-up sweep (#1417) does nothing in unit tests.
+
+    Its thread deletes files and can outlive the bounded join above: one started by an earlier
+    GUI test's timer reached a later test's patched ``installercache.sweep`` (CI 3.13, #1641)
+    and deleted another test's umu folder (CI 3.12, #1619/#1639). Tests of the sweep call
+    ``CleanupMixin`` directly; the lifecycle lane keeps the real one.
+    """
+    if _production_lane(request):
+        return
+    try:
+        from nadare.gui.main_window import MainWindow
+    except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
+        return
+    monkeypatch.setattr(MainWindow, "_start_leftover_sweep", lambda self: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_automatic_runner_prefetch(monkeypatch, request):
+    """A real window's 20 s runner prefetch (#1425) does nothing in unit tests.
+
+    A leftover window's timer ran the real prefetch during a later test; its thread signalled
+    the destroyed window and crashed the worker (CI 1f9ef3c1). Tests of the prefetch call
+    ``_real_start_runner_prefetch`` or ``CleanupMixin`` directly; the lifecycle lane keeps it.
+    """
+    if _production_lane(request):
+        return
+    try:
+        from nadare.gui.main_window import MainWindow
+    except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
+        return
+    real = MainWindow._start_runner_prefetch
+    monkeypatch.setattr(MainWindow, "_real_start_runner_prefetch", real, raising=False)
+    monkeypatch.setattr(MainWindow, "_start_runner_prefetch", lambda self: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_automatic_startup_checks(monkeypatch, request):
+    """A real window's 3 s start-up checks (#1299) do nothing in unit tests.
+
+    A leftover window's timer ran the real Flatpak folder check while ``test_flatpak_reach_1299``
+    had patched ``in_flatpak`` to True: it found that window's games out of reach and opened a
+    real message box, which aborted the worker (CI run 2403). Tests of the checks call
+    ``CleanupMixin`` or ``_real_start_*`` directly; the lifecycle lane keeps them.
+    """
+    if _production_lane(request):
+        return
+    try:
+        from nadare.gui.main_window import MainWindow
+    except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
+        return
+    for name in (
+        "_start_sandbox_broad_check",
+        "_start_flatpak_reach_check",
+        "_start_sandbox_trust_check",
+    ):
+        monkeypatch.setattr(MainWindow, "_real" + name, getattr(MainWindow, name), raising=False)
+        monkeypatch.setattr(MainWindow, name, lambda self: None)
 
 
 @pytest.fixture(autouse=True)
@@ -295,6 +463,13 @@ def _library_picker_is_a_folder_dialog_in_tests(monkeypatch):
 #: Plain daemon threads that do image work in Qt (news images, the cover-cache sweep).
 _BACKGROUND_THREAD_NAMES = frozenset(
     {"nadare-news-fetch", "nadare-news-image", "cover-cache-migration", "nadare-found-copies"}
+)
+#: The window's start-up threads that delete files. One left running reads HOME/XDG when it
+#: gets there, which may already be the *next* test's: the leftover sweep deleted the umu
+#: folder of test_leftovers_umu before that test took umu's lock (CI 3.12, twice, 2026-11-16).
+_DELETING_THREAD_NAMES = frozenset(
+    {"leftover-sweep", "nadare-spare-delete", "profile-folders-delete",
+     "steam-shortcut-cleanup", "quality-cleanup"}
 )
 
 
@@ -329,7 +504,8 @@ def _background_work_ends_with_its_test():
     # ran, and the xdist worker aborted (CI 2026-11-10, test_single_instance).
     deadline = time.monotonic() + 3.0
     for thread in threading.enumerate():
-        if thread.name in _BACKGROUND_THREAD_NAMES and thread is not threading.current_thread():
+        waited = _BACKGROUND_THREAD_NAMES | _DELETING_THREAD_NAMES
+        if thread.name in waited and thread is not threading.current_thread():
             _join_until(thread, deadline)
     try:
         from PyQt6.QtCore import QCoreApplication, QThreadPool
@@ -346,6 +522,27 @@ def _background_work_ends_with_its_test():
             workers.wait_detached(3000)
         except Exception:  # noqa: BLE001 - best effort, like the pool wait
             pass
+
+
+@pytest.fixture(autouse=True)
+def _no_real_session_bus(monkeypatch):
+    """No test may reach the desktop's session bus (a real "hello" notification, 2026-11-15).
+
+    Qt caches the session bus per process, so a test that set DBUS_SESSION_BUS_ADDRESS still
+    talked to the real desktop when the suite ran inside one (a worker on flxpc). Every test
+    gets a connection that is never connected; a test that wants a bus patches
+    ``sessionBus`` itself (its monkeypatch runs after this one), and test_notify_dbus_real
+    starts its own private bus in a subprocess.
+    """
+    try:
+        from PyQt6.QtDBus import QDBusConnection
+    except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
+        return
+    monkeypatch.setattr(
+        QDBusConnection,
+        "sessionBus",
+        staticmethod(lambda: QDBusConnection("nadare-tests-no-bus")),
+    )
 
 
 class RealModalBox(AssertionError):
@@ -385,6 +582,17 @@ def _stop_download_question_never_blocks(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _move_confirmation_never_blocks(monkeypatch):
+    """The "Moved" box after a Move (#1352) is modal: tests that care stub it themselves."""
+    try:
+        from nadare.gui.settings_parts.move import MoveMixin
+    except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
+        return
+    monkeypatch.setattr(MoveMixin, "_real_confirm_moved", MoveMixin._confirm_moved, raising=False)
+    monkeypatch.setattr(MoveMixin, "_confirm_moved", lambda self, text: None)
+
+
+@pytest.fixture(autouse=True)
 def _failure_dialog_never_blocks(monkeypatch):
     """The Retry / Open logs / Close box is modal: tests must never wait on it."""
     try:
@@ -404,6 +612,17 @@ def _quality_cleanup_question_never_blocks(monkeypatch):
     except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
         return
     monkeypatch.setattr(MainWindow, "_ask_remove_qualities", lambda self, *a, **k: False)
+
+
+@pytest.fixture(autouse=True)
+def _spare_copies_question_never_blocks(monkeypatch):
+    """The other copies of a re-pointed game are offered (#1300): tests that do not care keep
+    them."""
+    try:
+        from nadare.gui.main_window import MainWindow
+    except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
+        return
+    monkeypatch.setattr(MainWindow, "_ask_spare_copies", lambda self, *a, **k: [])
 
 
 @pytest.fixture(autouse=True)
@@ -510,3 +729,21 @@ def _no_bundled_umu(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(
         _umu, "BUNDLED_ARCHIVE", tmp_path_factory.getbasetemp() / "no-bundled-umu.tar"
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_live_steam_metadata(monkeypatch):
+    """Steam metadata uses curl's resolver, so the Python DNS guard cannot block it."""
+    from urllib.parse import urlparse
+
+    from nadare.core import artwork
+
+    get_json, real_curl = artwork._get_json, artwork._curl
+
+    def offline(url, **kwargs):
+        steam_host = urlparse(url).hostname in ("api.steampowered.com", "store.steampowered.com")
+        if steam_host and artwork._curl is real_curl:
+            raise OSError("Steam metadata is offline in tests; supply a fake HTTP client")
+        return get_json(url, **kwargs)
+
+    monkeypatch.setattr(artwork, "_get_json", offline)

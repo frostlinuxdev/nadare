@@ -254,3 +254,89 @@ def test_readahead_still_survives_a_flaky_server(server):
         [RangePart(s.url + "/a", len(BIG))], block_size=4096, readahead=64 * 1024, backoff=0
     ) as r:
         assert r.read() == BIG
+
+
+# --- #1496: ranged reads share the downloader's idea of a transient HTTP answer --------------
+
+
+@pytest.mark.parametrize("status", [408, 425, 429, 503])
+def test_a_transient_status_is_retried_like_a_full_download(server, status):
+    s = server({"/a": DATA})
+    with reader(s, "/a", retries=3) as r:
+        s.fail_status, s.fail_next, s.fail_retry_after = status, 1, "0"
+        assert r.read(100) == DATA[:100]
+    assert sum(1 for q in s.requests if q == "/a") == 2  # one failed GET, one good one
+
+
+@pytest.mark.parametrize("status", [400, 403, 404, 410])
+def test_a_permanent_4xx_still_fails_at_once(server, status):
+    s = server({"/a": DATA})
+    with reader(s, "/a", retries=3) as r:
+        s.fail_status, s.fail_next = status, 5
+        with pytest.raises(RangeError, match=f"HTTP {status}"):
+            r.read(100)
+    assert sum(1 for q in s.requests if q == "/a") == 1
+
+
+def test_the_full_downloader_and_the_range_reader_agree_on_every_status():
+    from nadare.core import download
+
+    for status in range(400, 600):
+        assert download.transient_status(status) == (status in (408, 425, 429) or status >= 500), (
+            status
+        )
+
+
+def test_retry_after_is_honoured_between_range_attempts(server, monkeypatch):
+    from nadare.core import download
+
+    waits: list[float] = []
+    monkeypatch.setattr(download, "_sleep", lambda seconds, cancel: waits.append(seconds))
+    s = server({"/a": DATA})
+    with reader(s, "/a", retries=3, backoff=0.5) as r:
+        s.fail_status, s.fail_next, s.fail_retry_after = 429, 1, "7"
+        assert r.read(10) == DATA[:10]
+    assert waits == [7.0]
+
+
+def test_retry_after_is_capped_like_the_full_downloader(server, monkeypatch):
+    from nadare.core import download
+
+    waits: list[float] = []
+    monkeypatch.setattr(download, "_sleep", lambda seconds, cancel: waits.append(seconds))
+    s = server({"/a": DATA})
+    with reader(s, "/a", retries=3, backoff=0.5) as r:
+        s.fail_status, s.fail_next, s.fail_retry_after = 429, 1, "100000"
+        assert r.read(10) == DATA[:10]
+    assert waits == [download.RETRY_AFTER_MAX]
+
+
+def test_without_retry_after_the_backoff_doubles(server, monkeypatch):
+    from nadare.core import download
+
+    waits: list[float] = []
+    monkeypatch.setattr(download, "_sleep", lambda seconds, cancel: waits.append(seconds))
+    s = server({"/a": DATA})
+    with reader(s, "/a", retries=3, backoff=0.5) as r:
+        s.fail_status, s.fail_next = 503, 2
+        assert r.read(10) == DATA[:10]
+    assert waits == [0.5, 1.0]
+
+
+def test_cancel_during_a_retry_after_wait_stops_the_read(server):
+    s = server({"/a": DATA})
+    cancel = Cancel()
+    with reader(s, "/a", retries=3, cancel=cancel) as r:
+        s.fail_status, s.fail_next, s.fail_retry_after = 429, 1, "30"
+        import threading
+        import time
+
+        timer = threading.Timer(0.3, cancel.cancel)
+        timer.start()
+        started = time.monotonic()
+        try:
+            with pytest.raises(Cancelled):
+                r.read(10)
+        finally:
+            timer.cancel()
+        assert time.monotonic() - started < 5

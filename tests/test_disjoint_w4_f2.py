@@ -8,12 +8,12 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication, QDialog
 
 from nadare.core import diskspace
 from nadare.core.config import Config
 from nadare.gui.main_window import MainWindow
-from nadare.gui.main_window_parts import confirm as confirm_mod
+from nadare.gui.quick_install import QuickInstallDialog
 
 
 @pytest.fixture(scope="module")
@@ -36,11 +36,15 @@ def test_install_is_refused_when_the_chosen_quality_does_not_fit(
     window = MainWindow(config)
     try:
         monkeypatch.setattr(diskspace, "free_bytes", lambda path: 70 * 2**30)
-        monkeypatch.setattr(
-            confirm_mod.QMessageBox,
-            "exec",
-            lambda self: QMessageBox.StandardButton.Yes,
-        )
+        shown = []
+
+        def accept_when_it_fits(dialog):
+            # An install that does not fit cannot be accepted: the sheet's Install is off.
+            shown.append(dialog)
+            fits = dialog.install_button.isEnabled()
+            return QDialog.DialogCode.Accepted if fits else QDialog.DialogCode.Rejected
+
+        monkeypatch.setattr(QuickInstallDialog, "exec", accept_when_it_fits)
         fits = window._confirm_download("wuwa")
         config.profiles["wuwa"]["wuwa_quality"] = "hd"
         too_big = window._confirm_download("wuwa")
@@ -49,6 +53,8 @@ def test_install_is_refused_when_the_chosen_quality_does_not_fit(
             fits,
             too_big,
         )
+        assert shown[0].install_button.isEnabled()
+        assert not shown[1].install_button.isEnabled()
     finally:
         window.controller._workers.clear()
         window.close()

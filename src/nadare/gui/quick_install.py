@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""The one confirm dialog behind the Store's Install button."""
+"""The one confirm dialog behind a Store card (#1536: the Store has no detail page)."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import re
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -16,12 +19,52 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from ..core import libraries
 from .theme import apply_theme
+
+#: Qt's QWIDGETSIZE_MAX: no maximum size.
+_UNLIMITED = 16_777_215
+
+#: ``exec()`` result when the user picked another version of the game: the caller opens the
+#: dialog again for :attr:`QuickInstallDialog.variant_kind` (its size and folder differ).
+VARIANT_CHANGED = 2
+
+#: One line on what each way of delivering a game means (was on the Store detail page).
+DELIVERY_FACTS = {
+    "Direct download": "Installs straight from the publisher's servers, without their launcher.",
+    "Publisher's launcher": (
+        "Runs the publisher's own launcher under Wine/Proton. "
+        "Anti-cheat or launcher updates can break it."
+    ),
+    # The backend's own notice carries the podman/binder requirements.
+    "Android container": "Runs in an Android container (Lepton).",
+}
+
+
+@dataclass(frozen=True)
+class StoreFacts:
+    """What the Store knows about a game, shown before it is installed (#1536)."""
+
+    tier: str = ""
+    tier_help: str = ""
+    delivery: str = ""
+    #: ``(text, url)`` or ``(text, url, link label)``: the game's own notice.
+    notice: tuple[str, ...] | None = None
+
+
+def facts_for(kind: str) -> StoreFacts:
+    """The Store catalog's facts for ``kind`` (empty facts for a kind the Store does not list)."""
+    from ..core.storecatalog import entries
+
+    entry = next((e for e in entries() if e.kind == kind), None)
+    if entry is None:
+        return StoreFacts()
+    return StoreFacts(entry.tier, entry.tier_help, entry.delivery_label, entry.notice)
 
 
 def _elide_middle(text: str, limit: int = 64) -> str:
@@ -32,13 +75,30 @@ def _elide_middle(text: str, limit: int = 64) -> str:
     return f"{text[:head]}…{text[-(limit - head - 1):]}"
 
 
+
+_LIST_ITEM = re.compile(r"\s*(?:[-*\u2022]|\d+[.)])\s")
+
+
+def _reflow(text: str) -> str:
+    """Join hard-wrapped lines into paragraphs; blank lines and list items stay."""
+    paragraphs = []
+    for block in re.split(r"\n\s*\n", text.strip()):
+        lines: list[str] = []
+        for line in block.splitlines():
+            if lines and not _LIST_ITEM.match(line):
+                lines[-1] = f"{lines[-1].rstrip()} {line.strip()}"
+            else:
+                lines.append(line.rstrip())
+        paragraphs.append("\n".join(lines))
+    return "\n\n".join(paragraphs)
+
 class QuickInstallDialog(QDialog):
-    """Size, free space, the unofficial-launcher notice and the install folder, once.
+    """Size, free space, the unofficial-launcher and account notices, the install folder, once.
 
     ``describe(chosen)`` returns ``(folder, free, summary)`` for the folder the user picked
     (``None`` = the default), so what is shown is where the game will really go.
-    ``summary_text`` and ``notice_text`` are empty when there is nothing to say;
-    ``import_requested`` is set when the user wants to use files they already have.
+    ``summary_text``, ``notice_text`` and ``account_notice_text`` are empty when there is
+    nothing to say.
     """
 
     def __init__(
@@ -52,16 +112,24 @@ class QuickInstallDialog(QDialog):
         choice_sizes: Mapping[str, int] | None = None,
         on_choice: Callable[[str], None] | None = None,
         libraries: list[tuple[str, str]] | None = None,
+        facts: StoreFacts | None = None,
+        variants: Sequence[tuple[str, str]] = (),
+        current_kind: str = "",
+        account_notice: str = "",
+        change_location: bool = True,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("Root")
         apply_theme(self)
         self.setWindowTitle(f"Install {title}")
         self.setMinimumWidth(520)
+        # A short question: maximised, it stretched into a strip of empty space. The flag is
+        # not enough on Wayland; _fit_height also fixes the size, which KWin does honour.
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, False)
         self._describe = describe
         self.notice_text = notice
+        self.account_notice_text = account_notice
         self.chosen_folder = ""
-        self.import_requested = False
         # An unreadable default library must not escape the constructor (#1207 b212): say so
         # and keep Install off until a usable folder is picked.
         self._default_unreadable = ""
@@ -83,6 +151,27 @@ class QuickInstallDialog(QDialog):
         heading.setObjectName("Title")
         layout.addWidget(heading)
 
+        # Account notices can be long. Keep the action buttons outside the scrolling
+        # content so the combined sheet remains usable on a short display.
+        outer_layout = layout
+        self._content_scroll: QScrollArea | None = None
+        if account_notice:
+            self._content_scroll = QScrollArea()
+            self._content_scroll.setWidgetResizable(True)
+            self._content_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            content = QWidget()
+            layout = QVBoxLayout(content)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(12)
+            self._content_scroll.setWidget(content)
+            outer_layout.addWidget(self._content_scroll)
+
+        self._add_facts(layout, facts or StoreFacts())
+        self.variant_kind = current_kind
+        self.variant_combo: QComboBox | None = None
+        if len(variants) > 1:
+            self._add_variants(layout, variants, current_kind)
+
         self.summary_label = self._label("")
         layout.addWidget(self.summary_label)
         self.choice_combo: QComboBox | None = None
@@ -93,7 +182,13 @@ class QuickInstallDialog(QDialog):
             head = QLabel("Nadare is an unofficial launcher")
             head.setStyleSheet("font-weight: 600;")
             layout.addWidget(head)
-            layout.addWidget(self._label(notice))
+            layout.addWidget(self._label(_reflow(notice)))
+
+        if account_notice:
+            head = QLabel("Account notice")
+            head.setStyleSheet("font-weight: 600;")
+            layout.addWidget(head)
+            layout.addWidget(self._label(_reflow(account_notice)))
 
         self.library_combo: QComboBox | None = None
         if libraries:
@@ -115,18 +210,15 @@ class QuickInstallDialog(QDialog):
         self.change_button = QPushButton("Change install location…")
         self.change_button.setAutoDefault(False)
         self.change_button.clicked.connect(self.change_location)
+        self.change_button.setVisible(change_location)
         row.addWidget(self.change_button)
-        self.import_button = QPushButton("I already have it installed…")
-        self.import_button.setAutoDefault(False)
-        self.import_button.clicked.connect(self._want_import)
-        row.addWidget(self.import_button)
         row.addStretch(1)
         layout.addLayout(row)
         self._show_folder()
 
         buttons = QDialogButtonBox()
         self.install_button = buttons.addButton(
-            "I understand, install" if notice else "Install",
+            "Install",
             QDialogButtonBox.ButtonRole.AcceptRole,
         )
         self.cancel_button = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
@@ -134,7 +226,65 @@ class QuickInstallDialog(QDialog):
         self.install_button.setEnabled(not self._default_unreadable)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        outer_layout.addWidget(buttons)
+
+    def _add_facts(self, layout: QVBoxLayout, facts: StoreFacts) -> None:
+        """Tier, delivery and the game's notice (with its link): what the Store detail page
+        used to show, now before the one Install button (#1536)."""
+        self.tier_label = QLabel(facts.tier)
+        self.tier_label.setObjectName("Accent")
+        self.tier_label.setVisible(bool(facts.tier))
+        layout.addWidget(self.tier_label)
+        self.tier_help_label = self._label(facts.tier_help)
+        self.tier_help_label.setVisible(bool(facts.tier_help))
+        layout.addWidget(self.tier_help_label)
+        explanation = DELIVERY_FACTS.get(facts.delivery)
+        delivery = f"{facts.delivery} — {explanation}" if explanation else facts.delivery
+        self.delivery_label = self._label(delivery)
+        self.delivery_label.setVisible(bool(delivery))
+        layout.addWidget(self.delivery_label)
+        notice = facts.notice or ()
+        self._notice_url = str(notice[1]) if len(notice) > 1 else ""
+        self.page_notice_label = self._label(str(notice[0]) if notice else "")
+        self.page_notice_label.setVisible(bool(notice))
+        layout.addWidget(self.page_notice_label)
+        self.page_notice_link = QPushButton(
+            (str(notice[2]) if len(notice) > 2 else "Learn more") if self._notice_url else ""
+        )
+        self.page_notice_link.setObjectName("Link")
+        self.page_notice_link.setAutoDefault(False)
+        self.page_notice_link.clicked.connect(self._open_notice)
+        self.page_notice_link.setVisible(bool(self._notice_url))
+        layout.addWidget(self.page_notice_link, 0, Qt.AlignmentFlag.AlignLeft)
+
+    def _open_notice(self) -> None:
+        if self._notice_url:
+            QDesktopServices.openUrl(QUrl(self._notice_url))
+
+    def _add_variants(
+        self, layout: QVBoxLayout, variants: Sequence[tuple[str, str]], current: str
+    ) -> None:
+        """The versions of one game (GFL2: Darkwinter or Haoplay); another one reopens."""
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Version"))
+        combo = QComboBox()
+        combo.setAccessibleName("Version")
+        for label, kind in variants:
+            combo.addItem(label, kind)
+        index = combo.findData(current)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.currentIndexChanged.connect(self._variant_changed)
+        row.addWidget(combo, 1)
+        layout.addLayout(row)
+        self.variant_combo = combo
+
+    def _variant_changed(self, _index: int) -> None:
+        if self.variant_combo is None:
+            return
+        picked = str(self.variant_combo.currentData() or "")
+        if picked and picked != self.variant_kind:
+            self.variant_kind = picked
+            self.done(VARIANT_CHANGED)
 
     def _add_choice(self, layout: QVBoxLayout, option: Any, sizes: Mapping[str, int]) -> None:
         """A backend's install-time choice (WuWa's quality), each value with its size (#990)."""
@@ -195,6 +345,10 @@ class QuickInstallDialog(QDialog):
     def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().showEvent(event)
         self._fit_height()
+        if self.install_button.isEnabled():
+            # Focus on Install, as Enter does: the notice's link came first in the tab order
+            # and took the focus, so Space opened a web page (#1536).
+            self.install_button.setFocus()
 
     def _fit_height(self) -> None:
         """Grow to the height the wrapped text needs at the width the dialog really has.
@@ -205,10 +359,26 @@ class QuickInstallDialog(QDialog):
         layout = self.layout()
         if layout is None:
             return
-        layout.activate()
-        need = layout.totalHeightForWidth(self.width())
-        if need > self.height():
-            self.resize(self.width(), need)
+        # Free the size the last fit fixed, fit again, then fix it: a fixed size is what keeps
+        # the dialog from being maximised on KDE Wayland (2026-11-20 user simulation).
+        self.setMinimumSize(520, 0)
+        self.setMaximumSize(_UNLIMITED, _UNLIMITED)
+        try:
+            layout.activate()
+            if self._content_scroll is not None:
+                scroll = self._content_scroll
+                content = scroll.widget()
+                need = content.layout().totalHeightForWidth(scroll.viewport().width())
+                content.setMinimumHeight(need)
+                screen = self.screen()
+                available = screen.availableGeometry().height() - 60
+                self.resize(self.width(), min(need + layout.minimumSize().height(), available))
+                return
+            need = layout.totalHeightForWidth(self.width())
+            if need > self.height():
+                self.resize(self.width(), need)
+        finally:
+            self.setFixedSize(self.size())
 
     @staticmethod
     def _label(text: str) -> QLabel:
@@ -228,10 +398,6 @@ class QuickInstallDialog(QDialog):
         self.summary_label.setVisible(bool(self.summary_text))
         if self.isVisible():
             self._fit_height()
-
-    def _want_import(self) -> None:
-        self.import_requested = True
-        self.reject()
 
     def change_location(self) -> None:
         start = self.chosen_folder or str(Path.home())

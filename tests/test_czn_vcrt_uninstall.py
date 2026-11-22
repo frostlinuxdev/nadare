@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # ruff: noqa: F811 - tests take the fixtures imported below as arguments
-"""CznBackend: Visual C++ runtime install and safe uninstall (split out of test_backends_czn.py,
-#1248)."""
+"""CznBackend: Visual C++ runtime install (split out of test_backends_czn.py, #1248)."""
 
 from __future__ import annotations
 
@@ -18,7 +17,6 @@ from _czn_test_helpers import (  # noqa: F401  # noqa: F401 - pytest fixtures, f
     SENTINEL,
     _auth_runner,
     _cred_backend,
-    _install_game,
     _make_backend,
     _no_runner_downloads,
     _no_vcredist_network,
@@ -391,78 +389,6 @@ class TestRound1AuditFixes:
         assert stopped == []
 
 
-# ---------------------------------------------------------------------------
-# CznBackend.uninstall must only delete a prefix that is clearly Nadare's
-# ---------------------------------------------------------------------------
-class TestUninstallSafety:
-    def _run(self, make_backend_context, prefix, monkeypatch=None):
-        backend = _make_backend(make_backend_context, prefix)
-        events = []
-        backend.ctx.emit = events.append
-        monkeypatch.setattr(CznBackend, "_game_running", lambda self: False)
-        return backend, events
-
-    def test_external_unmarked_prefix_is_left_in_place(
-        self, make_backend_context, tmp_path, monkeypatch
-    ):
-        prefix = tmp_path / "wine"
-        (prefix / "drive_c" / "OtherGame").mkdir(parents=True)
-        _install_game(prefix)
-        backend, events = self._run(make_backend_context, prefix, monkeypatch)
-        backend.uninstall()
-        assert (prefix / "drive_c" / "OtherGame").is_dir()
-        assert prefix.is_dir()
-        assert any("left in place" in e.message for e in events)
-        assert not any(e.message == "Uninstalled" for e in events)
-
-    def test_marked_prefix_is_removed(self, make_backend_context, tmp_path, monkeypatch):
-        prefix = tmp_path / "wine"
-        (prefix / "drive_c").mkdir(parents=True)
-        (prefix / czn_backend.PREFIX_MARKER).write_text("nadare\n")
-        backend, events = self._run(make_backend_context, prefix, monkeypatch)
-        backend.uninstall()
-        assert not prefix.exists()
-        assert any(e.kind == "done" and e.message == "Uninstalled" for e in events)
-
-    def test_default_prefix_under_profile_dir_is_removed(
-        self, make_backend_context, tmp_path, monkeypatch
-    ):
-        ctx = make_backend_context("stove-czn", {})
-        backend = CznBackend(ctx)
-        monkeypatch.setattr(CznBackend, "_game_running", lambda self: False)
-        (backend.prefix() / "drive_c").mkdir(parents=True)
-        backend.uninstall()
-        assert not backend.prefix().exists()
-
-    def test_prefix_shared_with_another_profile_is_kept(
-        self, make_backend_context, tmp_path, monkeypatch
-    ):
-        prefix = tmp_path / "wine"
-        (prefix / "drive_c").mkdir(parents=True)
-        (prefix / czn_backend.PREFIX_MARKER).write_text("nadare\n")
-        backend, events = self._run(make_backend_context, prefix, monkeypatch)
-        backend.ctx.config.profiles["other"] = {"backend": "wine", "prefix": str(prefix)}
-        backend.uninstall()
-        assert (prefix / "drive_c").is_dir()
-        assert any("left in place" in e.message for e in events)
-
-    def test_failed_removal_is_reported_not_swallowed(
-        self, make_backend_context, tmp_path, monkeypatch
-    ):
-        prefix = tmp_path / "wine"
-        (prefix / "drive_c").mkdir(parents=True)
-        (prefix / czn_backend.PREFIX_MARKER).write_text("nadare\n")
-        backend, events = self._run(make_backend_context, prefix, monkeypatch)
-
-        def boom(path, *a, **k):
-            raise PermissionError("locked")
-
-        monkeypatch.setattr(czn_backend.shutil, "rmtree", boom)
-        with pytest.raises(BackendError, match="locked"):
-            backend.uninstall()
-        assert not any(e.message == "Uninstalled" for e in events)
-
-
 def test_exact_ge_proton_name_beats_a_longer_prefix_match(
     make_backend_context, tmp_path, monkeypatch
 ):
@@ -729,7 +655,7 @@ class TestGameWorkingDirectoryOnC:
         monkeypatch.setattr(backend, "_run_module", auth)
         seen: list[list[str]] = []
 
-        def fake_prefix_command(args, extra=None):
+        def fake_prefix_command(args, extra=None, **_kw):
             seen.append(list(args))
             return ["stub"], {}
 
@@ -786,3 +712,12 @@ class TestRunnerIntegrity:
         backend.ctx.emit = events.append
         assert backend.resolve_runner() == (str(other), "proton")
         assert any(e.kind == "status" and "untested" in e.message for e in events)
+
+
+@pytest.fixture(autouse=True)
+def _umu_available(monkeypatch):
+    """CZN runs through umu like every Proton game (#1449): stand in Nadare's own copy."""
+    from nadare.core import umu
+
+    monkeypatch.setattr(umu, "resolve", lambda *a, **k: "/usr/bin/umu-run")
+    monkeypatch.setattr(umu, "note_first_runtime", lambda emit: None)

@@ -14,7 +14,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from _backend_helpers import make_context
+from _backend_helpers import make_context, write_exe
 
 from nadare.backends import arknights as ak
 from nadare.backends.arknights import ArknightsBackend
@@ -133,8 +133,9 @@ def test_direct_arknights_repair_syncs_then_verifies(tmp_path, monkeypatch):
     backend.ctx.emit = events.append
     calls: list[str] = []
     monkeypatch.setattr(backend, "_sync_direct", lambda: calls.append("sync") or {})
-    monkeypatch.setattr(backend, "_load_manifest", lambda: object())
-    monkeypatch.setattr(ak.yostar, "plan", lambda manifest, directory, **kw: [])
+    monkeypatch.setattr(backend, "plan", lambda: object())
+    monkeypatch.setattr(ak.directdl, "sophon_missing", lambda plan, directory: [])
+    monkeypatch.setattr(ak.directdl, "plan_missing", lambda plan, directory, **kw: ([], []))
 
     backend.repair()
 
@@ -145,9 +146,10 @@ def test_direct_arknights_repair_syncs_then_verifies(tmp_path, monkeypatch):
 def test_direct_arknights_repair_reports_files_that_still_differ(tmp_path, monkeypatch):
     backend, _ = _direct_arknights(tmp_path)
     monkeypatch.setattr(backend, "_sync_direct", lambda: {})
-    monkeypatch.setattr(backend, "_load_manifest", lambda: object())
+    monkeypatch.setattr(backend, "plan", lambda: object())
+    monkeypatch.setattr(ak.directdl, "sophon_missing", lambda plan, directory: [])
     missing = [type("F", (), {"path": f"game/file{i}"})() for i in range(2)]
-    monkeypatch.setattr(ak.yostar, "plan", lambda manifest, directory, **kw: missing)
+    monkeypatch.setattr(ak.directdl, "plan_missing", lambda plan, directory, **kw: (missing, []))
 
     with pytest.raises(BackendError) as exc:
         backend.repair()
@@ -156,8 +158,22 @@ def test_direct_arknights_repair_reports_files_that_still_differ(tmp_path, monke
     assert "game/file0" in exc.value.message
 
 
-def test_non_direct_arknights_repair_is_unsupported(tmp_path):
+def test_arknights_repair_without_a_manifest_refuses_clearly(tmp_path, monkeypatch):
+    """#1452: no official route; with the index off Repair says why, like Install."""
+    monkeypatch.setattr(ak.yostar.hosting, "yostar_index_url", lambda: "")
+    monkeypatch.delenv("YOSTAR_MANIFEST_INDEX", raising=False)
     backend = ArknightsBackend(make_context(tmp_path, ak.KIND))
+    write_exe(backend.direct_target(), "MZ")
+    with pytest.raises(BackendError) as exc:
+        backend.repair()
+    assert "index" in exc.value.message
+    assert backend.direct_target().read_bytes() == b"MZ"
+
+
+def test_the_shared_route_still_has_no_repair(tmp_path):
+    from _official_route import OfficialRouteBackend
+
+    backend = OfficialRouteBackend(make_context(tmp_path, ak.KIND))
     assert backend.direct_mode() is False
     with pytest.raises(BackendUnsupported) as exc:
         backend.repair()

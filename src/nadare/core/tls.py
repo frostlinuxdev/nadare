@@ -221,15 +221,9 @@ def urlopen(
     timeout: float,
     context: ssl.SSLContext | None,
 ) -> object:
-    """``urllib.request.urlopen`` with an explicit context.
+    """``urllib.request.urlopen`` with an explicit context, always (#621).
 
-    Wrappers that do not accept ``context`` (a few tests stub ``urlopen`` with
-    an older signature) still work; the real function always does.
+    There is no retry without it: that would quietly trust the system store instead.
     """
-    try:
-        return urllib.request.urlopen(url, timeout=timeout, context=context)  # noqa: S310
-    except TypeError as exc:
-        if "context" not in str(exc):
-            raise
-    return urllib.request.urlopen(url, timeout=timeout)  # noqa: S310
+    return urllib.request.urlopen(url, timeout=timeout, context=context)  # noqa: S310
 

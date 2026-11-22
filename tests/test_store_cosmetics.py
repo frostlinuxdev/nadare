@@ -10,16 +10,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 try:
-    from PyQt6.QtGui import QColor, QPixmap
     from PyQt6.QtWidgets import QApplication
 except Exception:  # pragma: no cover - optional GUI dependencies
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
 from nadare.core import artwork
-from nadare.core.storecatalog import StoreEntry, entries
 from nadare.gui.quick_install import QuickInstallDialog
 from nadare.gui.store import StorePage
-from nadare.gui.store_detail import StoreDetail
 
 
 @pytest.fixture(scope="module")
@@ -44,46 +41,7 @@ def dispose(qapp):
     qapp.processEvents()
 
 
-def _entry(kind: str) -> StoreEntry:
-    return next(item for item in entries() if item.kind == kind)
-
-
 # ---- the hero is drawn at the size of its label, never stretched ---------------------------
-@pytest.mark.parametrize("size", [(880, 560), (1200, 900), (1000, 700)])
-def test_the_hero_pixmap_matches_its_label(qapp, dispose, size):
-    detail = StoreDetail(_entry("launcher-nikke"))  # has a notice, so the label is squeezed
-    dispose(detail)
-    pixmap = QPixmap(1200, 400)
-    pixmap.fill(QColor(200, 40, 40))
-    detail.set_hero(pixmap)
-    detail.resize(*size)
-    detail.show()
-    qapp.processEvents()
-    shown = detail.hero_label.pixmap()
-    assert (shown.width(), shown.height()) == (
-        detail.hero_label.width(),
-        detail.hero_label.height(),
-    )
-    assert not detail.hero_label.hasScaledContents()
-
-
-def test_the_hero_follows_a_resize(qapp, dispose):
-    detail = StoreDetail(_entry("direct-pgr"))
-    dispose(detail)
-    detail.resize(1200, 900)
-    detail.show()
-    qapp.processEvents()
-    first = detail.hero_label.pixmap().size()
-    detail.resize(880, 560)
-    qapp.processEvents()
-    second = detail.hero_label.pixmap().size()
-    assert second != first
-    assert (second.width(), second.height()) == (
-        detail.hero_label.width(),
-        detail.hero_label.height(),
-    )
-
-
 # ---- a long install path does not blow the dialog up ----------------------------------------
 def test_a_very_long_folder_is_shortened_in_the_middle_with_the_full_path_on_hover(
     qapp, dispose

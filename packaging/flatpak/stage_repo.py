@@ -3,7 +3,11 @@
 # Copyright (C) 2026 Nadare contributors
 """Stage the AppImage payload as a Flatpak build directory for our own repository.
 
-    python3 packaging/flatpak/stage_repo.py --appdir AppDir --out build/flatpak-root
+    python3 packaging/flatpak/stage_repo.py --appdir AppDir --out build/flatpak-root \
+        --expected-version VERSION --expected-commit COMMIT --expected-lock-sha256 SHA256
+
+Expected inputs must come from the intended source cut, not the payload's own marker.
+See docs/PACKAGING.md for the identity format and unverified development policy.
 
 Uses the trimmed AppImage payload (``AppDir/usr/bin`` from ``scripts/build_appimage.sh``),
 keeping symlinks so Qt is stored once, and applies the manifest's own rules: the same
@@ -45,6 +49,9 @@ import yaml
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 APP_ID = "io.github.frostlinuxdev.Nadare"
+# Shared packaging helper, also used by the AppImage emitter.
+sys.path.insert(0, str(HERE.parent))
+import build_identity as identity  # noqa: E402
 
 
 def _sha256(path: Path) -> str:
@@ -79,9 +86,7 @@ def fetch_deb(entry: dict, cache: Path) -> Path:
         _download(entry["url"], temporary)
         actual = _sha256(temporary)
         if actual != expected:
-            raise SystemExit(
-                f"{target.name}: sha256 mismatch: expected {expected}, got {actual}"
-            )
+            raise SystemExit(f"{target.name}: sha256 mismatch: expected {expected}, got {actual}")
         os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
@@ -139,11 +144,7 @@ def extract_deb(deb: Path, libdir: Path, licences: Path) -> None:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     _write_file(target, source.read())
                 continue
-            if not (
-                len(parts) >= 4
-                and parts[:2] == ("usr", "lib")
-                and ".so" in parts[-1]
-            ):
+            if not (len(parts) >= 4 and parts[:2] == ("usr", "lib") and ".so" in parts[-1]):
                 continue
             target = libdir / parts[-1]
             if member.isfile():
@@ -195,15 +196,18 @@ def removed_libraries(manifest: dict) -> list[str]:
 
 
 def render_icon(svg: Path, size: int, target: Path) -> None:
+    """Render the app icon with rsvg-convert only.
+
+    ImageMagick's own SVG reader drops the gradient and the rotated snowflake arms (the b24
+    beta Flatpak showed a black square with a dot), so it is not a fallback.
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
-    for tool in (
+    if not shutil.which("rsvg-convert"):
+        raise SystemExit("need rsvg-convert (Debian/Ubuntu: librsvg2-bin) to render the icon")
+    subprocess.run(
         ["rsvg-convert", "-w", str(size), "-h", str(size), str(svg), "-o", str(target)],
-        ["magick", "-background", "none", str(svg), "-resize", f"{size}x{size}", str(target)],
-    ):
-        if shutil.which(tool[0]):
-            subprocess.run(tool, check=True)
-            return
-    raise SystemExit("need rsvg-convert or ImageMagick (magick) to render the icon")
+        check=True,
+    )
 
 
 def stage(
@@ -212,6 +216,10 @@ def stage(
     *,
     proton_libs: bool = True,
     deb_cache: Path | None = None,
+    expected_version: str | None = None,
+    expected_commit: str | None = None,
+    expected_lock_sha256: str | None = None,
+    allow_unverified: bool = False,
 ) -> None:
     manifest = yaml.safe_load((HERE / f"{APP_ID}.yml").read_text())
     if out.exists():
@@ -219,8 +227,22 @@ def stage(
     payload = appdir / "usr" / "bin"
     if not (payload / "nadare").is_file():
         raise SystemExit(f"no AppImage payload at {payload} (run scripts/build_appimage.sh)")
+    try:
+        source_identity, verification_errors, input_digest = identity.check_identity(
+            appdir,
+            expected_version=expected_version,
+            expected_commit=expected_commit,
+            expected_lock_sha256=expected_lock_sha256,
+            allow_unverified=allow_unverified,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"build identity: {exc}") from exc
     files = out / "files"
     shutil.copytree(payload, files / "lib" / "nadare", symlinks=True)
+    # Check the copy too: never bless bytes changed while copying the AppDir.
+    if identity.payload_digest(files / "lib/nadare") != input_digest:
+        shutil.rmtree(out)
+        raise SystemExit("build identity: payload digest changed while copying")
     internal = files / "lib" / "nadare" / "_internal"
     for name in removed_libraries(manifest):
         target = internal / name
@@ -255,6 +277,39 @@ def stage(
     if proton_libs:
         stage_proton_libs(files, deb_cache or ROOT / "build" / "flatpak-debs")
 
+    identity_dir = files / "share/nadare"
+    identity_dir.mkdir(parents=True)
+    staged_identity = {
+        "schema": 1,
+        "verified": not verification_errors,
+        "input_identity": source_identity,
+        "input_payload_sha256": input_digest,
+        "verification_errors": verification_errors,
+        "transformations": {
+            "removed_libraries": removed_libraries(manifest),
+            "proton_libraries": json.loads((HERE / "proton-libs.json").read_text())
+            if proton_libs
+            else [],
+            "removed_proton_plugins": ["spake.so"] if proton_libs else [],
+            "metadata": [
+                "desktop entry",
+                "rendered icons",
+                "metainfo",
+                "licence",
+                "ld.so.conf",
+                "launcher symlink",
+                "runtime extension directories",
+            ],
+        },
+        "payload_sha256": identity.payload_digest(files),
+    }
+    (identity_dir / identity.MARKER).write_text(json.dumps(staged_identity, indent=2) + "\n")
+    if verification_errors:
+        print(
+            "WARNING: staging UNVERIFIED development payload: " + "; ".join(verification_errors),
+            file=sys.stderr,
+        )
+
     runtime = f"{manifest['runtime']}/x86_64/{manifest['runtime-version']}"
     sdk = f"{manifest['sdk']}/x86_64/{manifest['runtime-version']}"
     (out / "metadata").write_text(
@@ -281,8 +336,25 @@ def main(argv: list[str] | None = None) -> int:
         action="store_false",
         help="skip the pinned Proton libraries and their licences",
     )
+    parser.add_argument("--expected-version")
+    parser.add_argument("--expected-commit")
+    parser.add_argument("--expected-lock-sha256")
+    parser.add_argument(
+        "--allow-unverified",
+        action="store_true",
+        help="development only: mark output unverified and record failed identity checks",
+    )
     args = parser.parse_args(argv)
-    stage(args.appdir, args.out, proton_libs=args.proton_libs, deb_cache=args.deb_cache)
+    stage(
+        args.appdir,
+        args.out,
+        proton_libs=args.proton_libs,
+        deb_cache=args.deb_cache,
+        expected_version=args.expected_version,
+        expected_commit=args.expected_commit,
+        expected_lock_sha256=args.expected_lock_sha256,
+        allow_unverified=args.allow_unverified,
+    )
     return 0
 
 

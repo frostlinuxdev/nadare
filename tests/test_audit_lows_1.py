@@ -83,7 +83,7 @@ def test_a_plain_title_is_untouched():
     )
 
 
-# ---- #596: the managed umu needs the interpreter its shebang names ---------------------
+# ---- #596/#1341: without that interpreter, Nadare's own Python runs the zipapp ----------
 
 
 def _fake_managed(tmp_path, monkeypatch):
@@ -94,16 +94,14 @@ def _fake_managed(tmp_path, monkeypatch):
     return target
 
 
-def test_managed_umu_needs_the_shebang_interpreter(tmp_path, monkeypatch):
+def test_managed_umu_runs_without_its_shebang_interpreter(tmp_path, monkeypatch):
     target = _fake_managed(tmp_path, monkeypatch)
     monkeypatch.setattr(umu, "SHEBANG_PYTHON", str(tmp_path / "no-such-python3"))
     monkeypatch.setattr(umu.shutil, "which", lambda name, *_a, **_k: "/home/u/.pyenv/shims/python3")
-    assert umu.managed() is None
-    fake_python = tmp_path / "python3"
-    fake_python.write_text("")
-    fake_python.chmod(0o755)
-    monkeypatch.setattr(umu, "SHEBANG_PYTHON", str(fake_python))
+    # The fallback (`nadare --umu-run`) does not need the shebang interpreter (#1341 item 3).
     assert umu.managed() == target
+    command = umu.command()
+    assert umu.run_argv(str(target), ["game.exe"])[: len(command)] == command
 
 
 # ---- #590: the Yostar workflow template pins its actions by commit -----------------------

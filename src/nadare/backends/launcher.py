@@ -33,6 +33,7 @@ from typing import Any
 
 from ..core import (
     endfield_shim,
+    gamefacts,
     graphics,
     monitors,
     paths,
@@ -43,10 +44,18 @@ from ..core import (
     trayidle,
     x11windows,
 )
-from ..core.backends import PREFIX_HELP, BackendError, BackendUnsupported, Option, Status
+from ..core.backends import (
+    PREFIX_HELP,
+    BackendError,
+    BackendNotInstalled,
+    BackendUnsupported,
+    Option,
+    Status,
+)
 from ..core.config import as_bool, valid_profile_name
 from ..core.events import Cancelled, Event
 from ..core.process import process_age_seconds
+from ..core.sandboxed import SANDBOX_EXEMPTION_OPTIONS
 from ..core.sources import nikke as nikke_source
 from ..core.trayidle import HiddenWindowWatch
 from . import arknights as _arknights
@@ -275,9 +284,19 @@ class LauncherBackend(WineGameBackend):
         ),
         Option("wine_binary", "Wine binary", "path_file", advanced=True),
         Option("umu_binary", "umu-run binary", "path_file", advanced=True),
+        Option(
+            "stop_grace_seconds",
+            "Stop grace (seconds)",
+            "int",
+            "How long Stop asks the game to close before it is forced; 0 skips the request. "
+            "Only for the games Nadare launches itself.",
+            default=8,
+            advanced=True,
+        ),
         Option("extra_env", "Environment", "env", "One KEY=VALUE per line.", advanced=True),
         monitors.OPTION,
         Option("process_match", "Process match", "text", advanced=True),
+        *SANDBOX_EXEMPTION_OPTIONS,
     )
 
     def direct_mode(self) -> bool:
@@ -327,6 +346,12 @@ _NIKKE_IDLE_EXES = frozenset(
 )
 
 
+#: What the launcher starts besides itself (its embedded browser and its webview helper).
+#: ``intl_service.exe`` is left out: a launcherless run starts it too, so on its own it does
+#: not say the launcher is up.
+_NIKKE_LAUNCHER_HELPERS = frozenset({"tbs_browser.exe", "intlwebviewhelper.exe"})
+
+
 def _exe_basename(value: str) -> str:
     """The lower-cased file name of a Windows or Unix path."""
     return str(value).replace("\\", "/").rsplit("/", 1)[-1].lower()
@@ -365,6 +390,9 @@ def _x11_by_default(options: tuple[Option, ...]) -> tuple[Option, ...]:
 
 #: A NIKKE launcher this old with no window was closed to the tray (it opens in a few seconds).
 TRAY_HINT_AFTER_SECONDS = 20.0
+
+#: How long a Play waits for an idle tray launcher it stopped to be gone.
+_LAUNCHER_STOP_WAIT = 15.0
 
 
 class NikkeBackend(LauncherBackend):
@@ -410,10 +438,10 @@ class NikkeBackend(LauncherBackend):
             "Stop the launcher when its window is closed",
             "bool",
             "Closing the NIKKE launcher with Minimize (its default) keeps it running in the "
-            "tray. With this on, Nadare stops it about a minute after its window is closed, "
-            "unless the game or an update is running. Works with the X11 display backend (the "
-            "default for NIKKE).",
-            default=False,
+            "tray, and Nadare would keep showing it as running. Nadare stops it about a minute "
+            "after its window is closed, unless the game runs or the launcher is downloading "
+            "an update. Works with the X11 display backend (the default for NIKKE).",
+            default=True,
         ),
     )
     page_notice = (
@@ -455,7 +483,7 @@ class NikkeBackend(LauncherBackend):
 
     def _hidden_watch(self) -> trayidle.HiddenWindowWatch | None:
         """The tray watch when the option is on and NIKKE really runs on X11."""
-        if not as_bool(profile_setting(self.ctx.profile, "stop_when_hidden"), False):
+        if not as_bool(profile_setting(self.ctx.profile, "stop_when_hidden"), True):
             return None
         if not self._display_in_use().startswith("x11"):
             return None
@@ -465,9 +493,9 @@ class NikkeBackend(LauncherBackend):
             on_idle=self._stop_hidden_launcher,
         )
 
-    def _nikke_busy_now(self) -> bool:
-        """Whether anything besides the tray launcher runs in this profile's prefix."""
-        argv0s = []
+    def _prefix_processes(self) -> list[tuple[int, str]]:
+        """``(pid, argv[0])`` for every process in this profile's prefix (best effort)."""
+        out: list[tuple[int, str]] = []
         for pid in scan_pids(ProcessQuery(prefix=str(self.prefix()))):
             try:
                 raw = Path(f"/proc/{pid}/cmdline").read_bytes()
@@ -475,8 +503,68 @@ class NikkeBackend(LauncherBackend):
                 continue
             head = raw.split(b"\0", 1)[0]
             if head:
-                argv0s.append(head.decode("utf-8", "replace"))
-        return nikke_busy(argv0s)
+                out.append((pid, head.decode("utf-8", "replace")))
+        return out
+
+    def _nikke_busy_now(self) -> bool:
+        """Whether anything besides the tray launcher runs in this profile's prefix, or the
+        launcher writes to disk (it downloads updates inside its own process)."""
+        processes = self._prefix_processes()
+        if nikke_busy(argv0 for _pid, argv0 in processes):
+            return True
+        writes = getattr(self, "_writes", None)
+        if writes is None:
+            writes = self._writes = trayidle.WriteActivity()
+        return writes.active(pid for pid, _argv0 in processes)
+
+    def _nikke_busy_sampled(self, seconds: float = 2.0) -> bool:
+        """:meth:`_nikke_busy_now` over a short look (Play has no earlier sample)."""
+        self._writes = trayidle.WriteActivity()
+        if self._nikke_busy_now():
+            return True
+        time.sleep(seconds)
+        return self._nikke_busy_now()
+
+    def _idle_in_tray(self) -> bool:
+        """The launcher runs with no window, nothing else runs and it writes nothing."""
+        try:
+            if not self._display_in_use().startswith("x11"):
+                return False
+            age = self._launcher_age()
+            if age is None or age < TRAY_HINT_AFTER_SECONDS:
+                return False  # still starting: its window is not up yet
+            if x11windows.any_shown(("NIKKE",)) is not False:
+                return False  # shown, or the windows cannot be read
+            if x11windows.any_window_open() is not False:
+                return False  # a prompt without the NIKKE title (its self-update, measured)
+            return not self._nikke_busy_sampled()
+        except Exception:  # noqa: BLE001 - when unsure, never stop the launcher
+            return False
+
+    def _stop_tray_launcher(self) -> bool:
+        """Stop the idle tray launcher before a Play; True when it is gone."""
+        pids = self._launcher_pids()
+        self.info(f"the NIKKE launcher was idle in the tray; stopping it before Play: {pids}")
+        self._stop_game_processes(pids)
+        deadline = time.monotonic() + _LAUNCHER_STOP_WAIT
+        while self._launcher_pids():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.5)
+        return True
+
+    def _launcher_pids(self) -> list[int]:
+        """PIDs of the NIKKE launcher (and its helpers) in this profile's prefix.
+
+        Only this prefix counts: a launcher open in another profile must not block a Play
+        here. The game is not the launcher either (a previous launcherless run may still have
+        it running, a separate case).
+        """
+        names = {
+            _exe_basename(name) for name in (*self.launcher_names, *self._launcher_query().names)
+        }
+        names.update(_NIKKE_LAUNCHER_HELPERS)
+        return [pid for pid, argv0 in self._prefix_processes() if _exe_basename(argv0) in names]
 
     def _stop_hidden_launcher(self) -> None:
         """The window stayed in the tray: stop the launcher and end the launch."""
@@ -487,7 +575,20 @@ class NikkeBackend(LauncherBackend):
         self.ctx.cancel.cancel()
 
     def launch(self) -> int:
+        if self._launcher_pids() and self._idle_in_tray():
+            # Closed to the tray (its default Minimize) and idle: a Play starts it cleanly
+            # instead of refusing (launcherless, #1388) or starting a second launcher.
+            self._stop_tray_launcher()
         if self._launcherless_wanted():
+            # The launcher keeps its own signed-in session, and downloads inside it, in this
+            # prefix; a game started next to ours exited about 20 s after the handshake
+            # (#1388). Never stop the launcher here (see _tray_hint): it updates itself.
+            if self._launcher_pids():
+                raise BackendError(
+                    "The NIKKE launcher is still running (maybe in the tray). Close it first: "
+                    "press Stop, or right-click the NIKKE tray icon and choose Exit. Then press "
+                    "Play again."
+                )
             if self._client_missing_but_signed_in():
                 # A launcher-only install (b22 left the client to the launcher): fetch the client
                 # the way Install does now, under the same guards as an update before Play.
@@ -623,7 +724,7 @@ class NikkeBackend(LauncherBackend):
         if not self._launcherless_wanted():
             return super().repair()
         if not self._client_exe().is_file():
-            raise BackendError("NIKKE is not installed yet")
+            raise BackendNotInstalled("NIKKE is not installed yet")
         self.ctx.emit(Event("step", "Checking the NIKKE game client"))
         self._sync_direct()
         try:
@@ -731,7 +832,7 @@ class NikkeBackend(LauncherBackend):
             return
         self.ctx.cancel.raise_if_cancelled()
         if not self._client_exe().is_file():
-            raise BackendError("NIKKE is not installed yet")
+            raise BackendNotInstalled("NIKKE is not installed yet")
         # Files are replaced one by one: never under the running game or launcher (#933).
         if (
             scan_pids(self._patterns())
@@ -794,6 +895,7 @@ class NikkeBackend(LauncherBackend):
         return self._launcherless_cache() is not None
 
     def _update_before_play_locked(self) -> None:
+        self.ctx.emit(Event("step", "NIKKE: checking for a game update"))
         self._update_client_before_play()
         checks = bool(self.ctx.config.data.get("check_updates", True))
         self._update_launcher_if_needed(fetch=checks)
@@ -956,15 +1058,18 @@ class NikkeBackend(LauncherBackend):
         return bool(as_bool(profile_setting(self.ctx.profile, "launcherless"), False))
 
     def _session_cache(self) -> Path:
-        """Nadare's private copy of the INTL sign-in for this profile."""
-        return self.ctx.data_dir() / "nikke-session"
+        """Nadare's private copy of the INTL sign-in for this profile.
+
+        A pure path (#1465): status() reads it; ``save_cache`` creates it when a sign-in is saved.
+        """
+        return self.ctx.data_path() / "nikke-session"
 
     def login(self) -> None:
         """Let the INTL service run the Google sign-in in the user's browser."""
         launcher = self.find_launcher()
         service = launcher.parent / "intl_service" / "intl_service.exe" if launcher else None
         if launcher is None or service is None or not service.is_file():
-            raise BackendError(
+            raise BackendNotInstalled(
                 "NIKKE is not installed yet; install it first, then press Log in"
             )
         prefix = self.prefix()
@@ -1013,6 +1118,7 @@ class NikkeBackend(LauncherBackend):
                     f"(sign-in helper exit code {code}); please try again"
                 )
             nikke_sail.save_cache(storage, self._session_cache())
+            nikke_sail.drop_game_auth(self._session_cache())  # a new sign-in, a new blob
         finally:
             self._stop_link_relay()
             shutil.rmtree(work, ignore_errors=True)
@@ -1084,7 +1190,7 @@ class NikkeBackend(LauncherBackend):
 
     def _launcher_age(self) -> float | None:
         """Seconds since the oldest running NIKKE launcher process started, or ``None``."""
-        ages = [process_age_seconds(pid) for pid in scan_pids(self._patterns())]
+        ages = [process_age_seconds(pid) for pid in scan_pids(self._launcher_query())]
         known = [age for age in ages if age is not None]
         return max(known) if known else None
 
@@ -1095,7 +1201,7 @@ class NikkeBackend(LauncherBackend):
         running. Telling is safe; stopping is not (the launcher downloads updates inside its
         own process), so auto-stop stays opt-in. X11 only, like the window check itself.
         """
-        if not (result.running or result.state == "running"):
+        if not gamefacts.is_running(result):
             return
         try:
             if not self._display_in_use().startswith("x11") or self._nikke_busy_now():
@@ -1170,8 +1276,18 @@ class NikkeBackend(LauncherBackend):
             return None
         return files
 
+    #: A launcherless game that ends sooner than this after a reused blob may have been turned
+    #: away by the server after the init (#1420): the next Play signs in afresh. A blob the
+    #: sign-in service minted in the same Play is kept whatever the session length: a new
+    #: sign-in could not give a better one.
+    _GAME_AUTH_KEEP_AFTER_SECONDS = 120
+
     def _launch_launcherless(self, files: nikke_sail.GameFiles) -> int:
-        """Start the game through the two Sail hosts instead of ``nikke_launcher.exe``."""
+        """Start the game through the Sail host instead of ``nikke_launcher.exe``.
+
+        The Sail host also runs the sign-in service when there is no kept game-auth blob
+        for the saved sign-in, or the game refused the kept one (#1420).
+        """
         prefix = self.prefix()
         cache = self._launcherless_cache()
         if cache is None:  # the plan just checked it; a deleted cache is a real error
@@ -1192,76 +1308,209 @@ class NikkeBackend(LauncherBackend):
             self._run_vcredist(created=False)
             self._watch = runtimewatch.RuntimeWatch()
             self._launch_started = time.monotonic()
-            self.ctx.emit(
-                Event("step", f"{self.display_name}: using the saved session, no launcher")
-            )
-            enc = work / "session.enc.json"
-            cmd = nikke_sail.intl_command(
-                str(stage / nikke_sail.INTL_HOST_NAME),
-                nikke_sail.win_path(prefix, files.service),
-                nikke_sail.win_path(prefix, enc),
-            )
-            argv, env = self._prefix_command(cmd, sandboxed=self.secure_mode_enabled())
-            argv, env = self._secure_wrap(argv, env, subject="sign-in")
-            self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
-            code = stream(argv, env, on_line=self._on_line, cancel=self.ctx.cancel)
-            if code != 0 or not enc.is_file() or enc.stat().st_size == 0:
-                raise BackendError(
-                    "NIKKE's saved sign-in could not be used. Turn off \"Start the game without "
-                    "the NIKKE launcher\" and press Play to sign in again in the launcher. "
-                    f"(sign-in helper exit code {code})"
+            auth = nikke_sail.load_game_auth(cache, nikke_sail.auth_fingerprint(cache))
+            if auth is not None:
+                self.ctx.emit(
+                    Event(
+                        "step",
+                        f"{self.display_name}: using the saved session, no launcher "
+                        "(sign-in already done)",
+                    )
                 )
-
-            resource = nikke_sail.win_path(prefix, files.resource_dir)
-            session = nikke_sail.make_session_file(
-                self._read_host_session(enc), work / "session.json", game_resource_path=resource
-            )
-            sail = nikke_sail.sail_command(
-                str(stage / nikke_sail.SAIL_HOST_NAME),
-                nikke_sail.win_path(prefix, session),
-                nikke_sail.win_path(prefix, files.game_exe),
-                nikke_sail.win_path(prefix, files.game_cwd),
-                self._extra_args("launch_args"),
-            )
-            extra_env = nikke_sail.host_env(
-                prefix,
-                launcher_dir=nikke_sail.win_path(prefix, files.launcher_dir),
-                log=nikke_sail.win_path(prefix, work / "sail_host.log"),
-                base={},
-            )
-            self._launcherless_game = True  # only the game gets Wayland on Auto
-            argv, env = self._prefix_command(
-                sail, extra_env=extra_env, sandboxed=self.secure_mode_enabled()
-            )
-            argv, env = self._secure_wrap(argv, env)  # the game, like a launcher launch
-            self.ctx.emit(Event("step", f"{self.display_name}: launching the game"))
-            self._log_launch_details(env)
-            _renderer, note = graphics.effective_renderer(self.ctx.profile)
-            if note:
-                self.info(note)
-            probe = self._renderer_probe().start()
-            try:
-                with self._run_lock():
-                    self._begin_game_output()
-                    try:
-                        code = stream(
-                            argv, env, on_line=self._on_game_line, cancel=self.ctx.cancel
-                        )
-                    finally:
-                        self._end_game_output()
-            finally:
-                probe.stop()
-                probe.join(timeout=1.0)
-                self._renderer = probe.result
-            # The helpers are windowless, so their output reaches Nadare only through this file;
-            # keep it after every run (which Sail commands the game sent), not only on failure.
-            self._report_host_log(work / "sail_host.log", tail=None if code == 0 else 15)
+                code, log = self._run_sail_game(files, work, auth)
+                if not self._game_auth_refused(log, cache) or self.ctx.cancel.cancelled:
+                    self._keep_game_auth_if_used(cache)
+                    return self._checked_launch_exit(code)
+                self.info(
+                    "the game did not accept the kept NIKKE session; signing in again "
+                    "(this takes a few seconds longer)"
+                )
+                self._watch = runtimewatch.RuntimeWatch()
+                self._launch_started = time.monotonic()
+            else:
+                self.ctx.emit(
+                    Event("step", f"{self.display_name}: using the saved session, no launcher")
+                )
+            code, log = self._sign_in_and_run_game(files, work, cache)
+            # Minted in this Play: a short session is no reason to sign in again (#1420 F4).
+            self._game_auth_refused(log, cache)
             return self._checked_launch_exit(code)
         finally:
             self._launcherless_active = False
             self._launcherless_game = False
             self._stop_link_relay()
             shutil.rmtree(work, ignore_errors=True)
+
+    def _sign_in_and_run_game(
+        self, files: nikke_sail.GameFiles, work: Path, cache: Path
+    ) -> tuple[int, str]:
+        """Let Sail run INTL in the same runner, publishing its session atomically."""
+        prefix = self.prefix()
+        stage = prefix.joinpath(*nikke_sail.STAGE_PARTS)
+        enc = work / "session.enc.json"
+        temporary = work / "session.json.tmp"
+        session = work / "session.json"
+        cmd = nikke_sail.intl_command(
+            nikke_sail.win_path(prefix, stage / nikke_sail.INTL_HOST_NAME),
+            nikke_sail.win_path(prefix, files.service),
+            nikke_sail.win_path(prefix, enc),
+        )
+        stop = threading.Event()
+        published = threading.Event()
+        errors: list[Exception] = []
+
+        def prepare_session() -> None:
+            while not stop.is_set() and not self.ctx.cancel.cancelled:
+                try:
+                    auth = self._read_host_session(enc)
+                except BackendError:
+                    # The child may still be writing. Only publish a complete, usable blob.
+                    stop.wait(0.05)
+                    continue
+                try:
+                    if stop.is_set() or self.ctx.cancel.cancelled:
+                        return
+                    try:
+                        kept = nikke_sail.save_game_auth(
+                            cache, auth,
+                            nikke_sail.auth_fingerprint(nikke_sail.cache_storage_dir(prefix)),
+                        )
+                    except (OSError, nikke_sail.HostError) as exc:
+                        kept = False
+                        self.info(f"cannot keep the NIKKE session for the next Play ({exc})")
+                    if not kept:
+                        self.info("the NIKKE session is not kept: the next Play signs in again")
+                    nikke_sail.make_session_file(
+                        auth, temporary,
+                        game_resource_path=nikke_sail.win_path(prefix, files.resource_dir),
+                    )
+                    if stop.is_set() or self.ctx.cancel.cancelled:
+                        return
+                    temporary.replace(session)
+                    published.set()
+                    with contextlib.suppress(OSError):
+                        enc.unlink()  # the kept copy lives in the profile, not in the prefix
+                except (OSError, nikke_sail.HostError) as exc:
+                    errors.append(exc)
+                return
+
+        waiter = threading.Thread(target=prepare_session, name="nikke-session")
+        waiter.start()
+        try:
+            code, log = self._run_sail_game(
+                files, work, None, signin_command=nikke_sail.windows_command_line(cmd)
+            )
+        finally:
+            stop.set()
+            waiter.join()
+            for path in (enc, temporary, session):
+                with contextlib.suppress(OSError):
+                    path.unlink()
+        self.ctx.cancel.raise_if_cancelled()
+        marker = "RESULT no-signin: sign-in helper exit "
+        if marker in log:
+            helper_code = log.split(marker, 1)[1].split()[0]
+            raise BackendError(
+                "NIKKE's saved sign-in could not be used. Turn off \"Start the game without "
+                "the NIKKE launcher\" and press Play to sign in again in the launcher. "
+                f"(sign-in helper exit code {helper_code})"
+            )
+        if "RESULT no-session" in log or not published.is_set() or errors:
+            raise BackendError(
+                "the NIKKE sign-in returned no session. Turn off \"Start the game without the "
+                "NIKKE launcher\" and press Play to sign in again in the launcher."
+            )
+        return code, log
+
+    def _run_sail_game(
+        self, files: nikke_sail.GameFiles, work: Path, auth: dict[str, Any] | None,
+        *, signin_command: str | None = None,
+    ) -> tuple[int, str]:
+        """Run the game through the Sail host; return its exit code and the host's log."""
+        prefix = self.prefix()
+        stage = prefix.joinpath(*nikke_sail.STAGE_PARTS)
+        log_path = work / "sail_host.log"
+        with contextlib.suppress(OSError):
+            log_path.unlink()
+        resource = nikke_sail.win_path(prefix, files.resource_dir)
+        session = work / "session.json"
+        if auth is not None:
+            nikke_sail.make_session_file(auth, session, game_resource_path=resource)
+        sail = nikke_sail.sail_command(
+            str(stage / nikke_sail.SAIL_HOST_NAME),
+            nikke_sail.win_path(prefix, session),
+            nikke_sail.win_path(prefix, files.game_exe),
+            nikke_sail.win_path(prefix, files.game_cwd),
+            self._extra_args("launch_args"),
+        )
+        extra_env = nikke_sail.host_env(
+            prefix,
+            launcher_dir=nikke_sail.win_path(prefix, files.launcher_dir),
+            log=nikke_sail.win_path(prefix, log_path),
+            base={},
+        )
+        if signin_command:
+            extra_env["SAIL_SIGNIN_CMD"] = signin_command
+        self._launcherless_game = True  # only the game gets Wayland on Auto
+        argv, env = self._prefix_command(
+            sail, extra_env=extra_env, sandboxed=self.secure_mode_enabled()
+        )
+        argv, env = self._secure_wrap(argv, env)  # the game, like a launcher launch
+        # After the wrap, so a Sandbox that was skipped records the unsandboxed game it is.
+        self._record_polite_stop(argv, env, len(sail))
+        self.ctx.emit(Event("step", f"{self.display_name}: launching the game"))
+        self.ctx.emit(Event("log", self._runtime_note(), data=self._runner_facts()))
+        self._log_launch_details(env)
+        _renderer, note = graphics.effective_renderer(self.ctx.profile)
+        if note:
+            self.info(note)
+        self._game_started = time.monotonic()
+        probe = self._renderer_probe().start()
+        # Only nikke.exe means the game is up: the Sail host runs first. The launch's
+        # "game_running" is what the sidebar and library show as Playing (2026-11-20).
+        game = ProcessQuery(prefix=str(prefix), names=("nikke.exe",), require_name=True)
+        try:
+            with self._run_lock(), self._game_process_watch(game):
+                self._begin_game_output()
+                try:
+                    code = stream(
+                        argv,
+                        env,
+                        on_line=self._on_game_line,
+                        cancel=self.ctx.cancel,
+                        before_stop=self._ask_game_to_close,
+                    )
+                finally:
+                    self._end_game_output()
+        finally:
+            probe.stop()
+            probe.join(timeout=1.0)
+            self._renderer = probe.result
+            with contextlib.suppress(OSError):
+                session.unlink()  # one run's copy; the kept blob is in the profile
+        # The helpers are windowless, so their output reaches Nadare only through this file;
+        # keep it after every run (which Sail commands the game sent), not only on failure.
+        try:
+            log = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            log = ""
+        self._report_host_log(log_path, tail=None if code == 0 else 15)
+        return code, log
+
+    @staticmethod
+    def _game_auth_refused(log: str, cache: Path) -> bool:
+        """Whether the game turned the session down at the Sail init; then the blob goes."""
+        refused = "RESULT no-init" in log
+        if refused:
+            nikke_sail.drop_game_auth(cache)
+        return refused
+
+    def _keep_game_auth_if_used(self, cache: Path) -> None:
+        """Drop the blob after a very short game: the server may have refused it in-game."""
+        started = getattr(self, "_game_started", None)
+        ran = time.monotonic() - started if started is not None else 0.0
+        if ran < self._GAME_AUTH_KEEP_AFTER_SECONDS:
+            nikke_sail.drop_game_auth(cache)
 
     def _read_host_session(self, path: Path) -> dict[str, Any]:
         try:
@@ -1286,11 +1535,14 @@ class NikkeBackend(LauncherBackend):
         for line in lines[-(tail or 500):]:
             self.info(f"sail: {line}")
 
+    def _launcher_query(self, target: Path | None = None) -> ProcessQuery:
+        """The launcher alone (``super()``'s query): never the game."""
+        return super()._patterns() if target is None else super()._patterns(target)
+
     def _patterns(self, target: Path | None = None) -> ProcessQuery:
-        """``super()``'s query, plus the game and the Sail host during a launcherless run."""
-        query = super()._patterns() if target is None else super()._patterns(target)
-        if not getattr(self, "_launcherless_active", False):
-            return query
+        """The launcher, plus the game and the Sail host: status and Stop see the game in any
+        Nadare instance, not only the one that started a launcherless run (b24 reports)."""
+        query = self._launcher_query(target)
         names = tuple(dict.fromkeys((*query.names, "nikke.exe", nikke_sail.SAIL_HOST_NAME)))
         return dataclasses.replace(query, names=names)
 

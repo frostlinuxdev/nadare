@@ -33,13 +33,13 @@ class AuthMixin:
 
     def _session_info(self) -> dict[str, Any] | None:
         try:
-            d = json.loads(self._session().read_text())
+            d = json.loads(self._session_path().read_text())
             exp = int(d.get("expire_time", "0")) // 1000
             nickname = str(d.get("member_nickname") or "")
             if nickname == "0":
                 nickname = ""
             return {
-                "path": str(self._session()),
+                "path": str(self._session_path()),
                 "expires_at": exp,
                 "valid": bool(d.get("access_token")) and exp > time.time(),
                 "nickname": nickname,

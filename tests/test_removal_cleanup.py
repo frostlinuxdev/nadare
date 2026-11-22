@@ -268,9 +268,7 @@ def test_a_failing_tree_keeps_shortcuts_login_and_data(env, monkeypatch):
     data.mkdir(parents=True)
     (data / "settings.json").write_text("{}")
     apps = tmp / "applications"
-    removal.shortcuts.install_desktop_entry(
-        "gone", "Gone", applications_dir=apps, argv=["nadare"]
-    )
+    removal.shortcuts.install_desktop_entry("gone", "Gone", applications_dir=apps, argv=["nadare"])
     entry = apps / "nadare-gone.desktop"
 
     real_rmtree = removal.shutil.rmtree
@@ -486,3 +484,45 @@ def test_wrapper_folders_keep_only_the_games_own_parent(tmp_path):
         ],
     }
     assert removal._wrapper_folders(profile) == [str(tmp_path / "Lib" / "Nadare" / "Gone")]
+
+
+def test_backend_load_failure_does_not_override_a_live_run_lock(env, monkeypatch):
+    """#1493: a backend this build cannot load says nothing about a game another Nadare
+    started; the prefix's run lock (and its processes) still refuse the removal."""
+    from nadare.core import runlock
+    from nadare.core.backends import BackendError
+
+    cfg, tmp = env
+
+    def broken(*_a, **_k):
+        raise BackendError("backend not available in this build")
+
+    monkeypatch.setattr(removal.backends, "create", broken)
+    prefix = _tree(tmp, "Prefixes", "gone")
+    (prefix / "save.dat").write_bytes(b"precious")
+    cfg.profiles["gone"].update(prefix=str(prefix), owned_trees=["prefix"])
+    with runlock.hold(prefix):
+        result = removal.remove_game(
+            cfg, "gone", delete_trees=["prefix"], applications_dir=tmp / "apps"
+        )
+    assert result.profile_kept
+    assert (prefix / "save.dat").read_bytes() == b"precious"
+    assert "gone" in cfg.profiles
+
+
+def test_backend_load_failure_with_an_unanswerable_check_refuses(env, monkeypatch):
+    from nadare.core.backends import BackendError
+
+    cfg, tmp = env
+    monkeypatch.setattr(
+        removal.backends, "create", lambda *a, **k: (_ for _ in ()).throw(BackendError("x"))
+    )
+    monkeypatch.setattr(
+        removal.process, "prefix_pids", lambda p: (_ for _ in ()).throw(PermissionError("no"))
+    )
+    prefix = _tree(tmp, "Prefixes", "gone")
+    cfg.profiles["gone"].update(prefix=str(prefix), owned_trees=["prefix"])
+    result = removal.remove_game(
+        cfg, "gone", delete_trees=["prefix"], applications_dir=tmp / "apps"
+    )
+    assert result.profile_kept and prefix.exists()

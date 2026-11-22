@@ -29,7 +29,7 @@ def test_repeated_right_clicks_do_not_accumulate_menus(qapp, monkeypatch):
     page = LibraryPage()
     try:
         page.refresh({"a": {"title": "A", "backend": "wine"}})
-        monkeypatch.setattr(QMenu, "exec", lambda self, *args, **kwargs: None)
+        monkeypatch.setattr(QMenu, "popup", lambda self, *args, **kwargs: self.close())
         for _ in range(3):
             page._cards["a"].customContextMenuRequested.emit(QPoint(1, 1))
             qapp.processEvents()

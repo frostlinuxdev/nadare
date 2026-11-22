@@ -18,17 +18,22 @@ from pathlib import Path
 
 from ....core import (
     graphics,
-    hostlibs,
     monitors,
     process,
+    protoncmd,
     runlock,
     sandbox,
+    shadercache,
+    vcredist,
 )
-from ....core import umu as umu_mod
+from ....core import runners as core_runners
 from ....core.backends import (
     BackendError,
+    BackendNotInstalled,
 )
 from ....core.events import Event
+from ...wine import ProcessQuery, scan_pids, stop_elsewhere, stop_runner_wineserver
+from .runner import DEFAULT_RUNNER
 from .shared import (
     UPDATE_MODULE,
     _profile_setting,
@@ -48,6 +53,12 @@ _RESULT = re.compile(r"RESULT\s+([a-z-]+)")
 #: Exit codes a game child reports when it was terminated on purpose
 #: (-SIGTERM, 128+SIGTERM, and the 256-15 wrap umu/proton produce; likewise SIGINT).
 _STOPPED_EXIT_CODES = frozenset({-15, 143, 241, -2, 130, 254})
+
+#: Play refuses with this when WebView2 is missing or half installed (no download at Play).
+WEBVIEW2_MISSING_AT_PLAY = (
+    "Microsoft WebView2 (needed for sign-in) is missing or broken in this game's prefix. "
+    "Press Repair files to put it back."
+)
 
 #: Helper processes the game leaves around; they are not "the game running"
 #: (a crash handler can linger after the game has exited) but Stop kills them.
@@ -73,29 +84,57 @@ def _cmdline_has_exe(raw: bytes, prefix: str, *, exclude: frozenset[str] = froze
     return False
 
 
+def game_pids(game_dir: Path, *, helpers: bool = True) -> list[int]:
+    """This user's processes running an exe from ``game_dir``'s ``bin`` (Wine shows it as
+    ``Z:\\<unix path with backslashes>``); ``helpers=False`` leaves out the crash handler.
+
+    CZN's one process check: the backend and the updater (``update.py``) both ask here (#1557).
+    """
+    folders = {Path(game_dir)}
+    # Flatpak exposes symlink targets and rewrites the launch path to match; native
+    # launches may still use the configured alias. Both identify this same game.
+    with contextlib.suppress(OSError, RuntimeError):
+        folders.add(Path(game_dir).resolve())
+    prefixes = [
+        ("Z:" + str(folder / "bin").replace("/", "\\") + "\\").lower()
+        for folder in folders
+    ]
+    uid = os.getuid()
+    pids: list[int] = []
+    exclude = frozenset() if helpers else GAME_HELPER_EXES
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            # Only processes owned by this user can be the game; this stops
+            # another user from planting a matching argv and being counted.
+            if d.stat().st_uid != uid:
+                continue
+            raw = (d / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if any(_cmdline_has_exe(raw, prefix, exclude=exclude) for prefix in prefixes):
+            pids.append(int(d.name))
+    return pids
+
+
+def running_elsewhere(prefix: Path) -> bool:
+    """Another Flatpak instance launched this prefix's game."""
+    return sandbox.in_flatpak() and runlock.running(prefix)
+
+
+def game_running(prefix: Path, game_dir: Path) -> bool:
+    """The game runs (here, or from another Flatpak window): the rule ``CznBackend._running``
+    applies, for callers without a backend object (the updater, #1557)."""
+    return bool(game_pids(game_dir, helpers=False)) or running_elsewhere(prefix)
+
+
 class LaunchingMixin:
     """Mixin for :class:`CznBackend`; see the module text."""
 
     # ---- running-state -----------------------------------------------------
     def _game_pids(self, *, helpers: bool = True) -> list[int]:
-        prefix = ("Z:" + str(self.game_dir() / "bin").replace("/", "\\") + "\\").lower()
-        uid = os.getuid()
-        pids: list[int] = []
-        for d in Path("/proc").iterdir():
-            if not d.name.isdigit():
-                continue
-            try:
-                # Only processes owned by this user can be the game; this stops
-                # another user from planting a matching argv and being counted.
-                if d.stat().st_uid != uid:
-                    continue
-                raw = (d / "cmdline").read_bytes()
-            except OSError:
-                continue
-            exclude = frozenset() if helpers else GAME_HELPER_EXES
-            if _cmdline_has_exe(raw, prefix, exclude=exclude):
-                pids.append(int(d.name))
-        return pids
+        return game_pids(self.game_dir(), helpers=helpers)
 
     def _game_running(self) -> bool:
         """The game itself is running (a lingering crash handler is not)."""
@@ -103,22 +142,37 @@ class LaunchingMixin:
 
     def _running_elsewhere(self) -> bool:
         """Another Flatpak instance launched this prefix's game."""
-        return sandbox.in_flatpak() and runlock.running(self.prefix())
+        return running_elsewhere(self.prefix())
 
     def _running(self) -> bool:
         return self._game_running() or self._running_elsewhere()
 
     # ---- launch ------------------------------------------------------------
     def _prefix_command(
-        self, args: list[str], extra_env: dict[str, str] | None = None
+        self,
+        args: list[str],
+        extra_env: dict[str, str] | None = None,
+        *,
+        sandboxed: bool = False,
     ) -> tuple[list[str], dict[str, str]]:
-        """Build the umu-run/wine command and environment for running `args` in
-        this profile's prefix with the selected runner."""
+        """Build the umu-run command and environment for running `args` in this profile's
+        prefix with the selected runner.
+
+        The umu decision and the Play speed-ups are the ones every Proton game shares
+        (:mod:`nadare.core.protoncmd`, #1449); what stays here is CZN's own: opt-in GL
+        threading, the ``pfx`` link and ``GAMEID=0``. CZN always runs on Proton
+        (``resolve_runner`` never answers plain Wine, #1310 W9-1).
+
+        ``sandboxed`` says the command will run in the Sandbox: inside the Flatpak that means
+        Proton runs directly, because umu needs the session bus the Sandbox hides.
+        """
         prefix = self.prefix()
-        proton, kind = self.resolve_runner()
-        env = self._env()
+        proton, _kind = self.resolve_runner()
+        env = process.build_env(
+            {"pass_env": _profile_setting(self.ctx.profile, "pass_env")}
+        )
         env["WINEPREFIX"] = str(prefix)
-        env.update(graphics.renderer_env(self.ctx.profile, kind=kind, environ=env))
+        env.update(graphics.renderer_env(self.ctx.profile, kind="proton", environ=env))
         # CZN is an OpenGL game whose render thread is CPU-bound under Wine. Driver-side
         # GL threading looked helpful on one AMD box (p99 ~140 -> ~50 ms) but the A/B was
         # not controlled, so it is opt-in: ``gl_threading: true`` in the profile.
@@ -126,95 +180,58 @@ class LaunchingMixin:
             env.setdefault("mesa_glthread", "true")  # Mesa (AMD/Intel/nouveau)
             env.setdefault("__GL_THREADED_OPTIMIZATIONS", "1")  # NVIDIA proprietary
         monitors.apply_env(env, self.ctx)
-        profile_env = self.ctx.profile.get("extra_env")
+        shadercache.prepare(self.ctx.name, env, self.info, runner=proton)
+        profile_env = _profile_setting(self.ctx.profile, "extra_env")
         if isinstance(profile_env, dict):
             process.apply_extra_env(env, profile_env, reserved=process.LAUNCH_RESERVED_ENV)
-        if extra_env:
-            env.update(extra_env)
-        if kind == "proton":
-            umu = umu_mod.system()
-            if umu is None and not sandbox.in_flatpak():
-                missing = self._missing_hostlibs()
-                if missing:
-                    umu = umu_mod.resolve(
-                        "umu-run",
-                        allow_download=True,
-                        emit=self.ctx.emit,
-                        cancel=self.ctx.cancel,
-                    )
-            # umu treats the prefix as Proton's compat-data dir and expects the
-            # Wine prefix at <prefix>/pfx; a symlink pfx -> . lets one dir serve both.
-            pfx = prefix / "pfx"
-            if not pfx.exists():
-                try:
-                    pfx.symlink_to(".", target_is_directory=True)
-                except OSError:
-                    pass
-            env["PROTONPATH"] = proton
-            env.setdefault("GAMEID", "0")
-            # A Display choice beats an exported PROTON_ENABLE_WAYLAND; a profile
-            # extra_env value still wins, as it does for the other Wine backends.
-            choice = str(_profile_setting(self.ctx.profile, "display") or "auto").strip().lower()
-            if not (isinstance(profile_env, dict) and "PROTON_ENABLE_WAYLAND" in profile_env):
-                if choice in ("x11", "xwayland", "wayland"):
-                    env["PROTON_ENABLE_WAYLAND"] = self._wayland_default()
-                else:
-                    env["PROTON_ENABLE_WAYLAND"] = os.environ.get(
-                        "PROTON_ENABLE_WAYLAND", self._wayland_default()
-                    )
-            if extra_env and "PROTON_ENABLE_WAYLAND" in extra_env:
-                env["PROTON_ENABLE_WAYLAND"] = extra_env["PROTON_ENABLE_WAYLAND"]
-            env.pop("UMU_NO_PROTON", None)
-            if umu:
-                return [umu, *args], process.sanitize_game_env(env)
-            # No umu-run (or inside Flatpak): run the Proton tree directly, so
-            # umu-launcher is not a hard dependency.
-            if not (Path(proton) / "proton").is_file():
-                raise BackendError(
-                    "the selected runner needs umu-run (umu-launcher): install "
-                    "umu-launcher, or choose a Proton runner that does not need it "
-                    "in Settings",
-                    1,
+        process.apply_extra_env(env, extra_env, reserved=process.LAUNCH_RESERVED_ENV)
+        # umu treats the prefix as Proton's compat-data dir and expects the
+        # Wine prefix at <prefix>/pfx; a symlink pfx -> . lets one dir serve both.
+        pfx = prefix / "pfx"
+        if not pfx.exists():
+            try:
+                pfx.symlink_to(".", target_is_directory=True)
+            except OSError:
+                pass
+        env["PROTONPATH"] = str(proton)
+        env.setdefault("GAMEID", "0")
+        protoncmd.note_prefix_upgrade(
+            self, prefix, proton, name="Chaos Zero Nightmare", emit=self.ctx.emit
+        )
+        # A Display choice beats an exported PROTON_ENABLE_WAYLAND; a profile
+        # extra_env value still wins, as it does for the other Wine backends.
+        choice = str(_profile_setting(self.ctx.profile, "display") or "auto").strip().lower()
+        if not (isinstance(profile_env, dict) and "PROTON_ENABLE_WAYLAND" in profile_env):
+            if choice in ("x11", "xwayland", "wayland"):
+                env["PROTON_ENABLE_WAYLAND"] = self._wayland_default()
+            else:
+                env["PROTON_ENABLE_WAYLAND"] = os.environ.get(
+                    "PROTON_ENABLE_WAYLAND", self._wayland_default()
                 )
-            # Running a Steam-Runtime Proton build directly makes it load the
-            # host's 32-bit libraries; without them wineboot cannot find
-            # FreeType and the WebView2 installer hangs silently. Fail fast
-            # (once per backend) unless we are inside the Flatpak runtime, which
-            # ships its own libraries.
-            if not sandbox.in_flatpak():
-                missing = self._missing_hostlibs()
-                if missing:
-                    raise BackendError(hostlibs.hint(missing), 1)
-            argv, env_updates = sandbox.proton_direct(proton, prefix, args)
-            env.update(env_updates)
-            return argv, process.sanitize_game_env(env)
-        wine = os.environ.get("CZN_WINE") or shutil.which("wine")
-        if not wine:
-            raise BackendError(
-                "no Proton runner found: pick one in Settings -> Manage runners "
-                "(CZN_WINE also works for advanced use)",
-                1,
-            )
-        # A fresh plain-Wine prefix otherwise pops "Wine could not find a
-        # wine-mono / wine-gecko package" dialogs. The game and WebView2 need
-        # neither, so suppress both prompts (Proton handles this itself).
-        parts = [p for p in str(env.get("WINEDLLOVERRIDES") or "").split(";") if p.strip()]
-        if "mscoree,mshtml=" not in parts:
-            parts.append("mscoree,mshtml=")
-        env["WINEDLLOVERRIDES"] = ";".join(parts)
-        return [wine, *args], process.sanitize_game_env(env)
-
-    def _missing_hostlibs(self) -> list[str] | None:
-        """The missing host 32-bit sonames, checked at most once per object.
-
-        Honours ``NADARE_SKIP_HOSTLIBS_CHECK=1`` as an escape hatch, and returns
-        ``None`` when the check is skipped or inconclusive. Never raises.
-        """
-        if not self._hostlibs_checked:
-            self._hostlibs_checked = True
-            if os.environ.get("NADARE_SKIP_HOSTLIBS_CHECK") != "1":
-                self._hostlibs_result = hostlibs.missing_32bit()
-        return self._hostlibs_result
+        if extra_env and "PROTON_ENABLE_WAYLAND" in extra_env:
+            env["PROTON_ENABLE_WAYLAND"] = extra_env["PROTON_ENABLE_WAYLAND"]
+        env.pop("UMU_NO_PROTON", None)
+        argv = protoncmd.proton_argv(
+            args,
+            proton=proton,
+            prefix=prefix,
+            env=env,
+            configured=str(_profile_setting(self.ctx.profile, "umu_binary") or "umu-run"),
+            sandboxed=sandboxed,
+            emit=self.ctx.emit,
+            cancel=self.ctx.cancel,
+        )
+        protoncmd.play_speedups(env, prefix, proton=True, info=self.info)
+        shadercache.log_caches(
+            self.ctx.name,
+            prefix,
+            env,
+            lambda line: self.info(line),
+            sandboxed=sandboxed,
+        )
+        return argv, process.sanitize_game_env(
+            env, preserve=process.launchenv.explicit_names(self.ctx.profile, extra_env)
+        )
 
     def _wayland_default(self) -> str:
         """``1`` (native Wayland) unless the profile asks for X11/XWayland."""
@@ -272,6 +289,10 @@ class LaunchingMixin:
         cwd = self.game_dir() if self.game_dir().is_dir() else self.prefix()
         return self._stream(cmd, env, cwd=cwd)
 
+    def _run_unwrapped(self, argv: list[str], env: dict[str, str], *, on_line) -> int:  # noqa: ANN001
+        """A setup step outside the Sandbox (core/sandboxed.py asks for umu's runtime first)."""
+        return self._stream(argv, env)
+
     def launch(self) -> int:
         with self._run_lock():
             return self._launch()
@@ -280,14 +301,33 @@ class LaunchingMixin:
         """Inside the Flatpak, let other Nadare instances see this launch and ask it to stop."""
         if not sandbox.in_flatpak():
             return contextlib.nullcontext()
-        return runlock.guard(self.prefix(), self.ctx.cancel.cancel)
+        return runlock.guard(self.prefix(), self._stop_from_elsewhere)
+
+    def _stop_from_elsewhere(self) -> None:
+        """Another window asked to stop the game: end its processes, then the wait.
+
+        Cancelling alone ends only the launch wrapper; a Sandboxed game keeps running (the same
+        finding as WineGame's, #1455 R4-2)."""
+        self._kill_game()
+        self.ctx.cancel.cancel()
 
     def _launch(self) -> int:
         if not self.installed():
-            raise BackendError("the game is not installed", 1)
+            raise BackendNotInstalled("the game is not installed", 1)
         # The run lock this launch holds itself would look like another instance.
         if self._game_running():
             self._fail("launch", 8)
+        # Without WebView2 the game shows only its own "run through the launcher" error.
+        # A file + registry read (no Wine, no download): Repair files puts it back.
+        if not self._webview2_installed():
+            raise BackendError(WEBVIEW2_MISSING_AT_PLAY, 1)
+        # Opt-in for CZN (#1556): False unless the profile switched the Sandbox on.
+        sandboxed = self.secure_mode_enabled()
+        if sandboxed and not vcredist.installed(self.prefix()):
+            raise BackendError(
+                "Microsoft Visual C++ runtime is missing or broken in this game's prefix. "
+                "Press Repair files to put it back."
+            )
         if os.environ.get("CZN_SKIP_UPDATE") != "1":
             code = self._run_module(UPDATE_MODULE, ["update", "--apply"])
             if code == 3:
@@ -317,8 +357,11 @@ class LaunchingMixin:
         session = self._session()
         try:
             stub = self._ensure_stub()
-            self._ensure_vcredist()
-            log = self._stub_log()
+            # Prefix installers run during Install/Repair. Starting one here would leave
+            # a second wineserver outside the game's private /tmp and PID namespace.
+            if not sandboxed:
+                self._ensure_vcredist()
+            log = self._stub_log(sandboxed=sandboxed)
             log.unlink(missing_ok=True)
             session.parent.mkdir(parents=True, exist_ok=True)
             _register_ephemeral(session)
@@ -330,11 +373,15 @@ class LaunchingMixin:
                 self._win(self.shield()),
                 self._win_cwd(self.game_dir()),
             ]
-            full, env = self._prefix_command(cmd)
+            full, env = self._prefix_command(cmd, sandboxed=sandboxed)
             # Set after _prefix_command: its env cleanup drops every CZN_* name, and
             # without this path the stub never logs, so the game never looks started.
             env["CZN_STUB_LOG"] = self._win(log)
             full = self._mangohud_wrap(full, env)
+            # The stub and the one-time session file live outside the prefix: bind those two
+            # files read only, never the folder that holds other profiles' secrets. The stub
+            # starts the game and WebView2, so one wrapper covers every Play-time process.
+            full, env = self._secure_wrap(full, env, read_only=[stub, session])
             cwd = self.game_dir() if self.game_dir().is_dir() else self.prefix()
             _renderer, note = graphics.effective_renderer(self.ctx.profile)
             if note:
@@ -345,6 +392,7 @@ class LaunchingMixin:
         except BaseException:
             # The minted game token must not outlive a failed pre-launch step.
             session.unlink(missing_ok=True)
+            self._stop_link_relay()
             raise
         try:
             with self._activity_label("Starting the game"):
@@ -357,9 +405,10 @@ class LaunchingMixin:
                     beat_until=lambda: self._stub_connected(log),
                 )
         finally:
-            # session.json holds a live game token; it must not outlive the run. The Go
-            # stub already read and deleted it at start (#811); this covers the C stub.
+            # session.json holds a live game token; it must not outlive the run. The stub
+            # reads and deletes it at start (#811); this covers a stub that never started.
             session.unlink(missing_ok=True)
+            self._stop_link_relay()
             probe.stop()
             probe.join(timeout=1.0)
         self._renderer = probe.result
@@ -392,17 +441,40 @@ class LaunchingMixin:
             return None
 
     def stop(self) -> None:
-        pids = self._game_pids()
-        if not pids:
-            if self._running_elsewhere():
-                self.info("asking the other Nadare window to stop the game")
-                runlock.request_stop(self.prefix())
-                deadline = time.monotonic() + 20
-                while time.monotonic() < deadline and runlock.running(self.prefix()):
-                    time.sleep(0.2)
-                if runlock.running(self.prefix()):
-                    self.info("the game did not stop within 20 s")
+        pids = self._stop_game_pids()
+        if not pids and self._running_elsewhere():
+            stop_elsewhere(self.prefix(), self.info)
             return
+        self._kill_game(pids)
+        # Like every Wine game: the prefix's helpers go too (#1455 R4-2; CZN never did this).
+        stop_runner_wineserver(prefix=self.prefix(), proton=self._runner_for_stop())
+
+    def _stop_game_pids(self) -> list[int]:
+        pids = self._game_pids()
+        if self.secure_mode_enabled():
+            # WebView2 and Wine services live outside the game's bin folder. The host's
+            # wineserver -k cannot reach their server in the Sandbox's private /tmp.
+            pids = sorted(set(pids).union(scan_pids(ProcessQuery(prefix=str(self.prefix())))))
+        return pids
+
+    def _runner_for_stop(self) -> str | None:
+        """This profile's Proton, only if already installed: Stop never downloads one."""
+        rid = core_runners.profile_runner_value(self.ctx.profile)
+        if not rid or rid.lower() in ("wine", "system", "none"):
+            rid = DEFAULT_RUNNER
+        try:
+            if rid in core_runners.RUNNERS:
+                found = self._installed_pinned(rid)
+            else:
+                found = core_runners.resolve_runner(rid)
+        except Exception:  # noqa: BLE001 - Stop must not fail on a runner lookup
+            return None
+        return str(found) if found else None
+
+    def _kill_game(self, pids: list[int] | None = None) -> None:
+        """SIGTERM the game's processes, wait up to 10 s, then SIGKILL what is left."""
+        if pids is None:
+            pids = self._stop_game_pids()
         for pid in pids:
             try:
                 os.kill(pid, signal.SIGTERM)
@@ -411,7 +483,7 @@ class LaunchingMixin:
         deadline = time.time() + 10
         while time.time() < deadline and self._game_running():
             time.sleep(0.25)
-        for pid in self._game_pids():
+        for pid in self._stop_game_pids():
             try:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):

@@ -21,12 +21,16 @@ from PyQt6.QtWidgets import (
 from ...core import backends as core_backends
 from ...core import (
     diskspace,
+    location,
+    operation_policy,
     paths,
 )
 from ...core.config import Config
 from ...core.gamefacts import primary_operation
+from .. import i18n
 from ..add_game import PREFIX_ONLY_KINDS
-from ..notice import AccountNoticeDialog
+from ..notice import AccountNoticeDialog, HoldDialog
+from ..quick_install import QuickInstallDialog
 from .shared import (
     DOWNLOAD_CONFIRM_BYTES,
 )
@@ -34,7 +38,7 @@ from .shared import (
 log = logging.getLogger("nadare.gui.main_window")
 
 #: Operations that must not run until the account notice is acknowledged.
-NOTICE_OPERATIONS = frozenset({"install", "update", "launch"})
+NOTICE_OPERATIONS = operation_policy.operations_with("gui_notice")
 
 #: Operations before which the one-time "unofficial launcher" notice is shown.
 UNOFFICIAL_OPERATIONS = frozenset({"install", "login", "launch"})
@@ -48,9 +52,11 @@ def download_folder(kind: str, data: Mapping[str, Any]) -> str:
     folder goes through the backend, which knows where it really installs (#W4-F8).
     """
     in_prefix = kind in PREFIX_ONLY_KINDS or kind.startswith("launcher-")
+    prefix = location._setting(data, "prefix")
+    install = location._setting(data, "install_dir")
     if in_prefix:
-        return str(data.get("prefix") or paths.profiles_dir())
-    if data.get("install_dir") or data.get("prefix"):
+        return prefix or str(paths.profiles_dir())
+    if install or prefix:
         try:
             config = Config()
             config.data["profiles"] = {"profile": {**data, "backend": kind}}
@@ -60,7 +66,7 @@ def download_folder(kind: str, data: Mapping[str, Any]) -> str:
                 return str(folder())
         except (core_backends.BackendError, OSError, TypeError, ValueError):
             log.debug("%s: could not resolve the backend install folder", kind, exc_info=True)
-    return str(data.get("install_dir") or paths.profiles_dir())
+    return install or str(paths.profiles_dir())
 
 
 class ConfirmMixin:
@@ -93,16 +99,60 @@ class ConfirmMixin:
 
     def _confirm_action(self, profile: str, operation: str) -> bool:
         """The notices and download questions every operation on ``profile`` asks first."""
+        if operation == "launch" and not self._confirm_hold(profile):
+            return False
+        if operation == "install" and self._fresh_install(profile):
+            # The one install sheet carries the notices itself (#1605).
+            return self._confirm_download(profile)
         if operation in NOTICE_OPERATIONS and self._needs_notice(profile):
             if not self._confirm_notice(profile):
                 return False
         if operation in UNOFFICIAL_OPERATIONS and not self._confirm_unofficial(profile):
             return False
-        if operation == "install" and not self._confirm_download(profile):
-            return False
         if operation == "repair" and not self._confirm_repair(profile):
             return False
         return True
+
+    def _confirm_hold(self, profile: str) -> bool:
+        """Ask before starting a game the maintainers marked dangerous (#805)."""
+        from ...core import holds
+
+        data = self.config.profiles.get(profile) or {}
+        # The window thread must never wait on the network: use the memo or saved copy.
+        known = holds.known()
+        # One backend may carry more than one hold: ask for each, remembering every answer,
+        # otherwise accepting one would only uncover the next and Play could never start.
+        for _ in range(holds.MAX_HOLDS + 1):
+            hold = holds.blocking_hold(
+                self.config, profile, str(data.get("backend") or ""), holds=known
+            )
+            if hold is None:
+                return True
+            if HoldDialog(hold, self).exec() != QDialog.DialogCode.Accepted:
+                return False
+            try:
+                with self.config.locked():
+                    had_override = "hold_override" in data
+                    previous = data.get("hold_override")
+                    data["hold_override"] = holds.acknowledge(data, hold.id)
+                    try:
+                        self.config.save()
+                    except OSError:
+                        # Nothing was persisted, so the in-memory answer must not stand:
+                        # a retry has to ask again instead of starting the game silently.
+                        if had_override:
+                            data["hold_override"] = previous
+                        else:
+                            data.pop("hold_override", None)
+                        raise
+            except OSError as exc:
+                QMessageBox.critical(
+                    self,
+                    i18n.tr("Launch blocked"),
+                    i18n.tr("Could not save this choice: {error}", error=exc),
+                )
+                return False
+        return False  # the list kept producing new ids: do not start unacknowledged
 
     def _library_play(self, profile: str) -> None:
         """Card Play runs the game page's launch checks (#765); otherwise open the page."""
@@ -148,13 +198,26 @@ class ConfirmMixin:
     def _backend_kind(self, profile: str) -> str:
         return str((self.config.profiles.get(profile) or {}).get("backend") or "")
 
+    def _unofficial_accepted(self) -> bool:
+        """Whether the one-time unofficial notice was accepted (#1605: once for the app).
+
+        Older versions asked once per game type and kept a list of kinds; an answer for
+        any game counts, so such a config is rewritten to the one app-wide value.
+        """
+        acked = self.config.data.get("unofficial_notice_ack")
+        if acked is True:
+            return True
+        if isinstance(acked, list) and acked:
+            self._remember_unofficial()
+            return True
+        return False
+
     def _confirm_unofficial(self, profile: str) -> bool:
-        """Tell the user once per game type that Nadare is unofficial; remember the answer."""
+        """Tell the user once for the app that Nadare is unofficial."""
         kind = self._backend_kind(profile)
         if not core_backends.unofficial_notice(kind) or os.environ.get("NADARE_ASSUME_NOTICES"):
             return True
-        acked = self.config.data.get("unofficial_notice_ack")
-        if isinstance(acked, list) and kind in acked:
+        if self._unofficial_accepted():
             return True
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Information)
@@ -166,26 +229,29 @@ class ConfirmMixin:
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
         if box.exec() != QMessageBox.StandardButton.Ok:
             return False
-        try:
-            with self.config.locked():
-                self.config.data["unofficial_notice_ack"] = sorted({*(acked or []), kind})
-                self.config.save()
-        except OSError as exc:
-            QMessageBox.warning(
-                self, "Nadare", f"Could not remember your answer ({exc}); you will be asked again."
-            )
+        self._remember_unofficial()
         return True
 
-    def _confirm_download(self, profile: str) -> bool:
-        """Ask before a fresh install that downloads several GB, showing the free space."""
-        if os.environ.get("NADARE_ASSUME_NOTICES"):
-            return True
-        kind = self._backend_kind(profile)
+    def _fresh_install(self, profile: str) -> bool:
+        """Whether ``profile`` has nothing installed yet (a fresh download, not a RESUME)."""
         status = self._snapshot(profile).get("status")
-        if status is not None and getattr(status, "state", "") not in ("not_installed", ""):
-            return True  # already installed: this is a repair, not a fresh download
-        if status is not None and (getattr(status, "data", None) or {}).get("incomplete"):
-            return True  # RESUME: only what is missing is fetched, nothing to confirm
+        if status is None:
+            return True
+        if getattr(status, "state", "") not in ("not_installed", ""):
+            return False
+        return not (getattr(status, "data", None) or {}).get("incomplete")
+
+    def _confirm_download(self, profile: str) -> bool:
+        """One sheet for a fresh install: size, unofficial and account notices (#1605)."""
+        if not self._fresh_install(profile):
+            return True  # already installed, or RESUME: only what is missing is fetched
+        if os.environ.get("NADARE_ASSUME_NOTICES"):
+            # The switch covers the unofficial and download-size questions only; the
+            # account notice is still the user's own acknowledgement, as it was before.
+            if not self._needs_notice(profile):
+                return True
+            return self._confirm_notice(profile)
+        kind = self._backend_kind(profile)
         data = self.config.profiles.get(profile) or {}
         size = core_backends.install_size_hint(kind)
         where = download_folder(kind, data)
@@ -205,30 +271,45 @@ class ConfirmMixin:
         if checked is not None:
             size, path = checked
             where = str(path)
-        if not size or size < DOWNLOAD_CONFIRM_BYTES:
-            return space_error is None
+        show_unofficial = core_backends.unofficial_notice(kind) and not self._unofficial_accepted()
+        notice = (self._notice_for(profile) or "") if self._needs_notice(profile) else ""
+        if (
+            space_error is None
+            and not show_unofficial
+            and not notice
+            and (not size or size < DOWNLOAD_CONFIRM_BYTES)
+        ):
+            return True
         try:
             free = f"{diskspace.human_size(diskspace.free_bytes(where))} free"
         except (OSError, core_backends.BackendError):
             free = "free space unknown"
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowTitle("Download the game?")
-        box.setText(
-            f"Installing {self._game_title(profile)} downloads about "
-            f"{diskspace.human_size(size)} and needs about as much free space ({free}).\n\n"
-            f"It goes to: {where}"
+        summary = (
+            f"Download: about {diskspace.human_size(size)}." if size else "Download size unknown."
         )
         if space_error is not None:
-            box.setInformativeText(space_error.message)
-        box.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
-        box.button(QMessageBox.StandardButton.Yes).setText("Download")
-        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
-        if box.exec() != QMessageBox.StandardButton.Yes or space_error is not None:
+            summary += f"\n{space_error.message}"
+        dialog = QuickInstallDialog(
+            self._game_title(profile),
+            notice=core_backends.UNOFFICIAL_NOTICE if show_unofficial else "",
+            account_notice=notice,
+            describe=lambda chosen: (where, free, summary),
+            change_location=False,
+            parent=self,
+        )
+        if space_error is not None:
+            dialog.install_button.setEnabled(False)
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        dialog.deleteLater()
+        if not accepted or space_error is not None:
             if space_error is not None:
                 log.warning("%s: install refused: %s", profile, space_error.message)
                 self._set_side_status(space_error.message)
             return False
+        if notice and not self._remember_account_notice(profile):
+            return False
+        if show_unofficial:
+            self._remember_unofficial()
         return True
 
     def _confirm_repair(self, profile: str) -> bool:

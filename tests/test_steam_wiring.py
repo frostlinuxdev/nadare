@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -16,7 +17,7 @@ try:
 except Exception:  # pragma: no cover - optional GUI dependencies
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
-from nadare.core import artwork, steamglue, steamrun
+from nadare.core import artwork, protoncmd, steamglue, steamrun
 from nadare.core.config import Config
 from nadare.gui import steam_wiring
 from nadare.gui.main_window import MainWindow
@@ -346,6 +347,7 @@ def test_quitting_during_a_set_up_step_asks_first(tmp_path, qapp, monkeypatch):
 
 # ---- install_webview2, end to end with fakes at the process and installer edges -----------
 E7 = "5019180"
+UMU_RUN = "/usr/bin/umu-run"
 
 
 def _e7_tree(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -365,8 +367,17 @@ class _Edges:
     def __init__(self, monkeypatch) -> None:
         self.ensure_kwargs: dict = {}
         self.spawned: list[tuple[list[str], dict]] = []
+        self.umu_calls: list[dict] = []
         monkeypatch.setattr(steam_wiring.graphics, "has_display", lambda: True)
         monkeypatch.setattr(steam_wiring.steamfix, "running_blockers", lambda *a: [])
+        monkeypatch.setattr(protoncmd.sandbox, "in_flatpak", lambda: False)
+        monkeypatch.setattr(protoncmd.userns, "blocks_runtime", lambda: False)
+
+        def fake_resolve(configured="umu-run", **kwargs):
+            self.umu_calls.append({"configured": configured, **kwargs})
+            return UMU_RUN
+
+        monkeypatch.setattr(protoncmd.umu, "resolve", fake_resolve)
 
         def fake_ensure(prefix, **kwargs):
             self.ensure_kwargs = {"prefix": prefix, **kwargs}
@@ -384,22 +395,43 @@ class _Edges:
 
 
 def test_the_webview2_install_runs_in_the_games_own_prefix_with_the_pinned_hash(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, caplog
 ):
     root, prefix, proton = _e7_tree(tmp_path)
     edges = _Edges(monkeypatch)
-    result = steam_wiring.install_webview2(E7, root=root, run_env={"DISPLAY": ":0"})
+    with caplog.at_level(logging.INFO):
+        result = steam_wiring.install_webview2(E7, root=root, run_env={"DISPLAY": ":0"})
     assert result.ok, result.line
     assert edges.ensure_kwargs["prefix"] == prefix
     assert edges.ensure_kwargs["constant"] == steam_wiring.webview2.PINNED_SHA256
     assert edges.ensure_kwargs["url"] == steam_wiring.webview2.DEFAULT_URL
     argv, kwargs = edges.spawned[0]
-    assert argv[0] == str(proton) and argv[-2:] == ["C:\\installer.exe", "/silent"]
+    # Through umu like every Proton launch (#1341 item 2), never a bare `proton run`.
+    assert argv == [UMU_RUN, "C:\\installer.exe", "/silent"]
+    assert edges.umu_calls and edges.umu_calls[0]["allow_download"] is True
+    assert kwargs["env"]["PROTONPATH"] == str(proton.parent)
+    assert kwargs["env"]["WINEPREFIX"] == str(prefix.parent)
+    assert kwargs["env"]["GAMEID"] == "umu-0"
     assert kwargs["env"]["STEAM_COMPAT_DATA_PATH"] == str(prefix.parent)
     assert kwargs["env"]["STEAM_COMPAT_CLIENT_INSTALL_PATH"] == str(root)
     assert kwargs["env"]["PROTON_ENABLE_WAYLAND"] == "0"
+    assert "umu" in caplog.text  # the log says which command form ran
     assert result.backup is not None and result.backup.is_dir()  # the backup was made first
     assert (result.backup / "drive_c").is_dir()
+
+
+@pytest.mark.parametrize("flatpak", [False, True])
+def test_the_installer_does_not_get_a_host_secret(tmp_path, monkeypatch, flatpak):
+    """The child env is the filtered launch env, not a copy of os.environ (#1590)."""
+    monkeypatch.setenv("WINE_SECRET", "hunter2")
+    root, _prefix, _proton = _e7_tree(tmp_path)
+    edges = _Edges(monkeypatch)
+    monkeypatch.setattr(protoncmd.sandbox, "in_flatpak", lambda: flatpak)
+    if flatpak:  # the direct-Proton fallback, the other command form
+        monkeypatch.setattr(protoncmd.umu, "resolve", lambda *a, **k: None)
+    result = steam_wiring.install_webview2(E7, root=root)
+    assert result.ok, result.line
+    assert "WINE_SECRET" not in edges.spawned[0][1]["env"]
 
 
 def test_the_webview2_install_does_nothing_while_the_game_runs(tmp_path, monkeypatch):
@@ -428,6 +460,53 @@ def test_without_the_games_proton_nothing_is_copied(tmp_path, monkeypatch):
     result = steam_wiring.install_webview2(E7, root=root)
     assert not result.ok and "Proton" in result.line
     assert not list(prefix.parent.glob("*.bak*")) and not edges.spawned
+
+
+def test_without_umu_outside_the_flatpak_nothing_is_copied_or_run(tmp_path, monkeypatch):
+    root, prefix, _proton = _e7_tree(tmp_path)
+    edges = _Edges(monkeypatch)
+    monkeypatch.setattr(protoncmd.umu, "resolve", lambda *a, **k: None)
+    monkeypatch.setattr(protoncmd.umu, "unavailable_message", lambda: "umu could not be set up")
+    result = steam_wiring.install_webview2(E7, root=root)
+    assert not result.ok and "umu could not be set up" in result.line
+    assert not list(prefix.parent.glob("*.bak*")) and not edges.spawned
+    assert not edges.ensure_kwargs
+
+
+def test_a_userns_block_is_named_before_the_prefix_is_copied(tmp_path, monkeypatch):
+    root, prefix, _proton = _e7_tree(tmp_path)
+    edges = _Edges(monkeypatch)
+    monkeypatch.setattr(protoncmd.userns, "blocks_runtime", lambda: True)
+    result = steam_wiring.install_webview2(E7, root=root)
+    assert not result.ok
+    assert protoncmd.userns.BLOCKED_BEFORE_LAUNCH.split(".")[0] in result.line
+    assert not list(prefix.parent.glob("*.bak*")) and not edges.spawned
+
+
+def test_inside_the_flatpak_without_umu_the_games_proton_runs_directly(
+    tmp_path, monkeypatch, caplog
+):
+    root, prefix, proton = _e7_tree(tmp_path)
+    edges = _Edges(monkeypatch)
+    monkeypatch.setattr(protoncmd.sandbox, "in_flatpak", lambda: True)
+    monkeypatch.setattr(protoncmd.umu, "resolve", lambda *a, **k: None)
+    with caplog.at_level(logging.INFO):
+        result = steam_wiring.install_webview2(E7, root=root)
+    assert result.ok, result.line
+    argv, kwargs = edges.spawned[0]
+    assert argv == [str(proton), "run", "C:\\installer.exe", "/silent"]
+    assert kwargs["env"]["STEAM_COMPAT_DATA_PATH"] == str(prefix.parent)
+    assert "proton run" in caplog.text
+
+
+def test_inside_the_flatpak_a_found_umu_is_used(tmp_path, monkeypatch):
+    root, _prefix, _proton = _e7_tree(tmp_path)
+    edges = _Edges(monkeypatch)
+    monkeypatch.setattr(protoncmd.sandbox, "in_flatpak", lambda: True)
+    monkeypatch.setattr(protoncmd.userns, "blocks_runtime", lambda: True)  # host check only
+    result = steam_wiring.install_webview2(E7, root=root)
+    assert result.ok, result.line
+    assert edges.spawned[0][0][0] == UMU_RUN
 
 
 # ---- one Set up window, for the right game; quitting waits for a step ---------------------
@@ -647,6 +726,59 @@ def test_every_action_uses_the_configured_steam_command(qapp, tmp_path, monkeypa
     assert seen == [("install", "/opt/mysteam --quiet"), ("runner", "/opt/mysteam --quiet")]
 
 
+def test_a_runner_download_in_set_up_is_reported_with_its_step_token(qapp, tmp_path, monkeypatch):
+    from nadare.core import runners
+    from nadare.core.events import Event
+    from nadare.core.steamsetup import SetupItem
+
+    seen: list[tuple[object, Event]] = []
+
+    def fake_ensure(family, *, cancel=None, emit=None):
+        emit(
+            Event(
+                "status",
+                "DW-Proton",
+                data={"runner": "dwproton", "tag": "dwproton-11.0-17", "total": 10},
+            )
+        )
+        emit(
+            Event(
+                "progress",
+                progress=0.5,
+                data={"runner": "dwproton", "tag": "dwproton-11.0-17", "done": 5, "total": 10},
+            )
+        )
+        return tmp_path / "dwproton-11.0-17"
+
+    monkeypatch.setattr(runners, "ensure_pinned", fake_ensure)
+    monkeypatch.setattr(steamglue, "ensure_steam_tool", lambda root, runner: runner.name)
+    monkeypatch.setattr(
+        steamglue.steamrun,
+        "set_runner",
+        lambda key, tool, **kwargs: steamrun.ActionResult(True, "x"),
+    )
+    root = _root(tmp_path)
+    dialog = steam_wiring.build_dialog(
+        None,
+        UMA,
+        root=root,
+        vulkan_version_fn=lambda: None,
+        async_plan=False,
+        confirm_fn=lambda title, text: True,
+        run=lambda argv: 0,
+        runner_events=lambda token, event: seen.append((token, event)),
+    )
+    try:
+        dialog._act_fn(SetupItem("runner", "Runner", "todo", action="set_runner"))
+        progress = [event for _, event in seen if event.kind == "progress"]
+        assert [event.data.get("tag") for event in progress] == ["dwproton-11.0-17"]
+        assert len({id(token) for token, _ in seen}) == 1  # one step, one Cancel token
+        assert [event.kind for _, event in seen][-1] == "runner_end"
+    finally:
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
 def test_the_profiles_steam_command_is_given_to_the_set_up_dialog(tmp_path, qapp, monkeypatch):
     seen: dict = {}
 
@@ -668,6 +800,19 @@ def test_the_profiles_steam_command_is_given_to_the_set_up_dialog(tmp_path, qapp
         window.open_game("uma")
         window._open_steam_setup()
         assert seen["binary"] == "flatpak run com.valvesoftware.Steam"
+        # A runner the Set up step downloads becomes a Downloads row (#1625).
+        from nadare.core.events import Cancel, Event
+
+        window.show_downloads()
+        seen["runner_events"](
+            Cancel(),
+            Event(
+                "progress",
+                progress=0.5,
+                data={"runner": "dwproton", "tag": "dwproton-11.0-17", "done": 1, "total": 2},
+            ),
+        )
+        assert window.downloads.row("runner:dwproton-11.0-17") is not None
     finally:
         window.controller._workers.clear()
         window.close()
@@ -840,6 +985,7 @@ def test_the_webview2_install_hands_its_cancel_token_to_the_installer(tmp_path, 
     edges = _Edges(monkeypatch)
     token = Cancel()
     assert steam_wiring.install_webview2(E7, root=root, cancel=token).ok
+    assert edges.umu_calls[0]["cancel"] is token
     assert edges.ensure_kwargs["cancel"] is token
 
 

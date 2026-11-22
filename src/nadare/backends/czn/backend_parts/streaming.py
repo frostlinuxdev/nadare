@@ -235,6 +235,8 @@ class StreamingMixin:
         pending = b""
         label = self._activity
         started = last_beat = time.monotonic()
+        last_game_probe = started
+        game_seen = False
         if label and not beat_as_log:
             # A bar that visibly moves, so a silent installer is not mistaken for a hang.
             self.ctx.emit(
@@ -248,6 +250,13 @@ class StreamingMixin:
                 if self.ctx.cancel.cancelled:
                     self._abort_child(proc, kill_game=kill_game)
                     raise Cancelled()
+                if kill_game and not game_seen:
+                    now = time.monotonic()
+                    if now - last_game_probe >= 1.0:
+                        last_game_probe = now
+                        if self._game_running():
+                            game_seen = True
+                            self.ctx.emit(Event("game_running", "the game is running"))
                 try:
                     ready, _, _ = select.select([fd], [], [], 0.25)
                 except (OSError, ValueError):
@@ -342,6 +351,10 @@ class StreamingMixin:
         extra_env: dict[str, str] | None = None,
     ) -> int:
         env = self._env()
+        from ....core.transfer import limiter
+
+        if limiter.path is not None:
+            env["NADARE_DOWNLOAD_BUDGET"] = str(limiter.path)
         if extra_env:
             env.update(extra_env)
         return self._stream(

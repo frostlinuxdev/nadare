@@ -310,7 +310,7 @@ wheels = [
 
 [[package]]
 name = "nadare-launcher"
-version = "0.1.0b24"
+version = "0.1.0b25"
 source = { editable = "." }
 dependencies = [
     { name = "certifi" },
@@ -331,6 +331,7 @@ dev = [
     { name = "pytest-xdist" },
     { name = "pyyaml" },
     { name = "ruff" },
+    { name = "setuptools" },
 ]
 secure = [
     { name = "keyring" },
@@ -350,6 +351,7 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "secretstorage", specifier = ">=3.3" },
+    { name = "setuptools", marker = "extra == 'dev'", specifier = ">=77" },
     { name = "zstandard", specifier = ">=0.22" },
 ]
 provides-extras = ["build", "dev", "secure"]

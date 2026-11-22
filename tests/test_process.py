@@ -58,10 +58,10 @@ def test_build_env_extra_overrides_everything_except_the_declared_prefix() -> No
     assert env["WINEDEBUG"] == "fixme"
 
 
-def test_build_env_inherits_base_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_env_drops_unknown_host_names_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NADARE_SENTINEL", "present")
     env = process.build_env()
-    assert env["NADARE_SENTINEL"] == "present"
+    assert "NADARE_SENTINEL" not in env
 
 
 # ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ runnable, or output we do not understand) returns ``None`` and never blocks.
 
 from __future__ import annotations
 
+import os
 import subprocess
 
 from . import process
@@ -109,9 +110,12 @@ def gl_install_command(missing: list[str], family: str | None) -> str | None:
             packages.append(package)
     if not packages:
         return None
-    return _INSTALL[family or ""].replace(
-        "sudo dpkg --add-architecture i386 && sudo apt update && ", ""
-    ).format(pkgs=" ".join(packages))
+    return for_host(
+        _INSTALL[family or ""]
+        .replace("sudo dpkg --add-architecture i386 && sudo apt update && ", "")
+        .format(pkgs=" ".join(packages)),
+        image_based(),
+    )
 
 
 def missing_32bit(run=subprocess.run) -> list[str] | None:  # noqa: ANN001
@@ -204,6 +208,63 @@ _FAMILY_NOTE = {
 }
 
 
+#: Fedora Atomic desktops (and the uBlue images built on them) say so in VARIANT_ID.
+_OSTREE_VARIANTS = {"silverblue", "kinoite", "sericea", "onyx", "cosmic-atomic", "atomic"}
+_OSTREE_IDS = {"bazzite", "bluefin", "aurora", "fedora-asahi-remix-atomic"}
+
+
+def _os_release_field(text: str, key: str) -> str:
+    for raw in text.splitlines():
+        name, _, val = raw.strip().partition("=")
+        if name == key:
+            return val.strip().strip("\"'").lower()
+    return ""
+
+
+def image_based(os_release: str | None = None, *, ostree_booted: bool | None = None) -> str | None:
+    """``"ostree"`` (Fedora Atomic, Bazzite...), ``"steamos"``, ``"nixos"``, or ``None``.
+
+    On these the package manager either needs ``rpm-ostree`` or is read-only, so the usual
+    ``dnf``/``pacman`` hint would not work.
+    """
+    if os_release is None:
+        try:
+            with open("/etc/os-release", encoding="utf-8") as fh:
+                os_release = fh.read()
+        except OSError:
+            os_release = ""
+    if ostree_booted is None:
+        ostree_booted = os.path.exists("/run/ostree-booted")
+    if _os_release_field(os_release, "ID") in ("steamos", "nixos"):
+        return _os_release_field(os_release, "ID")
+    variant = _os_release_field(os_release, "VARIANT_ID")
+    if (
+        ostree_booted
+        or variant in _OSTREE_VARIANTS
+        or "ostree" in variant
+        or _os_release_field(os_release, "ID") in _OSTREE_IDS
+    ):
+        return "ostree"
+    return None
+
+
+def for_host(command: str | None, image: str | None) -> str | None:
+    """``command`` as it works on this kind of system, or ``None`` when no package can be added.
+
+    Fedora Atomic layers packages with ``rpm-ostree`` (they apply after a restart); SteamOS keeps
+    its system read-only and NixOS sets packages in its configuration, so there is nothing to
+    copy and paste.
+    """
+    if command is None or image is None:
+        return command
+    if image in ("steamos", "nixos"):
+        return None
+    if image == "ostree" and command.startswith("sudo dnf install "):
+        pkgs = command[len("sudo dnf install ") :]
+        return f"rpm-ostree install {pkgs}"
+    return command
+
+
 def _os_release_ids(text: str) -> set[str]:
     ids: set[str] = set()
     for raw in text.splitlines():
@@ -241,7 +302,7 @@ def install_command(missing: list[str], family: str | None) -> str | None:
             packages.append(package)
     if not packages:
         return None
-    return _INSTALL[family or ""].format(pkgs=" ".join(packages))
+    return for_host(_INSTALL[family or ""].format(pkgs=" ".join(packages)), image_based())
 
 
 def install_command_in(message: str) -> str:
@@ -269,7 +330,11 @@ def hint(missing: list[str], os_release: str | None = None) -> str:
     family = distro_family(os_release)
     command = install_command(missing, family)
     if command:
-        note = _FAMILY_NOTE.get(family or "", "")
+        note = (
+            "The packages apply after a restart."
+            if command.startswith("rpm-ostree ")
+            else _FAMILY_NOTE.get(family or "", "")
+        )
         return (
             f"{head}\n{why}\nInstall them with:\n    {command}\n"
             + (f"{note}\n" if note else "")
@@ -286,6 +351,8 @@ __all__ = [
     "REQUIRED_32BIT",
     "REQUIRED_GL",
     "distro_family",
+    "for_host",
+    "image_based",
     "gl_install_command",
     "missing_gl",
     "hint",

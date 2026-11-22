@@ -7,6 +7,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -58,14 +59,16 @@ instance.close()
 """
 
 
-def test_two_simultaneous_starts_on_a_stale_socket_pick_one_primary(tmp_path):
+def test_two_simultaneous_starts_on_a_stale_socket_pick_one_primary(tmp_path, request):
     source = str(Path(nadare.__file__).resolve().parents[1])
     env = os.environ.copy()
     env["PYTHONPATH"] = source + os.pathsep + env.get("PYTHONPATH", "")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["QT_QPA_PLATFORM"] = "offscreen"
 
-    name = str(tmp_path / "s.sock")
+    socket_folder = tempfile.TemporaryDirectory(prefix="ns-", dir="/tmp")
+    request.addfinalizer(socket_folder.cleanup)
+    name = str(Path(socket_folder.name) / "s.sock")
     # A stale Unix socket: bound once, then its owner died without unlinking it.
     stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     stale.bind(name)

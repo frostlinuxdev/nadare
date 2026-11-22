@@ -537,6 +537,8 @@ def test_extract_prunes_stale_swap_leftovers(
     staging.mkdir()
     long_ago = time.time() - 7 * 3600
     os.utime(staging, (long_ago, long_ago))
+    # No owner marker: unknown ownership, so only an old backup goes (#1494).
+    os.utime(stale, (long_ago, long_ago))
     tar = _make_tarball(tmp_path, "GE-Proton11-7")
 
     runners._extract(tar, cancel=None, emit=runners.emitter(None))

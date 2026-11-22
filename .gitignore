@@ -55,7 +55,6 @@ czn_qr.png
 /nadare-data/
 /scratch/
 *.log
-!docs/**/*.log
 packaging/flatpak/staging/
 build/flatpak/
 !src/nadare/assets/czn_pcsdk_stub.exe

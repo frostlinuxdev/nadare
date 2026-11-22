@@ -33,6 +33,41 @@ status_file="${NADARE_PIN_STATUS:-$HOME/nadare-pins/status.json}"
 push="${NADARE_PIN_PUSH:-1}"
 heartbeat_url="${NADARE_PIN_HEARTBEAT_URL:-}"
 
+# A URL with /api/push/ is Uptime Kuma (?status=down&msg=..., bare URL = up); anything else is
+# Healthchecks, which reads <url>/fail with the message as the POST body and a plain GET as up
+# (#1215).
+heartbeat() { # heartbeat ok|down MESSAGE
+    [[ -n "$heartbeat_url" ]] || return 0
+    if [[ "$1" == ok ]]; then
+        curl -fsS -m 10 --retry 2 -o /dev/null "$heartbeat_url" >/dev/null 2>&1 \
+            || echo "publish_pins_node: heartbeat ping failed" >&2
+    elif [[ "$heartbeat_url" == */api/push/* ]]; then
+        curl -fsS -m 10 --retry 2 -o /dev/null -G \
+            --data-urlencode "status=down" --data-urlencode "msg=$(hostname -s): ${2:0:400}" \
+            "${heartbeat_url%%\?*}" >/dev/null 2>&1 \
+            || echo "publish_pins_node: heartbeat ping failed" >&2
+    else
+        local base="${heartbeat_url%%#*}" query=""
+        if [[ "$base" == *\?* ]]; then
+            query="?${base#*\?}"
+            base="${base%%\?*}"
+        fi
+        curl -fsS -m 10 --retry 2 -o /dev/null \
+            --data-raw "$(hostname -s): ${2:0:400}" \
+            "${base%/}/fail${query}" >/dev/null 2>&1 \
+            || echo "publish_pins_node: heartbeat ping failed" >&2
+    fi
+}
+
+failure_reported=0
+report_failure() {
+    local rc=$?
+    if (( rc != 0 && failure_reported == 0 )); then
+        heartbeat down "publish_pins_node failed (exit $rc), see journal"
+    fi
+}
+trap report_failure EXIT
+
 [[ -n "$index" && -d "$index/.git" ]] || {
     echo "publish_pins_node: no git checkout at '${index}' (set NADARE_PIN_INDEX_DIR)" >&2
     exit 1
@@ -40,24 +75,19 @@ heartbeat_url="${NADARE_PIN_HEARTBEAT_URL:-}"
 
 lock="${XDG_RUNTIME_DIR:-/tmp}/nadare-publish-pins.lock"
 [[ ! -L "$lock" ]] || { echo "publish_pins_node: lock path is a symlink: $lock" >&2; exit 1; }
-exec 9>"$lock"
-flock -n 9 || { echo "publish_pins_node: already running"; exit 0; }
+exec 9>"$lock" || { echo "publish_pins_node: could not open lock" >&2; exit 1; }
+flock -n 9
+lock_rc=$?
+if (( lock_rc == 1 )); then
+    echo "publish_pins_node: already running"
+    exit 0
+elif (( lock_rc != 0 )); then
+    echo "publish_pins_node: could not lock" >&2
+    exit 1
+fi
 
 # shellcheck source=index_git.sh
 source "$root/scripts/index_git.sh"
-
-heartbeat() { # heartbeat ok|down MESSAGE
-    [[ -n "$heartbeat_url" ]] || return 0
-    if [[ "$1" == ok ]]; then
-        curl -fsS -m 10 --retry 2 -o /dev/null "$heartbeat_url" >/dev/null 2>&1 \
-            || echo "publish_pins_node: heartbeat ping failed" >&2
-    else
-        curl -fsS -m 10 --retry 2 -o /dev/null -G \
-            --data-urlencode "status=down" --data-urlencode "msg=$(hostname -s): ${2:0:400}" \
-            "${heartbeat_url%%\?*}" >/dev/null 2>&1 \
-            || echo "publish_pins_node: heartbeat ping failed" >&2
-    fi
-}
 
 write_status() { # write_status ok|fail RESULT MESSAGE
     mkdir -p "$(dirname "$status_file")" 2>/dev/null || true
@@ -89,6 +119,7 @@ fail() { # fail MESSAGE
     echo "publish_pins_node: $1" >&2
     write_status fail failed "$1"
     heartbeat down "$1"
+    failure_reported=1
     exit 1
 }
 
@@ -131,6 +162,7 @@ if [[ $rc -ne 0 && $rc -ne 3 ]]; then
     echo "publish_pins_node: publisher exit $rc" >&2
     write_status fail failed "${msg:-publisher exit $rc}"
     heartbeat down "${msg:-publisher exit $rc}"
+    failure_reported=1
     exit 1
 fi
 

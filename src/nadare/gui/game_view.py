@@ -10,22 +10,24 @@ those signals to workers.
 from __future__ import annotations
 
 import html
+import re
 import time as time  # noqa: E402, F401
 from dataclasses import dataclass
 from typing import Any
 
-from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
-    QDesktopServices,
     QLinearGradient,
     QPainter,
     QPainterPath,
+    QPen,
     QPixmap,
 )
 from PyQt6.QtWidgets import (
     QCheckBox,
     QFrame,
+    QGraphicsDropShadowEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -44,6 +46,7 @@ from PyQt6.QtWidgets import (
 # game_view_parts/ (#1248). Re-exported so ``game_view.X`` is the same object.
 from PyQt6.QtWidgets import QMessageBox as QMessageBox  # noqa: E402, F401
 
+from ..core import safetycheck
 from ..core.backends import (
     Status,
     install_choice_label,
@@ -52,6 +55,7 @@ from ..core.backends import (
 )
 from ..core.eta import EtaEstimator, SpeedMeter
 from ..core.news import CREDIT
+from . import i18n
 from .game_view_parts.busy import (
     _ANNOUNCED_ON_SUCCESS,
     _BUSY_STATES,
@@ -99,6 +103,7 @@ from .game_view_parts.switches import (
 )
 from .images import ImageLoader
 from .library import FlowLayout, backend_label, profile_art_candidates, profile_title
+from .links import open_external
 from .theme import cover_pixmap, set_state_property
 
 #: Backends whose label ("Steam game", "Wine / Proton game") adds nothing on the game page.
@@ -165,11 +170,25 @@ class HeroCard(QFrame):
             self._cropped = scaled.copy(x, y, width, height)
             self._cropped_key = key
         painter.drawPixmap(0, 0, self._cropped)
-        gradient = QLinearGradient(0, 0, width * 0.72, 0)
-        gradient.setColorAt(0.0, QColor(7, 9, 13, 245))
-        gradient.setColorAt(0.5, QColor(7, 9, 13, 185))
-        gradient.setColorAt(1.0, QColor(7, 9, 13, 0))
-        painter.fillRect(0, 0, width, height, gradient)
+        # Three scrims, the way the official launchers treat key art: a corner wash that keeps
+        # the left column readable without flattening the whole picture, a foot band under the
+        # action row, and a light top band under the header buttons. The art stays the subject.
+        wash = QLinearGradient(0, height, width * 0.82, 0)
+        wash.setColorAt(0.0, QColor(6, 8, 12, 236))
+        wash.setColorAt(0.42, QColor(6, 8, 12, 168))
+        wash.setColorAt(1.0, QColor(6, 8, 12, 0))
+        painter.fillRect(0, 0, width, height, wash)
+        foot = QLinearGradient(0, height * 0.6, 0, height)
+        foot.setColorAt(0.0, QColor(6, 8, 12, 0))
+        foot.setColorAt(1.0, QColor(6, 8, 12, 196))
+        painter.fillRect(0, 0, width, height, foot)
+        top = QLinearGradient(0, 0, 0, 96)
+        top.setColorAt(0.0, QColor(6, 8, 12, 130))
+        top.setColorAt(1.0, QColor(6, 8, 12, 0))
+        painter.fillRect(0, 0, width, height, top)
+        painter.setPen(QPen(QColor(255, 255, 255, 26), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(QRectF(0.5, 0.5, width - 1, height - 1), 15.5, 15.5)
         painter.end()
 
 
@@ -284,13 +303,43 @@ class BannerStrip(QWidget):
         self.setVisible(self._row.count() > 0)
 
 
+def _text_shadow(label: QLabel) -> None:
+    """A tight dark halo behind ``label``'s text, for text drawn over key art."""
+    effect = QGraphicsDropShadowEffect(label)
+    effect.setBlurRadius(10)
+    effect.setOffset(0, 1)
+    effect.setColor(QColor(0, 0, 0, 230))
+    label.setGraphicsEffect(effect)
+
+
+#: A run of text longer than this without a space gets break points (a pack file name).
+_LONG_WORD = 28
+_LONG_WORD_RE = re.compile(rf"\S{{{_LONG_WORD},}}")
+_ZWSP = "\u200b"
+
+
+def breakable(text: str) -> str:
+    """``text`` with zero-width break points in long words, after ``_ - . /``.
+
+    A word-wrapped label cannot break a word, so one long file name sets its minimum width
+    and widens the whole page past the window (2026-11-20 user simulation).
+    """
+
+    def split(match: re.Match[str]) -> str:
+        word = re.sub(r"([_\-./])", r"\1" + _ZWSP, match.group(0))
+        # No separators at all: break every _LONG_WORD characters.
+        return re.sub(rf"([^{_ZWSP}]{{{_LONG_WORD}}})(?=[^{_ZWSP}])", r"\1" + _ZWSP, word)
+
+    return _LONG_WORD_RE.sub(split, text)
+
+
 class _NotifyLabel(QLabel):
     """A label that says when its text changed, so the box around it can hide when empty."""
 
     text_changed = pyqtSignal()
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt override
-        super().setText(text)
+        super().setText(breakable(text))
         self.text_changed.emit()
 
     def clear(self) -> None:
@@ -325,6 +374,8 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
     steam_setup_requested = pyqtSignal()
     remember_toggled = pyqtSignal(bool)  # the user ticked/unticked Remember me
     sandbox_toggled = pyqtSignal(bool)  # the user turned the Sandbox on or off
+    safety_check_requested = pyqtSignal(str)  # profile name: run the manual check
+    safety_dismissed = pyqtSignal(str)  # profile name: hide the compromise banner
 
     #: Text shown under the login QR for each coarse auth state.
     _QR_HINTS = {
@@ -350,6 +401,8 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         self._paused_op: str | None = None
         self._failed_op: str | None = None  # what RETRY runs again after a failure
         self._found_copy: str | None = None  # a folder the start-up check found (#1293)
+        self._unfinished_removal: list[str] = []  # an Uninstall a crash cut short (r3b01 F1)
+        self._busy_elsewhere = False  # another process holds this game's operation lock
         self._queue_waiting = False  # waits for an install slot (#770)
         #: True between a successful install/update/... and the status that
         #: follows it, so the stale status cannot offer the same action again.
@@ -428,6 +481,27 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         header.addWidget(self.more_button)
         root.addLayout(header)
 
+        # ---- a compromised result stays visible until the player dismisses it -----
+        self.safety_banner = QFrame()
+        self.safety_banner.setObjectName("Banner")
+        banner_row = QHBoxLayout(self.safety_banner)
+        banner_row.setContentsMargins(18, 8, 12, 8)
+        banner_row.setSpacing(10)
+        self.safety_banner_label = QLabel(
+            i18n.tr(
+                "Safety check: this game shows signs of being compromised. Read the result "
+                "before you launch it."
+            )
+        )
+        self.safety_banner_label.setWordWrap(True)
+        banner_row.addWidget(self.safety_banner_label, 1)
+        self.safety_dismiss = QPushButton(i18n.tr("Dismiss"))
+        self.safety_dismiss.setObjectName("GhostButton")
+        self.safety_dismiss.clicked.connect(self._dismiss_safety)
+        banner_row.addWidget(self.safety_dismiss)
+        self.safety_banner.setVisible(False)
+        root.addWidget(self.safety_banner)
+
         # ---- hero ----------------------------------------------------------
         hero = HeroCard()
         self.hero = hero
@@ -477,8 +551,14 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
 
         self.detail_label = QLabel("")
         self.detail_label.setObjectName("Hint")
+        # A soft pill sized to its text: readable over white key art without reading as a
+        # second, empty progress bar across the page (2026-11-20, user).
+        self.detail_label.setStyleSheet(
+            "color: rgba(255, 255, 255, 235); background-color: rgba(10, 14, 22, 165); "
+            "border: 1px solid rgba(255, 255, 255, 28); padding: 3px 10px; border-radius: 10px;"
+        )
         self.detail_label.setWordWrap(True)
-        copy.addWidget(self.detail_label)
+        copy.addWidget(self.detail_label, 0, Qt.AlignmentFlag.AlignLeft)
 
         # Informational note from the backend (e.g. "coming to Steam").
         self.notice_label = QLabel("")
@@ -492,6 +572,18 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         self._notice_kind = ""
         self._notice_open: bool | None = None  # None: whole before install, short after
         copy.addWidget(self.notice_label)
+        # The scrims leave the top right of light key art bright; a soft shadow keeps the lines
+        # under the title readable there (2026-11-20 user simulation).
+        for label in (
+            self.title,
+            self.backend_label,
+            self.version_label,
+            self.choice_label,
+            self.account_label,
+            self.detail_label,
+            self.notice_label,
+        ):
+            _text_shadow(label)
         copy.addStretch(1)
 
         self.primary = QPushButton("LAUNCH")
@@ -605,6 +697,15 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         )
         self.steam_setup_btn.setVisible(False)
         self.steam_setup_btn.clicked.connect(self.steam_setup_requested.emit)
+        self.safety = QPushButton(i18n.tr("Safety check"))
+        self.safety.setObjectName("GhostButton")
+        self.safety.setToolTip(
+            i18n.tr(
+                "Looks for signs of known attacks in this game's files. "
+                "It only reads: nothing is changed or uploaded."
+            )
+        )
+        self.safety.clicked.connect(lambda: self.safety_check_requested.emit(self._profile))
         self.logs = QPushButton("Open logs")
         self.logs.setObjectName("GhostButton")
         self.logs.clicked.connect(self._open_logs)
@@ -619,11 +720,18 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
             self.verify,
             self.repair_btn,
             self.steam_setup_btn,
+            self.safety,
             self.logs,
             self.report,
         ):
             secondary.addWidget(button)
         copy.addLayout(secondary)
+
+        self.safety_status = QLabel("")
+        self.safety_status.setObjectName("Muted")
+        self.safety_status.setWordWrap(True)
+        self.safety_status.setVisible(False)
+        copy.addWidget(self.safety_status)
 
         self.remember = QCheckBox(_REMEMBER_TEXT)
         self.remember.setToolTip(_REMEMBER_TIP)
@@ -649,6 +757,10 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         art_layout.addWidget(self.art_label)
         hero_layout.addWidget(self.art, 0, Qt.AlignmentFlag.AlignTop)
 
+        # The header keeps its own height: without news (or console) to fill the page it used to
+        # take the spare room and push LAUNCH to the bottom (user 2026-11-21). The spare room goes
+        # to the spacer added last instead.
+        hero.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         root.addWidget(hero)
 
         # ---- operation banners (official media) ---------------------------
@@ -766,6 +878,8 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         self.console.setMaximumBlockCount(5000)
         self.console.setPlaceholderText("Nadare's progress messages will appear here…")
         root.addWidget(self.console, 1)
+        # Takes the spare height only while nothing with a stretch (news, console) is shown.
+        root.addStretch(0)
 
         self._set_console_expanded(self._console_preference)
         self._refresh_actions()
@@ -814,6 +928,39 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         self._render_notice()
 
     # ---- profile -----------------------------------------------------------
+    def set_safety_result(self, result: safetycheck.SafetyResult | None) -> None:
+        """Show the latest result; a compromise keeps its banner until dismissed.
+
+        A no-list answer is not a finding: nothing was checked, so nothing stays on the page.
+        """
+        if result is None or result.level == safetycheck.NO_LIST:
+            self.safety_status.setText("")
+            self.safety_status.setVisible(False)
+            self.safety_banner.setVisible(False)
+            return
+        if result.level == safetycheck.CANCELLED or result.cancelled:
+            return  # nothing was learned: the previous answer stays on screen
+        self.safety_status.setText(safetycheck.result_summary(result))
+        self.safety_status.setVisible(True)
+        keep_warning = (
+            result.truncated
+            or result.level in (safetycheck.INCOMPLETE, safetycheck.ERROR)
+        ) and not self.safety_banner.isHidden()
+        self.safety_banner.setVisible(
+            not result.dismissed and (
+                result.level == safetycheck.COMPROMISED or result.compromise_warning or keep_warning
+            )
+        )
+
+    def set_safety_running(self, running: bool) -> None:
+        """One manual run at a time; the button says what is happening."""
+        self.safety.setEnabled(not running)
+        self.safety.setText(i18n.tr("Checking…") if running else i18n.tr("Safety check"))
+
+    def _dismiss_safety(self) -> None:
+        self.safety_banner.setVisible(False)
+        self.safety_dismissed.emit(self._profile)
+
     def set_profile(
         self,
         name: str,
@@ -832,6 +979,8 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         self._media_seq += 1
         self._status = None
         self._found_copy = None  # an offer for one game never follows to the next
+        self._unfinished_removal = []
+        self._busy_elsewhere = False
         # Until this game's status lands, the previous game's predownload button must not show.
         self._predownload_version = ""
         self._predownload_ready = False
@@ -845,6 +994,7 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         self._started_at = 0.0
         self._last_step_at = 0.0
         self._busy_op = None
+        self._operation_detail = ""
         self._sandbox_active = None
         self._paused_op = None
         self._failed_op = None
@@ -864,7 +1014,12 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         self.choice_label.setText(choice)
         self.choice_label.setVisible(bool(choice))
         self.hero.set_source(None)
+        self.art.setVisible(True)  # until this game's hero art lands, the poster is the art
         self.banners.set_banners([])
+        self.safety_status.setText("")
+        self.safety_status.setVisible(False)
+        self.safety_banner.setVisible(False)
+        self.set_safety_running(False)
         self.console.clear()
         self._last_line = ""
         self.step_label.setText("")
@@ -927,13 +1082,19 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
                 if seq != self._media_seq:
                     return
                 try:
+                    if pixmap is None or pixmap.isNull():
+                        self.hero.set_source(None)
+                        self.art.setVisible(True)
+                        return
                     self.hero.set_source(pixmap)
+                    self.art.setVisible(False)
                 except RuntimeError:
                     return  # the widget was destroyed while the decode was pending
 
-            self.images.request([str(hero_path)], 1280, 300, apply, crop=True)
+            self.images.request([str(hero_path)], 1600, 640, apply, crop=True)
         else:
             self.hero.set_source(None)
+            self.art.setVisible(True)
         self.banners.set_banners(list(banners or []))
 
     def wait_for_images(self, timeout_ms: int = 5000) -> None:
@@ -1004,12 +1165,7 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
             self._relayout_news()
 
     def _open_external(self, url: str) -> None:
-        if not url:
-            return
-        qurl = QUrl(url)
-        if qurl.scheme().lower() not in ("http", "https") or not qurl.host():
-            return
-        QDesktopServices.openUrl(qurl)
+        open_external(url)
 
     def _forget_last_line(self, *_args: object) -> None:
         self._last_line = ""

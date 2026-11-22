@@ -1,0 +1,1541 @@
+{
+ "flxpc_world": {
+  "Blue Archive": {
+   "q1_gamefinder_recorded_game": null,
+   "q1_gamefolders_placement": null,
+   "q1_libraries_game_folder": null,
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [],
+   "q2_removal_removable_trees": [],
+   "q5_library_of_folder": null,
+   "q5_library_of_game_dir": null,
+   "q8_folders_missing": [],
+   "q8_has_game_folders": false
+  },
+  "CZN": {
+   "q1_gamefinder_recorded_game": "{MNT}/Games/Nadare/Chaos Zero Nightmare",
+   "q1_gamefolders_placement": {
+    "folder": "{MNT}/Games/Nadare/Chaos Zero Nightmare",
+    "library": "{MNT}/Games",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{MNT}/Games/Nadare/Chaos Zero Nightmare",
+   "q1_relink_managed_home": "{MNT}/Games/Nadare/Chaos Zero Nightmare",
+   "q1_removal_wrapper_folders": [
+    "{MNT}/Games/Nadare/Chaos Zero Nightmare"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "prefix",
+     "path": "{MNT}/Games/Nadare/Chaos Zero Nightmare/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by CZN",
+    "relink_inside_other": "CZN",
+    "removal_shared_with": "CZN"
+   },
+   "q5_library_of_folder": "{MNT}/Games",
+   "q5_library_of_game_dir": "{MNT}/Games",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  },
+  "FGO": {
+   "q1_gamefinder_recorded_game": "{HOME}/.local/share",
+   "q1_gamefolders_placement": {
+    "folder": "{HOME}/.local/share/lepton-nv",
+    "library": null,
+    "made_by_nadare": false,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": null,
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [],
+   "q2_removal_removable_trees": [
+    {
+     "key": "prefix",
+     "path": "{HOME}/.local/share/lepton-nv",
+     "reason": "Nadare did not create this folder, so it will not delete it (remove it yourself if you want it gone)",
+     "safe": false
+    }
+   ],
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by FGO",
+    "relink_inside_other": "FGO",
+    "removal_shared_with": "FGO"
+   },
+   "q5_library_of_folder": null,
+   "q5_library_of_game_dir": null,
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  },
+  "STELLASORA": {
+   "q1_gamefinder_recorded_game": "{MNT}/Games/Stella Sora/YostarGames",
+   "q1_gamefolders_placement": {
+    "folder": "{MNT}/Games/Stella Sora/YostarGames/StellaSora_EN",
+    "library": null,
+    "made_by_nadare": false,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": null,
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{MNT}/Games/Stella Sora/YostarGames/StellaSora_EN",
+     "reason": "Nadare did not create this folder, so it will not delete it (remove it yourself if you want it gone)",
+     "safe": false
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by STELLASORA",
+    "relink_inside_other": "STELLASORA",
+    "removal_shared_with": "STELLASORA"
+   },
+   "q5_library_of_folder": null,
+   "q5_library_of_game_dir": null,
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  },
+  "aether-gazer": {
+   "q1_gamefinder_recorded_game": "{DATA}/profiles/aether-gazer",
+   "q1_gamefolders_placement": {
+    "folder": "{DATA}/profiles/aether-gazer",
+    "library": "{DATA}/profiles",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{DATA}/profiles/aether-gazer",
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [
+    "{DATA}/profiles/aether-gazer"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{DATA}/profiles/aether-gazer/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{DATA}/profiles/aether-gazer/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by aether-gazer",
+    "relink_inside_other": "aether-gazer",
+    "removal_shared_with": "aether-gazer"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by aether-gazer",
+    "relink_inside_other": "aether-gazer",
+    "removal_shared_with": "aether-gazer"
+   },
+   "q5_library_of_folder": "{DATA}/profiles",
+   "q5_library_of_game_dir": "{DATA}/profiles",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  },
+  "arknights": {
+   "q1_gamefinder_recorded_game": "{MNT}/Games/Nadare/Arknights",
+   "q1_gamefolders_placement": {
+    "folder": "{MNT}/Games/Nadare/Arknights",
+    "library": "{MNT}/Games",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{MNT}/Games/Nadare/Arknights",
+   "q1_relink_managed_home": "{MNT}/Games/Nadare/Arknights",
+   "q1_removal_wrapper_folders": [
+    "{MNT}/Games/Nadare/Arknights"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{MNT}/Games/Nadare/Arknights/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{MNT}/Games/Nadare/Arknights/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by arknights",
+    "relink_inside_other": "arknights",
+    "removal_shared_with": "arknights"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by arknights",
+    "relink_inside_other": "arknights",
+    "removal_shared_with": "arknights"
+   },
+   "q5_library_of_folder": "{MNT}/Games",
+   "q5_library_of_game_dir": "{MNT}/Games",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  },
+  "arknights-endfield": {
+   "q1_gamefinder_recorded_game": "{MNT}/Games/Nadare/Arknights Endfield",
+   "q1_gamefolders_placement": {
+    "folder": "{MNT}/Games/Nadare/Arknights Endfield",
+    "library": "{MNT}/Games",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{MNT}/Games/Nadare/Arknights Endfield",
+   "q1_relink_managed_home": "{MNT}/Games/Nadare/Arknights Endfield",
+   "q1_removal_wrapper_folders": [
+    "{MNT}/Games/Nadare/Arknights Endfield"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{MNT}/Games/Nadare/Arknights Endfield/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{MNT}/Games/Nadare/Arknights Endfield/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by arknights-endfield",
+    "relink_inside_other": "arknights-endfield",
+    "removal_shared_with": "arknights-endfield"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by arknights-endfield",
+    "relink_inside_other": "arknights-endfield",
+    "removal_shared_with": "arknights-endfield"
+   },
+   "q5_library_of_folder": "{MNT}/Games",
+   "q5_library_of_game_dir": "{MNT}/Games",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  },
+  "brown-dust-2": {
+   "q1_gamefinder_recorded_game": "{DATA}/profiles/brown-dust-2",
+   "q1_gamefolders_placement": {
+    "folder": "{DATA}/profiles/brown-dust-2",
+    "library": "{DATA}/profiles",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{DATA}/profiles/brown-dust-2",
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [
+    "{DATA}/profiles/brown-dust-2"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{DATA}/profiles/brown-dust-2/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{DATA}/profiles/brown-dust-2/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by brown-dust-2",
+    "relink_inside_other": "brown-dust-2",
+    "removal_shared_with": "brown-dust-2"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by brown-dust-2",
+    "relink_inside_other": "brown-dust-2",
+    "removal_shared_with": "brown-dust-2"
+   },
+   "q5_library_of_folder": "{DATA}/profiles",
+   "q5_library_of_game_dir": "{DATA}/profiles",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  },
+  "girls-frontline-2-haoplay-global-build": {
+   "q1_gamefinder_recorded_game": "{MNT}/Games/Nadare/Girls' Frontline 2 (Haoplay global build)",
+   "q1_gamefolders_placement": {
+    "folder": "{MNT}/Games/Nadare/Girls' Frontline 2 (Haoplay global build)",
+    "library": "{MNT}/Games",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{MNT}/Games/Nadare/Girls' Frontline 2 (Haoplay global build)",
+   "q1_relink_managed_home": "{MNT}/Games/Nadare/Girls' Frontline 2 (Haoplay global build)",
+   "q1_removal_wrapper_folders": [
+    "{MNT}/Games/Nadare/Girls' Frontline 2 (Haoplay global build)"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{MNT}/Games/Nadare/Girls' Frontline 2 (Haoplay global build)/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{MNT}/Games/Nadare/Girls' Frontline 2 (Haoplay global build)/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by girls-frontline-2-haoplay-global-build",
+    "relink_inside_other": "girls-frontline-2-haoplay-global-build",
+    "removal_shared_with": "girls-frontline-2-haoplay-global-build"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by girls-frontline-2-haoplay-global-build",
+    "relink_inside_other": "girls-frontline-2-haoplay-global-build",
+    "removal_shared_with": "girls-frontline-2-haoplay-global-build"
+   },
+   "q5_library_of_folder": "{MNT}/Games",
+   "q5_library_of_game_dir": "{MNT}/Games",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  },
+  "honkai-star-rail": {
+   "q1_gamefinder_recorded_game": "{DATA}/profiles/honkai-star-rail",
+   "q1_gamefolders_placement": {
+    "folder": "{DATA}/profiles/honkai-star-rail",
+    "library": "{DATA}/profiles",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{DATA}/profiles/honkai-star-rail",
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [
+    "{DATA}/profiles/honkai-star-rail"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{DATA}/profiles/honkai-star-rail/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{DATA}/profiles/honkai-star-rail/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by honkai-star-rail",
+    "relink_inside_other": "honkai-star-rail",
+    "removal_shared_with": "honkai-star-rail"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by honkai-star-rail",
+    "relink_inside_other": "honkai-star-rail",
+    "removal_shared_with": "honkai-star-rail"
+   },
+   "q5_library_of_folder": "{DATA}/profiles",
+   "q5_library_of_game_dir": "{DATA}/profiles",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  },
+  "neverness-to-everness": {
+   "q1_gamefinder_recorded_game": "{DATA}/profiles/neverness-to-everness",
+   "q1_gamefolders_placement": {
+    "folder": "{DATA}/profiles/neverness-to-everness",
+    "library": "{DATA}/profiles",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{DATA}/profiles/neverness-to-everness",
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [
+    "{DATA}/profiles/neverness-to-everness"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{DATA}/profiles/neverness-to-everness/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{DATA}/profiles/neverness-to-everness/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by neverness-to-everness",
+    "relink_inside_other": "neverness-to-everness",
+    "removal_shared_with": "neverness-to-everness"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by neverness-to-everness",
+    "relink_inside_other": "neverness-to-everness",
+    "removal_shared_with": "neverness-to-everness"
+   },
+   "q5_library_of_folder": "{DATA}/profiles",
+   "q5_library_of_game_dir": "{DATA}/profiles",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  },
+  "nikke": {
+   "q1_gamefinder_recorded_game": "{MNT}/Games/Nadare/NIKKE Goddess of Victory",
+   "q1_gamefolders_placement": {
+    "folder": "{MNT}/Games/Nadare/NIKKE Goddess of Victory",
+    "library": "{MNT}/Games",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{MNT}/Games/Nadare/NIKKE Goddess of Victory",
+   "q1_relink_managed_home": "{MNT}/Games/Nadare/NIKKE Goddess of Victory",
+   "q1_removal_wrapper_folders": [
+    "{MNT}/Games/Nadare/NIKKE Goddess of Victory"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "prefix",
+     "path": "{MNT}/Games/Nadare/NIKKE Goddess of Victory/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by nikke",
+    "relink_inside_other": "nikke",
+    "removal_shared_with": "nikke"
+   },
+   "q5_library_of_folder": "{MNT}/Games",
+   "q5_library_of_game_dir": "{MNT}/Games",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  },
+  "punishing-gray-raven": {
+   "q1_gamefinder_recorded_game": "{MNT}/Games/Nadare/Punishing Gray Raven",
+   "q1_gamefolders_placement": {
+    "folder": "{MNT}/Games/Nadare/Punishing Gray Raven",
+    "library": "{MNT}/Games",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{MNT}/Games/Nadare/Punishing Gray Raven",
+   "q1_relink_managed_home": "{MNT}/Games/Nadare/Punishing Gray Raven",
+   "q1_removal_wrapper_folders": [
+    "{MNT}/Games/Nadare/Punishing Gray Raven"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{MNT}/Games/Nadare/Punishing Gray Raven/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{MNT}/Games/Nadare/Punishing Gray Raven/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by punishing-gray-raven",
+    "relink_inside_other": "punishing-gray-raven",
+    "removal_shared_with": "punishing-gray-raven"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by punishing-gray-raven",
+    "relink_inside_other": "punishing-gray-raven",
+    "removal_shared_with": "punishing-gray-raven"
+   },
+   "q5_library_of_folder": "{MNT}/Games",
+   "q5_library_of_game_dir": "{MNT}/Games",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  },
+  "wuthering-waves": {
+   "q1_gamefinder_recorded_game": "{DATA}/profiles/wuthering-waves",
+   "q1_gamefolders_placement": {
+    "folder": "{DATA}/profiles/wuthering-waves",
+    "library": "{DATA}/profiles",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{DATA}/profiles/wuthering-waves",
+   "q1_relink_managed_home": "{DATA}/profiles/wuthering-waves",
+   "q1_removal_wrapper_folders": [
+    "{DATA}/profiles/wuthering-waves"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{DATA}/profiles/wuthering-waves/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{DATA}/profiles/wuthering-waves/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by wuthering-waves",
+    "relink_inside_other": "wuthering-waves",
+    "removal_shared_with": "wuthering-waves"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by wuthering-waves",
+    "relink_inside_other": "wuthering-waves",
+    "removal_shared_with": "wuthering-waves"
+   },
+   "q5_library_of_folder": "{DATA}/profiles",
+   "q5_library_of_game_dir": "{DATA}/profiles",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  },
+  "zenless-zone-zero": {
+   "q1_gamefinder_recorded_game": "{MNT}/Games/Nadare/Zenless Zone Zero",
+   "q1_gamefolders_placement": {
+    "folder": "{MNT}/Games/Nadare/Zenless Zone Zero",
+    "library": "{MNT}/Games",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{MNT}/Games/Nadare/Zenless Zone Zero",
+   "q1_relink_managed_home": "{MNT}/Games/Nadare/Zenless Zone Zero",
+   "q1_removal_wrapper_folders": [
+    "{MNT}/Games/Nadare/Zenless Zone Zero"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{MNT}/Games/Nadare/Zenless Zone Zero/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{MNT}/Games/Nadare/Zenless Zone Zero/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by zenless-zone-zero",
+    "relink_inside_other": "zenless-zone-zero",
+    "removal_shared_with": "zenless-zone-zero"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by zenless-zone-zero",
+    "relink_inside_other": "zenless-zone-zero",
+    "removal_shared_with": "zenless-zone-zero"
+   },
+   "q5_library_of_folder": "{MNT}/Games",
+   "q5_library_of_game_dir": "{MNT}/Games",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s01_add_game_library": {
+  "bd2": {
+   "q1_gamefinder_recorded_game": "{LIB}/Nadare/Brown Dust 2",
+   "q1_gamefolders_placement": {
+    "folder": "{LIB}/Nadare/Brown Dust 2",
+    "library": "{LIB}",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{LIB}/Nadare/Brown Dust 2",
+   "q1_relink_managed_home": "{LIB}/Nadare/Brown Dust 2",
+   "q1_removal_wrapper_folders": [
+    "{LIB}/Nadare/Brown Dust 2"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{LIB}/Nadare/Brown Dust 2/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{LIB}/Nadare/Brown Dust 2/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Brown Dust 2",
+    "relink_inside_other": "Brown Dust 2",
+    "removal_shared_with": "bd2"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Brown Dust 2",
+    "relink_inside_other": "Brown Dust 2",
+    "removal_shared_with": "bd2"
+   },
+   "q5_library_of_folder": "{LIB}",
+   "q5_library_of_game_dir": "{LIB}",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s02_default_library_no_records": {
+  "aether-gazer": {
+   "q1_gamefinder_recorded_game": "{DATA}/profiles/aether-gazer",
+   "q1_gamefolders_placement": {
+    "folder": "{DATA}/profiles/aether-gazer",
+    "library": "{DATA}/profiles",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{DATA}/profiles/aether-gazer",
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [
+    "{DATA}/profiles/aether-gazer"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{DATA}/profiles/aether-gazer/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{DATA}/profiles/aether-gazer/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Aether Gazer",
+    "relink_inside_other": "Aether Gazer",
+    "removal_shared_with": "aether-gazer"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Aether Gazer",
+    "relink_inside_other": "Aether Gazer",
+    "removal_shared_with": "aether-gazer"
+   },
+   "q5_library_of_folder": "{DATA}/profiles",
+   "q5_library_of_game_dir": "{DATA}/profiles",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s03_default_library_trees_no_dirs": {
+  "wuthering-waves": {
+   "q1_gamefinder_recorded_game": "{DATA}/profiles/wuthering-waves",
+   "q1_gamefolders_placement": {
+    "folder": "{DATA}/profiles/wuthering-waves",
+    "library": "{DATA}/profiles",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{DATA}/profiles/wuthering-waves",
+   "q1_relink_managed_home": "{DATA}/profiles/wuthering-waves",
+   "q1_removal_wrapper_folders": [
+    "{DATA}/profiles/wuthering-waves"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{DATA}/profiles/wuthering-waves/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{DATA}/profiles/wuthering-waves/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Wuthering Waves",
+    "relink_inside_other": "Wuthering Waves",
+    "removal_shared_with": "wuthering-waves"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Wuthering Waves",
+    "relink_inside_other": "Wuthering Waves",
+    "removal_shared_with": "wuthering-waves"
+   },
+   "q5_library_of_folder": "{DATA}/profiles",
+   "q5_library_of_game_dir": "{DATA}/profiles",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s04_b13_no_paths": {
+  "genshin": {
+   "q1_gamefinder_recorded_game": "{LIB}/Nadare/Genshin Impact",
+   "q1_gamefolders_placement": {
+    "folder": "{LIB}/Nadare/Genshin Impact",
+    "library": "{LIB}",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{LIB}/Nadare/Genshin Impact",
+   "q1_relink_managed_home": "{LIB}/Nadare/Genshin Impact",
+   "q1_removal_wrapper_folders": [
+    "{LIB}/Nadare/Genshin Impact"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{LIB}/Nadare/Genshin Impact/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{LIB}/Nadare/Genshin Impact/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Genshin Impact",
+    "relink_inside_other": "Genshin Impact",
+    "removal_shared_with": "genshin"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Genshin Impact",
+    "relink_inside_other": "Genshin Impact",
+    "removal_shared_with": "genshin"
+   },
+   "q5_library_of_folder": "{LIB}",
+   "q5_library_of_game_dir": "{LIB}",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s05_legacy_layout_with_paths": {
+  "hsr": {
+   "q1_gamefinder_recorded_game": "{LIB}/Nadare/Honkai Star Rail",
+   "q1_gamefolders_placement": {
+    "folder": "{LIB}/Nadare/Honkai Star Rail",
+    "library": "{LIB}",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{LIB}/Nadare/Honkai Star Rail",
+   "q1_relink_managed_home": "{LIB}/Nadare/Honkai Star Rail",
+   "q1_removal_wrapper_folders": [
+    "{LIB}/Nadare/Honkai Star Rail"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{LIB}/Nadare/Honkai Star Rail/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{LIB}/Nadare/Honkai Star Rail/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Honkai: Star Rail",
+    "relink_inside_other": "Honkai: Star Rail",
+    "removal_shared_with": "hsr"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Honkai: Star Rail",
+    "relink_inside_other": "Honkai: Star Rail",
+    "removal_shared_with": "hsr"
+   },
+   "q5_library_of_folder": "{LIB}",
+   "q5_library_of_game_dir": "{LIB}",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s06_b21_nested_container": {
+  "zzz": {
+   "q1_gamefinder_recorded_game": "{LIB}/Nadare/Nadare/Zenless Zone Zero",
+   "q1_gamefolders_placement": {
+    "folder": "{LIB}/Nadare/Nadare/Zenless Zone Zero",
+    "library": "{LIB}/Nadare",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{LIB}/Nadare/Nadare/Zenless Zone Zero",
+   "q1_relink_managed_home": "{LIB}/Nadare/Nadare/Zenless Zone Zero",
+   "q1_removal_wrapper_folders": [
+    "{LIB}/Nadare/Nadare/Zenless Zone Zero"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{LIB}/Nadare/Nadare/Zenless Zone Zero/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{LIB}/Nadare/Nadare/Zenless Zone Zero/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Zenless Zone Zero",
+    "relink_inside_other": "Zenless Zone Zero",
+    "removal_shared_with": "zzz"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Zenless Zone Zero",
+    "relink_inside_other": "Zenless Zone Zero",
+    "removal_shared_with": "zzz"
+   },
+   "q5_library_of_folder": "{LIB}/Nadare",
+   "q5_library_of_game_dir": "{LIB}",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s07_moved_into_profiles_nadare": {
+  "pgr": {
+   "q1_gamefinder_recorded_game": "{DATA}/profiles/Nadare/Punishing Gray Raven",
+   "q1_gamefolders_placement": {
+    "folder": "{DATA}/profiles/Nadare/Punishing Gray Raven",
+    "library": "{DATA}/profiles",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{DATA}/profiles/Nadare/Punishing Gray Raven",
+   "q1_relink_managed_home": "{DATA}/profiles/Nadare/Punishing Gray Raven",
+   "q1_removal_wrapper_folders": [
+    "{DATA}/profiles/Nadare/Punishing Gray Raven"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{DATA}/profiles/Nadare/Punishing Gray Raven/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{DATA}/profiles/Nadare/Punishing Gray Raven/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Punishing: Gray Raven",
+    "relink_inside_other": "Punishing: Gray Raven",
+    "removal_shared_with": "pgr"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Punishing: Gray Raven",
+    "relink_inside_other": "Punishing: Gray Raven",
+    "removal_shared_with": "pgr"
+   },
+   "q5_library_of_folder": "{DATA}/profiles",
+   "q5_library_of_game_dir": "{DATA}/profiles",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s08_imported_elsewhere": {
+  "wuwa-import": {
+   "q1_gamefinder_recorded_game": "{HOME}/Games/WuWa",
+   "q1_gamefolders_placement": {
+    "folder": "{HOME}/Games/WuWa/Wuthering Waves Game",
+    "library": null,
+    "made_by_nadare": false,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": null,
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{HOME}/Games/WuWa/Wuthering Waves Game",
+     "reason": "Nadare did not create this folder, so it will not delete it (remove it yourself if you want it gone)",
+     "safe": false
+    },
+    {
+     "key": "prefix",
+     "path": "{HOME}/Games/WuWa/prefix",
+     "reason": "Nadare did not create this folder, so it will not delete it (remove it yourself if you want it gone)",
+     "safe": false
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Wuthering Waves",
+    "relink_inside_other": "Wuthering Waves",
+    "removal_shared_with": "wuwa-import"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Wuthering Waves",
+    "relink_inside_other": "Wuthering Waves",
+    "removal_shared_with": "wuwa-import"
+   },
+   "q5_library_of_folder": null,
+   "q5_library_of_game_dir": null,
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s09_player_prefix_nadare_install": {
+  "endfield": {
+   "q1_gamefinder_recorded_game": "{DATA}/profiles/endfield",
+   "q1_gamefolders_placement": {
+    "folder": "{DATA}/profiles/endfield",
+    "library": "{DATA}/profiles",
+    "made_by_nadare": true,
+    "stray": {
+     "prefix": ""
+    }
+   },
+   "q1_libraries_game_folder": "{DATA}/profiles/endfield",
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [
+    "{DATA}/profiles/endfield"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{DATA}/profiles/endfield/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{HOME}/prefixes/endfield",
+     "reason": "Nadare did not create this folder, so it will not delete it (remove it yourself if you want it gone)",
+     "safe": false
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Arknights: Endfield",
+    "relink_inside_other": "Arknights: Endfield",
+    "removal_shared_with": "endfield"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Arknights: Endfield",
+    "relink_inside_other": "Arknights: Endfield",
+    "removal_shared_with": "endfield"
+   },
+   "q5_library_of_folder": "{DATA}/profiles",
+   "q5_library_of_game_dir": "{DATA}/profiles",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s10_picked_library_folder_no_trees": {
+  "mongil": {
+   "q1_gamefinder_recorded_game": "{LIB}/Nadare/Mongil",
+   "q1_gamefolders_placement": {
+    "folder": "{LIB}/Nadare/Mongil",
+    "library": "{LIB}",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{LIB}/Nadare/Mongil",
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [
+    "{LIB}/Nadare/Mongil"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{LIB}/Nadare/Mongil/install",
+     "reason": "Nadare did not create this folder, so it will not delete it (remove it yourself if you want it gone)",
+     "safe": false
+    },
+    {
+     "key": "prefix",
+     "path": "{LIB}/Nadare/Mongil/prefix",
+     "reason": "Nadare did not create this folder, so it will not delete it (remove it yourself if you want it gone)",
+     "safe": false
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Mongil: Star Dive",
+    "relink_inside_other": "Mongil: Star Dive",
+    "removal_shared_with": "mongil"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Mongil: Star Dive",
+    "relink_inside_other": "Mongil: Star Dive",
+    "removal_shared_with": "mongil"
+   },
+   "q5_library_of_folder": "{LIB}",
+   "q5_library_of_game_dir": "{LIB}",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s11_launcher_not_installed_yet": {
+  "nikke": {
+   "q1_gamefinder_recorded_game": "{DATA}/profiles/nikke",
+   "q1_gamefolders_placement": {
+    "folder": "{DATA}/profiles/nikke",
+    "library": "{DATA}/profiles",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{DATA}/profiles/nikke",
+   "q1_relink_managed_home": "{DATA}/profiles/nikke",
+   "q1_removal_wrapper_folders": [
+    "{DATA}/profiles/nikke"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "prefix",
+     "path": "{DATA}/profiles/nikke/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by NIKKE",
+    "relink_inside_other": "NIKKE",
+    "removal_shared_with": "nikke"
+   },
+   "q5_library_of_folder": "{DATA}/profiles",
+   "q5_library_of_game_dir": "{DATA}/profiles",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s12_prefix_only_kind": {
+  "czn": {
+   "q1_gamefinder_recorded_game": "{LIB}/Nadare/Chaos Zero Nightmare",
+   "q1_gamefolders_placement": {
+    "folder": "{LIB}/Nadare/Chaos Zero Nightmare",
+    "library": "{LIB}",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{LIB}/Nadare/Chaos Zero Nightmare",
+   "q1_relink_managed_home": "{LIB}/Nadare/Chaos Zero Nightmare",
+   "q1_removal_wrapper_folders": [
+    "{LIB}/Nadare/Chaos Zero Nightmare"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{LIB}/Nadare/Chaos Zero Nightmare/prefix/drive_c/CZN",
+     "reason": "Nadare did not create this folder, so it will not delete it (remove it yourself if you want it gone)",
+     "safe": false
+    },
+    {
+     "key": "prefix",
+     "path": "{LIB}/Nadare/Chaos Zero Nightmare/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Chaos Zero Nightmare",
+    "relink_inside_other": "Chaos Zero Nightmare",
+    "removal_shared_with": "czn"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Chaos Zero Nightmare",
+    "relink_inside_other": "Chaos Zero Nightmare",
+    "removal_shared_with": "czn"
+   },
+   "q5_library_of_folder": "{LIB}",
+   "q5_library_of_game_dir": "{LIB}",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s13_generic_wine_default_prefix": {
+  "my-tool": {
+   "q1_gamefinder_recorded_game": null,
+   "q1_gamefolders_placement": null,
+   "q1_libraries_game_folder": null,
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [],
+   "q2_removal_removable_trees": [
+    {
+     "key": "prefix",
+     "path": "{DATA}/profiles/my-tool/prefix",
+     "reason": "",
+     "safe": true
+    }
+   ],
+   "q5_library_of_folder": null,
+   "q5_library_of_game_dir": null,
+   "q8_folders_missing": [],
+   "q8_has_game_folders": false
+  }
+ },
+ "s14_steam_game": {
+  "Blue Archive": {
+   "q1_gamefinder_recorded_game": null,
+   "q1_gamefolders_placement": null,
+   "q1_libraries_game_folder": null,
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [],
+   "q2_removal_removable_trees": [],
+   "q5_library_of_folder": null,
+   "q5_library_of_game_dir": null,
+   "q8_folders_missing": [],
+   "q8_has_game_folders": false
+  }
+ },
+ "s15_prefix_moved_out": {
+  "aether": {
+   "q1_gamefinder_recorded_game": "{LIB}/Nadare/Aether Gazer",
+   "q1_gamefolders_placement": {
+    "folder": "{LIB}/Nadare/Aether Gazer",
+    "library": "{LIB}",
+    "made_by_nadare": true,
+    "stray": {
+     "prefix": ""
+    }
+   },
+   "q1_libraries_game_folder": "{LIB}/Nadare/Aether Gazer",
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [
+    "{LIB}/Nadare/Aether Gazer"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{LIB}/Nadare/Aether Gazer/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{LIB2}/Aether Gazer prefix",
+     "reason": "it is outside the game's own folder, so it is kept (remove it yourself if you want it gone)",
+     "safe": false
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Aether Gazer",
+    "relink_inside_other": "Aether Gazer",
+    "removal_shared_with": "aether"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Aether Gazer",
+    "relink_inside_other": "Aether Gazer",
+    "removal_shared_with": "aether"
+   },
+   "q5_library_of_folder": "{LIB}",
+   "q5_library_of_game_dir": "{LIB}",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s16_linked_profile_folder": {
+  "gone": {
+   "q1_gamefinder_recorded_game": null,
+   "q1_gamefolders_placement": null,
+   "q1_libraries_game_folder": null,
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [],
+   "q2_removal_removable_trees": [
+    {
+     "key": "prefix",
+     "path": "{HOME}/Documents/prefix",
+     "reason": "Nadare did not create this folder, so it will not delete it (remove it yourself if you want it gone)",
+     "safe": false
+    }
+   ],
+   "q5_library_of_folder": null,
+   "q5_library_of_game_dir": null,
+   "q8_folders_missing": [],
+   "q8_has_game_folders": false
+  }
+ },
+ "s17_library_drive_missing": {
+  "wuwa": {
+   "q1_gamefinder_recorded_game": "{LIB2}/Nadare/Wuthering Waves",
+   "q1_gamefolders_placement": {
+    "folder": "{LIB2}/Nadare/Wuthering Waves",
+    "library": "{LIB2}",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{LIB2}/Nadare/Wuthering Waves",
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [
+    "{LIB2}/Nadare/Wuthering Waves"
+   ],
+   "q2_removal_removable_trees": [],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Wuthering Waves",
+    "relink_inside_other": "Wuthering Waves",
+    "removal_shared_with": "wuwa"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Wuthering Waves",
+    "relink_inside_other": "Wuthering Waves",
+    "removal_shared_with": "wuwa"
+   },
+   "q5_library_of_folder": "{LIB2}",
+   "q5_library_of_game_dir": "{LIB2}",
+   "q8_folders_missing": [
+    "install_dir",
+    "prefix"
+   ],
+   "q8_has_game_folders": false
+  }
+ },
+ "s18_profile_name_differs_from_folder": {
+  "my-bd2": {
+   "q1_gamefinder_recorded_game": "{DATA}/profiles/Brown Dust 2",
+   "q1_gamefolders_placement": {
+    "folder": "{DATA}/profiles/Brown Dust 2",
+    "library": "{DATA}/profiles",
+    "made_by_nadare": true,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": "{DATA}/profiles/Brown Dust 2",
+   "q1_relink_managed_home": "{DATA}/profiles/Brown Dust 2",
+   "q1_removal_wrapper_folders": [
+    "{DATA}/profiles/Brown Dust 2"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{DATA}/profiles/Brown Dust 2/install",
+     "reason": "is inside nadare's own directories",
+     "safe": false
+    },
+    {
+     "key": "prefix",
+     "path": "{DATA}/profiles/Brown Dust 2/prefix",
+     "reason": "is inside nadare's own directories",
+     "safe": false
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Brown Dust 2",
+    "relink_inside_other": "Brown Dust 2",
+    "removal_shared_with": "my-bd2"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Brown Dust 2",
+    "relink_inside_other": "Brown Dust 2",
+    "removal_shared_with": "my-bd2"
+   },
+   "q5_library_of_folder": "{DATA}/profiles",
+   "q5_library_of_game_dir": "{DATA}/profiles",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s19_prefix_moved_by_hand": {
+  "gfl2": {
+   "q1_gamefinder_recorded_game": "{DATA}/profiles/gfl2",
+   "q1_gamefolders_placement": {
+    "folder": "{DATA}/profiles/gfl2",
+    "library": "{DATA}/profiles",
+    "made_by_nadare": true,
+    "stray": {
+     "prefix": ""
+    }
+   },
+   "q1_libraries_game_folder": "{DATA}/profiles/gfl2",
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [
+    "{DATA}/profiles/gfl2"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{DATA}/profiles/gfl2/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{HOME}/my-prefixes/gfl2",
+     "reason": "Nadare did not create this folder, so it will not delete it (remove it yourself if you want it gone)",
+     "safe": false
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Girls' Frontline 2",
+    "relink_inside_other": "Girls' Frontline 2",
+    "removal_shared_with": "gfl2"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Girls' Frontline 2",
+    "relink_inside_other": "Girls' Frontline 2",
+    "removal_shared_with": "gfl2"
+   },
+   "q5_library_of_folder": "{DATA}/profiles",
+   "q5_library_of_game_dir": "{DATA}/profiles",
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s20_linked_catalog_profile": {
+  "linked": {
+   "q1_gamefinder_recorded_game": "{HOME}/Documents",
+   "q1_gamefolders_placement": {
+    "folder": "{HOME}/Documents/prefix",
+    "library": null,
+    "made_by_nadare": false,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": null,
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [],
+   "q2_removal_removable_trees": [
+    {
+     "key": "prefix",
+     "path": "{HOME}/Documents/prefix",
+     "reason": "Nadare did not create this folder, so it will not delete it (remove it yourself if you want it gone)",
+     "safe": false
+    }
+   ],
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Linked",
+    "relink_inside_other": "Linked",
+    "removal_shared_with": "linked"
+   },
+   "q4_prefix_real": {
+    "prefixguard_unsafe_reason": "already used by Linked",
+    "relink_inside_other": "Linked"
+   },
+   "q5_library_of_folder": null,
+   "q5_library_of_game_dir": null,
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s21_mixed_no_records": {
+  "mixed": {
+   "q1_gamefinder_recorded_game": "{DATA}/profiles/mixed",
+   "q1_gamefolders_placement": {
+    "folder": "{DATA}/profiles/mixed/install",
+    "library": "{DATA}/profiles",
+    "made_by_nadare": false,
+    "stray": {}
+   },
+   "q1_libraries_game_folder": null,
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [
+    "{DATA}/profiles/mixed"
+   ],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{DATA}/profiles/mixed/install",
+     "reason": "",
+     "safe": true
+    },
+    {
+     "key": "prefix",
+     "path": "{HOME}/pfx-mixed",
+     "reason": "Nadare did not create this folder, so it will not delete it (remove it yourself if you want it gone)",
+     "safe": false
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Mixed",
+    "relink_inside_other": "Mixed",
+    "removal_shared_with": "mixed"
+   },
+   "q4_prefix": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Mixed",
+    "relink_inside_other": "Mixed",
+    "removal_shared_with": "mixed"
+   },
+   "q5_library_of_folder": null,
+   "q5_library_of_game_dir": null,
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ },
+ "s22_folders_only_under_extra": {
+  "gone": {
+   "q1_gamefinder_recorded_game": "{HOME}/Games",
+   "q1_gamefolders_placement": null,
+   "q1_libraries_game_folder": null,
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{HOME}/Games/Shared",
+     "reason": "shared with keep",
+     "safe": false
+    }
+   ],
+   "q4_install_dir": {
+    "gamefinder_used_by_other": true,
+    "libraries_used_folders": true,
+    "prefixguard_unsafe_reason": "already used by Gone",
+    "relink_inside_other": "Gone",
+    "removal_shared_with": "gone"
+   },
+   "q5_library_of_folder": null,
+   "q5_library_of_game_dir": null,
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  },
+  "keep": {
+   "q1_gamefinder_recorded_game": "{HOME}/Games",
+   "q1_gamefolders_placement": null,
+   "q1_libraries_game_folder": null,
+   "q1_relink_managed_home": null,
+   "q1_removal_wrapper_folders": [],
+   "q2_removal_removable_trees": [
+    {
+     "key": "install_dir",
+     "path": "{HOME}/Games/Shared",
+     "reason": "shared with gone",
+     "safe": false
+    }
+   ],
+   "q5_library_of_folder": null,
+   "q5_library_of_game_dir": null,
+   "q8_folders_missing": [],
+   "q8_has_game_folders": true
+  }
+ }
+}

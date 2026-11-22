@@ -30,7 +30,11 @@ def test_every_registered_backend_declares_unique_real_options() -> None:
         keys = [option.key for option in options]
         assert len(keys) == len(set(keys)), f"{kind} has duplicate option keys"
         assert len({option.label for option in options}) == len(keys), f"{kind} labels"
-        source = inspect.getsource(inspect.getmodule(cls))
+        # A key read by a shared base (the Sandbox mixin) is as real as one read here.
+        modules = {inspect.getmodule(base) for base in cls.__mro__} - {None}
+        source = "\n".join(
+            inspect.getsource(module) for module in modules if module.__name__.startswith("nadare.")
+        )
         for option in options:
             assert option.kind in OPTION_KINDS
             assert option.key in source, f"{kind}: {option.key!r} is not a real key"

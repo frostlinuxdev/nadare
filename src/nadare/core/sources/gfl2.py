@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import quote
 
 from .. import directdl
+from ..directdl import require_https
 from . import Fetch, default_fetch
 
 FLEX_URL = "https://gf2-launcher-us.sunborngame.com/flexible_config"
@@ -36,10 +37,6 @@ def _field(obj: dict[str, Any], key: str) -> Any:
     return value
 
 
-def _https(url: Any, what: str) -> str:
-    if not isinstance(url, str) or not url.startswith("https://"):
-        raise directdl.DirectError(f"{what} is not an https URL")
-    return url
 
 
 def _join(base: str, *parts: str) -> str:
@@ -81,8 +78,8 @@ def resolve(
     version = str(_field(plug, "ab_resource_version"))
     client_version = str(_field(plug, "game_client_version"))
     resource_version = version.rsplit(".", 1)[-1]
-    cdn = _https(_field(plug, "ab_resource_addr"), "ab_resource_addr")
-    download_addr = _https(_field(plug, "game_download_addr"), "game_download_addr")
+    cdn = require_https(_field(plug, "ab_resource_addr"), "ab_resource_addr")
+    download_addr = require_https(_field(plug, "game_download_addr"), "game_download_addr")
 
     version_url = _join(cdn, "AssetBundles_Windows", resource_version, "Version.txt")
     version_data = b"" if client_only else fetch(version_url, None)
@@ -100,7 +97,9 @@ def resolve(
         dest = directdl.safe_relative_path(DATA_DIR + "AssetBundles_Windows/" + rel)
         url = _join(cdn, "AssetBundles_Windows", ver, quote(rel, safe="/"))
         files.append(
-            directdl.RemoteFile(path=dest, url=_https(url, "asset URL"), size=_int(size), md5=md5)
+            directdl.RemoteFile(
+                path=dest, url=require_https(url, "asset URL"), size=_int(size), md5=md5
+            )
         )
 
     if not client_only:
@@ -118,7 +117,7 @@ def resolve(
         name=directdl.safe_relative_path(ARCHIVE_NAME),
         source=directdl.RemoteFile(
             path=directdl.safe_relative_path(ARCHIVE_NAME),
-            url=_https(_join(download_addr, client_version, ARCHIVE_NAME), "archive URL"),
+            url=require_https(_join(download_addr, client_version, ARCHIVE_NAME), "archive URL"),
         ),
         stream=True,
     )
@@ -135,5 +134,5 @@ def resolve(
 
 
 def resolve_haoplay(fetch: Fetch | None = None) -> directdl.Plan:
-    """The Haoplay global build: only the small client, the game fetches its resources itself."""
-    return resolve(fetch, flex_url=HAOPLAY_FLEX_URL, game_tag="gfl2-haoplay", client_only=True)
+    """The Haoplay global build: the client and the full game data, from Haoplay's CDN."""
+    return resolve(fetch, flex_url=HAOPLAY_FLEX_URL, game_tag="gfl2-haoplay")

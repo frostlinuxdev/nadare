@@ -12,6 +12,7 @@ testing; ``--latest`` (untested) falls back to the published ``.sha512sum``.
 from __future__ import annotations
 
 import fcntl
+import logging
 import os
 import re
 import shutil
@@ -21,16 +22,19 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from . import diskspace, download, paths
+from . import diskspace, download, ownerlease, paths
+from .config import profile_value  # the one reader (#1455 R4-11)
 from .directkinds import CATALOG_KINDS
 from .events import Cancel, Emitter, Event, emitter
+
+log = logging.getLogger("nadare.runners")
 
 GITHUB_API = "https://api.github.com/repos/{repo}/releases"
 
@@ -192,6 +196,44 @@ def runner_version(runner: Path) -> str:
         return (runner / "version").read_text(encoding="utf-8").strip() or runner.name
     except (OSError, ValueError):
         return runner.name
+
+
+_PREFIX_VERSION_RE = re.compile(r'^CURRENT_PREFIX_VERSION\s*=\s*["\']([^"\']+)["\']', re.M)
+
+
+def _small_text(path: Path, limit: int = 1 << 20) -> str | None:
+    """A regular file's start as text; a link or anything odd is ``None``."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            return handle.read(limit).decode("utf-8", "replace")
+    except OSError:
+        return None
+
+
+def prefix_upgrade(
+    prefix: str | os.PathLike[str], runner: str | os.PathLike[str]
+) -> tuple[str, str] | None:
+    """``(old, new)`` when ``runner`` will upgrade ``prefix`` before the game starts (#1422).
+
+    Proton keeps its prefix version in ``<compatdata>/version`` (Nadare's prefix is the
+    compatdata) and upgrades the prefix when its own ``CURRENT_PREFIX_VERSION`` differs: about
+    40 s with no output. ``None`` when nothing will happen or it cannot be told (a new prefix,
+    a runner without that line).
+    """
+    script = _small_text(Path(runner) / "proton")
+    found = _PREFIX_VERSION_RE.search(script or "")
+    old = _small_text(Path(prefix) / "version", 4096)
+    if not found or old is None:
+        return None
+    old = old.strip()
+    new = found.group(1).strip()
+    if not old or old == new:
+        return None
+    return old, new
 
 
 def proton_binary(runner: Path) -> Path:
@@ -497,7 +539,9 @@ def stale_suggestion(info: Mapping[str, Any]) -> str | None:
 def _spec(runner_id: str) -> RunnerSpec:
     if runner_id not in RUNNERS:
         raise RunnerError(f"unknown runner {runner_id!r}; have: {', '.join(RUNNERS)}")
-    return RUNNERS[runner_id]
+    from . import runnerindex
+
+    return runnerindex.effective(RUNNERS[runner_id])
 
 
 # ---------------------------------------------------------------------------
@@ -506,10 +550,26 @@ def _spec(runner_id: str) -> RunnerSpec:
 #: The runner family a profile uses when it names none.
 DEFAULT_FAMILY = "dwproton"
 
+#: Games that default to GE-Proton instead: GFL2 Haoplay's sign-in window only works under
+#: native Wayland on GE-Proton (DW-Proton froze on it). Only where DXVK can run: GE-Proton has
+#: no DXVK-Sarek, so below Vulkan 1.3 these stay on DW-Proton, which switches to Sarek by
+#: itself (user, 2026-11-19).
+GE_DEFAULT_KINDS = frozenset({"direct-gfl2-haoplay"})
+
+
+def default_family(kind: str | None) -> str:
+    """The runner family a game of backend ``kind`` uses when its profile names none."""
+    if kind in GE_DEFAULT_KINDS:
+        from . import graphics  # lazy: the Vulkan probe is only needed for these games
+
+        if graphics.dxvk_ok():
+            return "ge"
+    return DEFAULT_FAMILY
+
 
 def pinned_tag(family: str) -> str | None:
     """The tested release tag for ``family`` (its sha256 is pinned), if any."""
-    spec = RUNNERS.get(family)
+    spec = _spec(family) if family in RUNNERS else None
     return spec.tested[0] if spec is not None and spec.tested is not None else None
 
 
@@ -526,6 +586,34 @@ def is_recommended(runner: str | os.PathLike[str]) -> bool:
     return bool(tag) and matches_tag(Path(str(runner)).name, str(tag))
 
 
+_ARCH_SUFFIX = re.compile(r"[-_.](x86_64|amd64|aarch64|arm64|i[3-6]86)$", re.IGNORECASE)
+
+
+def _name_numbers(name: str) -> tuple[int, ...]:
+    """The version numbers in a build or tag name; the arch suffix (``x86_64``) is not one."""
+    return tuple(int(part) for part in re.findall(r"\d+", _ARCH_SUFFIX.sub("", name)))
+
+
+def standing(runner: str | os.PathLike[str]) -> str:
+    """Where a runner stands against its family's tested pin.
+
+    ``"recommended"`` the pin itself, ``"older"`` an earlier build of the family (tested
+    pins of the past are among these: old, not untested), ``"untested"`` a newer build or one
+    of a family without a pin, ``"custom"`` anything that is not a known family.
+    """
+    family = runner_family(runner)
+    if not family:
+        return "custom"
+    if is_recommended(runner):
+        return "recommended"
+    tag = pinned_tag(family)
+    mine = _name_numbers(Path(str(runner)).name)
+    pin = _name_numbers(tag) if tag else ()
+    if mine and pin and mine < pin:
+        return "older"
+    return "untested"
+
+
 def installed_pinned(family: str = DEFAULT_FAMILY) -> Path | None:
     """The already-installed pinned release of ``family``, or ``None``.
 
@@ -535,10 +623,66 @@ def installed_pinned(family: str = DEFAULT_FAMILY) -> Path | None:
     tag = pinned_tag(family)
     if not tag:
         return None
+    own = set(nadare_runners())
     for path in all_runners():
-        if runner_family(path) == family and matches_tag(path.name, tag):
+        if runner_family(path) != family or not _is_pin_folder(path.name, tag):
+            continue
+        # Nadare's own copy was sha256-checked when it was installed; one from elsewhere must
+        # show it is that release (a b24 player's games all crashed on some other build).
+        if path in own or _is_complete_release(path, tag):
             return path
     return None
+
+
+#: The Windows side of Wine every game loads first; a tree without them cannot start anything.
+_CORE_DLLS = ("ntdll.dll", "kernel32.dll", "kernelbase.dll")
+
+
+def _is_pin_folder(name: str, tag: str) -> bool:
+    """True when folder ``name`` is the release ``tag`` unpacked: the tag, then at most an arch
+    suffix. ``…-11.0-17-x86_64_v3`` or ``…-11.0-17-custom`` is another build (``matches_tag``
+    alone accepted them)."""
+    pattern = r"(?<![0-9A-Za-z])" + re.escape(tag) + r"(?:[-_.](?:x86_64|amd64))?"
+    return re.search(pattern + r"\Z", name, re.IGNORECASE) is not None
+
+
+def _is_complete_release(path: Path, tag: str) -> bool:
+    """Whether a runner Nadare did not install is release ``tag`` and has Wine's core files."""
+    try:
+        words = (path / "version").read_text(encoding="utf-8", errors="replace").split()
+        if tag.lower() not in (word.lower() for word in words):
+            return False
+        if not (path / "proton").is_file() or not (path / "files" / "bin" / "wine").is_file():
+            return False
+        for lib in ("lib", "lib64"):
+            windows = path / "files" / lib / "wine" / "x86_64-windows"
+            if all((windows / dll).is_file() for dll in _CORE_DLLS):
+                return True
+    except (OSError, ValueError):
+        return False
+    return False
+
+
+def launch_facts(proton: str | os.PathLike[str] | None, *, wine: str | None = None) -> dict:
+    """What a launch ran on, for the game page (#1732): the runner's name, whether it is the
+    recommended build (the one :func:`installed_pinned` picks), and the default's tag.
+
+    ``proton`` is the Proton tree used, or ``None`` for plain Wine (``wine`` names its binary).
+    """
+    default = pinned_tag(DEFAULT_FAMILY) or DEFAULT_FAMILY
+    if proton is None:
+        name = f"Wine ({wine})" if wine else "system Wine"
+        return {"runner": name, "runner_recommended": False, "runner_default": default}
+    path = Path(proton)
+    words = runner_version(path).split()
+    name = words[-1] if words else path.name
+    family = runner_family(path)
+    pinned = installed_pinned(family) if family else None
+    try:
+        recommended = pinned is not None and pinned.resolve() == path.resolve()
+    except OSError:
+        recommended = False
+    return {"runner": name, "runner_recommended": recommended, "runner_default": default}
 
 
 def installed_family(family: str) -> Path | None:
@@ -620,11 +764,20 @@ def install(
     rel = _pinned_release(spec) if use_pin else _release(spec, tag)
     tar = rel["tar"]
     size = int(tar.get("size") or 0)
+    forward = say
+
+    def say(event: Event) -> None:
+        # Keep nested download/extract events separate from the game's own transfers.
+        data = dict(event.data or {})
+        data.update(runner=runner_id, tag=rel["tag"])
+        data["runner_finished"] = event.kind == "done" and bool(data.get("path"))
+        forward(Event(event.kind, event.message, event.progress, data))
+
     say(
         Event(
             "status",
             f"{spec.name} {rel['tag']} ({size >> 20} MB) from github.com/{spec.repo}",
-            data={"runner": runner_id, "tag": rel["tag"], "tested": not latest},
+            data={"runner": runner_id, "tag": rel["tag"], "tested": not latest, "total": size},
         )
     )
 
@@ -666,7 +819,13 @@ def install(
             assert found is not None
             say(Event("done", f"installed {found.name}", data={"path": str(found)}))
             return found
-        result = download.download(
+        result = _reuse_verified(
+            tar_path,
+            sha256=pinned or expected_sha256,
+            sha512=expected_sha512,
+            size=size or None,
+            say=say,
+        ) or download.download(
             tar_url,
             tar_path,
             expected_sha256=pinned or expected_sha256,
@@ -698,33 +857,63 @@ def install(
     return dest
 
 
+def _reuse_verified(
+    tar_path: Path,
+    *,
+    sha256: str | None,
+    sha512: str | None,
+    size: int | None,
+    say: Emitter,
+) -> download.DownloadResult | None:
+    """The tarball a crash during the unpack left in the cache, when it still verifies (#1417).
+
+    Only a real file (never a link) that matches the release's own checksum is reused;
+    anything else is downloaded again as before.
+    """
+    if not (sha256 or sha512):
+        return None
+    try:
+        if tar_path.is_symlink() or not tar_path.is_file():
+            return None
+    except OSError:
+        return None
+    try:
+        if size is not None and tar_path.stat().st_size != size:
+            return None
+        digests = download.hash_file(tar_path, ("sha256", "sha512"))
+    except OSError:
+        return None
+    if (sha256 and digests["sha256"].lower() != sha256.lower()) or (
+        sha512 and digests["sha512"].lower() != sha512.lower()
+    ):
+        return None
+    say(Event("log", f"reused the verified download already in the cache: {tar_path.name}"))
+    return download.DownloadResult(
+        tar_path,
+        tar_path.stat().st_size,
+        digests["sha256"],
+        digests["sha512"],
+        resumed=True,
+    )
+
+
 #: A ``.unpack-*`` directory younger than this may belong to a live installer.
 _STALE_UNPACK_SECONDS = 6 * 3600
-_OWNER_MARKER = ".nadare-owner-pid"
-
-
-def _owned_by_live_process(directory: Path) -> bool:
-    try:
-        pid = int((directory / _OWNER_MARKER).read_text().strip())
-        os.kill(pid, 0)
-    except PermissionError:
-        return True  # exists, owned by someone else
-    except (OSError, ValueError):
-        return False
-    return True
+_OWNER_MARKER = ownerlease.MARKER
 
 
 def _prune_stale(root: Path) -> None:
     """Remove hidden ``.unpack-*``/``.<name>.old-*`` crash leftovers (NV-3).
 
-    A hidden work tree is only pruned when it is not owned by a live process;
-    an ``.unpack-*`` directory must also be old. The owner check keeps a
-    concurrent installer's ``.old-*`` backup safe during its swap window, and
-    old ``.unpack-*`` staging trees are never wiped while in use.
+    A hidden work tree is only pruned when no live owner holds its lease
+    (:mod:`ownerlease`, seen from any PID namespace, #1494); an ``.unpack-*``
+    directory must also be old. That keeps a concurrent installer's ``.old-*``
+    backup safe during its swap window, and ``.unpack-*`` staging trees are
+    never wiped while in use. Unknown ownership waits until the folder is old.
     """
     for pattern in (".*.old-*", ".unpack-*"):
         for leftover in root.glob(pattern):
-            if _owned_by_live_process(leftover):
+            if not ownerlease.may_remove(leftover, unknown_min_age=_STALE_UNPACK_SECONDS):
                 continue
             if pattern == ".unpack-*":
                 try:
@@ -766,8 +955,9 @@ def _extract(tar_path: Path, *, cancel: Cancel | None, emit: Emitter) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     _prune_stale(root)
     tmp = Path(tempfile.mkdtemp(prefix=".unpack-", dir=str(root)))
+    leases: list[ownerlease.Lease] = []
     try:
-        (tmp / _OWNER_MARKER).write_text(str(os.getpid()))
+        leases.append(ownerlease.take(tmp))
         emit(Event("status", "unpacking runner", data={"stage": "extract"}))
         if cancel is not None:
             cancel.raise_if_cancelled()
@@ -807,10 +997,13 @@ def _extract(tar_path: Path, *, cancel: Cancel | None, emit: Emitter) -> Path:
         stale: Path | None = None
         if dest.exists():
             stale = root / f".{dest.name}.old-{uuid.uuid4().hex}"
-            # Mark the tree as owned by this live install BEFORE it becomes a hidden backup,
-            # so a concurrent _prune_stale can never see it unowned (NV-3, #974).
+            # Hold this install's lease on the tree BEFORE it becomes a hidden backup, so a
+            # concurrent _prune_stale, in any PID namespace, never sees it unowned (NV-3,
+            # #974, #1494). Without a marker it is unknown, and kept until old.
             try:
-                (dest / _OWNER_MARKER).write_text(str(os.getpid()))
+                leases.append(ownerlease.take(dest))
+            except ownerlease.LeaseHeld as exc:
+                raise RunnerError(f"{dest.name} is being replaced by another install") from exc
             except OSError:
                 pass
             try:
@@ -836,6 +1029,8 @@ def _extract(tar_path: Path, *, cancel: Cancel | None, emit: Emitter) -> Path:
         return dest
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+        for lease in leases:
+            lease.release()
 
 
 #: Backends whose profiles use :data:`DEFAULT_FAMILY` when they name no runner.
@@ -867,21 +1062,6 @@ def runner_size(runner: str | os.PathLike[str]) -> int:
     return total
 
 
-def profile_value(profile: Mapping[str, Any], key: str) -> Any:
-    """``key`` from the top level, else from ``extra``: how backends read it (``profile_setting``).
-
-    Usage must see the runner a launch would use, or a runner chosen under ``extra`` looks
-    unused and can be deleted (#974).
-    """
-    value = profile.get(key)
-    if value not in (None, ""):
-        return value
-    extra = profile.get("extra")
-    if isinstance(extra, Mapping) and extra.get(key) not in (None, ""):
-        return extra[key]
-    return None
-
-
 #: Kept for existing callers; see :func:`profile_value`.
 _profile_value = profile_value
 
@@ -890,6 +1070,37 @@ def profile_runner_value(profile: Mapping[str, Any]) -> str:
     """The profile's runner setting, top level or ``extra``, as the backends read it."""
     value = profile_value(profile, "proton_runner") or profile_value(profile, "runner")
     return str(value).strip() if value not in (None, "") else ""
+
+
+def _named_build(profile: Mapping[str, Any]) -> str | None:
+    """The one runner build a profile is fixed to (its folder name), or ``None`` when it follows a
+    pin, an alias or nothing a family can be read from."""
+    value = profile_runner_value(profile)
+    if value and value.lower() not in ("wine", "system", "none", "latest", "auto"):
+        if value in RUNNERS:
+            return None  # a family id follows that family's pin
+        return Path(value).expanduser().name or None
+    wine = str(profile_value(profile, "wine_binary") or "").strip()
+    if wine:
+        # A custom Wine inside a runner tree (``…/dwproton-11.0-15/files/bin/wine``).
+        for parent in Path(wine).expanduser().parents:
+            if runner_family(parent.name):
+                return parent.name
+    return None
+
+
+def behind_pin(profile: Mapping[str, Any]) -> tuple[str, str] | None:
+    """``(build, pin)`` when a profile fixed to one build is older than its family's pin (#1595).
+
+    A profile that follows the pin (no runner, a family id, ``latest``) gets new builds on its
+    own; one that names a build, or a ``wine_binary`` inside one, stays put and can fall behind.
+    """
+    build = _named_build(profile)
+    if not build or standing(build) != "older":
+        return None
+    family = runner_family(build)
+    tag = pinned_tag(family) if family else None
+    return (build, tag) if tag else None
 
 
 def runner_usage(profiles: Mapping[str, Mapping[str, Any]]) -> dict[str, list[str]]:
@@ -918,7 +1129,7 @@ def runner_usage(profiles: Mapping[str, Mapping[str, Any]]) -> dict[str, list[st
         targets: list[Path | None] = []
         if not value:
             if profile.get("backend") in PROTON_DEFAULT_BACKENDS:
-                targets.append(installed_pinned(DEFAULT_FAMILY))
+                targets.append(installed_pinned(default_family(profile.get("backend"))))
         elif value in RUNNERS:
             # When the pin is not installed, CZN launches with the newest installed
             # build of that family instead: keep that fallback as well.
@@ -963,6 +1174,73 @@ def unused_old_runners(profiles: Mapping[str, Mapping[str, Any]]) -> list[Path]:
     )
 
 
+def _wanted_family(profile: Mapping[str, Any]) -> str | None:
+    """The runner family a profile's next launch takes from Nadare, or ``None``.
+
+    Mirrors the launch: a family id names that family; no runner (or ``wine``/``system``/
+    ``none``, #1324) on a backend that defaults to the pinned DW-Proton means the default
+    family, unless the profile names its own ``wine_binary``.
+    """
+    value = profile_runner_value(profile)
+    if value.lower() in ("wine", "system", "none"):
+        value = ""
+    if value in RUNNERS:
+        return value
+    if value:
+        return None
+    if str(profile_value(profile, "wine_binary") or "").strip():
+        return None
+    backend = profile.get("backend")
+    return default_family(backend) if backend in PROTON_DEFAULT_BACKENDS else None
+
+
+def prefetch_families(profiles: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    """Families whose tested pin a game will need at its next Play but is not installed (#1425).
+
+    Only after a pin bump (an older build of the family is installed): a fresh setup still
+    fetches its runner at install time, never as a surprise download at start-up.
+    """
+    wanted: list[str] = []
+    for profile in profiles.values():
+        family = _wanted_family(profile)
+        if family and family not in wanted:
+            wanted.append(family)
+    return [
+        family
+        for family in wanted
+        if pinned_tag(family)
+        and installed_pinned(family) is None
+        and installed_family(family) is not None
+    ]
+
+
+def prefetch(
+    profiles: Mapping[str, Mapping[str, Any]],
+    *,
+    emit: Emitter | None = None,
+    cancel: Cancel | None = None,
+    on_change: Callable[[list[Any]], None] | None = None,
+) -> list[Path]:
+    """Download the pins :func:`prefetch_families` names; return the new runner folders.
+
+    A failure is logged and skipped: the launch still fetches the runner itself.
+    ``on_change`` receives the signed pin changes once (an empty list when none), for
+    the caller's UI.
+    """
+    from . import runnerindex
+
+    changes = runnerindex.refresh()
+    if on_change is not None:
+        on_change(changes)
+    got: list[Path] = []
+    for family in prefetch_families(profiles):
+        try:
+            got.append(ensure_pinned(family, emit=emit, cancel=cancel))
+        except (RunnerError, download.DownloadError, OSError) as exc:
+            log.warning("background fetch of the %s runner failed: %s", family, exc)
+    return got
+
+
 def remove(runner_id_or_path: str | os.PathLike[str]) -> bool:
     """Remove an Nadare-installed runner by id or path. Returns True if removed."""
     root = paths.runners_dir().resolve()
@@ -992,5 +1270,11 @@ def remove(runner_id_or_path: str | os.PathLike[str]) -> bool:
         return True
     if not entry.is_dir():
         return False
-    shutil.rmtree(entry)
-    return True
+    from . import removal  # mount-aware, like Remove (#1481)
+
+    outcome = removal.delete_tree(entry)
+    for mount in outcome.mounts:
+        log.warning("kept %s: a mounted drive inside a runner folder", mount)
+    for path, exc in outcome.leftovers:
+        log.warning("could not delete %s: %s", path, exc)
+    return not (outcome.mounts or outcome.leftovers or entry.exists())

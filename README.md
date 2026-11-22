@@ -130,15 +130,20 @@ Never post tokens, QR codes, `session.json`, `secrets.json` or full logs in an i
 
 ## Command line
 
-The GUI is the main way to use Nadare; the same actions exist on the command line:
+The GUI is the product. The command line is plumbing beside it — what shortcuts and
+scripts call, plus diagnostics — not a second front end:
 
 ```sh
+Nadare-*.AppImage launch -p <profile>  # what every desktop and Steam shortcut runs
+Nadare-*.AppImage doctor               # check this machine
+Nadare-*.AppImage report               # build a redacted support report
 Nadare-*.AppImage list                 # profiles
 Nadare-*.AppImage status -p <profile>
-Nadare-*.AppImage install -p <profile>
-Nadare-*.AppImage launch  -p <profile>
-Nadare-*.AppImage doctor               # check this machine
 ```
+
+`install`, `update`, `repair`, `stop` and `verify` work the same way for unattended
+runs. Other commands (cover art, the Flatpak move, rebuilding a prefix) still exist
+for support cases; `nadare --help` names them on its Advanced line.
 
 From a source checkout, use `.venv/bin/nadare` instead. See
 [docs/SOURCE-INSTALL.md](docs/SOURCE-INSTALL.md) for running from source, profiles by hand,

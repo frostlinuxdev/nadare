@@ -26,14 +26,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import backends, flatpakfs, paths, prefixguard
+from . import backends, flatpakfs, location, paths, prefixguard, relocate
 from .config import MAX_PROFILE_NAME, valid_profile_name
+from .paths import inside as _inside
+from .paths import real as _real
 from .profilenames import short_name
 
 log = logging.getLogger(__name__)
 
 NADARE_DIR = "Nadare"
 MANIFEST_NAME = "nadare-game.json"
+#: Where :func:`write_manifest` writes before the atomic replace; a kill can leave it behind.
+MANIFEST_TMP_NAME = f".{MANIFEST_NAME}.tmp"
 MANIFEST_SCHEMA = 1
 MANIFEST_MAX_BYTES = 16 * 1024
 CONFIG_KEY = "libraries"
@@ -62,10 +66,6 @@ Candidate = Manifest
 
 
 # ---- roots ------------------------------------------------------------------------------------
-
-
-def _real(path: str | os.PathLike[str]) -> Path:
-    return Path(os.path.realpath(os.path.expanduser(str(path))))
 
 
 def default_root() -> Path:
@@ -184,7 +184,9 @@ def normalise_entries(config) -> bool:
             rewritten.append(entry)
             continue
         raw = entry.get("path")
-        if not isinstance(raw, str):
+        if not isinstance(raw, str) or "\x00" in raw:
+            # Kept as it is: library_roots already ignores it, and a NUL would stop the whole
+            # start-up upkeep (storage review round 2, A2).
             rewritten.append(entry)
             continue
         path = Path(os.path.normpath(os.path.expanduser(raw)))
@@ -257,14 +259,6 @@ def remove_library(config, path: str | os.PathLike[str]) -> bool:
 # ---- manifest ---------------------------------------------------------------------------------
 
 
-def _inside(path: Path, game_dir: Path) -> bool:
-    try:
-        path.relative_to(game_dir)
-    except ValueError:
-        return False
-    return True
-
-
 def write_manifest(profile: Mapping[str, Any], game_dir: str | os.PathLike[str]) -> Path | None:
     """Write ``game_dir/nadare-game.json`` for ``profile``; ``None`` when it does not fit.
 
@@ -281,12 +275,14 @@ def write_manifest(profile: Mapping[str, Any], game_dir: str | os.PathLike[str])
     owned = owned if isinstance(owned, list) else []
     made: list[str] = []
     for field, key in _FOLDERS.items():
-        value = profile.get(key)
-        if not isinstance(value, str) or not value.strip():
+        value = location._setting(profile, key)
+        if value is None:
             continue
         target = _real(value)
         if not _inside(target, folder):
-            return None
+            # A prefix moved out of the game folder (a prefix-only Move) is not described: a
+            # stale "prefix" here would send the game back to the old place (round 3, B-F5).
+            continue
         data[field] = target.relative_to(folder).as_posix() or "."
         if key in owned:
             made.append(field)
@@ -294,7 +290,7 @@ def write_manifest(profile: Mapping[str, Any], game_dir: str | os.PathLike[str])
         return None
     data["made_by_nadare"] = made
     target = folder / MANIFEST_NAME
-    tmp = folder / f".{MANIFEST_NAME}.tmp"
+    tmp = folder / MANIFEST_TMP_NAME
     folder.mkdir(parents=True, exist_ok=True)
     try:
         # The game folder is writable by the game: never follow a link planted at the temp
@@ -317,74 +313,8 @@ def write_manifest(profile: Mapping[str, Any], game_dir: str | os.PathLike[str])
 def _game_folder(
     profile: Mapping[str, Any], name: str, default_root: str | os.PathLike[str] | None
 ) -> Path | None:
-    """The folder Nadare made for this catalog game, or ``None`` (imported, generic kind).
-
-    It is the profile's ``<library>/Nadare/<Game>`` (its one ``owned_dirs`` entry), or
-    ``profiles/<name>`` in the default library.
-    """
-    if not _catalog_kind(profile.get("backend")):
-        return None
-    dirs = profile.get("owned_dirs")
-    if isinstance(dirs, list) and len(dirs) == 1 and isinstance(dirs[0], str):
-        game_dir = Path(os.path.expanduser(dirs[0]))
-        return game_dir if game_dir.parent.name == NADARE_DIR else None
-    if dirs:
-        return None
-    legacy = _legacy_game_folder(profile)
-    if legacy is not None:
-        return legacy
-    recorded = _recorded_default_home(profile)
-    if recorded is not None:
-        return recorded
-    return Path(default_root if default_root is not None else paths.profiles_dir()) / name
-
-
-def _legacy_game_folder(profile: Mapping[str, Any]) -> Path | None:
-    """The ``<library>/Nadare/<Game>`` of a profile made before ``owned_dirs`` existed.
-
-    Add Game always made ``<Game>/{prefix,install}`` there and recorded that it made the trees,
-    just not the folder (before 2026-10-27). Only that exact shape, with that record, counts:
-    the same rule ``relink._legacy_dirs`` uses for Move. Anything else stays the user's.
-    """
-    owned = profile.get("owned_trees")
-    prefix = profile.get("prefix")
-    if not isinstance(owned, list) or "prefix" not in owned or not isinstance(prefix, str):
-        return None
-    prefix_path = Path(os.path.expanduser(prefix))
-    home = prefix_path.parent
-    if prefix_path.name != "prefix" or home.parent.name != NADARE_DIR:
-        return None
-    install = profile.get("install_dir")
-    if isinstance(install, str) and install.strip():
-        if "install_dir" not in owned or Path(os.path.expanduser(install)) != home / "install":
-            return None
-    return home
-
-
-def _recorded_default_home(profile: Mapping[str, Any]) -> Path | None:
-    """A default-library game's real folder, from the ``install``/``prefix`` it recorded.
-
-    Old Add Game let the profile name differ from the title-named folder, so guessing
-    ``profiles/<profile>`` misses it (V-2/V-3).
-    """
-    owned = profile.get("owned_trees")
-    if not isinstance(owned, list):
-        return None
-    homes: set[Path] = set()
-    for key, name in (("install_dir", "install"), ("prefix", "prefix")):
-        value = profile.get(key)
-        if not isinstance(value, str) or not value.strip():
-            continue
-        if key not in owned:
-            return None
-        path = _real(value)
-        if path.name != name:
-            return None
-        homes.add(path.parent)
-    if len(homes) != 1:
-        return None
-    home = homes.pop()
-    return home if home.parent == default_root() else None
+    """The folder Nadare made for this catalog game: :func:`location.game_folder` (#1372)."""
+    return location.game_folder(profile, name, default_root)
 
 
 def record_new_game(
@@ -407,11 +337,26 @@ def record_new_game(
 def _matches(manifest: Manifest | None, profile: Mapping[str, Any]) -> bool:
     if manifest is None:
         return False
-    for folder, key in ((manifest.install_dir, "install_dir"), (manifest.prefix, "prefix")):
-        value = profile.get(key)
-        want = _real(value) if isinstance(value, str) and value.strip() else None
+    game_dir = _real(manifest.game_dir)
+    owned = profile.get("owned_trees")
+    owned = owned if isinstance(owned, list) else []
+    made: set[str] = set()
+    for field, folder, key in (
+        ("install", manifest.install_dir, "install_dir"),
+        ("prefix", manifest.prefix, "prefix"),
+    ):
+        value = location._setting(profile, key)
+        want = _real(value) if value is not None else None
+        if want is not None and not _inside(want, game_dir):
+            want = None  # a folder outside the game folder is never in its manifest
         if folder != want:
             return False
+        if want is not None and key in owned:
+            made.add(field)
+    # What Nadare made follows the config's record, as write_manifest writes it: otherwise the
+    # manifest keeps its first answer and a reader of it undoes the record (C2, 2026-11-21).
+    if set(manifest.made_by_nadare) != made:
+        return False
     # The title is part of the manifest: a rename must reach disk, or Find games would bring
     # the old name back (#W10-F3).
     return (
@@ -421,6 +366,15 @@ def _matches(manifest: Manifest | None, profile: Mapping[str, Any]) -> bool:
 
 
 def sync_game(config, name: str, *, remember_library: bool = True) -> bool:
+    """See :func:`_sync_game`; a damaged path (a NUL) skips the game (round 3, C-F4)."""
+    try:
+        return _sync_game(config, name, remember_library=remember_library)
+    except ValueError as exc:
+        log.warning("skipping %s: a stored folder is not a valid path: %s", name, exc)
+        return False
+
+
+def _sync_game(config, name: str, *, remember_library: bool = True) -> bool:
     """Bring an existing game's manifest and library up to date; ``True`` if the config changed.
 
     For a game Nadare laid out whose folder exists: (re)write its manifest when it is missing,
@@ -431,12 +385,24 @@ def sync_game(config, name: str, *, remember_library: bool = True) -> bool:
     profile = config.profiles.get(name)
     if not isinstance(profile, Mapping):
         return False
-    game_dir = _game_folder(profile, name, None)
     try:
+        game_dir = _game_folder(profile, name, None)
         if game_dir is None or game_dir.is_symlink() or not game_dir.is_dir():
             return False
+        others = {n: p for n, p in config.profiles.items() if n != name}
+        if any(used == game_dir or game_dir in used.parents for used in _used_folders(others)):
+            # Another game's folders are in there: its manifest is not this game's to replace
+            # (storage review B3).
+            return False
+    except ValueError as exc:  # a NUL in a stored path must not stop Nadare starting (B5)
+        log.warning("skipping %s: a stored folder is not a valid path: %s", name, exc)
+        return False
     except OSError as exc:
         log.warning("skipping %s: cannot inspect its game folder %s: %s", name, game_dir, exc)
+        return False
+    if not _has_game_folders(profile):
+        # Only a backend's own state is there (BackendContext.data_dir makes the folder on
+        # any use): no manifest for a game that is not installed (#1362).
         return False
     if not _matches(read_manifest(game_dir), profile):
         try:
@@ -471,6 +437,55 @@ def folder_moved(before: Mapping[str, Any], after: Mapping[str, Any]) -> bool:
     return before.get("owned_dirs") != after.get("owned_dirs")
 
 
+def _has_game_folders(profile: Mapping[str, Any]) -> bool:
+    """Whether the game's install folder or prefix exists (a manifest would describe them)."""
+    for key in _FOLDERS.values():
+        value = location._setting(profile, key)
+        if value is not None:
+            try:
+                if Path(os.path.expanduser(value)).is_dir():
+                    return True
+            except OSError:
+                continue
+    return False
+
+
+def record_profile_dir_ownership(profile: dict[str, Any], name: str) -> bool:
+    """Record what Nadare made for a game kept in ``profiles/<name>/`` (#1362).
+
+    b22..b24 installed some games into ``profiles/<name>/{prefix,install}`` without an
+    ``owned_trees`` record, so Move only offered the prefix and Settings called the folder
+    "an existing install". Only that exact layout, reached without any link, gets the record,
+    and only when the profile has none: a record that leaves a tree out is the player's
+    choice and stays. Uninstall offers the same folders before and after (Nadare's own
+    ``profiles/<name>`` was already treated as its own). ``True`` when the profile changed.
+    """
+    if profile.get("owned_trees") is not None or not _catalog_kind(profile.get("backend")):
+        return False
+    home = paths.profiles_dir() / name
+    wanted = {"prefix": home / "prefix", "install_dir": home / "install"}
+    prefix = profile.get("prefix")
+    if not isinstance(prefix, str) or not prefix.strip():
+        return False
+    owned: dict[str, str] = {}
+    for key, expected in wanted.items():
+        value = location._setting(profile, key)
+        if value is None:
+            continue
+        path = Path(os.path.abspath(os.path.expanduser(value)))
+        try:
+            if path != Path(os.path.abspath(expected)) or path.resolve() != path:
+                return False  # elsewhere, or reached through a link: not this layout
+        except OSError:
+            return False
+        owned[key] = str(path)
+    if "prefix" not in owned:
+        return False
+    profile["owned_trees"] = sorted(owned)
+    profile["owned_paths"] = owned
+    return True
+
+
 def backfill(config) -> bool:
     """:func:`sync_game` for every game (games from before libraries existed); ``True`` if the
     config changed and should be saved.
@@ -482,8 +497,38 @@ def backfill(config) -> bool:
     """
     first = not _set_up(config)
     changed = normalise_entries(config)
+    # Moves a crash interrupted (#1366 B-F2), before anything reads the games' paths.
+    for note in relocate.finish_interrupted_moves(config.profiles):
+        log.warning("interrupted move: %s", note)
+        changed = True
+    # A prefix rebuild a crash interrupted: its old prefix goes back (#1490).
+    from . import prefixmove  # noqa: PLC0415 - keeps start-up imports light
+
+    try:
+        for note in prefixmove.finish_interrupted_rebuilds(config):
+            log.warning("interrupted prefix rebuild: %s", note)
+            changed = True
+    except (OSError, ValueError):
+        log.warning("could not settle an interrupted prefix rebuild", exc_info=True)
+    # And an interrupted "Move into a library" of an import (#1372 phase 3).
+    from . import importmove  # noqa: PLC0415 - importmove imports this module
+
+    try:
+        for note in importmove.finish_interrupted(config):
+            log.warning("interrupted move into a library: %s", note)
+            changed = True
+    except (OSError, ValueError):
+        log.warning("could not settle an interrupted move into a library", exc_info=True)
     for name in list(config.profiles):
-        changed = sync_game(config, name, remember_library=first) or changed
+        profile = config.profiles.get(name)
+        try:
+            if isinstance(profile, dict):
+                changed = record_profile_dir_ownership(profile, name) or changed
+                changed = relocate.prune_pending_originals(profile) or changed
+            changed = sync_game(config, name, remember_library=first) or changed
+        except ValueError as exc:
+            # One damaged profile (a NUL in a path) must not stop the others (round 2, B5).
+            log.warning("skipping %s during library upkeep: %s", name, exc)
     return changed
 
 
@@ -538,16 +583,26 @@ def _read(game_dir: Path) -> Manifest:
         target = _real(game_dir / value)
         if not _inside(target, game_dir):
             raise ValueError(f"{field} points outside the game folder")
+        if target == _real(game_dir):
+            # Uninstall would delete the whole folder, other games' too (storage review B2).
+            raise ValueError(f"{field} must be a folder inside the game folder, not the folder")
         found[field] = target
     if found["install"] is None and found["prefix"] is None:
         raise ValueError("the manifest names no folder")
+    # Nadare only ever makes ``install`` and ``prefix`` directly in the game folder. Anything
+    # else a manifest names may be adopted, but never as Nadare's, so Uninstall cannot be
+    # pointed at another game's folder by a planted manifest (storage review B2).
+    real_dir = _real(game_dir)
+    standard = {"install": real_dir / "install", "prefix": real_dir / "prefix"}
     return Manifest(
         game_dir=game_dir,
         kind=kind,
         title=title.strip() or kind,
         install_dir=found["install"],
         prefix=found["prefix"],
-        made_by_nadare=tuple(m for m in made if found.get(m) is not None),
+        made_by_nadare=tuple(
+            m for m in made if found.get(m) is not None and found[m] == standard[m]
+        ),
     )
 
 
@@ -592,15 +647,13 @@ def _game_dirs(root: Path) -> list[Path]:
 
 
 def _used_folders(profiles: Mapping[str, Any]) -> set[Path]:
-    used: set[Path] = set()
-    for prof in profiles.values():
-        if not isinstance(prof, Mapping):
-            continue
-        for key in ("install_dir", "prefix", "wineprefix"):
-            value = prof.get(key)
-            if isinstance(value, str) and value.strip():
-                used.add(_real(value))
-    return used
+    """Every folder a game uses (:func:`location.claims`, #1372 step 2)."""
+    found: set[Path] = set()
+    for claim in location.claims(profiles):
+        found.add(claim.folder)
+        if claim.literal is not None:
+            found.add(claim.literal)
+    return found
 
 
 def scan(config, root: str | os.PathLike[str]) -> tuple[list[Candidate], list[str]]:
@@ -869,6 +922,7 @@ __all__ = [
     "LibraryError",
     "MANIFEST_MAX_BYTES",
     "MANIFEST_NAME",
+    "MANIFEST_TMP_NAME",
     "MANIFEST_SCHEMA",
     "GameSpec",
     "Manifest",
@@ -888,6 +942,7 @@ __all__ = [
     "normalise_entries",
     "read_manifest",
     "record_new_game",
+    "record_profile_dir_ownership",
     "remove_library",
     "reusable_folder",
     "scan",

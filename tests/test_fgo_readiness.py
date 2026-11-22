@@ -225,6 +225,42 @@ def test_selinux_enforcing_is_a_warning_with_setup_fix() -> None:
     assert "setup-host-selinux.sh" in check.fix
 
 
+def test_selinux_fix_keeps_old_wording_without_a_resolved_script() -> None:
+    probe = dataclasses.replace(
+        make_probe(
+            files={"/sys/fs/selinux/enforce": "1\n"},
+            existing={"/sys/fs/selinux/enforce"},
+        ),
+        selinux_setup_command=lambda: "",
+    )
+    check = _by_name(run_checks(probe))["SELinux"]
+    assert check.fix == "Run the FGO setup (setup-host-selinux.sh) once as root."
+
+
+def test_selinux_fix_names_the_full_setup_script_path() -> None:
+    command = "sudo /opt/lepton/lepton/setup-host-selinux.sh"
+    probe = dataclasses.replace(
+        make_probe(
+            files={"/sys/fs/selinux/enforce": "1\n"},
+            existing={"/sys/fs/selinux/enforce"},
+        ),
+        selinux_setup_command=lambda: command,
+    )
+    check = _by_name(run_checks(probe))["SELinux"]
+    assert command in check.fix
+
+
+def test_selinux_setup_command_uses_the_lepton_adapter_path(monkeypatch, tmp_path) -> None:
+    script = tmp_path / "setup-host-selinux.sh"
+    script.write_text("")
+
+    class FakeAdapter:
+        setup_selinux_sh = script
+
+    monkeypatch.setattr(readiness, "LeptonFgo", lambda: FakeAdapter())
+    assert readiness._selinux_setup_command() == f"sudo {script}"
+
+
 def test_only_intel_gpu_is_a_warning() -> None:
     check = _by_name(run_checks(make_probe(gpu_vendors=("0x8086",))))["GPU"]
     assert check.tier == "warning"

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from nadare.core import crc64 as crc64_mod
 from nadare.core import download as download_mod
 from nadare.core import yostar
 
@@ -69,7 +70,8 @@ class TestCrc64:
         assert yostar._crc64_native(b"123456789") == 0x995DC9BBDF1939FA
 
     def test_python_fallback_when_native_missing(self, monkeypatch):
-        monkeypatch.setattr(yostar, "_NATIVE_CRC64", None)
+        # The table, not liblzma: patch the module that does the work (#1452 moved it).
+        monkeypatch.setattr(crc64_mod, "_NATIVE_CRC64", None)
         assert yostar.crc64(b"123456789") == 0x995DC9BBDF1939FA
         assert yostar._crc64_python(b"") == 0
 
@@ -82,7 +84,8 @@ class TestCrc64:
         assert hasher.value == 0
 
     def test_incremental_python_fallback(self, monkeypatch):
-        monkeypatch.setattr(yostar, "_NATIVE_CRC64", None)
+        # The table, not liblzma: patch the module that does the work (#1452 moved it).
+        monkeypatch.setattr(crc64_mod, "_NATIVE_CRC64", None)
         hasher = yostar.Crc64(yostar.crc64(b"abc"))
         hasher.update(b"def")
         assert hasher.value == yostar.crc64(b"abcdef")
@@ -218,11 +221,12 @@ class TestLoadManifest:
 
     def test_index_is_resolved_for_tag(self, tmp_path, monkeypatch):
         leaf = _manifest()
+        body = json.dumps(leaf).encode()
         index = {
             "StellaSora_EN": {
                 "version": "1.0.0",
                 "url": "https://manifests.example/yostar/StellaSora_EN.json",
-                "sha256": "x",
+                "sha256": hashlib.sha256(body).hexdigest(),
             }
         }
         index_path = tmp_path / "index.json"
@@ -230,7 +234,7 @@ class TestLoadManifest:
 
         def fake_get(url, **kw):
             assert url == "https://manifests.example/yostar/StellaSora_EN.json"
-            return json.dumps(leaf).encode()
+            return body
 
         monkeypatch.setattr(yostar.download, "http_get", fake_get)
         man = yostar.load_manifest(str(index_path), game_tag="StellaSora_EN")
@@ -238,8 +242,10 @@ class TestLoadManifest:
 
     def test_relative_index_url_resolves_against_file(self, tmp_path):
         leaf = _manifest()
-        (tmp_path / "StellaSora_EN.json").write_text(json.dumps(leaf), encoding="utf-8")
-        index = {"StellaSora_EN": {"version": "1", "url": "StellaSora_EN.json", "sha256": "x"}}
+        body = json.dumps(leaf).encode()
+        (tmp_path / "StellaSora_EN.json").write_bytes(body)
+        sha = hashlib.sha256(body).hexdigest()
+        index = {"StellaSora_EN": {"version": "1", "url": "StellaSora_EN.json", "sha256": sha}}
         index_path = tmp_path / "index.json"
         index_path.write_text(json.dumps(index), encoding="utf-8")
         man = yostar.load_manifest(str(index_path), game_tag="StellaSora_EN")
@@ -352,7 +358,8 @@ class TestSync:
         summary = yostar.sync(man, tmp_path, emit=events.append)
         assert (tmp_path / "a" / "b.bin").read_bytes() == payload
         assert summary["downloaded"] == 1
-        assert events[-1].progress == 1.0
+        # The sync now ends with its transfer summary log line.
+        assert [event.progress for event in events if event.kind == "progress"][-1] == 1.0
 
     def test_checks_space_for_missing_bytes(self, tmp_path, monkeypatch):
         payload = b"hello world"
@@ -719,3 +726,37 @@ def test_manifest_rejects_duplicate_paths(paths):
 def test_manifest_accepts_distinct_paths():
     m = yostar._parse_manifest(_manifest_with(["a/b.ab", "a/c.ab", "d/b.ab"]))
     assert len(m.files) == 3
+
+
+
+# ---------------------------------------------------------------------------
+# #789 F5: the index's sha256 is required (the manifests carry no signature)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "sha",
+    # Short, long or padded hex must be refused as malformed, not merely fail the compare.
+    [None, "", "x", "0" * 63, 5, "0" * 65, "x" + "0" * 64, "0" * 64 + "\n", "a" * 32],
+)
+def test_index_entry_without_a_valid_sha256_is_refused(tmp_path: Path, sha) -> None:
+    (tmp_path / "T.json").write_text(json.dumps(_manifest_with(["a.bin"])))
+    entry = {"url": "T.json"}
+    if sha is not None:
+        entry["sha256"] = sha
+    (tmp_path / "index.json").write_text(json.dumps({"T": entry}))
+    with pytest.raises(yostar.ManifestError, match="has no valid sha256"):
+        yostar.load_manifest(str(tmp_path / "index.json"), game_tag="T")
+
+
+def test_index_entry_with_a_wrong_sha256_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "T.json").write_text(json.dumps(_manifest_with(["a.bin"])))
+    (tmp_path / "index.json").write_text(json.dumps({"T": {"url": "T.json", "sha256": "0" * 64}}))
+    with pytest.raises(yostar.ManifestError, match="does not match"):
+        yostar.load_manifest(str(tmp_path / "index.json"), game_tag="T")
+
+
+def test_index_entry_with_the_right_sha256_loads(tmp_path: Path) -> None:
+    body = json.dumps(_manifest_with(["a.bin"])).encode()
+    (tmp_path / "T.json").write_bytes(body)
+    entry = {"url": "T.json", "sha256": hashlib.sha256(body).hexdigest()}
+    (tmp_path / "index.json").write_text(json.dumps({"T": entry}))
+    assert yostar.load_manifest(str(tmp_path / "index.json"), game_tag="T").version == "1"

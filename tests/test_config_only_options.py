@@ -25,7 +25,7 @@ EXPECTED = {
     "installer_url", "installer_sha256", "installer_args", "manifest_index", "manifest_file",
     "media_file", "kuro_token", "repo", "mode", "size", "release", "data_dir", "logs_dir",
     "desktop_dir", "cache", "adopt", "force_update", "purge_cache", "uninstall_all",
-    "wine_binary", "umu_binary", "download_workers",
+    "wine_binary", "umu_binary", "sandbox_share_pid", "sandbox_host_tmp", "stop_grace_seconds",
 }  # fmt: skip
 
 
@@ -48,7 +48,8 @@ def test_a_listed_key_is_config_only_on_every_backend(key):
 
 @pytest.mark.parametrize(
     "key", ["extra_env", "steam_binary",
-            "stop_steam", "launch_args", "prefix", "runner", "install_dir", "monitor"],
+            "stop_steam", "download_workers", "launch_args", "prefix", "runner",
+            "install_dir", "monitor"],
 )  # fmt: skip
 def test_the_options_users_need_stay_visible(key):
     assert not config_only("direct-bd2", key)

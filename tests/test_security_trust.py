@@ -115,9 +115,9 @@ class TestNewsLinks:
         ],
     )
     def test_only_web_links_open(self, view, monkeypatch, url, opens):
-        from nadare.gui import game_view
+        from nadare.gui import links
 
         opened = []
-        monkeypatch.setattr(game_view.QDesktopServices, "openUrl", lambda u: opened.append(u))
+        monkeypatch.setattr(links.QDesktopServices, "openUrl", lambda u: opened.append(u))
         view._open_external(url)
         assert bool(opened) is opens

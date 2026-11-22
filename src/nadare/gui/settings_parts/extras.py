@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
+from PyQt6 import sip
 from PyQt6.QtCore import QFile, QThreadPool, QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
@@ -18,7 +19,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 
-from ...core import app_uninstall, community
+from ...core import app_uninstall, community, fgo_selinux, flatpakmove, i18n
 from ...core import runners as runners_core
 from ..library import count_text
 from ..workers import CallTask
@@ -29,19 +30,18 @@ SYSTEM_WINE = "System Wine"
 
 def _runner_label(path: Path) -> str:
     """Picker label for an installed runner: tested builds are marked."""
-    if runners_core.is_recommended(path):
-        return f"{path.name} · recommended"
-    if runners_core.runner_family(path):
-        return f"{path.name} · untested"
-    return path.name
+    standing = runners_core.standing(path)
+    if standing == "custom":
+        return path.name
+    return f"{path.name} · {standing}"
 
 
 def discover_runners(kind: str = "", *, include_default: bool = True) -> list[tuple[str, str]]:
     """Return ``(label, value)`` pairs for the runner picker.
 
     Value is a filesystem path for an installed Proton build. The empty value is
-    the backend's default: the recommended (tested) DW-Proton for every Proton
-    backend, including the generic Wine/Proton games. A custom Wine is chosen
+    the backend's default: its recommended (tested) runner, including for the
+    generic Wine/Proton games. A custom Wine is chosen
     with the profile's ``wine_binary`` field, not from this picker.
 
     ``include_default=False`` is for a profile whose ``wine_binary`` is what will
@@ -50,7 +50,7 @@ def discover_runners(kind: str = "", *, include_default: bool = True) -> list[tu
     entries: list[tuple[str, str]] = []
     proton_default = kind in runners_core.PROTON_DEFAULT_BACKENDS
     if proton_default and include_default:
-        tag = runners_core.pinned_tag(runners_core.DEFAULT_FAMILY) or "DW-Proton"
+        tag = runners_core.pinned_tag(runners_core.default_family(kind)) or "DW-Proton"
         entries.append((f"Default · recommended ({tag})", ""))
     seen: set[str] = set()
     for path in runners_core.all_runners():
@@ -72,41 +72,116 @@ def _is_runner_folder(value: str) -> bool:
 class ExtrasMixin:
     """Mixin for :class:`SettingsPage`; see the module text."""
 
-    def _uninstall_nadare(self) -> None:
-        plan = app_uninstall.preview()
-        if plan is None:
-            QMessageBox.information(
-                self, "Uninstall Nadare",
-                "Remove Nadare using the tool that installed it: your software centre for "
-                "Flatpak or packages, or Gear Lever / AppImageLauncher for a managed AppImage. "
-                "For a source install, remove its checkout and virtual environment. "
-                "A portable AppImage can be moved to Trash in your file manager. "
-                "Keep application data to preserve games and settings.",
-            )
+    def _move_to_flatpak(self) -> None:
+        """Move games and settings into the Flatpak (#1353), then close this Nadare."""
+        from PyQt6.QtWidgets import QApplication
+
+        config = getattr(self.window(), "config", None) or self._config
+        if config is None:
             return
+        why = flatpakmove.refusal(config)
+        if why:
+            QMessageBox.warning(self, "Move to the Flatpak", why)
+            return
+        data, _conf = flatpakmove.targets()
         answer = QMessageBox.question(
-            self, "Uninstall Nadare",
-            "For a portable AppImage, move this file to Trash?\n\n"
-            f"{plan.path}\n\n"
-            "Your games, saves, accounts, runners and settings will be kept. "
-            "Other AppImage versions and shortcuts will be kept too.\n\n"
-            "If you installed Nadare with Gear Lever or AppImageLauncher, cancel and "
-            "remove it there instead, so its menu entry is also removed.",
+            self, "Move to the Flatpak",
+            "Move your games and settings into the Nadare Flatpak?\n\n"
+            f"They move to {data.parent.parent}. Nothing is copied or deleted: the folders "
+            "are renamed. This Nadare then starts empty and closes now; open Nadare from the "
+            "Flatpak to play.\n\nThere is no automatic way back.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
+            notes = flatpakmove.move(config)
+        except (flatpakmove.MoveRefused, OSError) as exc:
+            QMessageBox.warning(self, "Move to the Flatpak", str(exc))
+            return
+        QMessageBox.information(self, "Move to the Flatpak", "\n\n".join(notes))
+        QApplication.quit()
+
+    def _uninstall_nadare(self) -> None:
+        remove_module = bool(
+            getattr(self, "remove_fgo_selinux", None) is not None
+            and self.remove_fgo_selinux.isChecked()
+            and not self.remove_fgo_selinux.isHidden()
+        )
+        plan = app_uninstall.preview()
+        if plan is None:
+            QMessageBox.information(
+                self, "Uninstall Nadare",
+                "Nadare cannot remove itself here, so nothing was removed.\n\n"
+                f"{app_uninstall.how_to_remove()}\n\n"
+                "Your games, saves, accounts, runners and settings stay where they are.",
+            )
+            if remove_module:
+                self._remove_fgo_selinux_module()
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Uninstall Nadare")
+        box.setText(
+            "Move this AppImage to Trash?\n\n"
+            f"{plan.path}\n\n"
+            "Your games, saves, accounts, runners and settings will be kept. "
+            "Other AppImage versions and shortcuts will be kept too.\n\n"
+            "If you installed Nadare with Gear Lever or AppImageLauncher, cancel and "
+            "remove it there instead, so its menu entry is also removed."
+        )
+        trash_button = box.addButton("Move to Trash", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_button = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel_button)
+        box.setEscapeButton(cancel_button)
+        box.exec()
+        if box.clickedButton() is not trash_button:
+            return
+        try:
             app_uninstall.trash(plan, QFile.moveToTrash)
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Could not uninstall Nadare", str(exc))
             return
+        if remove_module:
+            self._remove_fgo_selinux_module()
         QMessageBox.information(
             self, "AppImage moved to Trash",
             "The AppImage is in Trash. Close Nadare when you have finished any running "
             "games or downloads. You can restore the AppImage from Trash.",
         )
+
+    def _check_fgo_selinux_module(self) -> None:
+        """Keep the module-list subprocess off the GUI thread too."""
+        task = CallTask(fgo_selinux.available)
+        task.signals.done.connect(self._fgo_selinux_available)
+        self._fgo_selinux_probe = task
+        QThreadPool.globalInstance().start(task)
+
+    def _fgo_selinux_available(self, available: object) -> None:
+        # A bound page method disconnects when Qt deletes its receiver.
+        self.remove_fgo_selinux.setVisible(bool(available))
+
+    def _remove_fgo_selinux_module(self) -> None:
+        """Run the password prompt for FGO's policy module off the GUI thread.
+
+        pkexec waits for the password; on the GUI thread the window would freeze
+        behind the prompt.
+        """
+        task = CallTask(fgo_selinux.remove)
+        task.signals.done.connect(self._fgo_selinux_removed)
+        task.signals.failed.connect(lambda message: self._fgo_selinux_removed((False, message)))
+        self._fgo_selinux_task = task  # keep the signals alive until they fire
+        QThreadPool.globalInstance().start(task)
+
+    def _fgo_selinux_removed(self, result: object) -> None:
+        if sip.isdeleted(self):
+            return
+        ok, message = result if isinstance(result, tuple) else (False, str(result))
+        if ok:
+            QMessageBox.information(self, i18n.translate("FGO SELinux module"), message)
+        else:
+            QMessageBox.warning(self, i18n.translate("FGO SELinux module"), message)
 
     def _open_path(self, path: str, what: str) -> None:
         """Open ``path`` in the desktop's file manager/editor, or say why not."""
@@ -141,11 +216,6 @@ class ExtrasMixin:
         if not community.is_discord_invite(url):
             url = community.DISCORD_FALLBACK  # never open anything that is not an invite
         QDesktopServices.openUrl(QUrl(str(url)))
-
-    def _open_config_file(self) -> None:
-        if self._config is None:
-            return
-        self._open_path(str(self._config.path), "config file")
 
     def _fetch_art(self) -> None:
         """Download cover art for the current profile off the GUI thread.
@@ -223,8 +293,49 @@ class ExtrasMixin:
             profiles[self._profile]["runner"] = self._runner_value()
         dialog = ManageRunnersDialog(profiles, self)
         dialog.exec()
+        self.disk_space_panel.mark_stale()  # a runner may be gone: count again when shown
         # The default entry's data is ""; falling back to its label would persist the label.
         self._reload_runners(self._runner_value())
+
+    def _open_runners_from_card(self) -> None:
+        """The Disk space card's Manage runners: the same dialog, then count again (#1417)."""
+        self._open_runners_dialog()
+        self.disk_space_panel.refresh()
+
+    def _tab_shown(self, index: int) -> None:
+        if index == self._app_tab:
+            self.disk_space_panel.refresh_if_stale()
+
+    def _update_runner_behind(self) -> None:
+        """Say when the build this game is fixed to is older than the tested pin (#1595)."""
+        label = getattr(self, "runner_behind", None)
+        if label is None:
+            return
+        index = self.runner.currentIndex()
+        text = self.runner.currentText()
+        listed = index >= 0 and self.runner.itemText(index) == text
+        value = self.runner.itemData(index) if listed else text
+        profile: dict[str, object] = {"runner": str(value or "")}
+        config = getattr(self, "_config", None)
+        name = getattr(self, "_profile", None)
+        if config is not None and name:
+            try:
+                wine = runners_core.profile_value(config.profile(name), "wine_binary")
+            except KeyError:
+                wine = None
+            if wine:
+                profile["wine_binary"] = wine
+        behind = runners_core.behind_pin(profile)
+        if behind is None:
+            label.setText("")
+            label.setVisible(False)
+            return
+        build, tag = behind
+        label.setText(
+            f"This game is set to {build}; the recommended build is now {tag}. "
+            "Choose the recommended build to follow new tested releases."
+        )
+        label.setVisible(True)
 
     def _reload_runners(self, selected: str) -> bool:
         """Refill the picker and select ``selected``; False when it is not a listed runner."""

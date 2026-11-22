@@ -13,7 +13,7 @@ import pytest
 
 from nadare.core.config import Config
 from nadare.gui import add_game
-from nadare.gui.add_game import AddGameDialog, detect_import
+from nadare.gui.add_game import AddGameDialog
 
 
 @pytest.fixture(scope="module")
@@ -24,7 +24,7 @@ def qapp():
     yield app
 
 
-def dialog(tmp_path, qapp, *, kind="wine"):
+def dialog(tmp_path, qapp, *, kind="arknights-yostar"):
     instance = AddGameDialog(
         Config.load(tmp_path / "config.json"), data_root=tmp_path / "data", kind=kind
     )
@@ -238,73 +238,17 @@ def test_a_missing_folder_under_a_writable_parent_is_still_allowed(tmp_path, qap
         d.set_install_dir(str(library))
         name = d.create_profile()
         assert name
-        assert not library.exists()
+        install = Path(d.config.profile(name)["install_dir"])
+        assert install.is_relative_to(library)
+        assert not install.exists()  # only the library marker is written, not the game folder
     finally:
         close(d, qapp)
 
 
 # ---- 4. CZN import only accepts a folder in which a prefix was detected ------------
-def test_detect_import_refuses_an_unrelated_czn_folder(tmp_path):
-    empty = tmp_path / "TotallyEmpty"
-    empty.mkdir()
-    assert detect_import("stove-czn", empty, None)["notes"] == []
-    assert detect_import("stove-czn", None, empty)["notes"] == []
-
-
-def test_czn_import_of_an_empty_folder_is_refused(tmp_path, qapp):
-    empty = tmp_path / "TotallyEmpty"
-    empty.mkdir()
-    d = dialog(tmp_path, qapp, kind="stove-czn")
-    try:
-        d.set_mode(True)
-        d.set_prefix(str(empty))
-        d.detect()
-        assert not d.create_button.isEnabled()
-        assert d.create_profile() is None
-        assert "prefix" in d.error_label.text().lower()
-        assert "drive_c" in d.error_label.text()
-        assert not d.config.profiles
-    finally:
-        close(d, qapp)
-
-
-def test_czn_import_accepts_a_folder_inside_its_prefix(tmp_path, qapp):
-    prefix = tmp_path / "CZNPrefix"
-    game = prefix / "drive_c" / "ProgramData" / "Smilegate" / "Games" / "ChaosZeroNightmare"
-    game.mkdir(parents=True)
-    d = dialog(tmp_path, qapp, kind="stove-czn")
-    try:
-        d.set_mode(True)
-        d.set_install_dir(str(game))
-        d.detect()
-        assert d.create_button.isEnabled()
-        name = d.create_profile()
-        assert name
-        profile = d.config.profile(name)
-        assert profile["prefix"] == str(prefix)
-        assert not profile.get("owned_trees")
-    finally:
-        close(d, qapp)
 
 
 # ---- 5. Import keeps working from a folder Nadare must not write to --------------
-def test_importing_from_a_read_only_library_is_allowed(tmp_path, qapp):
-    game = tmp_path / "library" / "Arknights"
-    game.mkdir(parents=True)
-    (game / "Arknights.exe").write_text("exe")
-    _readonly(game)
-    d = dialog(tmp_path, qapp, kind="arknights-yostar")
-    try:
-        d.set_mode(True)
-        d.set_install_dir(str(game))
-        d.detect()
-        assert d.create_button.isEnabled()
-        name = d.create_profile()
-        assert name
-        assert d.config.profile(name)["install_dir"] == str(game)
-    finally:
-        close(d, qapp)
-        _writable_again(game)
 
 
 # ---- 6. CZN shows the prefix it will really store --------------------------------
@@ -362,32 +306,13 @@ def test_a_fresh_czn_install_inside_another_prefix_is_refused(tmp_path, qapp):
 
 
 # ---- 9. '~' is expanded before an import is detected --------------------------------
-def test_a_tilde_import_is_detected_and_stored_absolute(tmp_path, qapp, monkeypatch):
-    home = tmp_path / "home"
-    game = home / "Games" / "Arknights"
-    game.mkdir(parents=True)
-    (game / "Arknights.exe").write_text("exe")
-    czn_prefix = home / "CZNPrefix"
-    (czn_prefix / "drive_c").mkdir(parents=True)
-    monkeypatch.setenv("HOME", str(home))
-    assert detect_import("arknights-yostar", "~/Games/Arknights", None)["install_dir"] == str(game)
-    assert detect_import("stove-czn", None, "~/CZNPrefix")["prefix"] == str(czn_prefix)
-    d = dialog(tmp_path, qapp, kind="arknights-yostar")
-    try:
-        d.set_mode(True)
-        d.set_install_dir("~/Games/Arknights")
-        d.detect()
-        assert d.create_button.isEnabled()
-        name = d.create_profile()
-        assert name
-        assert d.config.profile(name)["install_dir"] == str(game)
-    finally:
-        close(d, qapp)
 
 
 def test_an_ordinary_games_prefix_line_stays_next_to_the_install_line(tmp_path, qapp):
     """The CZN row must not move the other kinds' summary away from "Installs to:"."""
-    d = AddGameDialog(Config.load(tmp_path / "c.json"), data_root=tmp_path / "data", kind="wine")
+    d = AddGameDialog(
+        Config.load(tmp_path / "c.json"), data_root=tmp_path / "data", kind="arknights-yostar"
+    )
     try:
         d.resize(640, 560)
         d.show()

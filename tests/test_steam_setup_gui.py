@@ -767,7 +767,8 @@ def test_a_finished_step_redraws_the_checklist_from_the_new_plan(qapp):
         dialog.next_button.click()
         assert _wait(qapp, lambda: not dialog.busy and dialog.result_label.text() == "ok")
         assert dialog.rows["h264"].marker_label.text() == "✓"
-        assert not dialog.next_button.isEnabled()  # nothing left to do
+        assert dialog.next_button.text() == "Close"  # nothing left to do but leave
+        assert dialog.next_button.isEnabled()
     finally:
         _close(dialog, qapp)
 

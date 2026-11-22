@@ -113,3 +113,11 @@ def test_default_bundled_path_is_looked_up_at_call_time(tmp_path, monkeypatch):
 def test_missing_bundled_file_means_not_found(tmp_path, monkeypatch):
     monkeypatch.setattr(sevenzip, "BUNDLED", tmp_path / "nope")
     assert sevenzip.find(which=lambda _name: None) is None
+
+
+def test_the_pinned_7zzs_is_the_static_pie_build():
+    """#1551: the digest of the static-pie no-RAR 26.05 build from the release container
+    (scripts/fetch_7zip.sh, reproduced twice on 2026-11-17)."""
+    assert sevenzip.BUNDLED_SHA256 == (
+        "3f1e45055d0d547f39f63fcfbb07ef086545db2c09f74de57b8c580688a8132a"
+    )

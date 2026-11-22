@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 from ...core import diskspace, sandbox
 from ...core.backends import BackendError
+from .lepton import LeptonFgo
 from .lepton import default_prefix as _lepton_prefix
 
 __all__ = [
@@ -107,6 +108,15 @@ def _free_bytes_in_lepton_prefix() -> int:
     return diskspace.free_bytes(_lepton_prefix())
 
 
+def _selinux_setup_command() -> str:
+    """The SELinux setup command install prints, or "" if the script is absent."""
+    try:
+        script = LeptonFgo().setup_selinux_sh
+        return f"sudo {script}" if script.is_file() else ""
+    except (OSError, ValueError, BackendError):  # doctor reports; it never fails on this
+        return ""
+
+
 @dataclass(frozen=True)
 class Probe:
     """Every host read the checks perform, injectable for hermetic tests."""
@@ -121,6 +131,7 @@ class Probe:
     environ: Mapping[str, str] = field(default_factory=lambda: dict(os.environ))
     getuser: Callable[[], str] = getpass.getuser
     free_bytes: Callable[[], int] = _free_bytes_in_lepton_prefix
+    selinux_setup_command: Callable[[], str] = _selinux_setup_command
 
 
 # ---------------------------------------------------------------------------
@@ -467,13 +478,13 @@ def _gpu_check(probe: Probe) -> Check:
 def _selinux_check(probe: Probe) -> Check:
     path = "/sys/fs/selinux/enforce"
     if probe.exists(path) and probe.read_text(path).strip() == "1":
-        return Check(
-            "SELinux",
-            "warning",
-            False,
-            "SELinux is enforcing",
-            "Run the FGO setup (setup-host-selinux.sh) once as root.",
+        command = probe.selinux_setup_command()
+        fix = (
+            f"Run the FGO setup once as root: {command}"
+            if command
+            else "Run the FGO setup (setup-host-selinux.sh) once as root."
         )
+        return Check("SELinux", "warning", False, "SELinux is enforcing", fix)
     return Check("SELinux", "info", True, "not enforcing", "")
 
 

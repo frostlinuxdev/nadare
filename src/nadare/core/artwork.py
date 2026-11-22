@@ -69,6 +69,7 @@ _STEAM_FILES: dict[str, tuple[str, ...]] = {
     "cover": ("library_600x900.jpg", "header.jpg", "hero.jpg"),
     "thumb": ("library_600x900.jpg", "header.jpg"),
     "hero": ("hero.jpg", "header.jpg"),
+    "tile": ("capsule_616x353.jpg", "header.jpg"),
     "logo": ("logo.png", "header.jpg"),
     "icon": ("logo.png",),
 }
@@ -652,6 +653,19 @@ _NUMERIC_HOST_RE = re.compile(r"(?:0[xX][0-9a-fA-F]+|[0-9]+)(?:\.(?:0[xX][0-9a-f
 
 #: Resolver used by :func:`resolves_publicly`; tests replace this module global.
 _RESOLVER: Any = socket.getaddrinfo
+#: The real resolver: only its answers are remembered (a swapped ``_RESOLVER`` never is).
+_DEFAULT_RESOLVER: Any = socket.getaddrinfo
+#: How long a resolver answer is reused (#1411). One Store pass resolved the same art hosts
+#: ~1,000 times a minute, and a per-client limiter (Pi-hole: 1000/min) then refused every name
+#: from the machine. A failure is kept for less, so art comes back soon after the network does.
+RESOLVE_TTL_SECONDS = 300.0
+RESOLVE_FAIL_TTL_SECONDS = 60.0
+_RESOLVED: dict[str, tuple[float, bool]] = {}
+_RESOLVED_LOCK = threading.Lock()
+
+
+def _now() -> float:
+    return time.monotonic()
 #: RFC 2606/6761 names that only exist in tests/documentation: a real resolver
 #: cannot return a globally routable address for them, so skip the DNS check.
 _RESERVED_TEST_SUFFIXES = (".example", ".test", ".invalid")
@@ -665,7 +679,30 @@ def resolves_publicly(host: str, resolver: Any = None) -> bool:
     rebinding between this check and the connect is *not* covered.
     """
     if resolver is None:
+        if _RESOLVER is _DEFAULT_RESOLVER:
+            return _remembered_resolution(host)
         resolver = _RESOLVER
+    return _resolution(host, resolver)
+
+
+def _remembered_resolution(host: str) -> bool:
+    """:func:`resolves_publicly` with the real resolver, answered from memory for a while."""
+    key = host.lower().rstrip(".")
+    now = _now()
+    with _RESOLVED_LOCK:
+        hit = _RESOLVED.get(key)
+        if hit is not None and hit[0] > now:
+            return hit[1]
+    result = _resolution(host, _DEFAULT_RESOLVER)
+    ttl = RESOLVE_TTL_SECONDS if result else RESOLVE_FAIL_TTL_SECONDS
+    with _RESOLVED_LOCK:
+        if len(_RESOLVED) > 512:  # a long session never grows this without bound
+            _RESOLVED.clear()
+        _RESOLVED[key] = (now + ttl, result)
+    return result
+
+
+def _resolution(host: str, resolver: Any) -> bool:
     try:
         infos = resolver(host, None)
     except (OSError, ValueError):
@@ -885,6 +922,78 @@ def _steam_profile_appid(profile: dict) -> int | None:
     return None
 
 
+#: Which of Steam's published library assets suit each art kind, best first. Steam keeps
+#: these under a content-hashed path that changes when the publisher updates the art, so the
+#: names are resolved through the store-browse API rather than guessed from a fixed URL.
+_STEAM_LIBRARY_FILES: dict[str, tuple[str, ...]] = {
+    "cover": (
+        "library_capsule_2x",
+        "library_capsule",
+        "main_capsule_2x",
+        "main_capsule",
+        "header_2x",
+        "header",
+    ),
+    "thumb": ("library_capsule_2x", "library_capsule", "main_capsule"),
+    "hero": ("library_hero_2x", "library_hero", "raw_page_background", "main_capsule_2x"),
+    "tile": ("main_capsule_2x", "main_capsule", "header_2x", "header"),
+    "logo": ("logo", "header_2x", "header"),
+    "icon": ("library_capsule", "main_capsule"),
+}
+
+#: Resolved asset URLs per app id: when they were read (monotonic), the table, and how long that
+#: table is good for. The hashes change only when the art does, so a few hours of reuse saves one
+#: request per cover; a failure is remembered for minutes, not hours, so a flaky network recovers.
+_STEAM_ASSETS: dict[str, tuple[float, dict[str, str], float]] = {}
+_STEAM_ASSETS_TTL = 6 * 3600.0
+_STEAM_ASSETS_FAILED_TTL = 600.0
+_STEAM_ASSETS_LOCK = threading.Lock()
+
+
+def steam_library_assets(appid: object) -> dict[str, str]:
+    """Steam's current hashed library-asset URLs for ``appid`` (``{}`` on any failure).
+
+    ``IStoreBrowseService`` is the store API Steam's own library uses; it names the current
+    capsule and hero files. Their paths carry a content hash, so the fixed
+    ``cdn.cloudflare.steamstatic.com/steam/apps/<id>/library_<name>.jpg`` names that older
+    games still answer are missing for newer ones. Never raises: this is an optional source.
+    """
+    key = str(appid)
+    now = time.monotonic()
+    with _STEAM_ASSETS_LOCK:
+        cached = _STEAM_ASSETS.get(key)
+        if cached is not None and now - cached[0] < cached[2]:
+            return cached[1]
+    payload = {
+        "ids": [{"appid": int(appid) if key.isdigit() else appid}],
+        "context": {"language": "english", "country_code": "US", "steam_realm": 1},
+        "data_request": {"include_assets": True},
+    }
+    url = (
+        "https://api.steampowered.com/IStoreBrowseService/GetItems/v1/?input_json="
+        + quote(json.dumps(payload, separators=(",", ":")))
+    )
+    assets: dict[str, str] = {}
+    try:
+        answer = _get_json(url)
+        items = (answer.get("response") or {}).get("store_items") or []
+        item = items[0] if items else {}
+        published = item.get("assets") if isinstance(item, dict) else None
+        if isinstance(published, dict):
+            fmt = str(published.get("asset_url_format") or "")
+            if fmt.startswith("steam/apps/") and "${FILENAME}" in fmt:
+                base = "https://shared.akamai.steamstatic.com/store_item_assets/" + fmt
+                for name, filename in published.items():
+                    if isinstance(filename, str) and filename:
+                        assets[name] = base.replace("${FILENAME}", filename)
+    except Exception as exc:  # noqa: BLE001 - this source is optional
+        log.debug("Steam library assets unavailable for %s: %s", appid, exc)
+    ttl = _STEAM_ASSETS_TTL if assets else _STEAM_ASSETS_FAILED_TTL
+    with _STEAM_ASSETS_LOCK:
+        _STEAM_ASSETS[key] = (now, assets, ttl)
+    return assets
+
+
 def _steam_candidates(profile: dict, kind: str = "cover") -> Iterator[str]:
     appid = profile.get("steam_appid")
     if not appid:
@@ -893,6 +1002,12 @@ def _steam_candidates(profile: dict, kind: str = "cover") -> Iterator[str]:
         appid = _steam_profile_appid(profile)
     if not appid:
         return
+    # The current hashed assets first: they are what Steam's own library shows today.
+    assets = steam_library_assets(appid)
+    for name in _STEAM_LIBRARY_FILES.get(kind, _STEAM_LIBRARY_FILES["cover"]):
+        url = assets.get(name)
+        if url:
+            yield url
     for name in _STEAM_FILES.get(kind, _STEAM_FILES["cover"]):
         yield STEAM_CDN.format(appid=appid, name=name)
     # Newer Steam apps keep their art under a hashed path the fixed names above cannot reach;
@@ -911,7 +1026,10 @@ def _steam_store_image(appid: object) -> str | None:
     except Exception as exc:  # noqa: BLE001 - this source is optional
         log.debug("Steam store lookup failed for %s: %s", appid, exc)
         return None
-    return image if isinstance(image, str) and image.startswith("https://") else None
+    if not isinstance(image, str):
+        return None
+    # The URL arrived inside an API answer: only Steam's own image hosts may serve it.
+    return image if host_allowed(image, artindex.STEAM_HOSTS) else None
 
 
 class _OgImageParser(HTMLParser):
@@ -1469,45 +1587,54 @@ _index_failures: dict[str, float] = {}
 _INDEX_RETRY_AFTER = 3600.0
 
 
-def _index_art(slug_: str, kind: str, backend: str, *, wait: bool) -> Path | None:
-    """The cover the index prescribes for ``backend``, downloaded and cached, or ``None``.
+def _index_art(
+    slug_: str, kind: str, backend: str, *, wait: bool, art: str = "cover"
+) -> Path | None:
+    """The ``art`` the index prescribes for ``backend``, downloaded and cached, or ``None``.
 
     A cover already cached from the same URL is reused without any request. One cached from
     another source is replaced once the better art has downloaded; if that fails the cover that
     is already there stays. ``wait`` says whether to wait for the index itself (an explicit
-    fetch, or nothing cached yet); otherwise the copy saved on disk answers at once.
+    fetch, or nothing cached yet); otherwise the copy saved on disk answers at once. ``art`` is
+    ``cover`` (the portrait card poster) or ``wide`` (landscape key art); wide art gets its own
+    cache name so it never shadows the cover.
     """
     if kind != "cover":
         return None
-    for url, hosts in artindex.lookup(backend, wait=wait):
-        hit = _cached_official(slug_, kind, url)
+    cache_kind = kind if art == "cover" else f"{kind}-{art}"
+    for url, hosts in artindex.lookup(backend, art=art, wait=wait):
+        hit = _cached_official(slug_, cache_kind, url)
         if hit is not None:
             return hit
         failed_at = _index_failures.get(url)
         if failed_at is not None and time.monotonic() - failed_at < _INDEX_RETRY_AFTER:
             continue
-        path = download(url, slug_, kind, hosts, official=True)
+        path = download(url, slug_, cache_kind, hosts, official=True)
         if path is None:
             _index_failures[url] = time.monotonic()
             continue
-        _drop_superseded(slug_, kind, path)
+        _drop_superseded(slug_, cache_kind, path)
         return path
     return None
 
 
 def _drop_superseded(slug_: str, kind: str, new: Path) -> None:
-    """Clear what the new cover replaces: its news marker, and an older WebP that would shadow it.
+    """Clear what the new file replaces: its news marker and every older file of the slot.
 
-    ``_cached`` prefers a ``.webp`` over every other type, so an older WebP left next to a newer
-    PNG or JPEG would keep being shown. The new image is not a news banner either way.
+    ``_cached`` prefers one extension over another, so an older file of a different type
+    (a b24 ``-cover.jpg`` next to a new ``-cover.gif``) would keep being shown. The new
+    image is not a news banner either way.
     """
-    news_marker(new).unlink(missing_ok=True)
-    if new.suffix.lower() == ".webp":
-        return
-    old = cache_dir() / f"{slug_}-{kind}.webp"
-    if old.is_file():
+    with contextlib.suppress(OSError):
+        news_marker(new).unlink()
+    root = cache_dir()
+    for ext in _IMAGE_EXTS:
+        old = root / f"{slug_}-{kind}.{ext}"
+        if old.name == new.name:
+            continue
         for leftover in (old, src_sidecar(old), news_marker(old)):
-            leftover.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                leftover.unlink()
 
 
 def fetch(
@@ -1516,6 +1643,7 @@ def fetch(
     kind: str = "cover",
     *,
     wait_for_index: bool = False,
+    art: str = "cover",
 ) -> Path | None:
     """Download the best available art for ``profile`` into the cache.
 
@@ -1523,18 +1651,26 @@ def fetch(
     (network, parse, disk) is logged and swallowed so callers get ``None``. With
     ``wait_for_index`` the curated index art is looked up even when a cover is already cached
     (an explicit fetch); otherwise a cached cover is returned without waiting for the network.
+    ``art`` selects the index field: ``cover`` (portrait card poster) or ``wide`` (landscape
+    key art for a tile or hero). Wide art only comes from the curated index; the older
+    publisher/third-party sources below are cover sources. Art already on disk is returned
+    without waiting for the network, so an offline index never hides a cached cover or wide file.
     """
     try:
         slug_ = slug(profile, title)
-        cached = _cached(slug_, kind)
+        cache_kind = kind if art == "cover" else f"{kind}-{art}"
+        cached = _cached(slug_, cache_kind)
         pinned = _index_art(
             slug_,
             kind,
             str(profile.get("backend") or ""),
             wait=wait_for_index or cached is None,
+            art=art,
         )
         if pinned is not None:
             return pinned
+        if art != "cover":
+            return cached
         if cached is not None:
             log.debug("artwork cache hit: %s", cached)
             backend = str(profile.get("backend") or "")
@@ -1629,6 +1765,7 @@ __all__ = [
     "slug",
     "source_of",
     "src_sidecar",
+    "steam_library_assets",
 ]
 
 

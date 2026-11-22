@@ -15,7 +15,6 @@ import socket
 import threading
 import time
 import tracemalloc
-import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -29,6 +28,9 @@ from _czn_test_helpers import (  # noqa: F401  # noqa: F401 - pytest fixtures, f
 )
 
 from nadare.backends.czn import update as czn_update
+from nadare.backends.czn.backend_parts import launching
+from nadare.core import directdl
+from nadare.core import download as download_module
 
 # ---------------------------------------------------------------------------
 # czn.update — pure helpers
@@ -80,37 +82,6 @@ def _chunk_server(body: bytes, *, interrupt_first_at: int | None = None):
     return server, thread, f"http://127.0.0.1:{server.server_port}", requests
 
 
-class _LocalHttpResponse:
-    def __init__(self, connection: http.client.HTTPConnection, response) -> None:
-        self._connection = connection
-        self._response = response
-        self._content: bytes | None = None
-        self.status_code = response.status
-        self.headers = response.headers
-
-    def iter_content(self, chunk_size: int):
-        while chunk := self._response.read1(chunk_size):
-            yield chunk
-
-    @property
-    def content(self) -> bytes:
-        if self._content is None:
-            self._content = self._response.read()
-        return self._content
-
-    def close(self) -> None:
-        self._response.close()
-        self._connection.close()
-
-
-class _LocalHttpSession:
-    def get(self, url: str, *, headers: dict, timeout: float, stream: bool = False):
-        parsed = urllib.parse.urlsplit(url)
-        connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=timeout)
-        connection.request("GET", parsed.path, headers=headers)
-        return _LocalHttpResponse(connection, connection.getresponse())
-
-
 class TestUpdateHelpers:
     def test_parse_files(self):
         manifest = _manifest_files(
@@ -150,14 +121,14 @@ class TestUpdateHelpers:
         manifest = _manifest_files(
             f"0|F|/a.bin|3|c0|g|{len(data)}|9|{md5}|{'d' * 32}|x"
         )
-        original_hash = czn_update._md5_file
+        original_hash = directdl._verify_remote
         hashed: list[Path] = []
 
-        def counting_hash(path):
-            hashed.append(path)
-            return original_hash(path)
+        def counting_hash(path, rf, **kwargs):
+            hashed.append(Path(path))
+            return original_hash(path, rf, **kwargs)
 
-        monkeypatch.setattr(czn_update, "_md5_file", counting_hash)
+        monkeypatch.setattr(directdl, "_verify_remote", counting_hash)
         assert czn_update.plan(manifest)[0] == []
         assert hashed == [game_dir / "a.bin"]
         assert czn_update.plan(manifest)[0] == []
@@ -267,6 +238,7 @@ class TestUpdateHelpers:
 
     def test_game_running_false_for_absent_dir(self, monkeypatch, tmp_path):
         monkeypatch.setattr(czn_update, "GAME_DIR", tmp_path / "nope")
+        monkeypatch.setattr(czn_update, "PREFIX", tmp_path / "nope-prefix")
         assert czn_update.game_running() is False
 
     def test_parse_files_rejects_a_malformed_size(self):
@@ -280,10 +252,10 @@ class TestUpdateHelpers:
     def test_cmdline_match_ignores_an_incidental_substring(self):
         """L2: the path only counts at an argv-token boundary."""
         prefix = "z:\\home\\game\\bin\\"
-        assert not czn_update._cmdline_has_exe(
+        assert not launching._cmdline_has_exe(
             b"editor\0/home/user/notes-z:\\home\\game\\bin\\x", prefix
         )
-        assert czn_update._cmdline_has_exe(
+        assert launching._cmdline_has_exe(
             b"Z:\\home\\game\\bin\\shield.exe\0--launch", prefix
         )
 
@@ -359,12 +331,14 @@ class TestUpdateMain:
             czn_update,
             "plan",
             lambda manifest, **_kw: ([
-                ("/a.bin", "3", "c0", "u" * 32, "p" * 32, 1234),
-                ("/b.bin", "3", "c0", "u" * 32, "p" * 32, 66),
+                ("/a.bin", "3", "c0", "a" * 32, "b" * 32, 1234),
+                ("/b.bin", "3", "c1", "a" * 32, "b" * 32, 66),
             ], []),
         )
         monkeypatch.setattr(czn_update, "game_running", lambda: False)
-        monkeypatch.setattr(czn_update, "download_file", lambda *a, **k: 1)
+        monkeypatch.setattr(
+            czn_update.directdl, "sync", lambda *a, **k: {"downloaded": 2, "skipped": 0}
+        )
         monkeypatch.setattr(czn_update, "UPF", tmp_path / "upf.json")
         calls: list[tuple[Path, int]] = []
         monkeypatch.setattr(
@@ -375,18 +349,17 @@ class TestUpdateMain:
         assert czn_update.main(["update", "--apply"]) == 0
         assert calls == [(game_dir, 1300)]
 
-    def test_download_file_writes_bytes(self, monkeypatch, tmp_path):
+    @staticmethod
+    def _sync_chunk(monkeypatch, tmp_path, base, payload, packed):
         game_dir = tmp_path / "game"
+        monkeypatch.setattr(czn_update, "BASE", base)
         monkeypatch.setattr(czn_update, "GAME_DIR", game_dir)
-
-        def fake_fetch(_path, _vf, _ci, _md5u, _md5p, _usize, _packed_tmp, output_tmp):
-            output_tmp.write_bytes(b"payload")
-            return len(b"payload")
-
-        monkeypatch.setattr(czn_update, "_fetch_verified_to_file", fake_fetch)
-        n = czn_update.download_file("/sub/file.bin", "3", "c0", "u", "p")
-        assert n == len(b"payload")
-        assert (game_dir / "sub/file.bin").read_bytes() == b"payload"
+        plan = czn_update.to_plan(
+            [czn_update.Row("/sub/file.bin", "3", "chunk", hashlib.md5(payload).hexdigest(),
+                            hashlib.md5(packed).hexdigest(), len(payload))]
+        )
+        directdl.sync(plan, game_dir)
+        return game_dir
 
     def test_download_resumes_a_truncated_chunk_with_range(self, monkeypatch, tmp_path):
         payload = hashlib.shake_256(b"resume test").digest(4 << 20)
@@ -394,56 +367,32 @@ class TestUpdateMain:
         server, thread, base, requests = _chunk_server(
             packed, interrupt_first_at=1 << 20
         )
-        game_dir = tmp_path / "game"
-        monkeypatch.setattr(czn_update, "_SESS", _LocalHttpSession())
-        monkeypatch.setattr(czn_update, "BASE", base)
-        monkeypatch.setattr(czn_update, "GAME_DIR", game_dir)
-        monkeypatch.setattr(czn_update.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(download_module, "_sleep", lambda _seconds, _cancel: None)
         try:
-            size = czn_update.download_file(
-                "/sub/file.bin",
-                "3",
-                "chunk",
-                hashlib.md5(payload).hexdigest(),
-                hashlib.md5(packed).hexdigest(),
-                len(payload),
-            )
+            game_dir = self._sync_chunk(monkeypatch, tmp_path, base, payload, packed)
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
-        assert size == len(payload)
         assert (game_dir / "sub/file.bin").read_bytes() == payload
-        assert requests == [None, f"bytes={1 << 20}-"]
-        assert not (game_dir / "sub/file.bin.part").exists()
-        assert not (game_dir / "sub/file.bin.part.gz").exists()
+        assert requests[0] is None
+        assert requests[-1] == f"bytes={1 << 20}-"
+        assert sorted(p.name for p in (game_dir / "sub").iterdir()) == ["file.bin"]
 
     def test_download_stream_memory_stays_below_chunk_size(self, monkeypatch, tmp_path):
         payload = hashlib.shake_256(b"memory test").digest(16 << 20)
         packed = gzip.compress(payload)
         server, thread, base, _requests = _chunk_server(packed)
-        game_dir = tmp_path / "game"
-        monkeypatch.setattr(czn_update, "_SESS", _LocalHttpSession())
-        monkeypatch.setattr(czn_update, "BASE", base)
-        monkeypatch.setattr(czn_update, "GAME_DIR", game_dir)
         tracemalloc.start()
         try:
-            size = czn_update.download_file(
-                "/large.bin",
-                "3",
-                "large",
-                hashlib.md5(payload).hexdigest(),
-                hashlib.md5(packed).hexdigest(),
-                len(payload),
-            )
+            game_dir = self._sync_chunk(monkeypatch, tmp_path, base, payload, packed)
             _current, peak = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
-        assert size == len(payload)
-        assert (game_dir / "large.bin").stat().st_size == len(payload)
+        assert (game_dir / "sub/file.bin").stat().st_size == len(payload)
         assert peak < 10 << 20
 
     def test_apply_rejects_a_traversal_manifest_and_writes_nothing(

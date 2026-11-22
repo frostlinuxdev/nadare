@@ -3,7 +3,10 @@
 # Copyright (C) 2026 Nadare contributors
 #
 # Turn a directory staged by stage_repo.py into a signed Flatpak repository plus the files
-# users open: index.flatpakrepo (adds the repo) and nadare.flatpakref (installs Nadare).
+# users open: index.flatpakrepo (adds the repo), nadare.flatpakref (installs Nadare) and
+# nadare.flatpak (a single-file bundle for stores that ignore a .flatpakref's repository, like
+# Bazaar on Bazzite, #1410; it carries the repository address and key, so updates still come
+# from the repository).
 #
 #   NADARE_FLATPAK_URL=https://flatpak.example/ NADARE_FLATPAK_KEY=<fingerprint> \
 #     packaging/flatpak/build_repo.sh build/flatpak-root build/flatpak-repo
@@ -48,8 +51,11 @@ flatpak build-export --disable-sandbox "${gpg_args[@]}" "$repo" "$staged"
 flatpak build-update-repo "${gpg_args[@]}" --title="Nadare" \
     --homepage=https://frostlinuxdev.github.io/nadare/ "$repo"
 
-key_b64="$(gpg --export "$key" | base64 -w0)"
-[[ -n "$key_b64" ]] || { echo "[!] gpg could not export key $key" >&2; exit 1; }
+keyfile="$(mktemp)"
+trap 'rm -f "$keyfile"' EXIT
+gpg --export "$key" > "$keyfile"
+[[ -s "$keyfile" ]] || { echo "[!] gpg could not export key $key" >&2; exit 1; }
+key_b64="$(base64 -w0 < "$keyfile")"
 cat > "$repo/index.flatpakrepo" <<EOF
 [Flatpak Repo]
 Title=Nadare
@@ -67,7 +73,11 @@ Title=Nadare
 Url=$url
 RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
 IsRuntime=false
+SuggestRemoteName=nadare
 GPGKey=$key_b64
 EOF
+flatpak build-bundle --repo-url="$url" \
+    --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+    --gpg-keys="$keyfile" "$repo" "$repo/nadare.flatpak" "$app_id" master
 flatpak repo --branches "$repo"
-echo "[+] $repo ready for $url (index.flatpakrepo, nadare.flatpakref)"
+echo "[+] $repo ready for $url (index.flatpakrepo, nadare.flatpakref, nadare.flatpak)"

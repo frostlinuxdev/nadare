@@ -15,7 +15,32 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from . import gamesandbox, hostlibs, linkrelay, paths, sandbox
-from .backends import BackendError
+from .backends import BackendError, Option
+from .config import as_bool, profile_value
+
+#: Last-resort per-game exemptions from the Sandbox's private /tmp and PID namespace.
+#: Kept out of Settings (config-only): a wrong value gives back isolation the Sandbox
+#: exists for, and only a broken game needs it.
+SANDBOX_EXEMPTION_OPTIONS = (
+    Option(
+        "sandbox_share_pid",
+        "Share the game's process list with this computer",
+        "bool",
+        "Turns off the game's private process list (PID namespace). Only for a game "
+        "that cannot start without seeing this computer's processes. Config file only.",
+        default=False,
+        advanced=True,
+    ),
+    Option(
+        "sandbox_host_tmp",
+        "Let the game use this computer's temporary folder",
+        "bool",
+        "Turns off the game's private temporary folder (/tmp). Only for a game that "
+        "needs a file Nadare cannot put there. Config file only.",
+        default=False,
+        advanced=True,
+    ),
+)
 
 
 def _broad_message(exc: Exception) -> str:
@@ -28,10 +53,33 @@ def _broad_message(exc: Exception) -> str:
         "library (⋯ → Move to another folder…), or turn Sandbox off for this game on its page."
     )
 
+
+def _umu_launcher_end(argv: list[str]) -> int | None:
+    """The index of the argument that starts umu, when ``argv`` launches umu, else ``None``.
+
+    Only the launcher position counts: ``umu-run ...``, or Nadare's own hidden wrapper
+    (``nadare --umu-run ...`` frozen, ``python -m nadare --umu-run ...`` from source). A game
+    argument that happens to say ``umu-run`` must not run the game outside the Sandbox.
+    """
+    if not argv:
+        return None
+    if Path(argv[0]).name == "umu-run":
+        return 0
+    for lead in (1, 3):
+        if argv[lead : lead + 1] == ["--umu-run"] and (lead == 1 or argv[1:3] == ["-m", "nadare"]):
+            return lead
+    return None
+
+
 class SandboxMixin:
     """The Sandbox methods, for backends that can run a game under bubblewrap."""
 
     _link_relay: linkrelay.LinkRelay | None = None
+
+    #: Whether the last :meth:`_secure_wrap` really put its command in the Sandbox;
+    #: ``None`` before the first call. The Sandbox can be on and still be skipped (no
+    #: bubblewrap here), and Stop must then treat the game as the unsandboxed one it is.
+    _sandbox_wrapped: bool | None = None
 
     def _sandbox_prefix(self) -> Path:
         """The Wine prefix the Sandbox binds writable."""
@@ -46,7 +94,22 @@ class SandboxMixin:
             self.ctx.profile,
             supported=self.supports_secure_mode,
             default=self.sandbox_default_on,
+            required=bool(getattr(self, "sandbox_required", False)),
         )
+
+    def _sandbox_insisted(self) -> bool:
+        """Switched on by the player, or required by the game: no unprotected fallback."""
+        return gamesandbox.choice(self.ctx.profile) is True or bool(
+            getattr(self, "sandbox_required", False)
+        )
+
+    def _sandbox_exemptions(self) -> dict[str, bool]:
+        """The per-game opt-outs from the private /tmp and PID namespace (all off)."""
+        profile = self.ctx.profile
+        return {
+            "share_pid": bool(as_bool(profile_value(profile, "sandbox_share_pid"), False)),
+            "host_tmp": bool(as_bool(profile_value(profile, "sandbox_host_tmp"), False)),
+        }
 
     def _sandbox_check(self, subject: str) -> gamesandbox.Located:
         """The bubblewrap the Sandbox will use here, or why there is none.
@@ -55,7 +118,7 @@ class SandboxMixin:
         back. A missing bubblewrap is still returned (``binary`` is ``None``) so the caller
         can say why the ``subject`` runs without it when the Sandbox is only on by default.
         """
-        explicit = gamesandbox.choice(self.ctx.profile) is True
+        explicit = self._sandbox_insisted()
         located = gamesandbox.locate()
         if located.binary is None and explicit:
             if not located.found:
@@ -64,6 +127,12 @@ class SandboxMixin:
                     "Sandbox needs bubblewrap and Nadare could not find a copy. It comes "
                     "with the game runtime Nadare downloads the first time a game runs; or "
                     f"install it with: {command}. Turn Sandbox off to play without it."
+                )
+            if located.untrusted:
+                raise BackendError(
+                    "Sandbox did not start: the game runtime was updated and Nadare has not "
+                    "been told to trust its new bubblewrap yet. Restart Nadare and answer "
+                    '"Trust the new copy", or turn Sandbox off to play without it.'
                 )
             raise BackendError(
                 f"Sandbox cannot start here ({located.why}). On Ubuntu 24.04 and newer the "
@@ -91,8 +160,15 @@ class SandboxMixin:
         still starts and says why it is not sandboxed.
         """
         if not self.secure_mode_enabled():
+            self._sandbox_wrapped = False
             return argv, env
-        explicit = gamesandbox.choice(self.ctx.profile) is True
+        if not env.get(gamesandbox.GAME_DRIVE_ENV):
+            # Proton's drive S: as the game sees it without the Sandbox, asked on the host:
+            # inside, umu would map the bound game folder itself (NTE: "root directory", #1614).
+            drive = gamesandbox.game_drive(argv, env)
+            if drive is not None:
+                env = {**env, gamesandbox.GAME_DRIVE_ENV: drive}
+        explicit = self._sandbox_insisted()
         thing = "this game" if subject == "game" else f"the {subject}"
         if sandbox.in_flatpak():
             if gamesandbox._flatpak_spawn() is None:
@@ -106,6 +182,7 @@ class SandboxMixin:
                     f"not find; {thing} runs without it.",
                     sandbox=False,
                 )
+                self._sandbox_wrapped = False
                 return argv, env
             env_dir = os.environ.get("XDG_RUNTIME_DIR")
             if not env_dir or not Path(env_dir).is_dir():
@@ -143,6 +220,7 @@ class SandboxMixin:
                     self._stop_link_relay()
                 raise
             self.info(f"Sandbox: your home folder is hidden from {thing}.", sandbox=True)
+            self._sandbox_wrapped = True
             return wrapped
         self._runtime_before_sandbox(argv, env)
         located = self._sandbox_check(subject)
@@ -155,12 +233,23 @@ class SandboxMixin:
                     "Sandbox off to hide this note.",
                     sandbox=False,
                 )
+                self._sandbox_wrapped = False
+                return argv, env
+            if located.untrusted:
+                self.info(
+                    "Sandbox is on by default, but the game runtime was updated and Nadare has "
+                    f"not been told to trust its new bubblewrap yet; {thing} runs without the "
+                    'Sandbox. Restart Nadare and answer "Trust the new copy".',
+                    sandbox=False,
+                )
+                self._sandbox_wrapped = False
                 return argv, env
             self.info(
                 f"Sandbox is on by default but cannot start here ({located.why}); {thing} "
                 "runs without it. `nadare doctor` shows the fix.",
                 sandbox=False,
             )
+            self._sandbox_wrapped = False
             return argv, env
         pipe = self._start_link_relay() if links else None
         try:
@@ -173,6 +262,7 @@ class SandboxMixin:
                 link_pipe=pipe,
                 read_only=read_only,
                 bwrap=located.binary,
+                **self._sandbox_exemptions(),
             )
         except gamesandbox.BroadBindError as exc:
             if links:
@@ -185,6 +275,7 @@ class SandboxMixin:
                 self._stop_link_relay()
             raise
         self.info(f"Sandbox: your home folder is hidden from {thing}.", sandbox=True)
+        self._sandbox_wrapped = True
         return wrapped
 
     def _run_unwrapped(self, argv: list[str], env: dict[str, str], *, on_line) -> int:  # noqa: ANN001
@@ -198,7 +289,12 @@ class SandboxMixin:
         (Ubuntu VM, 2026-11-14). ``umu-run ""`` downloads the runtime and creates the prefix
         and runs no game code; it runs outside the Sandbox like the rest of prefix setup.
         """
-        if not argv or Path(argv[0]).name != "umu-run":
+        if argv and Path(argv[0]).name == "mangohud":
+            argv = argv[1:]  # CZN's optional overlay goes in front of umu-run (#1556)
+            if argv[:1] == ["--dlsym"]:
+                argv = argv[1:]
+        marker = _umu_launcher_end(argv)
+        if marker is None:
             return
         from . import umu
 
@@ -208,8 +304,11 @@ class SandboxMixin:
 
         self.info("Setting up the Steam Runtime and the prefix before the Sandbox starts.")
         try:
+            # Line up to the umu program, then an empty game argument: setup only.
             code = self._run_unwrapped(
-                [argv[0], ""], dict(env), on_line=lambda line: self.info(mask(line))
+                [*argv[: marker + 1], ""],
+                dict(env),
+                on_line=lambda line: self.info(mask(line)),
             )
         except NotImplementedError:
             return

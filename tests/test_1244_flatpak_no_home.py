@@ -38,6 +38,8 @@ def flatpak(tmp_path, monkeypatch):
     info.write_text("[Context]\nfilesystems=" + ";".join(grants) + ";\n", encoding="utf-8")
     monkeypatch.setattr(flatpakfs, "FLATPAK_INFO", str(info))
     monkeypatch.setattr(flatpakfs.sandbox, "in_flatpak", lambda: True)
+    # A virtual home outside /mnt: scratch data may live on a granted NVMe mount.
+    monkeypatch.setenv("HOME", "/home/nadare-permission-fixture")
     return Path.home()
 
 

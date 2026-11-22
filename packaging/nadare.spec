@@ -30,6 +30,7 @@
 # * No icons/game art are shipped: nadare has no copyrighted assets in-repo.
 #   Add an `icon=` path here only if you own or licence the artwork.
 
+import glob
 import os
 
 try:
@@ -42,13 +43,42 @@ except Exception:  # pragma: no cover - pyinstaller is a build-time dep
 ROOT = os.path.abspath(os.path.join(SPECPATH, os.pardir))
 SRC = os.path.join(ROOT, "src")
 
+# umu's zipapp runs on Nadare's own interpreter when /usr/bin/python3 is missing (#1341
+# item 3). PyInstaller cannot see imports inside that data file, so read them from the
+# archive scripts/fetch_umu.sh put there and unpack it for the analysis.
+pathex = [SRC]
+umu_hiddenimports = []
+_umu_archives = sorted(
+    glob.glob(os.path.join(SRC, "nadare", "assets", "umu-launcher-*-zipapp.tar"))
+)
+if len(_umu_archives) != 1:
+    raise SystemExit(
+        "Expected one bundled umu archive. Remove obsolete archives and run scripts/fetch_umu.sh."
+    )
+if _umu_archives:
+    import importlib.util
+
+    _umu_spec = importlib.util.spec_from_file_location(
+        "nadare_umu_bundle", os.path.join(ROOT, "packaging", "umu_bundle.py")
+    )
+    _umu_bundle = importlib.util.module_from_spec(_umu_spec)
+    _umu_spec.loader.exec_module(_umu_bundle)
+    _umu_archive = _umu_archives[0]
+    umu_hiddenimports = _umu_bundle.modules(_umu_archive)
+    pathex.append(
+        str(
+            _umu_bundle.extract(
+                _umu_archive,
+                os.path.join(
+                    ROOT, "build", os.path.basename(_umu_archive)[: -len(".tar")]
+                ),
+            )
+        )
+    )
+
 # Data files that live outside the .py modules and must ship verbatim.
 datas = [
     (os.path.join(SRC, "nadare", "assets"), "nadare/assets"),
-    (os.path.join(SRC, "nadare", "backends", "czn", "stub_src"),
-     "nadare/backends/czn/stub_src"),
-    (os.path.join(SRC, "nadare", "backends", "czn", "build_stub.sh"),
-     "nadare/backends/czn"),
     # C sources the Endfield launch helper compiles at run time (core/endfield_shim.py).
     (os.path.join(SRC, "nadare", "core", "shim_src"), "nadare/core/shim_src"),
 ]
@@ -96,10 +126,10 @@ if collect_dynamic_libs is not None:
 
 a = Analysis(
     [os.path.join(ROOT, "packaging", "nadare_entry.py")],
-    pathex=[SRC],
+    pathex=pathex,
     binaries=binaries,
     datas=datas,
-    hiddenimports=hiddenimports,
+    hiddenimports=hiddenimports + umu_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

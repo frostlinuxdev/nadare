@@ -67,9 +67,9 @@ def test_every_finish_path_ignores_a_stale_worker(controller, path):
     assert controller._workers["p"] is newer
 
 
-def test_the_outcome_signal_still_reaches_the_ui_for_a_stale_worker(controller):
+def test_the_outcome_signal_is_suppressed_for_a_stale_worker(controller):
     got = []
     controller.succeeded.connect(lambda p, o, c: got.append((p, o, c)))
     controller._workers["p"] = FakeWorker("install")
     controller._on_succeeded("p", "install", 0, FakeWorker("install"))
-    assert got == [("p", "install", 0)]
+    assert got == []

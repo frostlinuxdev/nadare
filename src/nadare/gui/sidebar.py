@@ -25,8 +25,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..core import gamefacts
 from ..core.backends import Status
-from ..core.gamefacts import InstallFacts, display_state, update_available
+from ..core.gamefacts import display_state, update_available
+from .game_order import game_sort_key, is_installed
 from .images import ImageLoader
 from .library import display_title, profile_art_candidates
 from .theme import cover_pixmap, load_card_pixmap, repolish
@@ -35,20 +37,10 @@ ICON_SIZE = 28
 ROW_HEIGHT = 38
 
 
-def is_installed(status: Status | None) -> bool:
-    """True when ``status`` means the game is on disk / running / updatable."""
-    if status is None or InstallFacts.from_status(status).offers_resume():
-        return False
-    state = display_state(status).strip().lower()
-    if state in ("installed", "running") or status.running:  # running is on disk (#1207 b232)
-        return True
-    return update_available(status)
-
-
 def _running(status: Status | None) -> bool:
     if status is None:
         return False
-    return bool(status.running or (status.state or "").strip().lower() == "running")
+    return gamefacts.is_running(status)
 
 
 def _updatable(status: Status | None) -> bool:
@@ -335,14 +327,8 @@ class SidebarGames(QWidget):
             status = self._statuses.get(name)
             if self._hidden(name, status):
                 continue
-            if _running(status):
-                rank = 0
-            elif is_installed(status):
-                rank = 1
-            else:
-                rank = 2  # not installed yet, or no status reported yet
             title = display_title(name, self._profiles)
-            entries.append((rank, title.lower(), name))
+            entries.append(game_sort_key(name, title, status))
         entries.sort()
         return [name for _rank, _title, name in entries]
 

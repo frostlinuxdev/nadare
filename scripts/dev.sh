@@ -10,7 +10,7 @@
 #   scripts/dev.sh fmt       # ruff format
 #   scripts/dev.sh gui       # run the PyQt6 GUI from source
 #   scripts/dev.sh cli ...   # run the CLI, e.g. `scripts/dev.sh cli list`
-#   scripts/dev.sh stub      # build the CZN PCSDK stub (mingw-w64)
+#   scripts/dev.sh stub      # build the CZN PCSDK stub (Go, in a container)
 #   scripts/dev.sh build     # PyInstaller onedir bundle
 #   scripts/dev.sh clean     # remove caches and build output
 set -euo pipefail
@@ -46,10 +46,11 @@ case "${1:-help}" in
             echo "[*] Syncing the locked environment (uv sync --frozen --extra dev)"
             uv sync --frozen --extra dev
         else
-            echo "[*] uv/uv.lock unavailable: falling back to pip + requirements.txt"
-            "$PIP" install --upgrade pip
-            "$PIP" install -r requirements.txt
-            "$PIP" install -e ".[dev]"
+            echo "[*] uv/uv.lock unavailable: falling back to pip + requirements-dev.txt"
+            # Hashed pins of the lock's runtime + dev set (pip checks every hash); the
+            # project itself goes in without resolving anything else.
+            "$PIP" install -r requirements-dev.txt
+            "$PIP" install --no-deps -e .
         fi
         echo "[+] Ready. Try: scripts/dev.sh cli list"
         ;;
@@ -74,10 +75,11 @@ case "${1:-help}" in
         exec "$PY" -m nadare "${@:2}"
         ;;
     stub)
-        exec "$root/scripts/build_stub.sh" "${@:2}"
+        exec "$root/scripts/build_stub_go.sh" "${@:2}"
         ;;
     build)
         ensure_venv
+        bash "$root/scripts/fetch_umu.sh"
         exec "$PY" -m PyInstaller --clean -y packaging/nadare.spec
         ;;
     clean)
@@ -95,7 +97,7 @@ Developer convenience wrapper.
   scripts/dev.sh fmt       # ruff format
   scripts/dev.sh gui       # run the PyQt6 GUI from source
   scripts/dev.sh cli ...   # run the CLI, e.g. `scripts/dev.sh cli list`
-  scripts/dev.sh stub      # build the CZN PCSDK stub (mingw-w64)
+  scripts/dev.sh stub      # build the CZN PCSDK stub (Go, in a container)
   scripts/dev.sh build     # PyInstaller onedir bundle
   scripts/dev.sh clean     # remove caches and build output
 EOF

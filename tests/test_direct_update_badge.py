@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Direct-mode games advertise updates from a cached published manifest version.
 
-Everything here is offline: manifests are local files and ``yostar.sync`` is
+Everything here is offline: manifests are local files and ``directdl.sync`` is
 replaced with a fake, so no test touches the network.
 """
 
@@ -160,7 +160,10 @@ class TestCheckUpdate:
         backend.check_update()
         assert backend._read_latest() is None
 
-    def test_official_mode_is_a_no_op(self, tmp_path, monkeypatch):
+    def test_without_a_manifest_it_is_a_no_op(self, tmp_path, monkeypatch):
+        """The index off (#1452: no official route): nothing to check, nothing fetched."""
+        monkeypatch.setattr(ak.yostar.hosting, "yostar_index_url", lambda: "")
+        monkeypatch.delenv("YOSTAR_MANIFEST_INDEX", raising=False)
         backend = _ak(tmp_path)
         monkeypatch.setattr(backend, "_load_manifest", lambda: pytest.fail("fetched"))
         backend.check_update()
@@ -173,7 +176,7 @@ class TestSyncRecordsVersions:
         backend = _installed(tmp_path, {"manifest_file": str(manifest)})
         backend._write_latest("2.0.0")
         monkeypatch.setattr(
-            ak.yostar, "sync", lambda *a, **k: {"downloaded": 0, "skipped": 0}
+            ak.directdl, "sync", lambda *a, **k: {"downloaded": 0, "skipped": 0}
         )
 
         backend.update()

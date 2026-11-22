@@ -22,14 +22,13 @@ from .directkinds import (
     tier_of,
 )
 
-INSTALLER_LABEL = "Publisher's installer"
 CONTAINER_LABEL = "Android container"
 
 #: Older backends the Add Game wizard offers but ``directkinds`` does not list.
 _LEGACY_ROWS: tuple[tuple[str, str, str, str], ...] = (
     ("stove-czn", "Chaos Zero Nightmare", DIRECT_LABEL, TIER_VERIFIED),
-    ("arknights-yostar", "Arknights", INSTALLER_LABEL, TIER_VERIFIED),
-    ("stellasora-yostar", "Stella Sora", INSTALLER_LABEL, TIER_VERIFIED),
+    ("arknights-yostar", "Arknights", DIRECT_LABEL, TIER_VERIFIED),
+    ("stellasora-yostar", "Stella Sora", DIRECT_LABEL, TIER_VERIFIED),
     ("fgo-lepton", "Fate/Grand Order", CONTAINER_LABEL, TIER_EXPERIMENTAL),
 )
 

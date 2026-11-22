@@ -18,12 +18,11 @@ import stat
 import struct
 import subprocess
 import sys
-import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from . import process, sandbox, steamtools
+from . import atomicfile, process, sandbox, steamtools
 from .profilenames import profile_display
 from .steamtools import config_lock
 
@@ -125,10 +124,16 @@ def desktop_entry(
     profile: str,
     title: str,
     argv: list[str],
-    icon: str = "nadare",
+    icon: str | None = None,
     profiles: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> str:
-    """Render a freedesktop entry that launches ``profile`` through Nadare."""
+    """Render a freedesktop entry that launches ``profile`` through Nadare.
+
+    Without an ``icon``: Nadare's own, by the name the host knows it under (a Flatpak exports
+    it as its app ID; ``nadare`` resolved to nothing there, rig 2026-11-15).
+    """
+    if icon is None:
+        icon = FLATPAK_ID if sandbox.in_flatpak() else "nadare"
     exec_args = " ".join(_quote_exec(str(a)) for a in argv)
     exec_line = f"{exec_args} launch -p {_quote_exec(profile)}".strip()
     label = profile_display(profile, {"title": title}, profiles)
@@ -232,22 +237,11 @@ def _applications_dir(applications_dir: str | os.PathLike[str] | None) -> Path:
 
 
 def _atomic_write_bytes(path: Path, data: bytes, mode: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".nadare-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    atomicfile.write(path, data, mode=mode, make_parent=True)
 
 
 def _atomic_write(path: Path, text: str, mode: int) -> None:
-    _atomic_write_bytes(path, text.encode("utf-8"), mode)
+    atomicfile.write(path, text, mode=mode, make_parent=True)
 
 
 def _owned_profile(path: Path) -> str | None:
@@ -293,6 +287,13 @@ def install_desktop_entry(
             digest = hashlib.sha1(profile.encode("utf-8")).hexdigest()[:8]
             name = f"nadare-{slug(profile)}-{digest}.desktop"
             break
+    # The fallback is a candidate too, not proof that Nadare owns the file.
+    for directory in dirs:
+        candidate = directory / name
+        if (candidate.exists() or candidate.is_symlink()) and (
+            candidate.is_symlink() or _owned_profile(candidate) != profile
+        ):
+            raise ShortcutError(f"{candidate} belongs to someone else; it was not replaced")
     written = []
     menu = _applications_dir(applications_dir) / name
     _atomic_write(menu, text, 0o644)
@@ -548,8 +549,8 @@ def vdf_loads(data: bytes, *, strict: bool = False) -> list[dict[str, Any]]:
             _key, pos = _read_cstr(raw, pos)
             entry, pos = _read_map(raw, pos, strict)
             shortcuts.append(entry)
-        if strict and not closed:
-            raise ValueError("shortcuts.vdf ends before the shortcuts map is closed")
+        if strict and (not closed or raw[pos:] != b"\x08"):
+            raise ValueError("shortcuts.vdf does not end with a closed root map")
         return shortcuts
     except (ValueError, struct.error, IndexError, RecursionError):
         # A truncated/corrupt file (including absurdly deep nesting) is

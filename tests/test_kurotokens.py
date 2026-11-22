@@ -42,7 +42,8 @@ class FakeFetch:
 
 
 def _cache() -> Path:
-    return paths.cache_dir() / "kuro-tokens.json"
+    """The cache for the source in use now (#1472: one cache per source)."""
+    return kurotokens._cache_path(hosting.kuro_tokens_url())
 
 
 def _set_mtime(path: Path, age: float) -> None:
@@ -75,7 +76,8 @@ def test_parse_rejects_bad_payloads(body):
 
 
 # ----------------------------------------------------------------- published
-def test_published_uses_a_fresh_cache_without_network():
+def test_published_uses_a_fresh_cache_without_network(monkeypatch):
+    monkeypatch.setenv("NADARE_INDEX_BASE", "https://index.invalid/")
     cache = _cache()
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_bytes(payload())
@@ -123,11 +125,11 @@ def test_published_returns_none_without_a_cache_or_network(monkeypatch):
 def test_published_does_nothing_when_the_index_is_disabled(monkeypatch):
     monkeypatch.setenv("NADARE_INDEX_BASE", "")
 
-    def opener(url):
-        raise AssertionError("the index is disabled; nothing may be fetched")
+    calls: list[str] = []
 
     assert hosting.kuro_tokens_url() == ""
-    assert kurotokens.published("wuwa", opener=opener) is None
+    assert kurotokens.published("wuwa", opener=lambda url: calls.append(url) or b"") is None
+    assert calls == []
 
 
 def test_published_does_not_cache_an_unparsable_payload(monkeypatch):
@@ -242,3 +244,50 @@ def test_no_refresh_is_attempted_for_an_explicit_token(monkeypatch):
 
     with pytest.raises(dd.DirectError):
         wuwa.resolve_legacy(fake_fetch, token="EXPLICITTOKEN123456")
+
+
+# ----------------------------------------------------------- #1472: bound to its source
+def test_a_disabled_index_never_serves_a_cached_token(monkeypatch):
+    monkeypatch.setenv("NADARE_INDEX_BASE", "https://index.invalid/")
+    cache = _cache()
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_bytes(payload())  # fresh, from when the index was on
+    monkeypatch.setenv("NADARE_INDEX_BASE", "")
+    calls: list[str] = []  # published() swallows fetch errors: record, do not raise
+
+    assert kurotokens.published("wuwa", opener=lambda url: calls.append(url) or b"") is None
+    assert calls == [], "the index is disabled; nothing may be fetched"
+
+
+def test_a_cache_from_another_source_is_not_used(monkeypatch):
+    monkeypatch.setenv("NADARE_INDEX_BASE", "https://source-a.invalid/")
+    fetch_a = FakeFetch({hosting.kuro_tokens_url(): payload("aTOKEN123456789")})
+    assert kurotokens.published("wuwa", opener=fetch_a) == "aTOKEN123456789"
+    monkeypatch.setenv("NADARE_INDEX_BASE", "https://source-b.invalid/")
+    fetch_b = FakeFetch({hosting.kuro_tokens_url(): payload("bTOKEN123456789")})
+    assert kurotokens.published("wuwa", opener=fetch_b) == "bTOKEN123456789"
+    assert fetch_b.calls == [hosting.kuro_tokens_url()]
+
+
+def test_an_offline_fallback_uses_only_its_own_sources_cache(monkeypatch):
+    monkeypatch.setenv("NADARE_INDEX_BASE", "https://source-a.invalid/")
+    kurotokens.published("wuwa", opener=lambda url: payload("aTOKEN123456789"))
+    monkeypatch.setenv("NADARE_INDEX_BASE", "https://source-b.invalid/")
+
+    def offline(url):
+        raise OSError("offline")
+
+    assert kurotokens.published("wuwa", opener=offline) is None
+
+
+def test_the_old_shared_cache_file_is_not_trusted(monkeypatch):
+    """0.1.0b24 kept one cache for every source; it cannot say where it came from."""
+    monkeypatch.setenv("NADARE_INDEX_BASE", "https://index.invalid/")
+    legacy = paths.cache_dir() / "kuro-tokens.json"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_bytes(payload("legacyTOKEN1234"))
+
+    def offline(url):
+        raise OSError("offline")
+
+    assert kurotokens.published("wuwa", opener=offline) is None

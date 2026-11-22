@@ -181,6 +181,20 @@ def test_the_shader_cache_lives_in_a_bound_folder_of_its_own(layout):
     assert str(layout["home"] / ".cache") not in {s for s, _ in _pairs(_flags(argv), "--bind")}
 
 
+def test_owned_shader_paths_survive_the_native_wrapper(layout, monkeypatch):
+    from nadare.core import shadercache
+
+    monkeypatch.setenv("XDG_CACHE_HOME", layout["env"]["XDG_CACHE_HOME"])
+    shadercache.prepare("My Game", layout["env"], lambda line: None)
+    argv, env = _wrap(layout)
+    cache = Path(env["XDG_CACHE_HOME"])
+    assert (str(cache), str(cache)) in _pairs(_flags(argv), "--bind")
+    for key in ("MESA_SHADER_CACHE_DIR", "VKD3D_SHADER_CACHE_PATH"):
+        folder = Path(env[key])
+        assert env[key] == layout["env"][key]
+        assert folder.is_absolute() and folder.is_dir() and folder.is_relative_to(cache)
+
+
 def test_the_runtime_bubblewrap_cannot_be_replaced_by_the_game(layout, monkeypatch):
     """Nadare runs this file outside the Sandbox on the next launch."""
     srt = layout["home"] / ".local/share/umu/steamrt3/pressure-vessel/libexec/srt-bwrap"
@@ -491,7 +505,8 @@ def test_only_unrecorded_copies_and_no_system_bubblewrap_says_what_to_do(tmp_pat
     _another_copy(tmp_path, "steamrt-new")
     found = gamesandbox.locate()
     assert found.binary is None and found.found
-    assert "did not record" in found.why and str(gamesandbox.pins_path()) in found.why
+    # #1299: a record exists, so this reads as umu's runtime update, with the trust question.
+    assert "updated" in found.why and str(gamesandbox.pins_path()) in found.why
 
 
 def test_an_unrecorded_copy_gives_way_to_the_system_bubblewrap(tmp_path, monkeypatch):

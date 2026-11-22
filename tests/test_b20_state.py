@@ -16,7 +16,7 @@ from nadare.core import download as dl
 from nadare.core import events
 from nadare.core import logging as logging_mod
 from nadare.core import secrets as core_secrets
-from nadare.core.config import TOP_DEFAULTS, Config
+from nadare.core.config import OPTIONAL_TOP_KEYS, TOP_DEFAULTS, Config
 from nadare.core.journal import JournalError, Transaction
 from nadare.core.secrets import SecretStore
 
@@ -62,9 +62,10 @@ def test_save_does_not_resurrect_a_key_deleted_by_another_process(tmp_path: Path
     first.save()
     on_disk = json.loads(path.read_text(encoding="utf-8"))
     assert on_disk["check_updates"] is False
-    assert on_disk.get("language", "en") == "en"  # back to the default, not "de"
+    default = TOP_DEFAULTS["language"]
+    assert on_disk.get("language", default) == default  # back to the default, not "de"
     # The key stays readable in the saving process: Settings does ``config.data["language"]``.
-    assert first.data["language"] == "en"
+    assert first.data["language"] == TOP_DEFAULTS["language"]
 
 
 def test_a_custom_key_deleted_by_another_process_is_not_written_back(tmp_path: Path) -> None:
@@ -90,9 +91,9 @@ def test_saving_over_an_older_file_keeps_every_default_key_readable(tmp_path: Pa
     config.save()
     config.data["dismissed_update"] = "x"
     config.save()
-    for key in TOP_DEFAULTS:
+    for key in TOP_DEFAULTS.keys() - OPTIONAL_TOP_KEYS:
         assert key in config.data, key
-    assert config.data["language"] == "en"
+    assert config.data["language"] == TOP_DEFAULTS["language"]
 
 
 # ---------------------------------------------------------------------------

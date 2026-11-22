@@ -23,6 +23,7 @@ from ...core import (
 )
 from ...core.backends import (
     sandbox_default,
+    sandbox_required,
     supports_remember_me,
     supports_sandbox,
 )
@@ -66,10 +67,14 @@ class AccountsMixin:
             # the page claims no protection (no pill); the answer re-syncs the page.
             ready = False
             self._probe_sandbox_in_background()
+        required = sandbox_required(kind)
         self.game.set_sandbox(
             supported,
-            gamesandbox.wanted(data, supported=supported, default=sandbox_default(kind)),
+            gamesandbox.wanted(
+                data, supported=supported, default=sandbox_default(kind), required=required
+            ),
             ready=bool(ready),
+            locked="This game always runs in the Sandbox." if required else "",
         )
 
     def _on_sandbox_toggled(self, enabled: bool) -> None:
@@ -78,6 +83,9 @@ class AccountsMixin:
         data = self.config.profiles.get(profile)
         kind = str((data or {}).get("backend") or "")
         if not data or not supports_sandbox(kind):
+            return
+        if sandbox_required(kind):
+            self._sync_sandbox(profile)  # cannot be turned off: redraw it On
             return
         before = gamesandbox.wanted(data, supported=True, default=sandbox_default(kind))
         had_value = "secure_mode" in data

@@ -22,17 +22,20 @@ directory inside the prefix for the length of one run.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import shutil
 import stat
+import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .session import DEFAULT_GAME_RESOURCE_PATH, GAME_ID, build_session
+from .session import DEFAULT_GAME_RESOURCE_PATH, GAME_ID, REQUIRED_AUTH_FIELDS, build_session
 
 #: Re-exported for the command-line entry point (``scripts/nikke_launcherless``).
 DEFAULT_RESOURCE_PATH = DEFAULT_GAME_RESOURCE_PATH
@@ -48,9 +51,9 @@ _ASSETS = Path(__file__).resolve().parents[2] / "assets"
 INTL_HOST = _ASSETS / INTL_HOST_NAME
 SAIL_HOST = _ASSETS / SAIL_HOST_NAME
 INTL_HOST_SHA256 = "3a442d1a045d5dca04c25fec7512f591bc9e6589cb95a239f8f7984f31e8ea76"
-SAIL_HOST_SHA256 = "21b4305cfdd78de23a0ce85828c022f6cbdc0519318e95c5680af02f77afc9c5"
+SAIL_HOST_SHA256 = "1fd8cf2c04c984346aac378088380b3f5dbc56a893daefdb3766a695d90066a4"
 INTL_SOURCE_SHA256 = "09437533adc13721e68889594fed60bc8df3980ffb091ad0b20c8c2f2f1a3990"
-SAIL_SOURCE_SHA256 = "8febc84135ac0795b1cd122706b3554292ba4524fd0193141718ffb8ebf3f18c"
+SAIL_SOURCE_SHA256 = "3d2ff7da2f5175d7cc0578221d7bb2dd86b563d584c7ee5f9702965156128734"
 
 #: Files the INTL service needs to auto-login. Logs and reports are excluded.
 #: Without this the copy is not a sign-in (a fresh Google sign-in may have no mmkv yet).
@@ -418,7 +421,89 @@ def restore_cache(
         _keep_mtime(source_file, target)
 
 
+# ------------------------------------------------------------ game-auth blob
+# #1420: the INTL service runs in a runner of its own (umu, Proton, Wine, then a Chromium app)
+# only to return the game-auth blob: ~7 s of every Play. The blob says when it expires, so it is
+# kept next to the saved sign-in (same folder, same 0600 rules) and reused while it is good. It
+# never goes into the prefix: restore_cache copies CACHE_FILES only.
+
+GAME_AUTH_NAME = "game-auth.json"
+#: A blob this close to its expiry is not reused (a session may last hours).
+GAME_AUTH_MARGIN_SECONDS = 86_400
+
+
+def auth_fingerprint(cache_dir: str | Path) -> str | None:
+    """A digest of the saved sign-in (``intl_auth.txt``); ``None`` without one or via a link."""
+    try:
+        data = _read_plain(Path(cache_dir) / "intl_auth.txt")
+    except OSError:
+        return None
+    return hashlib.sha256(data).hexdigest() if data else None
+
+
+def _expiry(auth: dict[str, Any]) -> int | None:
+    value = auth.get("token_expire_time")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())
+    return value if isinstance(value, int) and value > 0 else None
+
+
+def _usable_auth(auth: Any) -> bool:
+    return (
+        isinstance(auth, dict)
+        and all(isinstance(auth.get(k), str) and auth.get(k) for k in REQUIRED_AUTH_FIELDS)
+        and _expiry(auth) is not None
+    )
+
+
+def save_game_auth(cache_dir: str | Path, auth: dict[str, Any], fingerprint: str | None) -> bool:
+    """Keep ``auth`` for the sign-in ``fingerprint``; ``False`` (nothing kept) when it is unfit.
+
+    A blob without a readable expiry is not kept: Nadare cannot tell when it goes stale.
+    """
+    folder = Path(cache_dir)
+    if not fingerprint or not _usable_auth(auth) or folder.is_symlink() or not folder.is_dir():
+        return False
+    doc = {"fingerprint": fingerprint, "auth": auth}
+    _write_plain(folder / GAME_AUTH_NAME, json.dumps(doc, ensure_ascii=False).encode(), 0o600)
+    return True
+
+
+def load_game_auth(
+    cache_dir: str | Path, fingerprint: str | None, *, now: float | None = None
+) -> dict[str, Any] | None:
+    """The kept blob when it belongs to ``fingerprint`` and is not about to expire."""
+    if not fingerprint:
+        return None
+    try:
+        doc = json.loads(_read_plain(Path(cache_dir) / GAME_AUTH_NAME).decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or doc.get("fingerprint") != fingerprint:
+        return None
+    auth = doc.get("auth")
+    if not _usable_auth(auth):
+        return None
+    current = time.time() if now is None else now
+    if _expiry(auth) <= current + GAME_AUTH_MARGIN_SECONDS:
+        return None
+    return auth
+
+
+def drop_game_auth(cache_dir: str | Path) -> None:
+    """Forget the kept blob (a link there is removed, never followed)."""
+    with contextlib.suppress(OSError):
+        (Path(cache_dir) / GAME_AUTH_NAME).unlink()
+
+
 # ------------------------------------------------------------- command lines
+
+
+def windows_command_line(args: list[str]) -> str:
+    """Quote arguments for CreateProcessW using the Windows C runtime rules."""
+    return subprocess.list2cmdline(args)
 
 
 def intl_command(

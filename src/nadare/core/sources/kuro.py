@@ -12,9 +12,10 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 from .. import directdl, kurotokens
+from ..directdl import require_https
 from . import Fetch, default_fetch, ungzip
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]{8,64}")
@@ -39,10 +40,6 @@ def _patch_extra(root: str, configs: dict[str, Any]) -> dict[str, Any]:
     return {EXTRA_KEY: {"root": root, "packs": packs}} if packs else {}
 
 
-def _https(url: str) -> str:
-    if urlparse(url).scheme != "https":
-        raise directdl.DirectError(f"refusing a non-https URL: {url!r}")
-    return url
 
 
 def _cdn_root(
@@ -61,7 +58,7 @@ def _cdn_root(
         raise directdl.DirectError("index is missing the CDN list or config") from exc
     if not isinstance(config, dict):
         raise directdl.DirectError("index config is not an object")
-    return config, _https(str(root))
+    return config, require_https(str(root))
 
 
 def _index_url(group: str, prefix: str, token: str) -> str:
@@ -171,7 +168,7 @@ def resolve_game(
     except KeyError as exc:
         raise directdl.DirectError(f"index config is missing {exc.args[0]!r}") from exc
 
-    list_url = _https(root + quote(index_file, safe="/"))
+    list_url = require_https(root + quote(index_file, safe="/"))
     manifest = _json(fetch(list_url, None), "indexFile")
 
     resources = manifest.get("resource")
@@ -190,7 +187,7 @@ def resolve_game(
             raise directdl.DirectError(f"resource is missing {exc.args[0]!r}") from exc
         except (TypeError, ValueError) as exc:
             raise directdl.DirectError("resource has an invalid size") from exc
-        url = _https(root + quote(base_url + path, safe="/"))
+        url = require_https(root + quote(base_url + path, safe="/"))
         files.append(directdl.RemoteFile(path=path, url=url, size=size, md5=md5))
 
     return directdl.Plan(
@@ -227,7 +224,8 @@ def _bundle_files(
             raise directdl.DirectError(f"pack {name!r} is missing {exc.args[0]!r}") from exc
         pack_versions.append((str(name), str(pack.get("version") or "")))
         patch_configs[str(name)] = pack.get("patchConfig")
-        manifest = _json(fetch(_https(root + quote(index_file, safe="/")), None), "indexFile")
+        index_url = require_https(root + quote(index_file, safe="/"))
+        manifest = _json(fetch(index_url, None), "indexFile")
         resources = manifest.get("resource")
         if not isinstance(resources, list):
             raise directdl.DirectError(f"pack {name!r} is missing its resource list")
@@ -245,7 +243,7 @@ def _bundle_files(
             if path in seen:
                 raise directdl.DirectError(f"{path} is listed in more than one pack")
             seen.add(path)
-            url = _https(root + quote(base_url + path, safe="/"))
+            url = require_https(root + quote(base_url + path, safe="/"))
             files.append(directdl.RemoteFile(path=path, url=url, size=size, md5=md5))
 
     # The first pack's version is the plan's; a pack that moved on its own is added, so a
@@ -305,7 +303,7 @@ def resolve_bundle(
     try:
         source: dict[str, Any] = block if isinstance(block, dict) else index
         cdns = source["cdnList"] if "cdnList" in source else index["cdnList"]
-        root = _https(str(max(cdns, key=lambda cdn: int(cdn["P"]))["url"]))
+        root = require_https(str(max(cdns, key=lambda cdn: int(cdn["P"]))["url"]))
         packs = source["resourcePacks"]
     except (KeyError, TypeError, ValueError) as exc:
         raise directdl.DirectError("index is missing the CDN list, packs or bundles") from exc

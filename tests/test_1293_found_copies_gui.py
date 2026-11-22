@@ -304,3 +304,52 @@ def test_the_chooser_keeps_version_and_completeness_visible_for_long_paths(case,
     assert dialog.list.textElideMode() == Qt.TextElideMode.ElideMiddle
     assert dialog.list.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
     dialog.deleteLater()
+
+
+# #1300: copy sizes, measured off the GUI thread after the dialog opens, never at start-up.
+def test_copy_text_adds_the_size_when_known(case):
+    from nadare.gui.found_copies import copy_text
+
+    config, _real, _old = case
+    copy = _found(config)["hsr"][0]
+    assert "GiB" not in copy_text(copy) and "B" not in copy_text(copy).split("\n")[1]
+    assert copy_text(copy, size=3 * 1024**3).split("\n")[1].endswith("· 3 GiB")
+
+
+def test_the_chooser_measures_each_copy_in_the_background(case, qapp, monkeypatch):
+    from nadare.core import diskspace
+    from nadare.gui import found_copies
+
+    config, real, _old = case
+    copies = _found(config)["hsr"]
+    threads: list[str] = []
+    import threading
+
+    measured: list[str] = []
+
+    def fake_bytes(path, **_k):
+        measured.append(str(path))
+        threads.append(threading.current_thread().name)
+        return 5 * 1024**3
+
+    monkeypatch.setattr(diskspace, "tree_bytes", fake_bytes)
+    dialog = found_copies.FoundCopiesDialog("Honkai: Star Rail", copies)
+    assert "GiB" not in dialog.list.item(0).text(), "nothing measured while opening"
+    dialog.wait_for_sizes(5.0)
+    qapp.processEvents()
+    assert measured == [str(c.game_dir) for c in copies]
+    assert all(name != threading.main_thread().name for name in threads)
+    assert dialog.list.item(0).text().endswith("· 5 GiB")
+    assert dialog.list.item(0).text().startswith(str(real))
+    dialog.deleteLater()
+
+
+def test_a_size_arriving_after_close_is_harmless(case, qapp):
+    from nadare.gui import found_copies
+
+    config, _real, _old = case
+    dialog = found_copies.FoundCopiesDialog("Honkai: Star Rail", _found(config)["hsr"])
+    dialog._size_ready(99, 1)  # a row that does not exist
+    dialog._size_ready(0, 1024)
+    assert dialog.list.item(0).text().endswith("· 1 KiB")
+    dialog.deleteLater()

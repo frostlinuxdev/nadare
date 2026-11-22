@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Hermetic tests for the CZN updater's verification and probing.
 
-The chunk stream is replaced with a temporary-file fake so no test touches the network.
+Chunks are served by a local HTTP server (directdl does the download, #1557).
 """
 
 from __future__ import annotations
@@ -10,82 +10,81 @@ import gzip
 import hashlib
 
 import pytest
+from test_directdl_prune import server  # noqa: F401 - fixture reuse
 
 from nadare.backends.czn import update as czn_update
+from nadare.backends.czn.backend_parts import launching
+from nadare.core import directdl
 from nadare.core.yostar import ManifestError
 
 
 def _pack(payload: bytes) -> bytes:
-    return gzip.compress(payload)
+    return gzip.compress(payload, mtime=0)
 
 
 # ---------------------------------------------------------------------------
-# F7 — verification must fail closed
+# F7 — verification must fail closed (the chunks now go through directdl, #1557)
 # ---------------------------------------------------------------------------
-def test_fetch_verified_rejects_empty_manifest_md5(monkeypatch, tmp_path) -> None:
+def test_a_row_with_an_empty_manifest_md5_is_refused(monkeypatch, tmp_path) -> None:
     """An empty manifest md5 column must refuse the chunk, not skip the check."""
+    monkeypatch.setattr(czn_update, "GAME_DIR", tmp_path)
     with pytest.raises(ManifestError):
-        czn_update._fetch_verified_to_file(
-            "/bin/a.dll", "3", "c0", "", "", None,
-            tmp_path / "packed.part", tmp_path / "output.part",
+        czn_update.to_plan([czn_update.Row("/bin/a.dll", "3", "c0", "", "", None)])
+
+
+def test_a_row_with_a_bad_unpacked_md5_is_refused(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(czn_update, "GAME_DIR", tmp_path)
+    packed = _pack(b"payload")
+    with pytest.raises(ManifestError):
+        czn_update.to_plan(
+            [czn_update.Row("/bin/a.dll", "3", "c0", "not-a-hash",
+                            hashlib.md5(packed).hexdigest(), None)]
         )
 
 
-def test_fetch_verified_rejects_a_bad_unpacked_md5(monkeypatch, tmp_path) -> None:
+def test_the_plan_checks_both_md5s_and_the_size(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(czn_update, "GAME_DIR", tmp_path)
+    monkeypatch.setattr(czn_update, "BASE", "https://cdn.example/game/dpms_X")
     payload = b"payload"
     packed = _pack(payload)
-    with pytest.raises(ManifestError):
-        czn_update._fetch_verified_to_file(
-            "/bin/a.dll", "3", "c0", "not-a-hash", hashlib.md5(packed).hexdigest(),
-            None, tmp_path / "packed.part", tmp_path / "output.part",
-        )
+    (rf,) = czn_update.to_plan(
+        [czn_update.Row("/bin/a.dll", "3", "c0", hashlib.md5(payload).hexdigest().upper(),
+                        hashlib.md5(packed).hexdigest(), len(payload))]
+    ).files
+    assert rf.path == "bin/a.dll"
+    assert rf.url == "https://cdn.example/game/dpms_X/v3/c0.gz"
+    assert (rf.size, rf.md5) == (len(payload), hashlib.md5(payload).hexdigest())
+    assert rf.packed == directdl.Packed("gzip", md5=hashlib.md5(packed).hexdigest())
 
 
-def test_download_file_rejects_a_size_mismatch(monkeypatch, tmp_path) -> None:
+def _sync_one(make_server, tmp_path, monkeypatch, payload, packed, usize):
+    srv = make_server({"/v3/c0.gz": packed})
+    monkeypatch.setattr(czn_update, "GAME_DIR", tmp_path / "game")
+    monkeypatch.setattr(czn_update, "BASE", srv.url)
+    plan = czn_update.to_plan(
+        [czn_update.Row("/a.bin", "3", "c0", hashlib.md5(payload).hexdigest(),
+                        hashlib.md5(packed).hexdigest(), usize)]
+    )
+    directdl.sync(plan, tmp_path / "game")
+
+
+def test_a_size_mismatch_is_refused(server, monkeypatch, tmp_path) -> None:  # noqa: F811
     """A chunk whose decompressed length differs from ``usize`` is refused."""
-    game_dir = tmp_path / "game"
-    monkeypatch.setattr(czn_update, "GAME_DIR", game_dir)
     payload = b"payload"
-    packed = _pack(payload)
-
-    def fake_stream(_url, dest, **_kwargs):
-        dest.write_bytes(packed)
-        return len(packed)
-
-    monkeypatch.setattr(czn_update, "_download_stream", fake_stream)
-    with pytest.raises(ValueError):
-        czn_update.download_file(
-            "/a.bin", "3", "c0", hashlib.md5(payload).hexdigest(),
-            hashlib.md5(packed).hexdigest(), len(payload) + 1, attempts=1,
-        )
-    assert not (game_dir / "a.bin").exists()
+    with pytest.raises(directdl.DirectError):
+        _sync_one(server, tmp_path, monkeypatch, payload, _pack(payload), len(payload) + 1)
+    assert not (tmp_path / "game" / "a.bin").exists()
 
 
 # ---------------------------------------------------------------------------
 # F8 — a decompression bomb is bounded
 # ---------------------------------------------------------------------------
-def test_fetch_verified_caps_the_unpacked_size(monkeypatch, tmp_path) -> None:
-    """A chunk that expands past the cap is aborted during streaming decode."""
-    monkeypatch.setattr(czn_update, "MAX_UNPACKED", 4096)
+def test_the_unpacked_size_is_capped_at_the_manifest_size(server, monkeypatch, tmp_path) -> None:  # noqa: F811
+    """A chunk that expands past the file's size is aborted while it is decoded."""
     payload = b"x" * 1_000_000
-    packed = _pack(payload)
-
-    def fake_stream(_url, dest, **_kwargs):
-        dest.write_bytes(packed)
-        return len(packed)
-
-    monkeypatch.setattr(czn_update, "_download_stream", fake_stream)
-    with pytest.raises(ValueError):
-        czn_update._fetch_verified_to_file(
-            "/bomb.bin",
-            "3",
-            "c0",
-            hashlib.md5(payload).hexdigest(),
-            hashlib.md5(packed).hexdigest(),
-            None,
-            tmp_path / "packed.part",
-            tmp_path / "output.part",
-        )
+    with pytest.raises(directdl.DirectError, match="larger than"):
+        _sync_one(server, tmp_path, monkeypatch, payload, _pack(payload), 4096)
+    assert not (tmp_path / "game" / "a.bin").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +153,7 @@ def test_plan_nul_path_is_a_clean_error(monkeypatch, tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# a lingering crash handler is not "the game" (#24)
+# a lingering crash handler is not "the game" (#24); one rule with the backend (#1557)
 # ---------------------------------------------------------------------------
 class TestGameRunningIgnoresHelpers:
     PREFIX = "z:\\mnt\\games\\czn\\bin\\"
@@ -163,29 +162,32 @@ class TestGameRunningIgnoresHelpers:
     def _argv(*tokens: str) -> bytes:
         return b"\0".join(t.encode() for t in tokens) + b"\0"
 
+    @staticmethod
+    def _game(raw: bytes, prefix: str) -> bool:
+        return launching._cmdline_has_exe(raw, prefix, exclude=launching.GAME_HELPER_EXES)
+
     def test_the_game_exe_counts(self):
         raw = self._argv("Z:\\mnt\\games\\czn\\bin\\ChaosZeroNightmare.exe")
-        assert czn_update._cmdline_has_exe(raw, self.PREFIX) is True
+        assert self._game(raw, self.PREFIX) is True
 
     def test_a_lingering_crashpad_handler_does_not_count(self):
         raw = self._argv("Z:\\mnt\\games\\czn\\bin\\crashpad_handler.exe", "--database=x")
-        assert czn_update._cmdline_has_exe(raw, self.PREFIX) is False
+        assert self._game(raw, self.PREFIX) is False
 
     def test_helper_match_is_case_and_separator_insensitive(self):
         raw = self._argv("Z:/mnt/games/czn/bin/CrashPad_Handler.EXE")
-        assert czn_update._cmdline_has_exe(raw, self.PREFIX.replace("\\", "/")) is False
+        assert self._game(raw, self.PREFIX.replace("\\", "/")) is False
 
     def test_the_game_still_counts_next_to_its_crash_handler(self):
         raw = self._argv(
             "Z:\\mnt\\games\\czn\\bin\\crashpad_handler.exe",
             "Z:\\mnt\\games\\czn\\bin\\ssr-stove-shield.exe",
         )
-        assert czn_update._cmdline_has_exe(raw, self.PREFIX) is True
+        assert self._game(raw, self.PREFIX) is True
 
-    def test_backend_and_updater_agree_on_the_helper_list(self):
-        from nadare.backends.czn import backend
-
-        assert czn_update.GAME_HELPER_EXES == backend.GAME_HELPER_EXES
+    def test_the_updater_has_no_helper_list_of_its_own(self):
+        assert not hasattr(czn_update, "GAME_HELPER_EXES")
+        assert czn_update.launching is launching
 
 
 # ---------------------------------------------------------------------------

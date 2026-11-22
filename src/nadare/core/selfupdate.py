@@ -12,11 +12,12 @@ Nothing here talks to the GUI. The user is always asked first; this module only 
 
 from __future__ import annotations
 
-import hashlib
+import json
 import logging
 import os
 import platform
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -27,7 +28,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from . import channel, download, indexfetch, sandbox
+from . import channel, download, indexfetch, paths, sandbox
 from .updatecheck import UpdateInfo
 
 log = logging.getLogger(__name__)
@@ -45,6 +46,8 @@ _SUMS_LINE = re.compile(r"^([0-9a-fA-F]{64})[ \t]+\*?(.+?)\s*$")
 _APPIMAGE_ENV = ("APPIMAGE", "APPDIR", "ARGV0", "OWD")
 INDEX_DOC = "app/releases.json"
 BACKUP_SUFFIX = ".previous"
+#: The update's note of the exact backup it made, for :func:`cleanup_previous` (#1478).
+RECEIPT = "selfupdate-previous.json"
 _SUMS_MAX_BYTES = 64 * 1024
 
 
@@ -211,7 +214,7 @@ def _looks_like_release_doc(data: Any) -> bool:
         if not isinstance(entry, dict):
             return False
         digest = entry.get("sha256")
-        if digest is not None and (not isinstance(digest, str) or not _SHA256.match(digest)):
+        if digest is not None and (not isinstance(digest, str) or not _SHA256.fullmatch(digest)):
             return False
     return True
 
@@ -238,7 +241,7 @@ def _index_hash(info: UpdateInfo, fetch_index: Callable[[], Any]) -> str | None:
     if not isinstance(entry, dict):
         return None
     value = entry.get("sha256")
-    if not isinstance(value, str) or not _SHA256.match(value):
+    if not isinstance(value, str) or not _SHA256.fullmatch(value):
         raise SelfUpdateError("the Nadare index lists a malformed checksum for this release")
     return value.lower()
 
@@ -358,32 +361,53 @@ def install_update(new: Path, target: Path, filename: str, *, sha256: str | None
         # was verified (#811).
         raise SelfUpdateError("the downloaded file changed after it was checked; not installed")
     os.chmod(new, 0o755)
+    # Every step leaves ``target`` starting Nadare, even if the process is killed between
+    # steps (#1471): the backup is a second name for the old file (or a copy), the new file
+    # arrives with one atomic rename, and only then does the old path become a link to it.
     try:
-        os.replace(target, backup)
+        _keep_backup(target, backup)
     except OSError as exc:
         raise SelfUpdateError(f"could not set the old version aside: {exc}") from exc
     try:
         os.replace(new, dest)
     except OSError as exc:
-        try:
-            os.replace(backup, target)
-        except OSError:  # pragma: no cover - nothing sensible left to do
-            log.error("self-update: could not restore %s from %s", target, backup)
         raise SelfUpdateError(f"could not put the new version in place: {exc}") from exc
     if dest != target:
         _leave_links(target, dest)
+    _write_receipt(backup, dest)
     return dest
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
+def _write_receipt(backup: Path, dest: Path) -> None:
+    """Remember which backup this update made, so cleanup never guesses by name (#1478)."""
     try:
-        with open(path, "rb") as fh:
-            for block in iter(lambda: fh.read(1 << 20), b""):
-                digest.update(block)
+        path = paths.state_dir() / RECEIPT
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"backup": str(backup), "new": str(dest)}), encoding="utf-8")
+    except OSError as exc:
+        log.debug("self-update: could not record the backup: %s", exc)
+
+
+def _keep_backup(target: Path, backup: Path) -> None:
+    """Make ``backup`` the current ``target`` without ever removing ``target``.
+
+    A hard link costs nothing; a folder that refuses links gets a copy. Either is built under a
+    temporary name and renamed over an older backup in one step.
+    """
+    with tempfile.TemporaryDirectory(prefix=".nadare-backup-", dir=target.parent) as work:
+        staged = Path(work) / "previous"
+        try:
+            os.link(target, staged)
+        except OSError:
+            shutil.copy2(target, staged)
+        os.replace(staged, backup)
+
+
+def _sha256_file(path: Path) -> str:
+    try:
+        return download.hash_file(path)["sha256"]
     except OSError as exc:
         raise SelfUpdateError(f"could not read the download: {exc}") from exc
-    return digest.hexdigest()
 
 
 def _leave_links(old: Path, dest: Path) -> None:
@@ -406,11 +430,45 @@ def _leave_links(old: Path, dest: Path) -> None:
                 os.replace(temp, path)
         except OSError:
             log.debug("self-update: could not leave a link at %s", path, exc_info=True)
+            if path == old:
+                # No links in this folder: the old name goes, as before #1471 (its file is
+                # kept as the backup); otherwise a FAT drive would hold a third full copy.
+                try:
+                    os.unlink(old)
+                except OSError:
+                    log.debug("self-update: could not remove %s", old, exc_info=True)
+
+
+def _cleanup_recorded(running: Path) -> None:
+    """Remove the backup the last update recorded, once its new file is the one running."""
+    path = paths.state_dir() / RECEIPT
+    try:
+        note = json.loads(path.read_text(encoding="utf-8"))
+        backup, new = Path(str(note["backup"])), Path(str(note["new"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    real = Path(os.path.realpath(running))  # a shortcut may start it through the old link
+    if Path(os.path.realpath(new)) != real:
+        return  # the old version runs again (a bad update): its backup is still the way back
+    keep = real.name + BACKUP_SUFFIX  # a same-name update keeps its backup (the way back)
+    # Only a backup this update could have made: beside the new file, named *.previous.
+    if backup.parent == real.parent and backup.name.endswith(BACKUP_SUFFIX):
+        if backup.name != keep and not backup.is_symlink() and backup.is_file():
+            try:
+                backup.unlink()
+            except OSError:
+                log.debug("self-update: could not remove %s", backup)
+                return
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
 
 def cleanup_previous(running: Path) -> None:
     """Delete the kept ``*.previous`` copy of an older version once the new one has started."""
     keep = running.name + BACKUP_SUFFIX
+    _cleanup_recorded(running)
     for old in running.parent.glob("Nadare-*.AppImage" + BACKUP_SUFFIX):
         if old.name != keep:
             try:

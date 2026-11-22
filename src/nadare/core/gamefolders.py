@@ -16,13 +16,14 @@ Custom Wine games, scripts and Steam games are outside this model (:func:`placem
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import backends, libraries
+from . import backends, libraries, location
+from .paths import inside as _inside
+from .paths import real as _real
 
 #: Profile keys that name a folder of the game.
 FOLDER_KEYS = ("install_dir", "prefix")
@@ -39,14 +40,6 @@ class Placement:
     #: Profile keys that point outside the game folder, each with the value a reset puts back
     #: (``None``: the key goes, the game does not use it).
     stray: dict[str, str | None] = field(default_factory=dict)
-
-
-def _real(value: str | os.PathLike[str]) -> Path:
-    return Path(os.path.realpath(os.path.expanduser(str(value))))
-
-
-def _inside(path: Path, folder: Path) -> bool:
-    return path == folder or folder in path.parents
 
 
 def in_model(profile: Mapping[str, Any]) -> bool:
@@ -73,7 +66,7 @@ def library_of_folder(config, folder: Path) -> Path | None:
 def _folder_values(profile: Mapping[str, Any]) -> dict[str, Path]:
     out: dict[str, Path] = {}
     for key in FOLDER_KEYS:
-        value = profile.get(key)
+        value = location._setting(profile, key)
         # A hand-edited NUL cannot name a folder; realpath() would raise on it.
         if isinstance(value, str) and value.strip() and "\x00" not in value:
             out[key] = _real(value)
@@ -81,15 +74,8 @@ def _folder_values(profile: Mapping[str, Any]) -> dict[str, Path]:
 
 
 def _made_folder(profile: Mapping[str, Any], name: str) -> Path | None:
-    """The folder Nadare made for this game, when it made one."""
-    owned = profile.get("owned_trees")
-    dirs = profile.get("owned_dirs")
-    if not (isinstance(owned, list) and owned) and not (isinstance(dirs, list) and dirs):
-        # Nothing recorded as Nadare's: a library game in the default library still has no
-        # folder keys at all (both default inside profiles/<name>); anything else is an import.
-        if _folder_values(profile):
-            return None
-    made = libraries._game_folder(profile, name, None)
+    """The folder Nadare made for this game, when it made one (:mod:`location`, #1372)."""
+    made = location.game_folder(profile, name)
     return _real(made) if made is not None else None
 
 
@@ -141,6 +127,9 @@ def reset_stray(config, name: str) -> list[str]:
     for key, value in place.stray.items():
         if value is None:
             profile.pop(key, None)
+            extra = profile.get("extra")
+            if isinstance(extra, dict):
+                extra.pop(key, None)  # otherwise launch still reads the legacy value
             changed.append(key)
         elif value:
             profile[key] = value

@@ -17,12 +17,12 @@ git clone https://github.com/frostlinuxdev/nadare.git
 cd nadare
 
 python3 -m venv .venv
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -r requirements.txt
-.venv/bin/pip install -e ".[dev]"        # pytest + ruff
-.venv/bin/pip install -e ".[build]"      # PyInstaller, only for packaging
-.venv/bin/pip install -e ".[secure]"     # keyring, enables Remember me
+.venv/bin/pip install -r requirements-dev.txt   # the lock's runtime + dev pins, hash-checked
+.venv/bin/pip install --no-deps -e .
 ```
+
+`scripts/build_appimage.sh` builds from the locked set in `.venv-build` by itself
+(`uv sync --frozen --extra build`), so packaging needs `uv`, not a hand-made venv.
 
 Or use the helper (it prefers `uv` and the committed `uv.lock` when present):
 
@@ -34,16 +34,17 @@ Or use the helper (it prefers `uv` and the committed `uv.lock` when present):
 ./scripts/dev.sh gui        # start the GUI from source
 ```
 
-Run the CLI directly while developing:
+Run the CLI directly while developing. The GUI is the product; the CLI is plumbing
+for shortcuts, diagnostics and the tests (`nadare --help` lists the supported commands,
+and names the advanced ones on its Advanced line):
 
 ```sh
 .venv/bin/python -m nadare list
 .venv/bin/python -m nadare status -p czn
 ```
 
-`./scripts/dev.sh stub` builds the CZN PCSDK stub's C fallback with mingw-w64
-(see `scripts/build_stub.sh`); the shipped default is the Go build
-(`scripts/build_stub_go.sh`).
+`./scripts/dev.sh stub` builds the CZN PCSDK stub (the Go build, in a pinned
+container; see `scripts/build_stub_go.sh`).
 
 ## Repository layout
 
@@ -169,8 +170,8 @@ with the backend excluded, and tests must not assume it is present — see
   `scripts/build_deb.sh` builds the `.deb`.
 - `packaging/flatpak/` and `scripts/build_flatpak.sh` build a Flatpak bundle,
   but Flatpak is deferred and would ship without FGO.
-- `scripts/build_stub.sh` builds the C fallback of the CZN PCSDK stub with
-  mingw-w64; `scripts/build_stub_go.sh` builds the shipped Go stub.
+- `scripts/build_stub_go.sh` builds the shipped CZN PCSDK stub (Go). The C
+  fallback was retired after 0.1.0b25.
 
 If your change affects what is bundled (a new data file, a new hidden import),
 update the spec **and** the `.deb` staging in the same PR.

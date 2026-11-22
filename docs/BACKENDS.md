@@ -10,6 +10,42 @@ build the backend, and stream its `Event`s. If your backend blocks, reports
 progress and cleans up after itself, it will work in both front ends with no UI
 code.
 
+## Game environment
+
+Use `process.build_env` for games, publisher launchers, and installers or helpers
+that run inside a game prefix. It copies only the host variable names allowed by
+`core/launchenv.py`. Add backend settings after that step. General tools such as
+Git and 7-Zip continue to use `process.child_environ`.
+
+The list keeps display, locale, session, audio, input, Wine, Proton, Steam and
+GPU settings. It also keeps `XCURSOR_*`, `GAMESCOPE_*`, `LIBGL_*`, `GALLIUM_*`,
+`__EGL_*`, `GBM_*`, `ENABLE_VK_LAYER_*`, `DISABLE_VK_LAYER_*`, `DISABLE_LAYER_*`,
+`ENABLE_GAMESCOPE_WSI`, `EGL_PLATFORM`, `OBS_VKCAPTURE`, `GAMEMODERUNEXEC`,
+`GDK_SCALE`, `GDK_DPI_SCALE`, `QT_SCALE_FACTOR`, `QT_AUTO_SCREEN_SCALE_FACTOR`,
+`QT_SCREEN_SCALE_FACTORS`, `QT_ENABLE_HIGHDPI_SCALING`, `TERM`, `TMPDIR`,
+`XDG_SESSION_DESKTOP`, `XDG_SESSION_CLASS`, `XDG_SESSION_ID`, `XDG_SEAT`, `XDG_VTNR`,
+`SteamDeck` and `SteamOS`.
+
+Steam clients keep the host's XDG directories rather than Nadare's pinned ones.
+Under Flatpak, host programs keep the session environment supplied by the portal;
+Lepton forwards only changed settings with `host_argv`.
+
+Profiles can copy additional host variables by exact name with `pass_env`:
+
+```json
+{
+  "pass_env": ["https_proxy"],
+  "extra_env": {"MY_GAME_SETTING": "1"}
+}
+```
+
+Both keys also work inside the profile's `extra` object. `pass_env` is a list of
+names, not patterns; missing variables are ignored. `extra_env` supplies explicit
+values and wins over inherited values. Existing prefix and runner pins still
+apply. Proxies, credentials, SSH agents and host `LD_*` variables are dropped by
+default; use these settings only for variables the game needs. Backend-created
+loader settings still pass. Debug logs list dropped names without their values.
+
 ## The contract
 
 ```python
@@ -279,15 +315,16 @@ two launcher API calls, fetches the public game-file list, and publishes plain
 manifests; the backends then download the listed files directly from the public
 CDN.
 
-* `arknights-yostar` downloads directly by default, like Stella Sora: the
-manifest from Nadare's published index is synced into `install_dir` and
-`Arknights.exe` is launched (**direct** mode). Only when no manifest source is
-left (the index disabled with an empty `NADARE_INDEX_BASE` and no
-`manifest_index`/`manifest_file`) does it fall back to **official** mode, where
-the Yostar installer runs the launcher, which then downloads the game.
-* `stellasora-yostar` is **direct only**. It uses Nadare's published manifest
-index by default, and errors with an actionable message when that index is
-disabled and no manifest is configured.
+* `arknights-yostar` and `stellasora-yostar` are **direct only**: the manifest
+from Nadare's published index is downloaded into `install_dir` (each file
+checked by size and CRC-64) and the game's own exe is launched. Yostar's
+launcher never runs; that route was retired in #1452. When the index is
+disabled (an empty `NADARE_INDEX_BASE`) and no `manifest_index`/`manifest_file`
+is configured, Install and Update stop with an actionable message. An
+installed game still plays. Both are `DirectBackend` games whose plan is the
+manifest (no archive pins: the manifest carries every file's hash) and have no
+predownload; Play and process detection use the game's own exe, never a launcher
+an older install left in the folder.
 
 Manifest configuration (environment wins over the profile):
 
@@ -301,19 +338,23 @@ A manifest index maps a game tag to `{"url", "version", "sha256"}`; the client
 resolves the entry for its own `game_tag`. The per-game manifest lists files as
 `{"path", "size", "crc64"}` (CRC-64/XZ, decimal or hex). Paths are always
 treated as relative to `install_dir`; absolute or `..` paths are rejected.
-Downloads only come from `*.yo-star.com` or the manifest's own base host, use
-the resumable `.part` machinery in `core/download.py`, and are verified against
-the manifest CRC before they are kept. `status()` reports `data["mode"]` as
-`"direct"` or `"official"`.
+Downloads only come from `*.yo-star.com` over https (or a host the caller
+allow-lists; never the manifest's own say-so), and every redirect hop is held to
+the same rule. `yostar.to_plan` turns the manifest into a `directdl` plan, and
+`directdl.sync` downloads it with the resumable `.part` machinery in
+`core/download.py`, checking each file's size and CRC-64/XZ before it is kept.
+A file is replaced only after its new copy checks out. Each finished sync records
+the manifest's paths in `install_dir/.nadare/manifest-files.json`; the next finished
+sync removes the files that record lists and the new manifest does not (never a
+file no manifest listed, and nothing for an install without a record). A file that
+could not be removed is retried by Repair. `status()` reports
+`data["mode"]` as `"direct"`.
 
-Syncs are parallel and keep-alive by default: `yostar.sync(..., workers=N)`
-fetches up to 16 files at once (default 6) over per-thread reused HTTP(S)
-connections, and the CRC-64/XZ is computed from the bytes as they are written
-(liblzma's `lzma_crc64` via ctypes when available, else a pure-Python table), so
-no second read is needed. The `download_workers` profile option (1-16, config-only: see
-`CONFIG-ONLY-OPTIONS.md`) selects the worker count for `arknights-yostar`, `stellasora-yostar`
-and the `direct-*` catalog backends. Progress is aggregated and emitted at most
-every 250 ms with `speed_bps`/`eta_s`.
+The `download_workers` profile option (1-32, shown in Settings) caps how many
+files download at once for `arknights-yostar`, `stellasora-yostar` and the
+`direct-*` catalog backends; the plan still chooses its own default (6, 16 or 32
+by file count) and the profile can only lower it. The global
+`download_speed_limit` (MB/s, 0 = none) applies to every download Nadare starts.
 
 ```json
 {

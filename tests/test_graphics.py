@@ -173,6 +173,51 @@ def test_vulkaninfo_no_drivers_unavailable(monkeypatch: pytest.MonkeyPatch) -> N
     assert graphics._query_vulkan().available is False
 
 
+_CRASHED_VULKANINFO = (
+    "ERROR while creating surface for extension VK_KHR_xcb_surface : vulkaninfo.h:931: "
+    "AppCreateXcbSurface failed to establish connection\n"
+    "ERROR while creating window for surface extension VK_KHR_xlib_surface : vulkaninfo.h:966: "
+    "XLib failed to connect to the X server.\n"
+)
+_PROBED_RTX = {
+    "instance": "1.3.204",
+    "devices": [{"name": "NVIDIA GeForce RTX 3060", "api": "1.4.357", "type": "discrete"}],
+}
+
+
+def test_a_crashed_vulkaninfo_asks_the_driver_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """vulkaninfo that segfaults on an X connection says nothing about the GPU (flxpc,
+    2026-11-19): the driver probe must decide, not "no Vulkan" -> WineD3D -> D3D11 error."""
+    monkeypatch.setattr(graphics, "_vulkaninfo_path", lambda: "/usr/bin/vulkaninfo")
+    monkeypatch.setattr(
+        graphics.subprocess,
+        "run",
+        lambda *a, **k: types.SimpleNamespace(
+            stdout="", stderr=_CRASHED_VULKANINFO, returncode=-11
+        ),
+    )
+    monkeypatch.setattr(graphics, "_run_vkprobe", lambda: _PROBED_RTX)
+    info = graphics._query_vulkan()
+    assert info.available is True
+    assert info.api_version == "1.4.357"
+    monkeypatch.setattr(graphics, "vulkan_info", lambda **k: info)
+    assert graphics.effective_renderer({"renderer": "auto"}) == ("vulkan", None)
+
+
+def test_found_no_drivers_stays_unavailable_even_with_a_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The explicit "no drivers" answer is still final; only a crash defers to the probe."""
+    monkeypatch.setattr(graphics, "_vulkaninfo_path", lambda: "/usr/bin/vulkaninfo")
+    monkeypatch.setattr(
+        graphics.subprocess,
+        "run",
+        lambda *a, **k: types.SimpleNamespace(stdout="", stderr="Found no drivers!", returncode=1),
+    )
+    monkeypatch.setattr(graphics, "_run_vkprobe", lambda: _PROBED_RTX)
+    assert graphics._query_vulkan().available is False
+
+
 def test_loader_only_probe_is_marked_unverified(monkeypatch: pytest.MonkeyPatch) -> None:
     """With no vulkaninfo, a hardware ICD makes Nadare assume DXVK works (so a
     missing vulkan-tools never demotes a real GPU), but the version it reports is
@@ -225,7 +270,9 @@ def test_dxvk_ok_requires_vulkan_13(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda **k: graphics.VulkanInfo(True, api_version="1.2.199", device="old", driver="x"),
     )
     assert graphics.dxvk_ok() is False
-    assert "OpenGL" in graphics.vulkan_note()
+    # a GPU that has Vulkan is never pointed at OpenGL: the fix is the driver
+    assert "OpenGL" not in graphics.vulkan_note()
+    assert "1.2.199" in graphics.vulkan_note()
 
 
 def test_vulkan_info_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -286,12 +333,41 @@ def test_renderer_choice_defaults_and_clamps() -> None:
 
 
 def test_effective_renderer_auto_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(graphics, "dxvk_ok", lambda: False)
+    """OpenGL only when the machine has no Vulkan GPU at all."""
+    monkeypatch.setattr(graphics, "vulkan_info", lambda **k: graphics.VulkanInfo(False))
     renderer, note = graphics.effective_renderer({})
     assert renderer == "opengl"
     assert note and "OpenGL" in note
     monkeypatch.setattr(graphics, "dxvk_ok", lambda: True)
+    # a verified (not loader-only) answer, whatever this machine's vulkaninfo does
+    monkeypatch.setattr(
+        graphics, "vulkan_info", lambda **k: graphics.VulkanInfo(True, "1.3.280")
+    )
     assert graphics.effective_renderer({}) == ("vulkan", None)
+
+
+@pytest.mark.parametrize("version", ["1.2.199", "1.1.0", None])
+def test_auto_never_picks_opengl_on_a_gpu_with_vulkan(
+    monkeypatch: pytest.MonkeyPatch, version: str | None
+) -> None:
+    """User decision 2026-11-19: a GPU that has Vulkan stays on Vulkan, whatever its
+    version; OpenGL (WineD3D) is only for a GPU without Vulkan."""
+    info = graphics.VulkanInfo(True, api_version=version, device="old GPU", driver="x")
+    monkeypatch.setattr(graphics, "vulkan_info", lambda **k: info)
+    renderer, note = graphics.effective_renderer({"renderer": "auto"})
+    assert renderer == "vulkan"
+    assert note and "OpenGL" not in note
+
+
+def test_no_note_points_a_vulkan_gpu_at_opengl(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = graphics.VulkanInfo(available=True, api_version="1.3.204", loader_only=True)
+    monkeypatch.setattr(graphics, "vulkan_info", lambda **k: info)
+    assert "OpenGL" not in graphics.vulkan_note()
+
+
+def test_renderer_help_says_opengl_is_only_without_vulkan() -> None:
+    assert "without Vulkan" in graphics.RENDERER_HELP
+    assert "1.3" not in graphics.RENDERER_HELP
 
 
 def test_renderer_env_proton_opengl() -> None:
@@ -309,6 +385,7 @@ def test_renderer_env_wine_opengl_builtin_overrides() -> None:
 def test_renderer_env_vulkan_and_auto(monkeypatch: pytest.MonkeyPatch) -> None:
     assert graphics.renderer_env({"renderer": "vulkan"}, kind="proton") == {}
     monkeypatch.setattr(graphics, "dxvk_ok", lambda: True)
+    monkeypatch.setattr(graphics, "vulkan_info", lambda **k: graphics.VulkanInfo(True, "1.3.280"))
     assert graphics.renderer_env({}, kind="wine") == {}
 
 

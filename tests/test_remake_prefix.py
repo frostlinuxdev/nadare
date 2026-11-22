@@ -233,7 +233,7 @@ def test_arknights_remake_rolls_back_on_failure(tmp_path, monkeypatch):
 
 def test_arknights_remake_refuses_while_the_game_is_running(tmp_path, monkeypatch):
     backend = _arknights(tmp_path)
-    backend.prefix().mkdir()
+    backend.prefix().mkdir(parents=True)  # prefix() no longer makes the profile folder (#1465)
     patch_everywhere(monkeypatch, wg, "scan_pids", lambda patterns: [1234])
 
     with pytest.raises(BackendError) as exc:

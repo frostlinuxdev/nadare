@@ -56,6 +56,9 @@ def _czn(tmp_path, monkeypatch, profile, default_monitor=None):
     proton.mkdir(exist_ok=True)
     (proton / "proton").write_text("#!/bin/sh\n")
     monkeypatch.setattr(czn_backend.shutil, "which", lambda name, *a, **k: None)
+    # CZN runs through umu like every Proton game (#1449).
+    monkeypatch.setattr("nadare.core.umu.resolve", lambda *a, **k: "/usr/bin/umu-run")
+    monkeypatch.setattr("nadare.core.umu.note_first_runtime", lambda emit: None)
     values = {"prefix": str(tmp_path / "prefix"), "runner": str(proton), **profile}
     ctx = make_context(tmp_path, "stove-czn", values)
     if default_monitor:

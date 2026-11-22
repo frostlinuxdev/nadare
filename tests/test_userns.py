@@ -71,9 +71,9 @@ def test_profile_text_is_scoped_to_the_bundled_bwrap() -> None:
 
 def test_install_command_writes_and_loads_the_profile() -> None:
     cmd = userns.install_command()
-    assert "sudo tee /etc/apparmor.d/nadare-srt-bwrap" in cmd
-    assert "sudo apparmor_parser -r /etc/apparmor.d/nadare-srt-bwrap" in cmd
-    assert userns.profile_text().strip() in cmd
+    assert "sudo /bin/sh -c" in cmd
+    assert "apparmor_parser -r" in cmd
+    assert "nadare-srt-bwrap" in cmd
 
 
 def test_hint_names_apparmor_and_the_fix() -> None:
@@ -104,7 +104,7 @@ def test_doctor_reports_a_restricted_host(monkeypatch, capsys) -> None:
     out = capsys.readouterr().out
     assert code == 0  # informational: the sysctl alone does not prove a failure
     assert "user namespaces: restricted by AppArmor" in out
-    assert "sudo apparmor_parser -r /etc/apparmor.d/nadare-srt-bwrap" in out
+    assert "apparmor_parser -r" in out
 
 
 def test_doctor_is_quiet_when_the_profile_is_installed(monkeypatch, capsys) -> None:
@@ -118,7 +118,7 @@ def test_doctor_is_quiet_when_the_profile_is_installed(monkeypatch, capsys) -> N
     run_cli(["doctor"])
     out = capsys.readouterr().out
     assert "user namespaces: restricted, Nadare's AppArmor profile is installed" in out
-    assert "sudo tee" not in out
+    assert "sudo /bin/sh -c" not in out
 
 
 def test_doctor_says_ok_on_an_unrestricted_host(monkeypatch, capsys) -> None:
@@ -313,16 +313,16 @@ def _doctor(monkeypatch, capsys, probe_result):
 def test_doctor_is_calm_when_the_sandbox_really_works(monkeypatch, capsys) -> None:
     out = _doctor(monkeypatch, capsys, True)
     assert "sandbox starts fine (checked)" in out
-    assert "sudo tee" not in out
+    assert "sudo /bin/sh -c" not in out
 
 
 def test_doctor_says_blocked_when_the_probe_failed(monkeypatch, capsys) -> None:
     out = _doctor(monkeypatch, capsys, False)
     assert "blocked by AppArmor" in out
-    assert "sudo tee" in out
+    assert "sudo /bin/sh -c" in out
 
 
 def test_doctor_says_not_verified_when_there_is_no_runtime_yet(monkeypatch, capsys) -> None:
     out = _doctor(monkeypatch, capsys, None)
     assert "not verified yet" in out
-    assert "sudo tee" in out
+    assert "sudo /bin/sh -c" in out

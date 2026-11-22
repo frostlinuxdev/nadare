@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -20,9 +21,10 @@ from nadare.gui.single_instance import SingleInstance
 
 
 @pytest.fixture
-def name(tmp_path) -> str:
-    # A short absolute socket path, like the real server_name().
-    return str(tmp_path / "s.sock")
+def name():
+    # Unix socket names have a byte limit regardless of the bulk scratch location.
+    with tempfile.TemporaryDirectory(prefix="ns-", dir="/tmp") as folder:
+        yield str(Path(folder) / "s.sock")
 
 
 def test_a_regular_file_at_the_socket_path_is_left_alone(name):

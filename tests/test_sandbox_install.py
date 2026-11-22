@@ -50,7 +50,7 @@ def rig(tmp_path, monkeypatch):
     installer = write_exe(tmp_path / "downloads" / "nikke-wrapper.exe", "MZ")
     calls: list[list[str]] = []
 
-    def fake_stream(argv, env, on_line=None, cancel=None):
+    def fake_stream(argv, env, on_line=None, cancel=None, before_stop=None):
         calls.append(list(argv))
         _install_launcher(tmp_path / "prefix")
         return 0

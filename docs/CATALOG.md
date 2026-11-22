@@ -12,7 +12,7 @@ Every catalog game carries a support tier, shown on its card in the **Store** (t
 | Tier | Meaning |
 |---|---|
 | **Verified** | A maintainer installed it through Nadare and played it past the title screen on a real machine. Currently: Brown Dust 2, Aether Gazer, Punishing: Gray Raven, Girls' Frontline 2: Exilium (Darkwinter build), Girls' Frontline 2 (Haoplay global build), Honkai Impact 3rd, Genshin Impact, Honkai: Star Rail, Zenless Zone Zero, Wuthering Waves, NIKKE: Goddess of Victory, Arknights: Endfield, Neverness to Everness (the direct install) and Mongil: Star Dive. |
-| **Experimental** | The install path is covered by tests and fixtures, but nobody has played it end to end yet, or it needs a workaround (an anti-cheat, a publisher launcher, a login). It can break when a publisher changes something. |
+| **Experimental** | The install path is covered by tests and fixtures, but nobody has played it end to end yet, or it needs a workaround (an anti-cheat, a publisher launcher, a login). It can break when a publisher changes something. Currently: Snowbreak: Containment Zone (installs from Seasun's public file list; no end-to-end play yet). |
 
 The HoYo games (Genshin Impact, Honkai: Star Rail, Honkai Impact 3rd, Zenless Zone Zero) are offered
 like the others. All four are Verified and install through HoYo's chunked "Sophon" downloads.
@@ -72,6 +72,14 @@ A few publishers wrap their file list. Neverness to Everness's `ResList.bin` is 
 wrapper around zlib-compressed XML; `core/sources/nte.py` unwraps it with the small AES decryptor
 in `core/sources/_aes.py`. Nadare ships no crypto library. How a given wrapper is opened is a
 per-game project decision; keep research notes out of this repository.
+
+## Launch options
+
+Settings, Game options has **Launch arguments** for any extra command-line flags a game takes.
+Wuthering Waves and Mongil: Star Dive also have **Skip intro videos**, off by default: when on,
+Nadare adds the game's splash-skip flag (`-SkipSplash` and `-nosplash`) after its own default
+arguments and before your Launch arguments. It changes no game files; turn it off if the game
+misbehaves after an update.
 
 ## How a `launcher-<game>` works
 

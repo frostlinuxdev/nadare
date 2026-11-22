@@ -19,12 +19,14 @@ The command without ``--yes`` prints the plan and deletes nothing.
 
 from __future__ import annotations
 
+import fcntl
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import paths, process, removal
+from . import libraries, location, paths, process, profilefolders, removal
+from . import umu as umu_runtime
 
 #: Tree keys ``remove_game`` understands for the game's own files.
 _GAME_TREE_KEYS = ("install_dir", "prefix", "wineprefix")
@@ -64,12 +66,88 @@ def _is_backup_tree(tree: removal.RemovableTree) -> bool:
     return tree.key == removal._BACKUP_KEY or tree.key.startswith(f"{removal._BACKUP_KEY}:")
 
 
+#: Why umu's folder is never removed by default (#1417).
+UMU_NOTE = (
+    "shared: Steam, Lutris, Heroic, Faugus and other umu apps use this folder too; "
+    "they download it again when they need it"
+)
+
+
+def umu_folder() -> Path:
+    """umu's own data folder: ``~/.local/share/umu`` whatever ``XDG_DATA_HOME`` says."""
+    return Path.home() / ".local" / "share" / "umu"
+
+
+def _running_from(root: Path) -> list[str]:
+    """Processes whose program file is inside ``root`` (``"name (pid)"``), e.g. a game's
+    pressure-vessel started by any umu app."""
+    try:
+        base = Path(os.path.realpath(root))
+    except OSError:
+        return []
+    found: list[str] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            exe = Path(os.readlink(f"/proc/{entry}/exe"))
+        except OSError:
+            continue  # gone, or another user's
+        if exe == base or exe.is_relative_to(base):
+            try:
+                name = Path(f"/proc/{entry}/comm").read_text().strip()
+            except OSError:
+                name = exe.name
+            found.append(f"{name} ({entry})")
+    return found
+
+
+def _held_locks() -> list[str]:
+    """Every lock someone holds in Nadare's state folder: operation locks of *any* profile
+    (another ``--config``, a profile made after this config was read) and Flatpak run locks.
+
+    Deleting the state folder under a held lock lets a second owner take a fresh file while
+    the first still runs (#1499). A lock that cannot be probed counts as held."""
+    held: list[str] = []
+    for folder in (paths.state_dir() / process.LOCK_DIR_NAME, paths.state_dir() / "running"):
+        try:
+            files = sorted(p for p in folder.iterdir() if p.name.endswith(".lock"))
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            held.append(f"{folder} ({exc})")
+            continue
+        for path in files:
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+            except OSError as exc:
+                held.append(f"{path.name} ({exc})")
+                continue
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if not process.flock_unavailable(exc):
+                    held.append(path.name)
+            finally:
+                os.close(fd)  # closing drops a lock this probe took
+    return held
+
+
 def plan(config) -> list[Group]:
-    """Describe the four uninstall groups without deleting anything."""
+    """Describe the uninstall groups without deleting anything."""
     nadare = _existing(
         [paths.config_dir(), paths.state_dir(), paths.cache_dir(), paths.data_dir()]
     )
-    runtimes = _existing([paths.runners_dir(), paths.data_dir() / "umu"])
+    runtimes = _existing(
+        [paths.runners_dir(), paths.data_dir() / "umu", umu_runtime.runtime_base()]
+    )
+    umu = _existing(umu_runtime.shared_runtime_roots())
 
     games: list[Path] = []
     backups: list[Path] = []
@@ -92,9 +170,16 @@ def plan(config) -> list[Group]:
         ),
         Group(
             key="runtimes",
-            label="Downloaded Proton/Wine runners and the managed umu folder",
+            label="Downloaded Proton/Wine runners, umu-launcher and Nadare's umu runtime",
             default=True,
             paths=runtimes,
+        ),
+        Group(
+            key="umu",
+            label="Shared umu runtime (other apps may use it): Steam Runtime downloads",
+            default=False,
+            paths=umu,
+            note=UMU_NOTE,
         ),
         Group(
             key="games",
@@ -104,6 +189,13 @@ def plan(config) -> list[Group]:
             note="folders Nadare did not create are never deleted",
         ),
         Group(
+            key="kept",
+            label="Folders of games removed earlier with their files kept (always kept)",
+            default=False,
+            paths=tuple(_retained_game_folders(config)),
+            note="delete them yourself, or in Settings → Disk space",
+        ),
+        Group(
             key="backups",
             label="Old prefix backups recorded after rebuilding a prefix",
             default=False,
@@ -111,6 +203,36 @@ def plan(config) -> list[Group]:
             note="only backups Remove would delete are listed",
         ),
     ]
+
+
+def _retained_game_folders(config) -> list[Path]:
+    """Game folders under Nadare's data folder that no profile claims: what an earlier Remove
+    kept ("keep the files"), and folders the Disk space card would only *offer* (#1498).
+
+    They are always kept: their owner is gone, so only the player can say they may go."""
+    out: list[Path] = []
+    try:
+        roots = libraries.library_roots(config)
+    except Exception:  # noqa: BLE001 - a broken library list must not widen the deletion
+        roots = []
+    out.extend(folder.path for folder in profilefolders.find(config.profiles, roots))
+    default = paths.profiles_dir() / location.NADARE_DIR
+    try:
+        children = sorted(default.iterdir()) if default.is_dir() else []
+    except OSError:
+        children = []
+    for child in children:
+        try:
+            if child.is_symlink() or not child.is_dir():
+                continue
+            claim = location.overlapping(
+                config.profiles, child, excluding=None, direction="either", ignore_broad=False
+            )
+        except (OSError, ValueError, RuntimeError):
+            claim = None  # unknown: keep it
+        if claim is None and child not in out:
+            out.append(child)
+    return out
 
 
 def _configured_game_paths(config) -> list[Path]:
@@ -201,6 +323,7 @@ def run(
     games: bool = False,
     backups: bool = False,
     runtimes: bool = True,
+    umu: bool = False,
     applications_dir: Any = None,
     desktop_dir: Any = None,
 ) -> Report:
@@ -227,6 +350,13 @@ def run(
             problem = process.OPERATION_BUSY.format(name=name)
         if problem is not None:
             problems.append(problem)
+    busy = _held_locks()
+    if busy:
+        problems.append(
+            "another Nadare is installing, updating, moving or running a game ("
+            + ", ".join(busy[:3])
+            + "); close it and run this again. Nothing was deleted."
+        )
     if problems:
         return Report(profiles_removed=[], removed=[], warnings=problems, refused=True)
 
@@ -284,8 +414,9 @@ def run(
             refused=False,
         )
 
-    # 3. What must survive the deletion of Nadare's own folders.
-    keep: list[Path] = []
+    # 3. What must survive the deletion of Nadare's own folders. Folders of games removed
+    # earlier with their files kept always do (#1498), with or without ``games``.
+    keep: list[Path] = list(groups["kept"].paths)
     if not games:
         keep.extend(game_paths)
         keep.extend(configured_paths)
@@ -301,6 +432,18 @@ def run(
     removed: list[Path] = []
     if runtimes:
         for root in groups["runtimes"].paths:
+            _delete_root(root, keep, removed, warnings)
+
+    # 4b. umu's own folder, only when chosen and nothing runs from it (it is shared).
+    if umu:
+        for root in groups["umu"].paths:
+            busy = [] if root.is_symlink() else _running_from(root)
+            if busy:
+                warnings.append(
+                    f"{root} was kept: {', '.join(busy[:3])} is running from it (a game "
+                    "started by Nadare or another umu app). Close it and run this again."
+                )
+                continue
             _delete_root(root, keep, removed, warnings)
 
     # 5. Nadare's own settings, logs, cache and data.

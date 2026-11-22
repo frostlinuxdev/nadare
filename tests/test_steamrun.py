@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
 
-from nadare.core import steamrun, steamtools
+from nadare.core import process, steamrun, steamtools
 from nadare.core.backends import BackendError
 
 CONFIG = """"InstallConfigStore"
@@ -229,6 +230,74 @@ def test_the_proton_command_runs_in_the_games_own_prefix(tmp_path):
     assert env["STEAM_COMPAT_DATA_PATH"] == str(tmp_path / "compatdata" / "5019180")
     assert env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] == str(tmp_path / "Steam")
     assert env["DISPLAY"] == ":0"
+
+
+def test_the_umu_command_runs_the_installer_in_the_games_prefix_with_its_proton(tmp_path):
+    proton = tmp_path / "Proton - Experimental" / "proton"
+    compat = tmp_path / "compatdata" / "5019180"
+    argv, env = steamrun.umu_run_command(
+        umu_run="/usr/bin/umu-run", proton=proton, compat_data=compat,
+        client_path=tmp_path / "Steam", args=["setup.exe", "/silent"],
+        base_env={"DISPLAY": ":0", "GAMEID": "umu-12345"},
+    )
+    assert argv == ["/usr/bin/umu-run", "setup.exe", "/silent"]
+    # umu takes the compatdata folder as WINEPREFIX and keeps Steam's real pfx/ inside it.
+    assert env["WINEPREFIX"] == str(compat)
+    assert env["STEAM_COMPAT_DATA_PATH"] == str(compat)
+    assert env["PROTONPATH"] == str(proton.parent)
+    # An installer, not the game: no per-game fixes, whatever the caller's environment said.
+    assert env["GAMEID"] == "umu-0"
+    assert env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] == str(tmp_path / "Steam")
+    assert env["DISPLAY"] == ":0"
+
+
+def test_the_installer_command_goes_through_umu_when_one_is_usable(tmp_path, caplog):
+    proton = tmp_path / "Proton - Experimental" / "proton"
+    compat = tmp_path / "compatdata" / "5019180"
+    with caplog.at_level(logging.INFO):
+        argv, env = steamrun.installer_command(
+            umu_run="/usr/bin/umu-run", proton=proton, compat_data=compat,
+            client_path=tmp_path / "Steam", args=["setup.exe", "/silent"],
+            base_env={"DISPLAY": ":0"},
+        )
+    assert argv == ["/usr/bin/umu-run", "setup.exe", "/silent"]
+    assert env["WINEPREFIX"] == str(compat)
+    assert env["STEAM_COMPAT_DATA_PATH"] == str(compat)
+    assert env["PROTONPATH"] == str(proton.parent)
+    assert env["GAMEID"] == "umu-0"
+    assert "umu" in caplog.text
+
+
+def test_the_installer_command_without_umu_is_a_proton_run_and_says_so(tmp_path, caplog):
+    proton = tmp_path / "Proton - Experimental" / "proton"
+    compat = tmp_path / "compatdata" / "5019180"
+    with caplog.at_level(logging.INFO):
+        argv, env = steamrun.installer_command(
+            umu_run=None, proton=proton, compat_data=compat,
+            client_path=tmp_path / "Steam", args=["setup.exe", "/silent"],
+            base_env={"DISPLAY": ":0"},
+        )
+    assert argv == [str(proton), "run", "setup.exe", "/silent"]
+    assert env["STEAM_COMPAT_DATA_PATH"] == str(compat)
+    assert env["STEAM_COMPAT_CLIENT_INSTALL_PATH"] == str(tmp_path / "Steam")
+    assert "proton run" in caplog.text
+
+
+def test_the_installer_command_gets_the_filtered_launch_environment(tmp_path):
+    """Neither an unrelated host name nor a credential-looking one reaches the installer."""
+    base = process.build_env(base={
+        "DISPLAY": ":0", "UNRELATED": "host-only", "WINE_SECRET": "hunter2",
+        "PATH": ".:/usr/bin",
+    })
+    _argv, env = steamrun.installer_command(
+        umu_run="/usr/bin/umu-run", proton=tmp_path / "proton",
+        compat_data=tmp_path / "compatdata" / "5019180",
+        client_path=tmp_path / "Steam", args=["setup.exe"], base_env=base,
+    )
+    assert env["DISPLAY"] == ":0"
+    assert "UNRELATED" not in env
+    assert "WINE_SECRET" not in env
+    assert "." not in env["PATH"].split(":")
 
 
 def test_the_prefix_install_refuses_while_the_game_runs(tmp_path):

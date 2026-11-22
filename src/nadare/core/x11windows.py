@@ -13,8 +13,12 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import os
+import threading
 from collections.abc import Iterable
 from typing import Any
+
+#: One X11 tree walk at a time (see :func:`_list_windows_full`).
+_WALK_LOCK = threading.Lock()
 
 #: ``IsViewable`` from ``X.h``.
 _IS_VIEWABLE = 2
@@ -22,6 +26,12 @@ _IS_VIEWABLE = 2
 _ICONIC_STATE = 3
 #: How many levels below the root are read (a KWin client window is at level 3).
 _DEPTH = 4
+
+#: ``ClientMessage`` from ``X.h``: the event type EWMH uses for ``_NET_CLOSE_WINDOW``.
+_CLIENT_MESSAGE = 33
+#: The two masks a client sends an EWMH root message with (``X.h``).
+_SUBSTRUCTURE_REDIRECT = 1 << 20
+_SUBSTRUCTURE_NOTIFY = 1 << 19
 
 
 class _XWindowAttributes(ctypes.Structure):
@@ -56,6 +66,35 @@ class _XWindowAttributes(ctypes.Structure):
 
 class _XClassHint(ctypes.Structure):
     _fields_ = [("res_name", ctypes.c_void_p), ("res_class", ctypes.c_void_p)]
+
+
+class _XClientMessageData(ctypes.Union):
+    _fields_ = [
+        ("b", ctypes.c_char * 20),
+        ("s", ctypes.c_short * 10),
+        ("l", ctypes.c_long * 5),
+    ]
+
+
+class _XClientMessageEvent(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_int),
+        ("serial", ctypes.c_ulong),
+        ("send_event", ctypes.c_int),
+        ("display", ctypes.c_void_p),
+        ("window", ctypes.c_ulong),
+        ("message_type", ctypes.c_ulong),
+        ("format", ctypes.c_int),
+        ("data", _XClientMessageData),
+    ]
+
+
+class _XEvent(ctypes.Union):
+    _fields_ = [
+        ("type", ctypes.c_int),
+        ("xclient", _XClientMessageEvent),
+        ("pad", ctypes.c_long * 24),
+    ]
 
 
 _XErrorHandler = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
@@ -123,6 +162,16 @@ def _configure(lib: Any) -> None:
         ctypes.POINTER(ctypes.c_void_p),
     ]
     lib.XFetchName.restype = ctypes.c_int
+    lib.XSendEvent.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.c_int,
+        ctypes.c_long,
+        ctypes.POINTER(_XEvent),
+    ]
+    lib.XSendEvent.restype = ctypes.c_int
+    lib.XFlush.argtypes = [ctypes.c_void_p]
+    lib.XFlush.restype = ctypes.c_int
 
 
 def _children(lib: Any, display: int, window: int) -> list[int]:
@@ -209,6 +258,43 @@ def _window_class(lib: Any, display: int, window: int) -> str:
             lib.XFree(hint.res_class)
 
 
+def _net_wm_pid(lib: Any, display: int, window: int, atom: int) -> int | None:
+    """``_NET_WM_PID`` (the owning process), or ``None`` when the window has none.
+
+    EWMH recommends it and Wine's X11 driver, Qt, GTK and SDL normally set it; without
+    it a window's owner cannot be proven, so callers treat the window as unknown rather
+    than guessing.
+    """
+    actual_type = ctypes.c_ulong()
+    actual_format = ctypes.c_int()
+    nitems = ctypes.c_ulong()
+    bytes_after = ctypes.c_ulong()
+    data = ctypes.c_void_p()
+    status = lib.XGetWindowProperty(
+        display,
+        window,
+        atom,
+        0,
+        1,
+        0,
+        0,  # AnyPropertyType
+        ctypes.byref(actual_type),
+        ctypes.byref(actual_format),
+        ctypes.byref(nitems),
+        ctypes.byref(bytes_after),
+        ctypes.byref(data),
+    )
+    if status != 0 or not data:
+        return None
+    try:
+        if actual_format.value != 32 or nitems.value < 1:
+            return None
+        pid = int(ctypes.c_long.from_address(data.value).value)
+        return pid or None
+    finally:
+        lib.XFree(data)
+
+
 def is_shown(map_state: int, wm_state: int | None) -> bool:
     """Mapped, or minimized: a minimized window is unmapped too, but its ``WM_STATE`` says
     Iconic. A window closed to the tray is unmapped with no ``WM_STATE`` (measured on KWin)."""
@@ -248,16 +334,47 @@ def _wm_state(lib: Any, display: int, window: int, atom: int) -> int | None:
 
 
 def _viewable(lib: Any, display: int, window: int, wm_state_atom: int) -> bool:
+    return _viewable_size(lib, display, window, wm_state_atom)[0]
+
+
+def _viewable_size(
+    lib: Any, display: int, window: int, wm_state_atom: int
+) -> tuple[bool, tuple[int, int]]:
     attrs = _XWindowAttributes()
     if not lib.XGetWindowAttributes(display, window, ctypes.byref(attrs)):
-        return False
-    return is_shown(attrs.map_state, _wm_state(lib, display, window, wm_state_atom))
+        return False, (0, 0)
+    shown = is_shown(attrs.map_state, _wm_state(lib, display, window, wm_state_atom))
+    return shown, (int(attrs.width), int(attrs.height))
 
 
 def list_windows() -> list[tuple[str, str, bool]] | None:
     """``(WM_CLASS class, title, shown)`` for the windows down to :data:`_DEPTH` levels.
 
     "Shown" counts a minimized window too (see :func:`is_shown`).
+
+    ``None`` when libX11 cannot be loaded or no display can be opened.
+    """
+    found = list_windows_sized()
+    return None if found is None else [(cls, title, shown) for cls, title, shown, _ in found]
+
+
+def _list_windows_full() -> (
+    list[tuple[int, str, str, int | None, bool, tuple[int, int]]] | None
+):
+    """The tree walk's ``(id, class, title, _NET_WM_PID, shown, (width, height))``.
+
+    ``None`` when libX11 cannot be loaded or no display can be opened. One walk at a
+    time: ``XSetErrorHandler`` is process-wide, so a second walk could restore the
+    default handler (which exits on ``BadWindow``) in the middle of the first.
+    """
+    with _WALK_LOCK:
+        return _walk_windows()
+
+
+def _walk_windows() -> (
+    list[tuple[int, str, str, int | None, bool, tuple[int, int]]] | None
+):
+    """The tree walk's ``(id, class, title, _NET_WM_PID, shown, (width, height))``.
 
     ``None`` when libX11 cannot be loaded or no display can be opened.
     """
@@ -280,17 +397,32 @@ def list_windows() -> list[tuple[str, str, bool]] | None:
             windows.extend(level)
         net_wm_name = lib.XInternAtom(display, b"_NET_WM_NAME", 0)
         wm_state = lib.XInternAtom(display, b"WM_STATE", 0)
-        return [
-            (
+        net_wm_pid = lib.XInternAtom(display, b"_NET_WM_PID", 0)
+        out = []
+        for window in windows:
+            shown, size = _viewable_size(lib, display, window, wm_state)
+            out.append((
+                window,
                 _window_class(lib, display, window),
                 _title(lib, display, window, net_wm_name),
-                _viewable(lib, display, window, wm_state),
-            )
-            for window in windows
-        ]
+                _net_wm_pid(lib, display, window, net_wm_pid),
+                shown,
+                size,
+            ))
+        return out
     finally:
         lib.XSetErrorHandler(previous)
         lib.XCloseDisplay(display)
+
+
+def list_windows_sized() -> list[tuple[str, str, bool, tuple[int, int]]] | None:
+    """:func:`list_windows` plus each window's ``(width, height)``."""
+    found = _list_windows_full()
+    return (
+        None
+        if found is None
+        else [(cls, title, shown, size) for _id, cls, title, _pid, shown, size in found]
+    )
 
 
 def shown_from(
@@ -315,3 +447,104 @@ def any_shown(titles: Iterable[str], wm_class: str = "steam_proton") -> bool | N
     if windows is None:
         return None
     return shown_from(windows, titles, wm_class)
+
+
+#: Smaller windows are Wine's helpers (IME, 1x1 message windows, menu strips), not something
+#: the player sees.
+_MIN_SIDE = 64
+
+
+def window_open_from(
+    windows: Iterable[tuple[str, str, bool, tuple[int, int]]], wm_class: str = "steam_proton"
+) -> bool:
+    """True when a viewable ``wm_class`` window of real size exists, whatever its title."""
+    return any(
+        cls == wm_class and shown and size[0] >= _MIN_SIDE and size[1] >= _MIN_SIDE
+        for cls, _title, shown, size in windows
+    )
+
+
+def any_window_open(wm_class: str = "steam_proton") -> bool | None:
+    """Whether any such window is open (a titleless prompt counts); ``None`` when unknown."""
+    if not os.environ.get("DISPLAY"):
+        return None
+    try:
+        windows = list_windows_sized()
+    except Exception:
+        return None
+    if windows is None:
+        return None
+    return window_open_from(windows, wm_class)
+
+
+def list_windows_owned() -> list[tuple[int, int]] | None:
+    """``(window id, owning pid)`` for each shown window a player could see.
+
+    Same rules as :func:`window_open_from`: the window must be shown and at least
+    :data:`_MIN_SIDE` on both sides, so Wine's 1x1 IME/message helper windows are not
+    mistaken for a game. A window without ``_NET_WM_PID`` is left out: its owner is not
+    known, and no caller may guess. ``None`` when libX11 cannot be loaded or no display
+    can be opened.
+    """
+    found = _list_windows_full()
+    if found is None:
+        return None
+    return [
+        (window, pid)
+        for window, _cls, _title, pid, shown, (width, height) in found
+        if shown and pid is not None and width >= _MIN_SIDE and height >= _MIN_SIDE
+    ]
+
+
+def _send_close(lib: Any, display: int, root: int, window: int, atom: int) -> bool:
+    """Send one EWMH ``_NET_CLOSE_WINDOW`` message for ``window`` to the root window."""
+    event = _XEvent()
+    event.xclient.type = _CLIENT_MESSAGE
+    event.xclient.send_event = 1
+    event.xclient.display = display
+    event.xclient.window = window
+    event.xclient.message_type = atom
+    event.xclient.format = 32
+    event.xclient.data.l[0] = 0  # CurrentTime: the window manager supplies one
+    event.xclient.data.l[1] = 1  # source indication: a normal application
+    mask = _SUBSTRUCTURE_REDIRECT | _SUBSTRUCTURE_NOTIFY
+    return bool(lib.XSendEvent(display, root, 0, mask, ctypes.byref(event)))
+
+
+def request_close(windows: Iterable[int]) -> int | None:
+    """Ask the window manager to close each window (EWMH ``_NET_CLOSE_WINDOW``).
+
+    This is the polite stop for a Sandboxed game: the request goes through the
+    desktop's own window manager, so no Wine helper has to start outside the
+    Sandbox. Returns the number of messages sent, or ``None`` when libX11 or the
+    display is unavailable. The window manager decides whether to close; the
+    callers still wait for the game to exit and escalate afterwards.
+    """
+    ids = [int(window) for window in windows if int(window)]
+    if not ids:
+        return 0
+    if not os.environ.get("DISPLAY"):
+        return None
+    try:
+        name = ctypes.util.find_library("X11") or "libX11.so.6"
+        lib = ctypes.CDLL(name)
+        _configure(lib)
+    except (OSError, AttributeError):
+        return None
+    display = lib.XOpenDisplay(None)
+    if not display:
+        return None
+    # XSetErrorHandler is process-wide: a walk must not restore its handler mid-send.
+    with _WALK_LOCK:
+        previous = lib.XSetErrorHandler(ctypes.cast(_ignore_error, ctypes.c_void_p))
+        try:
+            root = lib.XDefaultRootWindow(display)
+            atom = lib.XInternAtom(display, b"_NET_CLOSE_WINDOW", 0)
+            if not atom:
+                return None
+            sent = sum(_send_close(lib, display, root, window, atom) for window in ids)
+            lib.XFlush(display)
+            return sent
+        finally:
+            lib.XSetErrorHandler(previous)
+            lib.XCloseDisplay(display)

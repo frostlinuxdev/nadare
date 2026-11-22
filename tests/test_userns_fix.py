@@ -26,7 +26,8 @@ def test_fix_script_writes_the_profile_and_loads_it(tmp_path: Path) -> None:
     result = subprocess.run(["/bin/sh", "-c", script], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert target.read_text() == userns.profile_text()
-    assert log.read_text().strip() == f"-r {target}"
+    assert target.stat().st_mode & 0o777 == 0o644
+    assert log.read_text().strip().startswith(f"-r {target}.")
 
 
 def test_fix_script_stops_if_the_profile_cannot_be_written(tmp_path: Path) -> None:

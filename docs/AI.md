@@ -73,6 +73,11 @@ We are not claiming that the AI-generated portions of this codebase are our
 original authored work. Under current US practice, material produced without
 human authorship is not copyrightable, and we do not pretend otherwise.
 
+Other countries differ. The UK, for example, protects "computer-generated works"
+(Copyright, Designs and Patents Act 1988, s.9(3)) and treats the person who made
+the arrangements for the work as its author. Which rule applies depends on where
+a question comes up, so what follows is written to hold under either.
+
 What that means in practice:
 
 - **We grant the GPL over the project as a whole** because we can grant the

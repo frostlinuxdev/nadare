@@ -514,3 +514,14 @@ def test_a_game_with_no_extra_variables_is_done_as_before(tmp_path):
         )
     )
     assert done.state == steamsetup.STATE_DONE
+
+
+def test_haoplay_on_old_vulkan_is_offered_dw_proton_with_sarek(tmp_path):
+    """GE-Proton has no DXVK-Sarek: below Vulkan 1.3 Haoplay gets the DW-Proton step."""
+    steamapps = _library(tmp_path, HAOPLAY)
+    _webview2(steamapps, HAOPLAY)
+    runner = _item(_plan(HAOPLAY, tmp_path, vulkan_version="1.2.170"), "runner")
+    assert runner.label == "DW-Proton runner"
+    assert runner.action_label == "Use DW-Proton"
+    assert runner.state == steamsetup.STATE_RECOMMENDED
+    assert "Sarek" in runner.warning

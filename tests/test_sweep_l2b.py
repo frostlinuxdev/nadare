@@ -147,7 +147,6 @@ def test_add_game_calls_the_folder_game_folder(tmp_path, qapp):
     dialog = AddGameDialog(Config.load(tmp_path / "config.json"), data_root=tmp_path / "data")
     try:
         assert dialog.folder_label.text() == "Game folder"
-        dialog.set_mode(True)
         assert "game folder" in dialog.folder_label.text().lower()
         assert "install folder" not in dialog.folder_label.text().lower()
     finally:
@@ -155,58 +154,14 @@ def test_add_game_calls_the_folder_game_folder(tmp_path, qapp):
         qapp.processEvents()
 
 
-# ---- #351/#335 F-07: prefix placeholder and import button ------------------
-def test_prefix_placeholder_fits_the_mode(tmp_path, qapp):
-    dialog = AddGameDialog(Config.load(tmp_path / "config.json"), data_root=tmp_path / "data")
-    try:
-        dialog.set_backend("wine")
-        assert dialog.prefix.placeholderText() == "Created automatically"
-        dialog.set_mode(True)
-        assert dialog.prefix.placeholderText() == "Folder of the existing install"
-    finally:
-        dialog.deleteLater()
-        qapp.processEvents()
-
-
-def test_import_button_is_disabled_until_detection_finds_something(tmp_path, qapp):
-    empty = tmp_path / "empty"
-    empty.mkdir()
+# ---- #351/#335 F-07: prefix placeholder ------------------
+def test_prefix_placeholder_describes_automatic_creation(tmp_path, qapp):
     dialog = AddGameDialog(Config.load(tmp_path / "config.json"), data_root=tmp_path / "data")
     try:
         dialog.set_backend("arknights-yostar")
-        dialog.set_mode(True)
-        dialog.set_install_dir(empty)
-        dialog.detect()
-        assert dialog.detect_label.text() == "Nothing detected yet."
-        assert not dialog.create_button.isEnabled()
-
-        found = tmp_path / "found"
-        found.mkdir()
-        (found / "Arknights.exe").write_text("MZ")
-        dialog.set_install_dir(found)
-        dialog.detect()
-        assert dialog.create_button.isEnabled()
+        assert dialog.prefix.placeholderText() == "Created automatically"
     finally:
         dialog.deleteLater()
-        qapp.processEvents()
-
-    prefix = tmp_path / "czn-prefix"
-    prefix.mkdir()
-    czn = AddGameDialog(Config.load(tmp_path / "czn.json"), data_root=tmp_path / "data")
-    try:
-        czn.set_backend("stove-czn")
-        czn.set_mode(True)
-        czn.set_install_dir(prefix)
-        czn.detect()
-        assert czn.detect_label.text() == "Nothing detected yet."
-        assert not czn.create_button.isEnabled(), "an empty folder is not a CZN prefix"
-
-        (prefix / "drive_c").mkdir()
-        czn.detect()
-        assert czn.detect_label.text() != "Nothing detected yet."
-        assert czn.create_button.isEnabled(), "CZN needs only the prefix, which was found"
-    finally:
-        czn.deleteLater()
         qapp.processEvents()
 
 
@@ -218,11 +173,6 @@ def test_install_new_explains_the_next_step_and_the_size(tmp_path, qapp):
         text = dialog.size_hint.text()
         assert "Press INSTALL" in text
         assert "about" in text
-        dialog.set_backend("steam")
-        assert "Press INSTALL" in dialog.size_hint.text()
-        assert "about" not in dialog.size_hint.text()
-        dialog.set_mode(True)
-        assert dialog.size_hint.isHidden()
     finally:
         dialog.deleteLater()
         qapp.processEvents()

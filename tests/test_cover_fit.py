@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Wide key art is shown whole on a portrait card instead of being centre-cropped."""
+"""Card and tile art fills its slot with a centre crop, without blurred letterboxing."""
 
 from __future__ import annotations
 
@@ -29,21 +29,27 @@ def _striped(path, width, height):
     return str(path)
 
 
-def test_wide_art_is_kept_whole_on_a_portrait_card(tmp_path, qapp):
+def test_wide_art_fills_a_portrait_card(tmp_path, qapp):
+    """Wide key art is centre-cropped to fill the card, not letterboxed over a blur."""
     src = _striped(tmp_path / "wide.png", 800, 400)  # 2:1
     out = images.decode_scaled(src, 234, 300, crop=True)
     assert (out.width(), out.height()) == (234, 300)
     middle = out.height() // 2
-    left, right = QColor(out.pixel(1, middle)), QColor(out.pixel(out.width() - 2, middle))
-    assert left.red() > 200 and left.blue() < 80, "the left edge of the art must be visible"
-    assert right.blue() > 200 and right.red() < 80, "the right edge of the art must be visible"
+    # Neither strip survives the crop: the card shows the middle of the art, edge to edge.
+    assert QColor.fromRgba(out.pixel(1, middle)).red() < 200, "the left edge was cropped away"
+    assert QColor.fromRgba(out.pixel(out.width() - 2, middle)).blue() < 200, "and so was the right"
+    centre = QColor.fromRgba(out.pixel(out.width() // 2, middle))
+    assert abs(centre.red() - 120) < 12 and centre.alpha() == 255
 
 
-def test_the_bars_around_wide_art_are_filled_not_transparent(tmp_path, qapp):
+def test_wide_art_is_not_drawn_over_a_dim_blurred_copy(tmp_path, qapp):
+    """The old letterbox dimmed a blurred copy behind the art; the card is now the art."""
     src = _striped(tmp_path / "wide.png", 800, 400)
     out = images.decode_scaled(src, 234, 300, crop=True)
     for y in (2, out.height() - 3):
-        assert QColor(out.pixel(out.width() // 2, y)).alpha() == 255
+        pixel = QColor.fromRgba(out.pixel(out.width() // 2, y))
+        assert abs(pixel.red() - 120) < 12, "no darkened bar above or below the art"
+        assert pixel.alpha() == 255
 
 
 def test_portrait_art_is_still_cropped_to_fill(tmp_path, qapp):
@@ -51,13 +57,13 @@ def test_portrait_art_is_still_cropped_to_fill(tmp_path, qapp):
     out = images.decode_scaled(src, 234, 351, crop=True)
     assert (out.width(), out.height()) == (234, 351)
     # No bars: the art fills the card, so the strip is on the very first column.
-    assert QColor(out.pixel(1, out.height() // 2)).red() > 200
+    assert QColor.fromRgba(out.pixel(1, out.height() // 2)).red() > 200
 
 
 def test_near_square_art_is_still_cropped(tmp_path, qapp):
     src = _striped(tmp_path / "square.png", 500, 500)
     out = images.decode_scaled(src, 234, 351, crop=True)
-    assert QColor(out.pixel(1, out.height() // 2)).red() < 200, "square art keeps the old crop"
+    assert QColor.fromRgba(out.pixel(1, out.height() // 2)).red() < 200
 
 
 def test_small_square_targets_are_never_letterboxed(tmp_path, qapp):
@@ -65,7 +71,7 @@ def test_small_square_targets_are_never_letterboxed(tmp_path, qapp):
     src = _striped(tmp_path / "wide.png", 800, 400)
     out = images.decode_scaled(src, 32, 32, crop=True)
     assert (out.width(), out.height()) == (32, 32)
-    assert QColor(out.pixel(1, 16)).red() < 200
+    assert QColor.fromRgba(out.pixel(1, 16)).red() < 200
 
 
 def test_contain_mode_is_unchanged(tmp_path, qapp):
@@ -75,11 +81,14 @@ def test_contain_mode_is_unchanged(tmp_path, qapp):
 
 
 def test_the_bottom_trim_still_applies_before_fitting(tmp_path, qapp):
-    src = _striped(tmp_path / "wide.png", 800, 400)
+    src = _banded(tmp_path / "wide.png", 800, 400)
     full = images.decode_scaled(src, 234, 300, crop=True)
     trimmed = images.decode_scaled(src, 234, 300, crop=True, trim_bottom=0.3)
     assert (trimmed.width(), trimmed.height()) == (234, 300)
-    assert full != trimmed
+    # Both keep the reddish top edge; cutting the bottom 30% takes the blue edge with it.
+    assert QColor.fromRgba(full.pixel(117, 1)).red() > 200
+    assert QColor.fromRgba(full.pixel(117, 298)).blue() > 200
+    assert QColor.fromRgba(trimmed.pixel(117, 298)).blue() < 200
 
 
 def _banded(path, width, height):
@@ -94,42 +103,25 @@ def _banded(path, width, height):
     return str(path)
 
 
-def test_portrait_art_is_shown_whole_on_a_landscape_card_when_asked(tmp_path, qapp):
-    src = _banded(tmp_path / "tall.png", 400, 600)
-    out = images.decode_scaled(src, 330, 186, crop=True, fit=True)
+def test_a_cinemascope_tile_is_filled_not_letterboxed(tmp_path, qapp):
+    """A 3:1 key art on a 16:9 store tile is cropped, the way the portrait card is."""
+    src = _striped(tmp_path / "cinemascope.png", 1200, 400)
+    out = images.decode_scaled(src, 330, 186, crop=True)
     assert (out.width(), out.height()) == (330, 186)
-    middle = out.width() // 2
-    assert QColor(out.pixel(middle, 1)).red() > 200, "the top edge of the art must be visible"
-    assert QColor(out.pixel(middle, out.height() - 2)).blue() > 200, "and the bottom edge"
-    assert QColor(out.pixel(2, out.height() // 2)).alpha() == 255, "the side bars are filled"
+    middle = out.height() // 2
+    assert QColor.fromRgba(out.pixel(1, middle)).red() < 200, "the strip was cropped away"
+    assert QColor.fromRgba(out.pixel(165, 2)).alpha() == 255, "no blurred bar above the art"
 
 
-def test_without_the_flag_a_landscape_target_still_crops(tmp_path, qapp):
+def test_a_portrait_poster_on_a_tile_is_cropped_too(tmp_path, qapp):
     src = _banded(tmp_path / "tall.png", 400, 600)
     out = images.decode_scaled(src, 330, 186, crop=True)
-    assert QColor(out.pixel(out.width() // 2, 1)).red() < 200, "centre crop loses the top strip"
+    assert QColor.fromRgba(out.pixel(out.width() // 2, 1)).red() < 200
+    assert QColor.fromRgba(out.pixel(1, out.height() // 2)).alpha() == 255
 
 
-def test_wide_art_fills_a_landscape_card_without_bars(tmp_path, qapp):
-    src = _striped(tmp_path / "wide.png", 1600, 900)  # 16:9, same shape as the card
-    out = images.decode_scaled(src, 330, 186, crop=True, fit=True)
-    assert QColor(out.pixel(1, out.height() // 2)).red() > 200
-    assert QColor(out.pixel(out.width() - 2, out.height() // 2)).blue() > 200
-
-
-def test_the_loader_passes_fit_through_and_caches_it_separately(tmp_path, qapp):
-    src = _banded(tmp_path / "tall.png", 400, 600)
-    loader = images.ImageLoader()
-    got = {}
-    loader.request([src], 330, 186, lambda p: got.setdefault("plain", p), cover=True)
-    loader.request([src], 330, 186, lambda p: got.setdefault("fit", p), cover=True, fit=True)
-    loader.wait()
-    assert got["plain"] is not None and got["fit"] is not None
-    assert got["plain"].toImage() != got["fit"].toImage()
-
-
-def test_the_bars_stay_opaque_even_when_the_art_has_transparent_pixels(tmp_path, qapp):
-    """A logo-style PNG must not let the page show through the bars."""
+def test_transparent_art_keeps_its_transparency_when_the_card_is_cropped(tmp_path, qapp):
+    """A logo-style PNG has no bars to fill any more: the card behind it shows through."""
     image = QImage(800, 400, QImage.Format.Format_ARGB32)
     image.fill(QColor(0, 0, 0, 0))
     painter = QPainter(image)
@@ -138,5 +130,5 @@ def test_the_bars_stay_opaque_even_when_the_art_has_transparent_pixels(tmp_path,
     path = tmp_path / "logo.png"
     assert image.save(str(path))
     out = images.decode_scaled(str(path), 234, 300, crop=True)
-    for x, y in ((2, 2), (117, 10), (117, 290), (230, 150), (2, 290)):
-        assert QColor(out.pixel(x, y)).alpha() == 255, (x, y)
+    assert QColor.fromRgba(out.pixel(2, 2)).alpha() == 0
+    assert QColor.fromRgba(out.pixel(117, 150)).red() > 200

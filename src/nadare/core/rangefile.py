@@ -17,7 +17,6 @@ import bisect
 import hashlib
 import http.client
 import io
-import time
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -60,8 +59,10 @@ class RangeReader(io.RawIOBase):
     kept. When ``readahead`` exceeds ``block_size``, a sequential miss fetches up to
     ``readahead`` bytes (ramping up from one block) in one request and caches the
     blocks it covers. ``requests`` and ``bytes_fetched`` count the ranged GETs made.
-    Network errors and 5xx answers are retried ``retries`` times with ``backoff``
-    seconds (doubling); other 4xx answers fail at once. A server that answers a Range
+    Network errors and transient answers (5xx, 408, 425, 429: the same rule as
+    :func:`download.transient_status`) are retried ``retries`` times, waiting the
+    server's ``Retry-After`` or else ``backoff`` seconds (doubling); other 4xx answers
+    fail at once. A server that answers a Range
     request with 200 raises :class:`RangeError`. ``cancel`` is checked before each
     request.
     """
@@ -166,13 +167,20 @@ class RangeReader(io.RawIOBase):
         length = end - start + 1
         headers = {**self._headers, "Range": f"bytes={start}-{end}"}
         with self._pool.open(part.url, headers=headers, timeout=self._timeout) as resp:
+            if isinstance(resp, download.transfer.Response):
+                resp.cancel = self._cancel
             status = resp.status
             if status == 200:
                 raise RangeError(
                     f"server does not support range requests for {part.url}"
                 )
             if status != 206:
-                raise download.DownloadError(f"HTTP {status} for {part.url}")
+                raise download.HTTPStatusError(
+                    f"HTTP {status} for {part.url}",
+                    status=status,
+                    retry_after=download.parse_retry_after(resp.headers.get("Retry-After")),
+                    url=part.url,
+                )
             content_range = resp.headers.get("Content-Range", "")
             try:
                 first = int(content_range.split()[1].split("-", 1)[0])
@@ -220,11 +228,11 @@ class RangeReader(io.RawIOBase):
                 data = self._fetch_block(part_index, start, end)
             except RangeError:
                 raise
-            except download.DownloadError as exc:
-                if "HTTP 4" in str(exc):
+            except download.HTTPStatusError as exc:
+                if not download.transient_status(exc.status):
                     raise RangeError(str(exc)) from exc
                 error = exc
-            except (OSError, http.client.HTTPException, _ShortRead) as exc:
+            except (download.DownloadError, OSError, http.client.HTTPException, _ShortRead) as exc:
                 error = exc
             else:
                 self.requests += 1
@@ -247,8 +255,14 @@ class RangeReader(io.RawIOBase):
                         self._cache.popitem(last=False)
                     wanted = self._cache[key]
                 return wanted
-            if attempt < self._retries and self._backoff:
-                time.sleep(self._backoff * 2**attempt)
+            if attempt < self._retries:
+                # The server's own Retry-After (already capped) wins over our backoff, as in
+                # a full download (#1496); either wait stops at once on cancel.
+                delay = getattr(error, "retry_after", None)
+                if delay is None:
+                    delay = self._backoff * 2**attempt
+                if delay > 0:
+                    download.wait(delay, self._cancel)
             attempt += 1
             if attempt > self._retries:
                 raise RangeError(

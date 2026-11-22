@@ -26,15 +26,16 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..core import diskspace, logview, paths, runlog
+from ..core import logview, paths, runlog
+from . import i18n
 
 
 def _human_size(size: int) -> str:
-    return diskspace.human_size(size)
+    return i18n.format_size(size)
 
 
 def _when(timestamp: float) -> str:
-    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+    return i18n.format_datetime(datetime.fromtimestamp(timestamp))
 
 
 class LogsDialog(QDialog):
@@ -153,7 +154,14 @@ class LogsDialog(QDialog):
         layout.addLayout(content, 1)
 
         self.files.currentRowChanged.connect(self._load_selected)
-        self.search.textChanged.connect(self._render)
+        # Filtering re-reads the whole tail: wait until typing pauses, not every keystroke
+        # (#624). Enter filters at once.
+        self._search_delay = QTimer(self)
+        self._search_delay.setSingleShot(True)
+        self._search_delay.setInterval(200)
+        self._search_delay.timeout.connect(self._render)
+        self.search.textChanged.connect(self._search_delay.start)
+        self.search.returnPressed.connect(self._search_now)
         self.latest_only.toggled.connect(self._render)
         self.redact_box.toggled.connect(self._render)
 
@@ -236,7 +244,12 @@ class LogsDialog(QDialog):
         self._read_upto = max(0, end_offset - partial_bytes)
         self._render()
 
+    def _search_now(self) -> None:
+        self._search_delay.stop()
+        self._render()
+
     def _render(self, *_args: object) -> None:
+        self._search_delay.stop()  # anything that renders also applies the current search
         text = self._file_text
         if self.latest_only.isChecked():
             parts = logview.sessions(text)

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from _backend_helpers import make_context, write_exe
+from _official_route import OfficialRouteBackend
 from _parts_patch import patch_everywhere
 
 from nadare.backends import arknights as ak
@@ -61,7 +62,7 @@ def test_watch_explain_appends_the_matching_hints() -> None:
 
 # ---- Arknights / Stella Sora -----------------------------------------------------
 def _backend(tmp_path: Path) -> ArknightsBackend:
-    backend = ArknightsBackend(make_context(tmp_path, ak.KIND, {}, "ak"))
+    backend = OfficialRouteBackend(make_context(tmp_path, ak.KIND, {}, "ak"))
     backend.ctx.emit = lambda event: None
     return backend
 

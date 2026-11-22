@@ -37,15 +37,40 @@ set -uo pipefail
 
 # A run that fails says so (#1209 P0-4): the three nodes share one heartbeat, so a node that
 # only stayed silent was never noticed while another node kept pinging (sw1, 24 days in 2026).
+# One rule for both heartbeat kinds (#1215): a URL with /api/push/ is Uptime Kuma, which takes
+# ?status=down&msg=... and counts the bare URL as up. Anything else is Healthchecks, which reads
+# <url>/fail with the message as the POST body (a plain GET there is up).
+heartbeat_down() { # heartbeat_down MESSAGE
+    local url="${NADARE_HEARTBEAT_URL:-}"
+    [[ -n "$url" ]] || return 0
+    if [[ "$url" == */api/push/* ]]; then
+        curl -fsS -m 10 --retry 2 -o /dev/null -G \
+            --data-urlencode "status=down" --data-urlencode "msg=$1" \
+            "${url%%\?*}" >/dev/null 2>&1 \
+            || echo "refresh_index: heartbeat ping failed" >&2
+    else
+        local base="${url%%#*}" query=""
+        if [[ "$base" == *\?* ]]; then
+            query="?${base#*\?}"
+            base="${base%%\?*}"
+        fi
+        curl -fsS -m 10 --retry 2 -o /dev/null --data-raw "$1" \
+            "${base%/}/fail${query}" >/dev/null 2>&1 \
+            || echo "refresh_index: heartbeat ping failed" >&2
+    fi
+}
+
+heartbeat_up() {
+    local url="${NADARE_HEARTBEAT_URL:-}"
+    [[ -n "$url" ]] || return 0
+    curl -fsS -m 10 --retry 2 -o /dev/null "$url" >/dev/null 2>&1 \
+        || echo "refresh_index: heartbeat ping failed" >&2
+}
+
 report_failure() {
     local rc=$?
     (( rc != 0 )) || return 0
-    [[ -n "${NADARE_HEARTBEAT_URL:-}" ]] || return 0
-    curl -fsS -m 10 --retry 2 -o /dev/null -G \
-        --data-urlencode "status=down" \
-        --data-urlencode "msg=$(hostname -s): refresh_index failed (exit $rc), see journalctl -u nadare-index-refresh" \
-        "${NADARE_HEARTBEAT_URL%%\?*}" >/dev/null 2>&1 \
-        || echo "refresh_index: heartbeat ping failed" >&2
+    heartbeat_down "$(hostname -s): refresh_index failed (exit $rc), see journalctl -u nadare-index-refresh"
 }
 trap report_failure EXIT
 
@@ -59,16 +84,11 @@ canary_down=
 
 
 heartbeat() {
-    [[ -n "${NADARE_HEARTBEAT_URL:-}" ]] || return 0
     if [[ -n "$canary_down" ]]; then
-        curl -fsS -m 10 --retry 2 -o /dev/null -G \
-            --data-urlencode "status=down" --data-urlencode "msg=$canary_down" \
-            "${NADARE_HEARTBEAT_URL%%\?*}" \
-            || echo "refresh_index: heartbeat ping failed" >&2
+        heartbeat_down "$canary_down"
         return 0
     fi
-    curl -fsS -m 10 --retry 2 -o /dev/null "$NADARE_HEARTBEAT_URL" \
-        || echo "refresh_index: heartbeat ping failed" >&2
+    heartbeat_up
 }
 
 # The lock lives in the user's runtime dir, else in a private 0700 directory of our own: a

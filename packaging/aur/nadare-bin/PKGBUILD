@@ -15,7 +15,7 @@ url='https://github.com/frostlinuxdev/nadare'
 license=('GPL-3.0-only')
 depends=('glibc')
 optdepends=(
-  'umu-launcher: preferred Proton runner for Windows games'
+  'umu-launcher: used for Proton games only when Nadare cannot set up its own copy'
   'wine: Windows games and the generic Wine backend'
   'mingw-w64-gcc: build the Arknights: Endfield launch helper and the Chaos Zero Nightmare PCSDK stub'
   'p7zip: unpack the Endfield and Neverness to Everness launcher installers'

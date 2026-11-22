@@ -43,7 +43,7 @@ def rig(tmp_path, monkeypatch):
     calls: list[list[str]] = []
     state = {"silent_installs": True, "extract_ok": True, "silent_code": 0}
 
-    def fake_stream(argv, env, on_line=None, cancel=None):
+    def fake_stream(argv, env, on_line=None, cancel=None, before_stop=None):
         calls.append(list(argv))
         prefix = tmp_path / "prefix"
         ran_inner = any(part.endswith(INNER.lower()) or part.endswith(INNER) for part in argv)

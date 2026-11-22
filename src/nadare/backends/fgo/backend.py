@@ -31,7 +31,7 @@ from __future__ import annotations
 import inspect
 import logging
 
-from ...core.backends import BackendError, GameBackend, Option, Status
+from ...core.backends import BackendError, BackendNotInstalled, GameBackend, Option, Status
 from ...core.events import Event, mask
 from ...core.shortcuts import command_hint
 from . import installer
@@ -122,6 +122,7 @@ class FgoLeptonBackend(GameBackend):
         profile = ctx.profile
         try:
             self.adapter = LeptonFgo(
+                profile=profile,
                 context=profile.get("context") or "fgo",
                 prefix=profile.get("prefix") or None,
                 repo=profile.get("repo") or profile.get("repo_path") or None,
@@ -265,7 +266,7 @@ class FgoLeptonBackend(GameBackend):
             cmd = self.adapter.cmd_launch()
         else:
             log.info("FGO is not installed under %s", self.adapter.prefix)
-            raise BackendError(
+            raise BackendNotInstalled(
                 "FGO is not installed for this profile. Press Install to set it up again."
             )
         self.ctx.emit(Event("step", f"launching {FGO_PKG}"))
@@ -298,20 +299,3 @@ class FgoLeptonBackend(GameBackend):
             "message": output.strip().splitlines()[-1] if output.strip() else "",
         }
 
-    def uninstall(self, purge: bool = False) -> None:
-        profile = self.ctx.profile
-        cmd = self.adapter.cmd_uninstall(
-            purge=purge,
-            all_=bool(profile.get("uninstall_all")),
-            purge_cache=bool(profile.get("purge_cache")),
-            yes=True,
-        )
-        self.ctx.emit(Event("step", "uninstalling context"))
-        code = self._stream(cmd)
-        if code != 0:
-            self._log(f"FGO uninstall command exited with code {code}")
-            raise BackendError(
-                "FGO could not be removed. Close the game, then try again. Details are "
-                "in Open logs.",
-                code=code,
-            )

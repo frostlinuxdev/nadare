@@ -30,7 +30,8 @@ def setup(tmp_path):
     repo = tmp_path / "repo"
     (repo / "objects").mkdir(parents=True)
     (repo / "refs").mkdir()
-    for name in ("summary", "nadare.flatpakref", "index.flatpakrepo", "config"):
+    # What build_repo.sh leaves, including the Bazaar bundle upload.sh requires (#1446).
+    for name in ("summary", "nadare.flatpakref", "index.flatpakrepo", "config", "nadare.flatpak"):
         (repo / name).write_text("x")
     env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", RCLONE=str(bin_dir / "rclone"))
     return repo, log, env

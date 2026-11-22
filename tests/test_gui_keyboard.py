@@ -37,7 +37,10 @@ def test_game_card_is_focusable_and_named(qapp):
     try:
         assert card.focusPolicy() == Qt.FocusPolicy.StrongFocus
         assert card.accessibleName() == "My Game"
-        assert ":focus" in card.styleSheet()
+        card.show()
+        card.setFocus()
+        qapp.processEvents()
+        assert card.hasFocus()  # the rounded cover paints the focus edge
     finally:
         card.deleteLater()
         qapp.processEvents()

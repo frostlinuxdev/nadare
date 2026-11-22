@@ -77,3 +77,36 @@ def test_doctor_names_an_old_system_umu(monkeypatch, capsys) -> None:
     out = capsys.readouterr().out
     assert "/usr/bin/umu-run is older than 1.3.0" in out
     assert "umu-run: not found" not in out
+
+
+def _doctor_out(monkeypatch, capsys) -> str:
+    from nadare.app import run_cli
+    from nadare.core import graphics, process, runners
+
+    monkeypatch.setattr(graphics, "vulkan_info", lambda **k: graphics.VulkanInfo(True))
+    monkeypatch.setattr(graphics, "dxvk_ok", lambda: True)
+    monkeypatch.setattr(process, "which", lambda name, **k: "/usr/bin/umu-run")
+    monkeypatch.setattr(runners, "all_runners", list)
+    run_cli(["doctor"])
+    return capsys.readouterr().out
+
+
+def test_doctor_names_nadares_own_copy_before_a_system_one(tmp_path, monkeypatch, capsys) -> None:
+    """The order the launch uses (user, 2026-11-16): Nadare's pinned copy first."""
+    managed = tmp_path / "umu-run"
+    managed.write_text("x")
+    monkeypatch.setattr(umu, "managed", lambda: managed)
+    out = _doctor_out(monkeypatch, capsys)
+    assert f"umu-run: Nadare's own copy {managed}" in out
+    assert "umu-run: /usr/bin/umu-run" not in out
+    assert "32-bit libs: not needed" in out
+
+
+def test_doctor_names_the_bundled_copy_before_a_system_one(tmp_path, monkeypatch, capsys) -> None:
+    bundle = tmp_path / "umu.tar"
+    bundle.write_bytes(b"x")
+    monkeypatch.setattr(umu, "managed", lambda: None)
+    monkeypatch.setattr(umu, "_bundled_archive", lambda: bundle)
+    out = _doctor_out(monkeypatch, capsys)
+    assert "umu-run: Nadare's own copy (set up at the first launch" in out
+    assert "umu-run: /usr/bin/umu-run" not in out

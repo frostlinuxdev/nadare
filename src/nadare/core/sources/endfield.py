@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
 from .. import directdl
+from ..directdl import require_https
 from . import Fetch, default_fetch, ungzip
 
 API = (
@@ -24,12 +25,6 @@ def _mapping(value: Any, what: str) -> Mapping[str, Any]:
     return value
 
 
-def _https(url: Any, what: str) -> str:
-    if not isinstance(url, str) or not url:
-        raise directdl.DirectError(f"{what} is missing")
-    if urlsplit(url).scheme != "https":
-        raise directdl.DirectError(f"{what} is not https")
-    return url
 
 
 def _size(value: Any, what: str) -> int:
@@ -80,7 +75,7 @@ def resolve(fetch: Fetch | None = None) -> directdl.Plan:
     total = 0
     for index, raw in enumerate(raw_packs, start=1):
         pack = _mapping(raw, f"pack {index}")
-        url = _https(pack.get("url"), f"pack {index} url")
+        url = require_https(pack.get("url"), f"pack {index} url")
         size = _size(pack.get("package_size"), f"pack {index} size")
         md5 = pack.get("md5")
         if not isinstance(md5, str) or not md5:

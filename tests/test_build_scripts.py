@@ -72,6 +72,7 @@ class TestAppimagetoolPin:
         tool.write_bytes(b"not the real appimagetool")
         env = dict(os.environ)
         env["APPIMAGETOOL"] = str(tool)
+        env["PYTHON"] = "/bin/false"  # never sync dependencies in a checksum-guard test
         env["NADARE_RELEASE"] = "1"
         for key in ("APPIMAGETOOL_SHA256", "APPIMAGETOOL_RELEASE", "APPIMAGETOOL_ALLOW_UNVERIFIED"):
             env.pop(key, None)
@@ -90,6 +91,7 @@ class TestAppimagetoolPin:
         tool.write_bytes(b"not the real appimagetool")
         env = dict(os.environ)
         env["APPIMAGETOOL"] = str(tool)
+        env["PYTHON"] = "/bin/false"  # never sync dependencies in a checksum-guard test
         for key in (
             "APPIMAGETOOL_SHA256",
             "APPIMAGETOOL_RELEASE",
@@ -111,6 +113,7 @@ class TestAppimagetoolPin:
         tool.write_bytes(b"not the real appimagetool")
         env = dict(os.environ)
         env["APPIMAGETOOL"] = str(tool)
+        env["PYTHON"] = "/bin/false"  # never sync dependencies in a checksum-guard test
         env["APPIMAGETOOL_SHA256"] = "0" * 64
         result = subprocess.run(
             ["bash", str(_REPO_ROOT / "scripts" / "build_appimage.sh")],
@@ -256,7 +259,7 @@ class TestAppImageReleaseHardening:
 
     def test_license_is_staged_in_every_package(self):
         assert "LICENSE" in _text("scripts/build_appimage.sh").split("copy_system_libs libGL")[1]
-        assert "LICENSE" in _text("scripts/build_flatpak.sh")
+        assert "LICENSE" in _text("packaging/flatpak/stage_repo.py")
         assert "LICENSE" in _text("packaging/flatpak/io.github.frostlinuxdev.Nadare.yml")
 
     def test_other_packagers_do_not_fall_back_to_a_fake_version(self):
@@ -373,8 +376,10 @@ class TestDevSetup:
     def test_setup_prefers_uv_sync_with_a_pip_fallback(self):
         script = _text("scripts/dev.sh")
         assert "uv sync --frozen --extra dev" in script
-        # The pip path is retained only as a fallback.
-        assert 'install -r requirements.txt' in script
+        # The pip path is retained only as a fallback, pinned and hashed from
+        # the lock (#1553), so it gets the dev tools too.
+        assert 'install -r requirements-dev.txt' in script
+        assert 'install -r requirements.txt' not in script
 
     def test_setup_actually_calls_uv_sync(self, tmp_path, monkeypatch):
         import shutil
@@ -451,7 +456,7 @@ class TestDocsMatchReality:
 
 def test_certifi_is_pinned_past_the_emsign_incident():
     """curl_cffi trusts certifi's bundle; 2026.10.19 dropped the compromised eMudhra root."""
-    pin = re.search(r"^certifi==([\d.]+)$", _text("requirements.txt"), re.M)
+    pin = re.search(r"^certifi==([\d.]+)(?: \\)?$", _text("requirements.txt"), re.M)
     assert pin is not None, "requirements.txt must pin certifi"
     assert tuple(int(p) for p in pin.group(1).split(".")) >= (2026, 10, 19)
     assert "certifi>=2026.10.19" in _text("pyproject.toml")
@@ -481,6 +486,19 @@ def test_fetch_7zip_builds_without_the_rar_code():
     assert "7z2605-linux-x64" not in script  # never the stock (RAR-capable) binary again
 
 
+def test_fetch_7zip_links_a_static_pie_with_full_relro():
+    """#1551: the bundled 7zzs is static-pie with full RELRO, and the build proves it."""
+    script = _text("scripts/fetch_7zip.sh")
+    # 7-Zip's makefile hard-codes `-static` for the static target: the script swaps it and stops
+    # when the swap did not apply (a new 7-Zip makefile would otherwise silently link ET_EXEC).
+    assert "-static-pie -o $(PROGPATH_STATIC)" in script
+    assert "static-pie link rule not applied" in script
+    assert 'LDFLAGS_STATIC_3="-Wl,-z,relro,-z,now"' in script
+    # The built binary goes through the same checker as the AppImage payload, before install.
+    check = script.index('scripts/check_elf_hardening.py" "$built"')
+    assert check < script.index('install -m 0755 "$built" "$binary"')
+
+
 def test_fetch_7zip_script_is_executable_and_called_through_bash():
     """The build once died with "Permission denied": the script had no execute bit."""
     import os
@@ -491,3 +509,35 @@ def test_fetch_7zip_script_is_executable_and_called_through_bash():
     assert os.access(script, os.X_OK), "scripts/fetch_7zip.sh must be executable"
     build = (root / "scripts" / "build_appimage.sh").read_text(encoding="utf-8")
     assert "bash scripts/fetch_7zip.sh" in build
+
+
+def test_one_flatpak_build_path():
+    """#104: the old flatpak-builder script (SDK pulled live from Flathub) is gone; the Flatpak
+    is staged from the AppImage's files and nothing names the old script any more."""
+    assert not (_REPO_ROOT / "scripts" / "build_flatpak.sh").exists()
+    for rel in ("docs/PACKAGING.md", "ARCHITECTURE.md"):
+        assert "build_flatpak.sh" not in _text(rel), rel
+    assert "build_flatpak.sh" not in _text("packaging/flatpak/io.github.frostlinuxdev.Nadare.yml")
+
+
+# ---------------------------------------------------------------------------
+# #1235 — a log file is never committed, not even under docs/
+# ---------------------------------------------------------------------------
+def test_gitignore_does_not_re_allow_logs_under_docs():
+    ignore = _text(".gitignore").splitlines()
+    assert "*.log" in ignore, "logs must stay ignored"
+    assert "!docs/**/*.log" not in ignore, "docs logs must not be re-allowed"
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [".forgejo/workflows/ci.yml", ".github/workflows/ci.yml"],
+)
+def test_pip_audit_is_pinned_to_an_exact_version(rel):
+    """An unpinned pip-audit makes the weekly audit's own tooling float."""
+    install = re.search(
+        r"^\s*python -m pip install --upgrade pip pip-audit==\d+\.\d+\.\d+$",
+        _text(rel),
+        re.M,
+    )
+    assert install is not None, f"{rel} must pin pip-audit to an exact version"

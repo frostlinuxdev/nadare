@@ -77,12 +77,18 @@ def _packets(data: bytes):
             raise SignatureError("not an OpenPGP packet")
         if head & 0x40:  # new format
             tag = head & 0x3F
+            if pos + 2 > len(data):
+                raise SignatureError("the packet is cut short")
             first = data[pos + 1]
             if first < 192:
                 length, pos = first, pos + 2
             elif first < 224:
+                if pos + 3 > len(data):
+                    raise SignatureError("the packet is cut short")
                 length, pos = ((first - 192) << 8) + data[pos + 2] + 192, pos + 3
             elif first == 255:
+                if pos + 6 > len(data):
+                    raise SignatureError("the packet is cut short")
                 length, pos = int.from_bytes(data[pos + 2 : pos + 6], "big"), pos + 6
             else:
                 raise SignatureError("partial-length packets are not used by Nadare releases")
@@ -92,6 +98,8 @@ def _packets(data: bytes):
             size = {0: 1, 1: 2, 2: 4}.get(kind)
             if size is None:
                 raise SignatureError("indeterminate-length packets are not accepted")
+            if pos + 1 + size > len(data):
+                raise SignatureError("the packet is cut short")
             length = int.from_bytes(data[pos + 1 : pos + 1 + size], "big")
             pos += 1 + size
         body = data[pos : pos + length]
@@ -119,8 +127,12 @@ def _subpackets(area: bytes) -> list[tuple[int, bytes]]:
         if first < 192:
             length, pos = first, pos + 1
         elif first < 255:
+            if pos + 2 > len(area):
+                raise SignatureError("a signature subpacket is damaged")
             length, pos = ((first - 192) << 8) + area[pos + 1] + 192, pos + 2
         else:
+            if pos + 5 > len(area):
+                raise SignatureError("a signature subpacket is damaged")
             length, pos = int.from_bytes(area[pos + 1 : pos + 5], "big"), pos + 5
         if length < 1 or pos + length > len(area):
             raise SignatureError("a signature subpacket is damaged")

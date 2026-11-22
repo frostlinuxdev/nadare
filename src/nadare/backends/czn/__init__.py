@@ -3,7 +3,7 @@
 """The ``stove-czn`` backend for Chaos Zero Nightmare (ported from czn-linux).
 
 Public surface: :class:`CznBackend` plus the ported ``auth``/``update``/
-``runners`` command modules and the PCSDK stub source under ``stub_src/``.
+``runners`` command modules. The PCSDK stub's source is ``stub/pcsdk-go/`` at the repo root.
 
 ``auth.py`` is GPL-3.0-only (it derives from yporoc's launcher, which grants no
 "or later"); every other file here is GPL-3.0-or-later.

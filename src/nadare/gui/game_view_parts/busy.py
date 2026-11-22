@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 
+from ...core import operation_policy
 from ...core.eta import format_eta, format_speed
 from ...core.events import Event
 from ...core.exitcode import STOPPED_EXIT_CODES, crash_signal, play_time
@@ -24,6 +25,7 @@ OPERATION_TITLES = {
     "login": "Logging in",
     "status": "Checking",
     "remove": "Removing",
+    "remove_qualities": "Removing old quality files",
 }
 
 
@@ -45,6 +47,7 @@ _BUSY_STATES = {
     "remove": "uninstalling",
     "set_remember": "saving",
     "logout": "logging out",
+    "remove_qualities": "cleaning",
 }
 
 #: A second click right after a button turns into CANCEL must not cancel the new job.
@@ -57,26 +60,26 @@ _LAUNCH_EXIT_GRACE_S = 30.0
 _PAUSED_TEXT = "Paused. Everything downloaded so far is kept."
 
 #: Operations whose success makes the status shown before them out of date.
-_STATE_CHANGING = frozenset({"install", "update", "repair", "remake_prefix", "uninstall"})
+_STATE_CHANGING = operation_policy.operations_with("state_changing") | {"uninstall"}
 
 #: Operations whose success is said on the progress line afterwards: OUTPUT is folded (#993),
 #: so its "done" line alone would leave no sign that an install or update worked.
-_ANNOUNCED_ON_SUCCESS = frozenset({"install", "update", "repair", "verify", "remake_prefix"})
+_ANNOUNCED_ON_SUCCESS = operation_policy.operations_with("announce_success")
 
 #: A backend's own last line for a launch (CZN); the page then adds no second one.
-_GAME_END_LINES = frozenset({"game exited normally", "game stopped"})
+_GAME_END_LINES = frozenset(
+    {"game exited normally", "game stopped", "steam returned without starting the game"}
+)
 
 #: Operations the failure dialog and the RETRY button can run again as they were.
-_RETRYABLE = frozenset(
-    {"install", "update", "repair", "remake_prefix", "verify", "login", "launch"}
-)
+_RETRYABLE = operation_policy.operations_with("retryable")
 
 
 def can_pause_kind(kind: str) -> bool:
     """Whether installs of backend ``kind`` resume from what is already on disk."""
-    from ...core.directkinds import DIRECT_KINDS
+    from ...core.backends import supports_resume
 
-    return kind in DIRECT_KINDS or kind == "stellasora-yostar"
+    return supports_resume(kind)
 
 
 class BusyMixin:
@@ -91,7 +94,10 @@ class BusyMixin:
         self._last_done = ""
         self._queue_waiting = False
         self._busy_op = operation
+        self._operation_detail = operation_title(operation)
+        self._set_detail("")
         if operation == "launch":
+            self._launch_runner = {}  # what this launch runs on, once the backend says (#1732)
             # What this launch has is fixed now; the switch can change later, the process cannot.
             # Only a guess until the backend reports: never one the machine cannot keep.
             self._sandbox_active = bool(
@@ -139,6 +145,7 @@ class BusyMixin:
         self.elapsed_label.setText("")
         self.progress.setRange(0, 0)  # the busy animation: nothing is downloading yet
         self._queue_waiting = True
+        self._set_badge("waiting", "")  # not INSTALLING: nothing of it runs yet
         self.set_queue_position(ahead, can_now)
         self._append_line("waiting for another install to finish", "status")
 
@@ -204,17 +211,28 @@ class BusyMixin:
         if operation == "launch":
             if exit_code == 0:
                 if self._last_done.lower() not in _GAME_END_LINES:  # CZN says it itself
-                    self._append_line("game exited normally", "done")
+                    if not stop_requested and elapsed < _LAUNCH_EXIT_GRACE_S:
+                        # A publisher launcher hands the game to another process and exits 0 at
+                        # once: the game keeps running, so it did not "exit normally" (#1554).
+                        self._append_line(
+                            f"The launcher closed after {play_time(elapsed)}; "
+                            "the game may still be running.",
+                            "status",
+                        )
+                    else:
+                        self._append_line("game exited normally", "done")
                 return
             crash = "" if stop_requested else crash_signal(exit_code)
+            runner_note, other_runner = self._runner_note()
             if crash and elapsed >= _LAUNCH_EXIT_GRACE_S:
                 # A real session that ended in a crash signal is not a normal quit (#1031).
                 self.show_error(
                     "The game crashed",
                     f"The game crashed ({crash}, exit code {exit_code}) after "
-                    f"{play_time(elapsed)}. Open the logs for details.",
+                    f"{play_time(elapsed)}.{runner_note} Open the logs for details.",
                     retry_op=retry_op,
                     failed=True,
+                    settings=other_runner,
                 )
                 return
             # Many Wine/Proton games and launchers exit non-zero on quit, and
@@ -226,6 +244,16 @@ class BusyMixin:
             ):
                 self._append_line(f"Game closed (exit code {exit_code})", "status")
                 return
+            # A launch that failed at once: say what it ran on (#1732).
+            self.show_error(
+                "Operation failed",
+                f"{operation_title(operation)} did not finish (exit code {exit_code})."
+                f"{runner_note} Open the logs for details.",
+                retry_op=retry_op,
+                failed=True,
+                settings=other_runner,
+            )
+            return
         if exit_code == 0 and operation in _ANNOUNCED_ON_SUCCESS:
             done = self._last_done or f"{operation_title(operation)} finished"
             self.step_label.setText(f"✓ {done}")  # cleared by the next operation
@@ -237,6 +265,23 @@ class BusyMixin:
                 retry_op=retry_op,
                 failed=True,
             )
+
+    def _runner_note(self) -> tuple[str, bool]:
+        """A sentence naming the runner this launch used, and whether it is not the recommended
+        one (then the box points to the game's settings). Empty when the backend did not say."""
+        facts = getattr(self, "_launch_runner", None) or {}
+        name = str(facts.get("runner") or "")
+        if not name:
+            return "", False
+        if facts.get("runner_recommended"):
+            return f" It ran on {name}, the recommended runner.", False
+        default = str(facts.get("runner_default") or "the recommended runner")
+        return (
+            f" It ran on {name}, which is not the recommended runner ({default}). If other "
+            "games fail the same way, try the recommended one: in this game's settings, set "
+            "Runner to Default · recommended.",
+            True,
+        )
 
     def fail(self, message: str, *, quiet: bool = False) -> None:
         """End the busy state after a failure; ``quiet`` writes it to OUTPUT without a box.
@@ -294,6 +339,7 @@ class BusyMixin:
 
     def _restore_badge(self) -> None:
         """Drop the busy pill once an operation ends without a status refresh."""
+        self._set_detail(self._status.message if self._status is not None else "")
         if self._status is not None:
             self._set_badge(self._status.state, self._status.message)
         else:
@@ -310,6 +356,17 @@ class BusyMixin:
     def append_event(self, event: Event) -> None:
         kind = event.kind
         data = event.data or {}
+        if self._busy_op is not None and kind in ("step", "done", "error"):
+            # A finished step must not linger while the next phase is being prepared. Progress
+            # counters stay in the bar below: the header names the phase only (2026-11-20).
+            from ..game_view import breakable  # late: game_view imports this module
+
+            # A pack file name must not widen the page (#1703): break points, as the step line has.
+            text = (event.message or "") if kind == "step" else ""
+            self._operation_detail = breakable(text)
+            self._set_detail("")
+        if self._busy_op == "launch" and "runner_recommended" in data:
+            self._launch_runner = dict(data)
         if self._busy_op == "launch" and "sandbox" in data:
             self._sandbox_active = bool(data["sandbox"])
             self._apply_sandbox()

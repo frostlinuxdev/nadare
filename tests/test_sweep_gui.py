@@ -71,7 +71,7 @@ def test_stale_worker_result_is_ignored_after_remove_and_readd(tmp_path, qapp, m
         window.config.add_profile("a", backend="wine", title="A")
         window.refresh_library()
 
-        window._on_result("a", Status("installed"))
+        window._on_result("a", "status", Status("installed"))
         assert "status" not in window._snapshots.get("a", {})
     finally:
         window.close()

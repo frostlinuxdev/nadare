@@ -49,7 +49,12 @@ def test_a_stop_request_ends_the_game_processes_not_only_the_wait(tmp_path, monk
         make_context(
             tmp_path,
             "launcher-nikke",
-            {"wine_binary": str(wine), "prefix": str(tmp_path / "prefix"), "secure_mode": False},
+            {
+                "wine_binary": str(wine),
+                "prefix": str(tmp_path / "prefix"),
+                "secure_mode": False,
+                "stop_grace_seconds": 0,  # the polite close has its own tests
+            },
         )
     )
     monkeypatch.setattr(backend, "_ensure_default_runner", lambda strict=False: None)
@@ -86,7 +91,14 @@ def test_stop_sweeps_again_for_wine_helpers_that_come_back(tmp_path, monkeypatch
         make_context(
             tmp_path,
             "launcher-nikke",
-            {"wine_binary": str(wine), "prefix": str(tmp_path / "prefix"), "secure_mode": False},
+            {
+                "wine_binary": str(wine),
+                "prefix": str(tmp_path / "prefix"),
+                "secure_mode": False,
+                # This test is about the SIGTERM/SIGKILL sweep; the polite close has its own
+                # tests (tests/test_stop_grace_1421.py).
+                "stop_grace_seconds": 0,
+            },
         )
     )
     rounds = iter([[1, 2], [3], [], []])

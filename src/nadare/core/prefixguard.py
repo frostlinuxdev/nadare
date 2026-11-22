@@ -15,16 +15,15 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from . import location
+from .paths import real as _real
+
 #: Folders under the home that hold the user's own files.
 PERSONAL_FOLDERS = frozenset(
     {"Documents", "Downloads", "Desktop", "Pictures", "Music", "Videos", "Public", "Templates"}
 )
 #: Profile keys that name a folder the game owns.
 _FOLDER_KEYS = ("prefix", "wineprefix", "install_dir")
-
-
-def _real(path: str | os.PathLike[str]) -> Path:
-    return Path(os.path.realpath(os.path.expanduser(str(path))))
 
 
 def is_wine_prefix(path: str | os.PathLike[str]) -> bool:
@@ -116,22 +115,14 @@ def unsafe_reason(
     reason = place_reason(resolved, home=home)
     if reason:
         return reason
-    for name, profile in (profiles or {}).items():
-        if name == own or not isinstance(profile, Mapping):
-            continue
-        for key in _FOLDER_KEYS:
-            value = profile.get(key)
-            if not isinstance(value, str) or not value.strip():
-                continue
-            other = _real(value)
-            # A legacy profile saved with a folder that can be nobody's game folder (home, a
-            # folder holding it, / or a drive) must not claim everything below it (#1207 b077).
-            broad = other == home or other in home.parents or os.path.ismount(other)
-            if broad and resolved != other:
-                continue
-            if resolved == other or resolved in other.parents or other in resolved.parents:
-                title = str(profile.get("title") or name)
-                return f"{_USED_BY}{title}"
+    # The one answer to "used by another game" (#1372 step 2): recorded paths, owned_dirs,
+    # the game folder and its own profiles/<name> (storage reviews C3, round 2 B4).
+    claim = location.overlapping(profiles or {}, path, excluding=own or None)
+    if claim is not None:
+        inside = claim.folder == resolved or claim.folder in resolved.parents
+        if claim.source != "path" and inside:
+            return f"{path} is inside the folder of another game ({claim.owner})"
+        return f"{_USED_BY}{claim.title}"
     if as_prefix and resolved.exists() and not resolved.is_dir():
         return _IS_A_FILE  # a regular file can never be a Wine prefix (#1207 b078)
     if as_prefix and resolved.is_dir() and not is_wine_prefix(resolved) and not _is_empty(resolved):

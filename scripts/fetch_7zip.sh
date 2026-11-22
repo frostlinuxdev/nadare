@@ -7,6 +7,8 @@
 # opens publisher installers (NSIS, PE, CAB, 7z, zip), never RAR, so the RAR code is deleted from
 # the source before building and the result is checked to list no RAR format. Needs make + g++
 # (the release build container has both). The output is reproducible: core/sevenzip.py pins it.
+# #1551: linked as a static PIE with full RELRO (BIND_NOW) and a non-executable stack; the
+# build checks the result with scripts/check_elf_hardening.py before installing it.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,9 +37,16 @@ mkdir "$work"
 tar -xJf "$source_archive" -C "$work"
 # The RAR handler and codecs go before the build, so not a line of unRAR code is compiled.
 rm -rf "$work/CPP/7zip/Archive/Rar" "$work"/CPP/7zip/Compress/Rar*
+# 7-Zip's makefile links its static target with a hard-coded `-static` (ET_EXEC). Make it a
+# static PIE; the objects are already built with -fPIC. Stop if the rule was not there to swap.
+mak="$work/CPP/7zip/7zip_gcc.mak"
+sed -i 's/\t$(CXX) -static -o $(PROGPATH_STATIC) $(LFLAGS_ALL)/\t$(CXX) -static-pie -o $(PROGPATH_STATIC) $(LFLAGS_ALL)/' "$mak"
+grep -qF -- '-static-pie -o $(PROGPATH_STATIC)' "$mak" \
+    || { echo "[!] 7-Zip's static-pie link rule not applied (did the makefile change?)" >&2; exit 1; }
 (
     cd "$work/CPP/7zip/Bundles/Alone2"
-    SOURCE_DATE_EPOCH=0 make -j"${JOBS:-4}" -f makefile.gcc DISABLE_RAR=1 COMPL_STATIC=1 >"$tmp/build.log" 2>&1 \
+    SOURCE_DATE_EPOCH=0 make -j"${JOBS:-4}" -f makefile.gcc DISABLE_RAR=1 COMPL_STATIC=1 \
+        LDFLAGS_STATIC_3="-Wl,-z,relro,-z,now" >"$tmp/build.log" 2>&1 \
         || { tail -40 "$tmp/build.log" >&2; exit 1; }
 )
 built="$work/CPP/7zip/Bundles/Alone2/_o/7zzs"
@@ -50,6 +59,8 @@ fi
 for format in Nsis Cab PE 7z zip; do
     grep -qw "$format" "$tmp/formats.txt" || { echo "[!] 7zzs lacks the $format format" >&2; exit 1; }
 done
+"${PYTHON:-python3}" "$root/scripts/check_elf_hardening.py" "$built" >&2 \
+    || { echo "[!] the built 7zzs is not hardened (PIE, full RELRO, NX)" >&2; exit 1; }
 install -m 0755 "$built" "$binary"
 install -m 0644 "$work/DOC/License.txt" "$license"
 echo "[*] 7-Zip (no RAR) built and installed: sha256 $(sha256sum "$binary" | cut -d' ' -f1)"

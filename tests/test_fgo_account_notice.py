@@ -209,6 +209,7 @@ def test_notice_dialog_continue_disabled_until_ticked(qt_env):
 def _make_window(tmp_path, monkeypatch):
     from nadare.gui import main_window as mw
 
+    monkeypatch.delenv("NADARE_ASSUME_NOTICES", raising=False)
     config = Config.load(tmp_path / "config.json")
     config.add_profile("gfgo", backend="fgo-lepton", title="FGO")
     window = mw.MainWindow(config, profile="gfgo")
@@ -221,24 +222,24 @@ def _make_window(tmp_path, monkeypatch):
 
 @pytestmark_gui
 def test_gui_continue_persists_flag_and_starts_install(tmp_path, qt_env, monkeypatch):
+    from nadare.gui.quick_install import QuickInstallDialog
+
     mw, window, config, starts = _make_window(tmp_path, monkeypatch)
-    shown: list[str] = []
-
-    class FakeDialog:
-        def __init__(self, notice, parent=None):
-            shown.append(notice)
-
-        def exec(self):
-            return QDialog.DialogCode.Accepted
-
-    patch_main_window(monkeypatch, "AccountNoticeDialog", FakeDialog)
+    shown: list[QuickInstallDialog] = []
+    monkeypatch.setattr(
+        QuickInstallDialog,
+        "exec",
+        lambda self: shown.append(self) or QDialog.DialogCode.Accepted,
+    )
     try:
         window._on_game_action("install")
+        assert shown[0].account_notice_text == ACCOUNT_NOTICE  # in the one sheet
         assert config.profile("gfgo")["accept_account_notice"] is True
         assert starts == [("gfgo", "install")]
         assert Config.load(config.path).profile("gfgo")["accept_account_notice"] is True
 
-        # Second attempt must not prompt again.
+        # Second attempt must not prompt again: only the size line is left, and the
+        # download size of this game is unknown, so nothing is asked at all.
         window._on_game_action("install")
         assert len(shown) == 1
         assert starts == [("gfgo", "install"), ("gfgo", "install")]
@@ -250,16 +251,10 @@ def test_gui_continue_persists_flag_and_starts_install(tmp_path, qt_env, monkeyp
 
 @pytestmark_gui
 def test_gui_cancel_starts_nothing(tmp_path, qt_env, monkeypatch):
+    from nadare.gui.quick_install import QuickInstallDialog
+
     mw, window, config, starts = _make_window(tmp_path, monkeypatch)
-
-    class FakeDialog:
-        def __init__(self, notice, parent=None):
-            pass
-
-        def exec(self):
-            return QDialog.DialogCode.Rejected
-
-    patch_main_window(monkeypatch, "AccountNoticeDialog", FakeDialog)
+    monkeypatch.setattr(QuickInstallDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
     try:
         window._on_game_action("install")
         assert config.profile("gfgo").get("accept_account_notice", False) is False

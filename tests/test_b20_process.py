@@ -9,7 +9,6 @@ import threading
 import time
 from pathlib import Path
 
-import pytest
 from _backend_helpers import make_context, write_exe
 
 from nadare.backends.wine import WineBackend
@@ -88,21 +87,20 @@ def test_relative_path_entries_are_dropped_without_a_system_python(monkeypatch) 
 
 
 # ---------------------------------------------------------------------------
-# #596: ensure_managed must not accept a zipapp its shebang cannot execute
+# #596/#1341: without the shebang python, ensure_managed uses Nadare's own interpreter
 # ---------------------------------------------------------------------------
-def test_ensure_managed_refuses_without_the_shebang_python(
+def test_ensure_managed_installs_without_the_shebang_python(
     monkeypatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(umu, "managed_path", lambda: tmp_path / "umu-run")
-    monkeypatch.setattr(umu, "SHEBANG_PYTHON", str(tmp_path / "no-such-python3"))
-    monkeypatch.setattr(
-        umu.shutil, "which", lambda name, *a, **k: "/usr/bin/python3"
-    )
-    monkeypatch.setattr(umu.download, "download", lambda *a, **k: pytest.fail("downloaded"))
+    from test_umu import _fake_download, _zipapp_payload
 
-    with pytest.raises(umu.UmuError, match="python3"):
-        umu.ensure_managed()
-    assert not (tmp_path / "umu-run").exists()
+    monkeypatch.setattr(umu, "managed_path", lambda: tmp_path / "data" / "umu-run")
+    monkeypatch.setattr(umu, "SHEBANG_PYTHON", str(tmp_path / "no-such-python3"))
+    monkeypatch.setattr(umu.shutil, "which", lambda name, *a, **k: None)
+    _fake_download(monkeypatch, _zipapp_payload())
+
+    dest = umu.ensure_managed()
+    assert dest == tmp_path / "data" / "umu-run" and dest.is_file()
 
 
 # ---------------------------------------------------------------------------
@@ -197,25 +195,6 @@ def test_runtime_note_says_when_auto_chose_vulkan(tmp_path: Path, monkeypatch) -
     backend = WineGameBackend(ctx)
     monkeypatch.setattr(backend, "resolve_runner", lambda: (None, "wine"))
     monkeypatch.setattr(graphics, "dxvk_ok", lambda: True)
+    monkeypatch.setattr(graphics, "vulkan_info", lambda **k: graphics.VulkanInfo(True, "1.3.280"))
     note = backend._runtime_note()
     assert "Vulkan" in note and "auto" in note
-
-
-# ---------------------------------------------------------------------------
-# #119: PCSDK stub hardening items
-# ---------------------------------------------------------------------------
-_STUB = (
-    Path(__file__).resolve().parents[1]
-    / "src/nadare/backends/czn/stub_src/czn_pcsdk_stub.c"
-)
-
-
-def _stub_text() -> str:
-    return _STUB.read_text(encoding="utf-8")
-
-
-
-
-
-
-

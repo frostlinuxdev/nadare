@@ -276,6 +276,11 @@ class SecretStore:
     def get(self, profile: str) -> str | None:
         accounts = self._accounts(profile)
         if self.secure:
+            # With no default collection nothing was ever saved, and get_password would create
+            # it first: gcr's "Choose password for new keyring" dialog, blocking a status read
+            # until it is answered (#1419). Only a proven absence skips the read.
+            if default_collection_exists() is False:
+                return None
             for account in accounts:
                 value = self._kget(account)
                 if value is not None:

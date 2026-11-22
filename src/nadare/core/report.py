@@ -12,20 +12,16 @@ import re
 import shutil
 import socket
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import date
 from pathlib import Path
 from typing import Any
 
-from . import events, paths, process, runlog, runners, sessionfiles
+from . import events, paths, pending, process, runlog, runners, sessionfiles
 from .gameversion import read_czn_version, read_install_version
 
 MAX_REPORT_BYTES = 300_000
-STUB_SHIPPED_SHA256 = (
-    "0a8cc27d2b6a7eb5097d65ca04214de997693da34483e11bc5d76211caddbdf7",
-    "fe4a5bad970750e974cf999e31e3b87132fbb25f9c04c9eea69e3acc2e243185",
-)
-
+STUB_SHIPPED_SHA256 = ("0a8cc27d2b6a7eb5097d65ca04214de997693da34483e11bc5d76211caddbdf7",)
 
 
 def _managed_umu_text() -> str:
@@ -38,6 +34,38 @@ def _managed_umu_text() -> str:
         return "unknown"
     return str(found) if found else "not set up yet"
 
+
+#: The labels this report writes at the start of its own lines (see ``redact(labels=...)``).
+REPORT_LABELS = (
+    "Generated",
+    "Nadare",
+    "Run kind",
+    "Distro",
+    "Kernel",
+    "Virtualisation",
+    "Session",
+    "GPU",
+    "Language",
+    "umu-run",
+    "umu-run (Nadare's own)",
+    "Doctor",
+    "Profile",
+    "Backend",
+    "Title",
+    "Settings",
+    "Installed version",
+    "Runner",
+    "Free disk (game)",
+    "Free disk (prefix)",
+    "Free disk (logs)",
+    "CZN stub",
+    "CZN stub banner",
+    "Warning",
+    "Game file",
+    "Game dump folder",
+)
+
+
 def redact(
     text: str,
     *,
@@ -45,8 +73,13 @@ def redact(
     home: str | Path | None = None,
     hostname: str | None = None,
     mask: bool = True,
+    labels: Iterable[str] = (),
 ) -> str:
     """Remove personal identifiers and public network addresses from text.
+
+    ``labels`` are the report's own line labels ("Runner", "Kernel"...): a line that starts
+    with one of them followed by ``:`` keeps the label even when the username is the same
+    word (GitHub's runners log in as ``runner``); the rest of the line is still redacted.
 
     ``mask`` also collapses token-like strings (``events.mask``), which would shorten hashes and
     long file names, so the report applies it to free-form log text only.
@@ -64,11 +97,16 @@ def redact(
             out,
         )
     if username:
-        out = re.sub(
-            rf"(?i)(?<![A-Za-z0-9]){re.escape(username)}(?![A-Za-z0-9])",
-            "USER",
-            out,
-        )
+        pattern = re.compile(rf"(?i)(?<![A-Za-z0-9]){re.escape(username)}(?![A-Za-z0-9])")
+        keep = sorted({f"{label}:" for label in labels}, key=len, reverse=True)
+        if keep:
+            kept = []
+            for line in out.split("\n"):
+                label = next((k for k in keep if line.startswith(k)), "")
+                kept.append(label + pattern.sub("USER", line[len(label) :]))
+            out = "\n".join(kept)
+        else:
+            out = pattern.sub("USER", out)
     out = re.sub(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "<email>", out, flags=re.I)
     if mask:
         out = events.mask(out)
@@ -112,20 +150,40 @@ def _command(runner: Callable[..., Any], args: list[str], *, timeout: float = 3)
 #: is never loaded whole (#858).
 _TAIL_BYTES = 256 * 1024
 
+#: A cut log also shows its first lines, where a launch log says what ran (the ``$`` command
+#: line, the runner): a crash loop would push them out of the tail (#1725).
+_HEAD_BYTES = 8 * 1024
+_HEAD_LINES = 10
 
-def _tail(path: Path, lines: int = 200) -> str:
+
+def _tail(path: Path, lines: int = 200, *, head: bool = True) -> str:
+    """The newest ``lines`` of ``path``, masked; with ``head``, a cut log keeps its first lines."""
     try:
         with path.open("rb") as handle:
             size = handle.seek(0, 2)
             start = max(0, size - _TAIL_BYTES)
             handle.seek(start)
             data = handle.read(_TAIL_BYTES + 1)
+            first_bytes = b""
+            if start and head:
+                handle.seek(0)
+                first_bytes = handle.read(min(_HEAD_BYTES, start))
         if start:
             # Began in the middle of a line: that first piece is not a whole line.
             cut = data.find(b"\n")
             data = data[cut + 1 :] if cut >= 0 else b""
-        text = data.decode("utf-8", errors="replace")
-        return events.mask("\n".join(text.splitlines()[-lines:])) or "(empty)"
+        all_lines = data.decode("utf-8", errors="replace").splitlines()
+        kept = all_lines[-lines:]
+        if head and (start or len(all_lines) > len(kept)):
+            newline = first_bytes.rfind(b"\n")
+            first = (
+                first_bytes[: newline + 1].decode("utf-8", errors="replace").splitlines()
+                if start
+                else all_lines[: len(all_lines) - len(kept)]
+            )[:_HEAD_LINES]
+            if first:
+                kept = [*first, "… (lines cut) …", *kept]
+        return events.mask("\n".join(kept)) or "(empty)"
     except OSError as exc:
         return f"unavailable: {exc}"
 
@@ -159,6 +217,7 @@ def build_report(
     doctor_text: str | None = None,
     os_release_path: str | Path = "/etc/os-release",
     sys_root: str | Path = "/sys",
+    config_path: str | Path | None = None,
 ) -> str:
     """Build one plain-text report. System access points are injectable for tests."""
     logs = Path(logs_path) if logs_path is not None else paths.logs_dir()
@@ -232,9 +291,7 @@ def build_report(
         install_dir = profile.get("install_dir")
         installed_version = read_install_version(install_dir)
         if installed_version is None and "czn" in str(profile.get("backend", "")).lower():
-            installed_version = read_czn_version(
-                profile.get("prefix") or profile.get("wineprefix")
-            )
+            installed_version = read_czn_version(profile.get("prefix") or profile.get("wineprefix"))
         game_dir = Path(str(install_dir or ""))
         runner_value = runners.profile_runner_value(profile) or "unknown"
         lines += [
@@ -250,7 +307,7 @@ def build_report(
                     folder = folder.parent  # the nearest folder that exists
                 free = shutil.disk_usage(folder).free
                 lines.append(f"Free disk ({label}): {free / 2**30:.0f} GiB")
-            except OSError as exc:
+            except (OSError, TypeError, ValueError) as exc:
                 lines.append(f"Free disk ({label}): unavailable: {exc}")
         if "czn" in str(profile.get("backend", "")).lower():
             stub = profiles / name / "stub" / "czn_pcsdk_stub.exe"
@@ -260,7 +317,15 @@ def build_report(
                     f"CZN stub: {stub.name} sha256={digest[:12]} "
                     f"shipped={'yes' if digest in STUB_SHIPPED_SHA256 else 'no'}"
                 )
-                stub_log = logs / f"{name}-czn-stub.log"
+                # A Sandboxed launch writes the stub log in the prefix (#1556); the newer one wins.
+                raw_prefix = str(profile.get("prefix") or "").strip()
+                prefix = Path(os.path.expanduser(raw_prefix)) if raw_prefix else (
+                    profiles / name / "prefix"
+                )
+                stub_log = max(
+                    (logs / f"{name}-czn-stub.log", prefix / f"{name}-czn-stub.log"),
+                    key=lambda p: p.stat().st_mtime if p.is_file() else -1.0,
+                )
                 try:
                     lines.append(
                         "CZN stub banner: "
@@ -273,6 +338,7 @@ def build_report(
         # Only a folder the profile names: an empty install_dir is Path(""), the current folder.
         if str(profile.get("install_dir") or "").strip():
             lines += _game_folder_notes(game_dir)
+    lines += ["", "## Unfinished operations", *_unfinished_lines(profs, name, config_path)]
     lines += ["", "## Logs"]
     log_files = (
         sorted(
@@ -294,7 +360,8 @@ def build_report(
                 or path.name.endswith(".log")
             )
         ):
-            lines += [f"### {path.name}", _tail(path)]
+            # The app log's first lines are just older app lines; a run log's say what ran.
+            lines += [f"### {path.name}", _tail(path, head=path.name != "nadare.log")]
     own_folder = runlog.game_id(name) if name else ""
     for path in _newest_runs(logs / own_folder) if own_folder else []:
         lines += [f"### {own_folder}/{path.name}", _tail(path)]
@@ -306,21 +373,54 @@ def build_report(
     if others:
         lines.append(f"Logs for {others} other game{'s' if others != 1 else ''} (not included).")
     result = redact(
-        "\n".join(lines), username=username, home=home, hostname=hostname, mask=False
+        "\n".join(lines),
+        username=username,
+        home=home,
+        hostname=hostname,
+        mask=False,
+        labels=REPORT_LABELS,
     )
     # A Linux log name is bytes and may be surrogate-escaped in Python: replace those so the
     # report can still be encoded and written as UTF-8.
     encoded = result.encode("utf-8", errors="replace")
-    if len(encoded) > min(max_bytes, MAX_REPORT_BYTES):
-        suffix = encoded[-(min(max_bytes, MAX_REPORT_BYTES) - 80) :].decode(
-            "utf-8", errors="replace"
-        )
+    limit = max(0, min(max_bytes, MAX_REPORT_BYTES))
+    if len(encoded) > limit:
         note = "\n".join(session_note).strip()
         head = "# Nadare support report (truncated; newest content kept)\n\n"
-        result = head + (note + "\n\n" if note else "") + suffix
+        prefix = (head + (note + "\n\n" if note else "")).encode("utf-8")
+        # Count the actual UTF-8 header and warning, including very small budgets.
+        if len(prefix) >= limit:
+            result = prefix[:limit].decode("utf-8", errors="ignore")
+        else:
+            suffix = encoded[-(limit - len(prefix)) :].decode("utf-8", errors="ignore")
+            result = prefix.decode("utf-8") + suffix
     else:
         result = encoded.decode("utf-8")
     return result
+
+
+def _unfinished_lines(
+    profiles: dict[str, Any], name: str, config_path: str | Path | None
+) -> list[str]:
+    """Storage operations that did not finish (#1372 phase 3), read only.
+
+    This game's are described; other games' are counted, not named.
+    """
+    try:
+        journal = pending.import_journal_path(
+            config_path if config_path is not None else paths.config_file()
+        )
+        found = pending.unfinished(profiles, journal)
+    except Exception as exc:  # noqa: BLE001 - the report must still be built
+        return [f"unavailable: {exc}"]
+    mine = [u for u in found if name and u.profile == name]
+    others = len(found) - len(mine)
+    lines = [f"{pending.LABELS.get(u.kind, u.kind)}: {u.detail}" for u in mine]
+    if others:
+        what = "operation" if others == 1 else "operations"
+        games = "another game" if others == 1 else "other games"
+        lines.append(f"{others} unfinished {what} for {games} (not included).")
+    return lines or ["None."]
 
 
 def _session_note(profiles: dict[str, Any], profiles_root: Path) -> list[str]:
@@ -412,7 +512,7 @@ def _game_folder_notes(game_dir: Path) -> list[str]:
     try:
         if not game_dir.is_dir():
             return notes
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return notes
     for root, dirs, files in os.walk(game_dir, onerror=lambda _exc: None):
         for name in files:
@@ -440,7 +540,17 @@ def _safe_setting(key: str, value: Any) -> Any:
                 result[str(child_key)] = child
         return result
     if isinstance(value, list):
-        return [child for item in value if (child := _safe_setting("", item)) is not _DROP]
+        result = []
+        for index, item in enumerate(value):
+            if index and isinstance(item, str) and not item.startswith("-"):
+                if events.is_secret_flag(value[index - 1]):
+                    # An argument list keeps a flag and its value apart (#1592).
+                    result.append(events._REDACTED)
+                    continue
+            child = _safe_setting("", item)
+            if child is not _DROP:
+                result.append(child)
+        return result
     if isinstance(value, str):
         value = events.mask_known(value)  # free-form text such as launch_args (#968)
     if isinstance(value, str) and ("/" in value or value.startswith("~")):

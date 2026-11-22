@@ -12,7 +12,6 @@ installer once, unpacks both layers with 7-Zip and copies just the
 
 from __future__ import annotations
 
-import hashlib
 import os
 import shutil
 import subprocess
@@ -56,15 +55,26 @@ def launcher_path(install_root: Path) -> Path:
 
 def _sha256(path: Path) -> str:
     """Return the hex SHA-256 of ``path``."""
-    digest = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for block in iter(lambda: fh.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
+    from . import download
+
+    return download.hash_file(path)["sha256"]
+
+
+def _pin_is_valid(value: str) -> bool:
+    """A pinned installer hash is exactly 64 lowercase hex digits."""
+    text = str(value or "").strip().lower()
+    return len(text) == 64 and all(char in "0123456789abcdef" for char in text)
 
 
 def _fetch_installer(cache: Path, download: Callable[[str, Path], Any]) -> Path:
     """Download the installer into ``cache`` once, atomically, and verify its hash."""
+    # The installer is downloaded and later run, so refuse a build with no usable pin before
+    # asking the publisher for anything (#1593).
+    if not _pin_is_valid(INSTALLER_SHA256):
+        raise NteLauncherError(
+            "the NTE installer has no valid checksum in this build; "
+            "Nadare will not run an unpinned installer"
+        )
     if cache.is_file():
         actual = _sha256(cache)
         if actual == INSTALLER_SHA256:

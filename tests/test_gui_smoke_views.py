@@ -21,12 +21,12 @@ def test_game_view_news_panel_renders_and_opens_url(tmp_path, qapp, monkeypatch)
     from PyQt6.QtCore import QUrl
 
     from nadare.core.news import CREDIT, NewsResult
-    from nadare.gui import game_view as game_view_mod
+    from nadare.gui import links
     from nadare.gui.game_view import GameView
 
     opened: list[QUrl] = []
     monkeypatch.setattr(
-        game_view_mod.QDesktopServices, "openUrl", lambda url: opened.append(url) or True
+        links.QDesktopServices, "openUrl", lambda url: opened.append(url) or True
     )
 
     view = GameView()
@@ -185,12 +185,12 @@ def test_game_view_set_media_shows_hero_and_banners(tmp_path, qapp, monkeypatch)
     """Official media paints a full-bleed hero and a clickable banner strip."""
     from PyQt6.QtGui import QPixmap
 
-    from nadare.gui import game_view as game_view_mod
+    from nadare.gui import links
     from nadare.gui.game_view import GameView
 
     opened: list[str] = []
     monkeypatch.setattr(
-        game_view_mod.QDesktopServices, "openUrl", lambda url: opened.append(url.toString()) or True
+        links.QDesktopServices, "openUrl", lambda url: opened.append(url.toString()) or True
     )
     hero = tmp_path / "hero.png"
     pix = QPixmap(640, 320)
@@ -213,6 +213,8 @@ def test_game_view_set_media_shows_hero_and_banners(tmp_path, qapp, monkeypatch)
         view.wait_for_images()
         qapp.processEvents()
         assert view.hero._source is not None
+        # The poster on the right would only repeat the hero, so the hero takes its place.
+        assert view.art.isHidden()
         assert not view.banners.isHidden()
         assert view.banners._row.count() == 2
 
@@ -223,6 +225,7 @@ def test_game_view_set_media_shows_hero_and_banners(tmp_path, qapp, monkeypatch)
         view.set_profile("sample", {"backend": "arknights-yostar"})
         assert view.hero._source is None
         assert view.banners.isHidden()
+        assert not view.art.isHidden(), "without a hero the poster is the page's art"
     finally:
         view.deleteLater()
         qapp.processEvents()
@@ -442,4 +445,62 @@ def test_add_game_dialog_default_name_is_always_valid(tmp_path, qapp):
     finally:
         dialog.close()
         dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_hero_decode_controls_poster_visibility(qapp, monkeypatch):
+    from PyQt6.QtGui import QPixmap
+
+    from nadare.gui.game_view import GameView
+
+    view = GameView()
+    pending = []
+
+    def request(paths, width, height, apply, **kwargs):
+        pending.append(apply)
+        assert (width, height) == (1600, 640)
+
+    monkeypatch.setattr(view.images, "request", request)
+    try:
+        view.set_media("hero.png")
+        assert not view.art.isHidden(), "keep the poster until a hero decoded"
+        hero = QPixmap(16, 16)
+        hero.fill()
+        pending.pop()(hero)
+        assert view.art.isHidden()
+        view.set_media("broken.png")
+        pending.pop()(None)
+        assert view.hero._source is None
+        assert not view.art.isHidden()
+        view.set_media("old.png")
+        stale = pending.pop()
+        view.set_media(None)
+        stale(hero)
+        assert not view.art.isHidden()
+        assert view.hero._source is None
+    finally:
+        view.deleteLater()
+        qapp.processEvents()
+
+
+def test_hero_scrims_shade_header_and_actions_without_flattening_the_art(qapp):
+    from PyQt6.QtGui import QColor, QPixmap
+
+    from nadare.gui.game_view import HeroCard
+
+    card = HeroCard()
+    card.resize(1000, 400)
+    source = QPixmap(1000, 400)
+    source.fill(QColor("white"))
+    card.set_source(source)
+    try:
+        image = card.grab().toImage()
+        # At the art side, the centre stays bright while header and action bands are shaded.
+        middle = image.pixelColor(900, 180).lightness()
+        assert middle > 220
+        assert image.pixelColor(900, 20).lightness() < middle - 50
+        assert image.pixelColor(900, 380).lightness() < middle - 100
+        assert image.pixelColor(20, 180).lightness() < middle - 70
+    finally:
+        card.deleteLater()
         qapp.processEvents()

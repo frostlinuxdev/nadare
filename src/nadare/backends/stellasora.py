@@ -2,17 +2,17 @@
 # Copyright (C) 2026 Nadare contributors
 """Stella Sora (Yostar global PC client) backend (``stellasora-yostar``).
 
-Stella Sora ships no usable official Linux installer path here, so this backend
-is **direct-download only**: it requires a CI-signed Yostar manifest (see
-``ci/yostar-manifests/``) configured through ``YOSTAR_MANIFEST_INDEX`` or the
-profile's ``manifest_index`` (URL) / ``manifest_file`` (local path).  Without a
-manifest the operations fail with an actionable error instead of guessing.
+Like Arknights it is **direct-download only** (#1452): it requires a CI-signed Yostar
+manifest (see ``ci/yostar-manifests/``), from Nadare's published index by default or
+through ``YOSTAR_MANIFEST_INDEX`` / the profile's ``manifest_index`` (URL) /
+``manifest_file`` (local path). Without one, Install and Update fail with an actionable
+error; an installed game still plays.
 
 The Wine/Proton runner handling, prefix discovery, launch-command construction,
 process detection and status reporting are inherited from
 :class:`~nadare.backends.arknights.ArknightsBackend`, which keeps the shared
 Yostar/Wine machinery in one place.  Only the game-specific exe name, install
-sub-path, manifest requirement and lifecycle wiring differ.
+sub-path, display default, options and news differ.
 
 Profile keys: the same as ``arknights-yostar`` (``prefix``, ``install_dir``,
 ``exe_name``, ``proton_runner``/``runner``, ``wine_binary``, ``umu_binary``,
@@ -24,8 +24,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..core import graphics, monitors
-from ..core.backends import PREFIX_HELP, BackendError, Option
-from .arknights import INSTALLED_PREFIX_KEY, ArknightsBackend
+from ..core.backends import PREFIX_HELP, Option
+from ..core.sandboxed import SANDBOX_EXEMPTION_OPTIONS
+from .arknights import ArknightsBackend
 from .arknights_news import IMAGE_HOSTS, fetch_stellasora_news
 
 KIND = "stellasora-yostar"
@@ -39,9 +40,6 @@ LAUNCHER_NAMES = ("StellaSora.exe",)
 
 class StellaSoraBackend(ArknightsBackend):
     install_size_hint = 21 * 1024**3
-    #: Direct download, no launcher: Play goes through ``_launch_direct``, which wraps it.
-    supports_secure_mode = True
-
     kind = KIND
     game_tag = "StellaSora_EN"
     display_name = "Stella Sora"
@@ -98,8 +96,8 @@ class StellaSoraBackend(ArknightsBackend):
             "download_workers",
             "Download workers",
             "int",
-            "Parallel downloads (1-16).",
-            default=6,
+            "Maximum parallel downloads (1-32); the plan may use fewer.",
+            default=32,
             advanced=True,
         ),
         Option("launch_args", "Launch arguments", "args"),
@@ -116,6 +114,7 @@ class StellaSoraBackend(ArknightsBackend):
         Option("extra_env", "Environment", "env", "One KEY=VALUE per line.", advanced=True),
         monitors.OPTION,
         Option("process_match", "Process match", "text", advanced=True),
+        *SANDBOX_EXEMPTION_OPTIONS,
     )
 
     #: Official stellasora.global news (same Yostar CMS as Arknights).
@@ -130,49 +129,6 @@ class StellaSoraBackend(ArknightsBackend):
         "https://store.steampowered.com/app/4813850/",
         "Steam store page",
     )
-
-    def direct_mode(self) -> bool:
-        # Stella Sora is always a direct-manifest game; the manifest itself is
-        # still required and checked by install/update/launch below.
-        return True
-
-    def _require_manifest(self) -> str:
-        source = self.manifest_source()
-        if not source:
-            raise BackendError(
-                "Stella Sora is direct-download only and needs a Yostar manifest: set "
-                "YOSTAR_MANIFEST_INDEX or the profile 'manifest_index'/'manifest_file'"
-            )
-        return source
-
-    def install(self) -> None:
-        self.ctx.cancel.raise_if_cancelled()
-        self._require_manifest()
-        # Record the prefix the install uses so uninstall may later remove an
-        # explicitly configured external prefix (and only that one), exactly as
-        # ArknightsBackend.install does; this override replaced that base method.
-        self.ctx.set(INSTALLED_PREFIX_KEY, str(self.prefix()))
-        # This override replaced the base install(), so it must set the runner up too.
-        self._ensure_default_runner(strict=False)
-        self._ensure_direct_prefix()
-        self._sync_direct()
-
-    def update(self) -> None:
-        self.ctx.cancel.raise_if_cancelled()
-        self._require_manifest()
-        target = self.direct_target()
-        if target is None or not target.is_file():
-            raise BackendError("Stella Sora is not installed")
-        self._sync_direct()
-
-    def launch(self) -> int:
-        self.ctx.cancel.raise_if_cancelled()
-        self._require_manifest()
-        target = self.direct_target()
-        if target is None or not target.is_file():
-            raise BackendError(f"game executable not found: {target}")
-        self._ensure_default_runner(strict=True)
-        return self._launch_direct()
 
 
 __all__ = [

@@ -125,9 +125,6 @@ def proton_direct(
     # versions. Only Proton gets this path, never Nadare itself.
     if PROTON_LIBS.is_dir():
         parts = [str(PROTON_LIBS / "x86_64"), str(PROTON_LIBS / "i386")]
-        existing = os.environ.get("LD_LIBRARY_PATH")
-        if existing:
-            parts.append(existing)
         env["LD_LIBRARY_PATH"] = ":".join(parts)
     return argv, env
 
