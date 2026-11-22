@@ -6,44 +6,60 @@ NIKKE, Brown Dust 2, Chaos Zero Nightmare and more. Pick a game in the Store, pr
 Install, press Play. Nadare downloads the game from the publisher, sets up the Wine/Proton
 environment, and keeps it updated, one profile per game.
 
-> **⬇ Download:** open the **[latest release](https://github.com/frostlinuxdev/nadare/releases/latest)**
-> and, under **Assets**, download the file **`Nadare-<version>-x86_64.AppImage`**.
-> That one file is the whole app: no installer, nothing else to download. (Not the
-> "Source code" zip files: those are for developers.)
->
-> **Prefer a Flatpak?** Nadare also comes from its own signed Flatpak repository (not
-> Flathub): see [Install → Flatpak](docs/INSTALL.md#flatpak-including-bazzite--bazaar).
+> **⬇ Download:** [nadare.app/download](https://nadare.app/download/), or follow
+> [Get started](#get-started) below. The **Flatpak** is the easiest way: your software centre
+> installs it and keeps it updated.
 
 Source code and the issue tracker are at
 [github.com/frostlinuxdev/nadare](https://github.com/frostlinuxdev/nadare).
 
 ## Get started
 
-1. Download `Nadare-<version>-x86_64.AppImage` from the
-   [latest release](https://github.com/frostlinuxdev/nadare/releases/latest) (under **Assets**)
-   and check its SHA-256 against the sum published there.
-2. Start it. A downloaded AppImage is not allowed to run yet, so double-clicking it does
-   nothing at all on Mint or Ubuntu (KDE asks "Launch?" and then also does nothing).
-   Pick one:
+### 1. Install Nadare
 
-   - **Terminal, one line:**
+**Flatpak (recommended).** From our own signed repository at `https://flatpak.nadare.app/`
+(not Flathub yet).
 
-     ```sh
-     chmod +x Nadare-*-x86_64.AppImage && ./Nadare-*-x86_64.AppImage
-     ```
+- Download **[nadare.flatpakref](https://flatpak.nadare.app/nadare.flatpakref)** and open it.
+  Linux Mint's Software Manager, GNOME Software and KDE Discover install Nadare from there.
+- **Bazzite (Bazaar), or if that file does not open:** download
+  **[nadare.flatpak](https://flatpak.nadare.app/nadare.flatpak)** and open it instead.
+  Updates still come from our repository.
+- Terminal: `flatpak install --user https://flatpak.nadare.app/nadare.flatpakref`
 
-   - **No terminal:** install [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever)
-     from your Software app (Flathub), then double-click the AppImage. Gear Lever opens it
-     and can add Nadare to your app menu.
-   - **Mint, without Gear Lever:** right-click the file → **Properties** → **Permissions**
-     → tick **Allow executing file as program**, then double-click it.
+Then start **Nadare** from your app menu. If a banner says a 32-bit graphics package or system
+libraries are missing, press **Install** on it.
 
-   Double-clicking never installs anything: the Store is inside the app. Step-by-step with
-   pictures: [docs/INSTALL.md](docs/INSTALL.md).
+**AppImage (one portable file).** From the
+[latest release](https://github.com/frostlinuxdev/nadare/releases/latest), under **Assets**,
+download **`Nadare-<version>-x86_64.AppImage`** (not the "Source code" zips). Linux does not
+let a downloaded file run yet, so double-clicking it does nothing at first. Pick one:
 
-   Without FUSE (containers, some hardened systems), add `--appimage-extract-and-run`.
-3. Open the **Store** (first item in the sidebar), pick a game, choose an install folder,
-   and press **Install**. Games that need a login ask for it on their page.
+- **No terminal:** right-click the file → **Properties** → **Permissions** → tick
+  **Allow executing file as program**, then double-click it. Or open it with
+  [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever), which also adds Nadare to your
+  app menu.
+- **Terminal:**
+
+  ```sh
+  cd ~/Downloads && chmod +x Nadare-*-x86_64.AppImage && ./Nadare-*-x86_64.AppImage
+  ```
+
+  Without FUSE (containers, some hardened systems), add `--appimage-extract-and-run`.
+
+Nadare updates the AppImage itself. To check the file is ours, see
+[Check the download](docs/INSTALL.md#check-the-download-optional).
+
+Step by step, with pictures: [docs/INSTALL.md](docs/INSTALL.md).
+
+### 2. Install a game
+
+Nadare opens on the **Store**. Pick a game, choose an install folder and press **Install**.
+Games that need a login ask for it on their page.
+
+### 3. Play
+
+Press **Play** on the game's page.
 
 ![The Nadare Store: every supported game with its tier and install size](docs/screenshots/store.webp)
 
@@ -68,11 +84,12 @@ asks once for a permission the runtime needs (one password prompt). The AppImage
 bundles the GL loader and the Qt X11 platform libraries it needs. A Secret Service
 keyring (GNOME Keyring or KWallet) is optional and only used for *Remember me*.
 
-Nadare also comes as a Flatpak from its own signed repository at `https://flatpak.nadare.app/`
-([how to install it](docs/INSTALL.md#flatpak-including-bazzite--bazaar)). There is no `.deb` yet.
+With the Flatpak, the `glibc` version does not matter (it brings its own runtime from Flathub);
+you still need a working GPU driver. There is no `.deb` yet.
 
-New here? Read the [tester guide](docs/TESTERS.md). Something wrong?
-Run `./Nadare-*.AppImage doctor` and see [Troubleshooting](docs/TROUBLESHOOTING.md).
+New here? Read the [tester guide](docs/TESTERS.md). Something wrong? Run
+`flatpak run io.github.frostlinuxdev.Nadare doctor` (Flatpak) or `./Nadare-*.AppImage doctor`
+(AppImage) and see [Troubleshooting](docs/TROUBLESHOOTING.md).
 
 Tested on NVIDIA + CachyOS and on AMD (RX 7900 XTX, Mesa, Debian 13), and the AppImage
 starts from the command above on Ubuntu 22.04 and 24.04, Debian 12, Fedora 44, Arch and Mint 22.1. Real game runs on
@@ -139,6 +156,9 @@ Never post tokens, QR codes, `session.json`, `secrets.json` or full logs in an i
 The GUI is the product. The command line is plumbing beside it — what shortcuts and
 scripts call, plus diagnostics — not a second front end:
 
+In the Flatpak, use `flatpak run io.github.frostlinuxdev.Nadare <command>` instead of
+`Nadare-*.AppImage <command>`.
+
 ```sh
 Nadare-*.AppImage launch -p <profile>  # what every desktop and Steam shortcut runs
 Nadare-*.AppImage doctor               # check this machine
@@ -157,7 +177,10 @@ and Fate/Grand Order.
 
 ## Updating and uninstalling
 
-Nadare tells you when a new release is out. When it runs from an AppImage in a folder you can
+**Flatpak:** your software centre (or `flatpak update`) updates Nadare like any other app.
+Already using the AppImage? Settings → **Move to the Flatpak…** moves your games and settings once.
+
+**AppImage:** Nadare tells you when a new release is out. When it runs from a folder you can
 write to, the banner says **Update**: Nadare downloads the new AppImage, checks it against a
 checksum from the Nadare index and against the release signature, keeps your old copy as
 `*.previous`, and asks before restarting. Otherwise, download the new AppImage and replace the old one. To remove Nadare and
