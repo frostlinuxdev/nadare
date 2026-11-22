@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nadare.core import libraries, paths, prefixmove, process, removal
+from nadare.core import folderproof, libraries, paths, prefixmove, process, removal
 from nadare.core.config import Config
 
 SRC = Path(prefixmove.__file__).resolve().parents[2]
@@ -250,13 +250,13 @@ def test_recovery_never_adopts_a_replaced_backup(tmp_path):
 
 def test_a_record_whose_rename_never_happened_is_just_forgotten(tmp_path):
     cfg, prefix, _ = _profile(tmp_path, "arknights-yostar")
-    info = os.lstat(prefix)
+    proof = folderproof.stamp(prefix, "rebuild")  # what begin_rebuild writes first
     backup = prefixmove.backup_path(prefix)
     profile = cfg.profiles["synthetic"]
     profile["prefix_backups"] = [str(backup.resolve())]
     profile[prefixmove.REBUILD_KEY] = {
         "prefix": str(prefix), "backup": str(backup.resolve()),
-        "id": [info.st_dev, info.st_ino], "keep": [],
+        **proof.record(), "keep": [],
     }
     cfg.save()
     again = Config.load(cfg.path)
@@ -295,11 +295,11 @@ def test_a_record_pointing_outside_the_prefix_folder_is_refused(tmp_path):
     cfg, prefix, _ = _profile(tmp_path, "arknights-yostar")
     elsewhere = tmp_path / "elsewhere" / "prefix.broken-x"
     elsewhere.mkdir(parents=True)
-    info = os.lstat(elsewhere)
+    proof = folderproof.stamp(elsewhere, "rebuild")  # proven, but at an odd place
     prefix.rename(tmp_path / "moved-away")
     cfg.profiles["synthetic"][prefixmove.REBUILD_KEY] = {
         "prefix": str(prefix), "backup": str(elsewhere),
-        "id": [info.st_dev, info.st_ino], "keep": [],
+        **proof.record(), "keep": [],
     }
     notes = prefixmove.finish_interrupted_rebuilds(cfg)
     assert notes and "kept" in notes[0], notes

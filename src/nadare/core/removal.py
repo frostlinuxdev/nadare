@@ -25,6 +25,7 @@ from typing import Any, NamedTuple
 
 from . import (
     backends,
+    folderproof,
     gamefacts,
     libraries,
     location,
@@ -819,7 +820,8 @@ def _drop_lone_manifest(folder: Path) -> None:
     With the game's files gone the manifest describes nothing. When files were kept it stays,
     so adding the library back finds the game again; a file the user put there keeps it too.
     """
-    ours = {libraries.MANIFEST_NAME, libraries.MANIFEST_TMP_NAME}
+    # Nadare's proof markers too: a whole-game Move leaves one in the folder (folderproof).
+    ours = {libraries.MANIFEST_NAME, libraries.MANIFEST_TMP_NAME} | folderproof.MARKER_NAMES
     try:
         entries = list(folder.iterdir())
         # An interrupted write leaves the temp file next to it (#1362): Nadare's too.

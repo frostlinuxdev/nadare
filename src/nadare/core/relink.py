@@ -8,13 +8,12 @@ after checking the new place really looks like the prefix.
 from __future__ import annotations
 
 import os
-import stat
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from . import flatpakfs, location, paths, prefixguard
+from . import flatpakfs, folderproof, location, paths, prefixguard
 from .libraries import MANIFEST_NAME, MANIFEST_TMP_NAME, default_root, game_folder_name
 from .shadercache import VERSIONS_FILE
 
@@ -256,7 +255,9 @@ def _profile_dir_moves_whole(profile: Mapping[str, Any], home: Path, *, exists: 
             # Nadare's own manifest (b22 folder rule) holds only paths relative to the folder.
             # The runner versions of the last Play (#1364) are Nadare's too: every game that
             # was played has them, and losing them only means the next Play records them again.
+            # A proof marker (folderproof) is Nadare's own as well.
             allowed = {"prefix", "install", MANIFEST_NAME, MANIFEST_TMP_NAME, VERSIONS_FILE}
+            allowed |= folderproof.MARKER_NAMES
             if any(entry.name not in allowed for entry in home.iterdir()):
                 return False
         except OSError:
@@ -407,7 +408,7 @@ def _stale_folder(folder: Path, profiles: Mapping[str, Any]) -> bool:
     file counts. Checking changes nothing; :func:`clear_stale_folder` clears it once the
     player confirmed (storage review A9).
     """
-    ours = {MANIFEST_NAME, MANIFEST_TMP_NAME}
+    ours = {MANIFEST_NAME, MANIFEST_TMP_NAME} | folderproof.MARKER_NAMES  # also Nadare's
     try:
         if folder.is_symlink() or not folder.is_dir() or _claimed(profiles, folder):
             return False
@@ -570,22 +571,15 @@ def _follow_backup(entry: Any, old_dir: Path, new_dir: Path) -> Any:
     return str(moved) if moved.is_dir() else entry
 
 
-#: ``{key: {"path": resolved path, "id": [st_dev, st_ino]}}`` for folders Nadare itself moved
-#: outside the game's folder (a prefix-only Move). Removal accepts such a folder only while path
-#: and identity both still match (#1366 A3).
+#: ``{key: {"path": resolved path, "id": [st_dev, st_ino], "token": hex}}`` for folders Nadare
+#: itself moved outside the game's folder (a prefix-only Move). Removal accepts such a folder
+#: only while the path matches and :mod:`folderproof` proves it is that very folder (#1366 A3):
+#: device and inode alone are reused by ext4 for the next folder made (b25 public CI).
 MOVED_BY_NADARE = "moved_by_nadare"
 
 
-def _folder_identity(path: Path) -> tuple[int, int] | None:
-    try:
-        info = os.stat(path, follow_symlinks=False)
-    except OSError:
-        return None
-    return (info.st_dev, info.st_ino) if stat.S_ISDIR(info.st_mode) else None
-
-
 def moved_by_nadare(profile: Mapping[str, Any], path: Path) -> bool:
-    """Whether ``path`` is a folder Nadare itself moved there for this profile (path + inode)."""
+    """Whether ``path`` is a folder Nadare itself moved there for this profile (path + proof)."""
     proof = profile.get(MOVED_BY_NADARE)
     if not isinstance(proof, dict):
         return False
@@ -593,14 +587,13 @@ def moved_by_nadare(profile: Mapping[str, Any], path: Path) -> bool:
         resolved = str(path.resolve())
     except (OSError, RuntimeError):
         return False
-    identity = _folder_identity(path)
-    if identity is None or path.is_symlink():
+    if path.is_symlink():
         return False
     for entry in proof.values():
         if (
             isinstance(entry, dict)
             and entry.get("path") == resolved
-            and entry.get("id") == list(identity)
+            and folderproof.matches(path, "moved", entry)
         ):
             return True
     return False
@@ -700,13 +693,14 @@ def plan_relink(
         if made_by_nadare:
             for key in moved_keys:
                 paths[key] = str(Path(changes[key]).resolve())
-                # The folder's identity too: a hand-edited owned_paths cannot fake it, so
-                # Uninstall can tell Nadare's own Move from an edit (#1366 A3, #1229).
-                identity = _folder_identity(Path(changes[key]))
-                if identity is None:
+                # The folder's proof too: a hand-edited owned_paths cannot fake it, so
+                # Uninstall can tell Nadare's own Move from an edit (#1366 A3, #1229), and
+                # a folder later put at the same path is not it (folderproof).
+                stamped = folderproof.try_stamp(Path(changes[key]), "moved")
+                if stamped is None:
                     proof.pop(key, None)
                 else:
-                    proof[key] = {"path": paths[key], "id": list(identity)}
+                    proof[key] = {"path": paths[key], **stamped.record()}
         else:
             for key in moved_keys:
                 paths.pop(key, None)

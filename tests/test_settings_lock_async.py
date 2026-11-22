@@ -321,7 +321,11 @@ def test_the_pending_original_is_saved_with_the_new_location(tmp_path, qapp, mon
         saved = Config.load(tmp_path / "config.json").profiles["sample"]
         (entry,) = saved[relocate.PENDING_ORIGINALS]
         assert entry[:2] == [str(src), str(parent / "pfx")]
-        assert len(entry) == 4  # the original's device and inode (round 3)
+        # The original's device and inode (round 3) and its marker's token (folderproof).
+        assert len(entry) == 5
+        assert relocate.pending_originals(Config.load(tmp_path / "config.json")) == [
+            ("sample", src, parent / "pfx")
+        ]
     finally:
         page.deleteLater()
         qapp.processEvents()

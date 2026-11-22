@@ -51,6 +51,7 @@ if str(_HERE.parent / "src") not in sys.path:
 from storage_shapes import SHAPES, World  # noqa: E402
 
 from nadare.core import (  # noqa: E402
+    folderproof,
     importmove,
     libraries,
     location,
@@ -611,8 +612,10 @@ def _check(
             ok = any(_under(f, t) for t in allowed)
             if not ok and result.get("data") and own is not None and _under(f, own):
                 ok = Path(os.path.realpath(f)) == Path(f)  # never through a link (B1)
-            if not ok and Path(f).name in (libraries.MANIFEST_NAME, libraries.MANIFEST_TMP_NAME):
-                ok = True  # Nadare's own manifest in the game's folder
+            if not ok and Path(f).name in (
+                libraries.MANIFEST_NAME, libraries.MANIFEST_TMP_NAME, *folderproof.MARKER_NAMES
+            ):
+                ok = True  # Nadare's own manifest (or proof marker) in the game's folder
             for other, trees in others_trees.items():
                 if other != name and any(_under(f, t) for t in trees):
                     v.append(Violation("uninstall deleted another game's file", f"{name}: {f}"))
@@ -627,8 +630,9 @@ def _check(
             if f in sentinels or Path(f).name in (
                 libraries.MANIFEST_NAME,
                 libraries.MANIFEST_TMP_NAME,
+                *folderproof.MARKER_NAMES,
             ):
-                continue  # Nadare's own manifest goes with Nadare
+                continue  # Nadare's own manifest (and proof markers) go with Nadare
             in_game_tree = any(_under(f, t) for t in game_trees)
             if in_game_tree and not (result["games"] and any(_under(f, t) for t in safe)):
                 v.append(Violation("uninstall-all deleted a kept game file", f))
@@ -639,7 +643,11 @@ def _check(
             if f in sentinels:
                 continue
             ok = any(
-                _under(f, Path(old)) and removed and arrived(f, Path(old), Path(new))
+                _under(f, Path(old)) and removed and (
+                    arrived(f, Path(old), Path(new))
+                    # Nadare's proof marker in the original the finished Move removed.
+                    or Path(f).name in folderproof.MARKER_NAMES
+                )
                 for old, new, removed in result.get("finished", [])
             ) or any(
                 # An interrupted import-move put a renamed folder back (phase 3).

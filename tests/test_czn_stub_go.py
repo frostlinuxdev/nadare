@@ -216,3 +216,41 @@ def test_a_missing_go_stub_with_an_old_c_stub_errors_and_never_claims_go(
     assert not [m for m in messages if "the Go stub runs" in m], messages
     assert [m for m in messages if "could not be installed" in m], messages
     assert stub.read_bytes() == OLD_C  # the unusable C stub was restored, not lost
+
+
+# ---------------------------------------------------------------------------
+# the committed exe is a build of the committed source
+# ---------------------------------------------------------------------------
+# Digest of everything the Go build reads (stub/pcsdk-go minus docs and tests, and the build
+# script), recorded together with GO_SHA256 when the exe was rebuilt. Go keeps line tables even
+# with -s -w, so a comment that adds a line changes the exe: #1552 did exactly that and only the
+# weekly reproducible-build job (GitHub CI on rc/b26) noticed. If this fails, rebuild with
+# scripts/build_stub_go.sh, update GO_SHA256 and STUB_PREBUILT_SHA256, then this digest.
+GO_SOURCE_SHA256 = "63b9dcc24d9f3608a04c0b6c6cfe1bd911082e27345ae1ad32a688d0c2db8987"
+
+
+def _go_build_inputs() -> list[Path]:
+    src = REPO / "stub" / "pcsdk-go"
+    files = [
+        p
+        for p in src.rglob("*")
+        if p.is_file() and not p.name.endswith("_test.go") and p.suffix != ".md"
+    ]
+    return sorted(files) + [REPO / "scripts" / "build_stub_go.sh"]
+
+
+def _go_source_digest() -> str:
+    h = hashlib.sha256()
+    for p in _go_build_inputs():
+        h.update(p.relative_to(REPO).as_posix().encode() + b"\0")
+        h.update(p.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def test_the_committed_exe_matches_the_committed_go_source():
+    names = [p.relative_to(REPO).as_posix() for p in _go_build_inputs()]
+    assert "stub/pcsdk-go/proto.go" in names and "stub/pcsdk-go/go.sum" in names
+    assert _go_source_digest() == GO_SOURCE_SHA256, (
+        "stub/pcsdk-go changed but src/nadare/assets/czn_pcsdk_stub.exe was not rebuilt "
+        "(see the comment above GO_SOURCE_SHA256)"
+    )

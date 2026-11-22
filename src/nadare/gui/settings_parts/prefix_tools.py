@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
 )
 
-from ...core import gamefacts, gamefinder
+from ...core import folderproof, gamefacts, gamefinder
 from ...core import libraries as core_libraries
 from ...core import process as process_core
 from ...core import relink as relink_core
@@ -35,6 +35,7 @@ from ..workers import CallTask
 def has_game_files(folder: Path) -> bool:
     """Whether ``folder`` holds more than Nadare's own manifest (a partial download, say)."""
     ours = {core_libraries.MANIFEST_NAME, core_libraries.MANIFEST_TMP_NAME}
+    ours |= folderproof.MARKER_NAMES  # Nadare's proof markers are its own too
     return any(entry.name not in ours for entry in folder.iterdir())
 
 

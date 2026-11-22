@@ -10,6 +10,9 @@ environment, and keeps it updated, one profile per game.
 > and, under **Assets**, download the file **`Nadare-<version>-x86_64.AppImage`**.
 > That one file is the whole app: no installer, nothing else to download. (Not the
 > "Source code" zip files: those are for developers.)
+>
+> **Prefer a Flatpak?** Nadare also comes from its own signed Flatpak repository (not
+> Flathub): see [Install → Flatpak](docs/INSTALL.md#flatpak-including-bazzite--bazaar).
 
 Source code and the issue tracker are at
 [github.com/frostlinuxdev/nadare](https://github.com/frostlinuxdev/nadare).
@@ -65,7 +68,8 @@ asks once for a permission the runtime needs (one password prompt). The AppImage
 bundles the GL loader and the Qt X11 platform libraries it needs. A Secret Service
 keyring (GNOME Keyring or KWallet) is optional and only used for *Remember me*.
 
-There is no Flatpak or `.deb` yet; the AppImage is the only release.
+Nadare also comes as a Flatpak from its own signed repository at `https://flatpak.nadare.app/`
+([how to install it](docs/INSTALL.md#flatpak-including-bazzite--bazaar)). There is no `.deb` yet.
 
 New here? Read the [tester guide](docs/TESTERS.md). Something wrong?
 Run `./Nadare-*.AppImage doctor` and see [Troubleshooting](docs/TROUBLESHOOTING.md).
@@ -95,6 +99,8 @@ is covered by tests but has not been played end to end, or needs a workaround.
 | Genshin Impact, Honkai: Star Rail, Zenless Zone Zero | Verified |
 | Wuthering Waves, NIKKE | Verified |
 | Arknights: Endfield, Neverness to Everness (direct install), Mongil: Star Dive | Verified |
+| Epic Seven, Umamusume: Pretty Derby, Blue Archive | Verified (installed through Steam) |
+| Snowbreak: Containment Zone, Duet Night Abyss | Experimental (direct download) |
 | Fate/Grand Order (NA) | Experimental, source checkouts only, needs podman and an NVIDIA GPU |
 
 How the catalog works, and how to add a game, is in [docs/CATALOG.md](docs/CATALOG.md).

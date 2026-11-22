@@ -351,9 +351,33 @@ class MoveMixin:
         dialog.setAutoReset(False)
         dialog.canceled.connect(cancel.cancel)
 
+        # QProgressDialog.setValue() runs the event loop when the dialog is modal, so done() or
+        # failed() can arrive *inside* it. They then closed the dialog and opened the "Moved"
+        # box from within the dialog's own setValue(): on Wayland the dialog came back as an
+        # invisible modal window and the box took no input (#1754). They wait for it instead.
+        in_progress: list[int] = []
+        after_progress: list = []
+
+        def outside_progress(handler):
+            def run(*args: object) -> None:
+                if in_progress:
+                    after_progress.append(lambda: handler(*args))
+                else:
+                    handler(*args)
+
+            return run
+
         def on_progress(done: object, total: object) -> None:
+            if sip.isdeleted(dialog):  # a progress queued before the end arrives after it
+                return
             total_bytes = max(int(total), 1)  # type: ignore[call-overload]
-            dialog.setValue(min(99, int(int(done) * 100 / total_bytes)))  # type: ignore[call-overload]
+            in_progress.append(1)
+            try:
+                dialog.setValue(min(99, int(int(done) * 100 / total_bytes)))  # type: ignore[call-overload]
+            finally:
+                in_progress.pop()
+            while not in_progress and after_progress:
+                after_progress.pop(0)()
 
         signals.progress.connect(on_progress)
         self._moving = True
@@ -445,15 +469,33 @@ class MoveMixin:
 
         task = CallTask(work)
 
+        # Boxes wait for the next turn of the event loop, after done()/failed() returned: by then
+        # the game is free and the progress dialog is gone. A box opened from inside done() held
+        # the lock for as long as it was up, and on Wayland the closed "Moving" dialog came back
+        # as a modal window over it, so it took no input and the game stayed busy (#1754).
+        boxes: list = []
+
+        def show_boxes() -> None:
+            def run() -> None:
+                for box in boxes:
+                    box(None if sip.isdeleted(self) else self)
+                boxes.clear()
+
+            if boxes:
+                QTimer.singleShot(0, run)
+
         def finish() -> bool:
             """Reset the state; False when the page is gone (nothing on it may be touched)."""
             self._moving = False
             self._move_running = False
             if sip.isdeleted(self):
                 return False
-            dialog.canceled.disconnect()  # closing the dialog would otherwise count as Cancel
+            # Only our own slot: closing the dialog must not count as Cancel, but the dialog's
+            # internal cancel handling stays (#1754).
+            dialog.canceled.disconnect(cancel.cancel)
+            signals.progress.disconnect(on_progress)  # a late progress must not show it again
             dialog.close()
-            dialog.deleteLater()
+            sip.delete(dialog)  # now, not deleteLater(): a nested loop would keep it alive
             signals.deleteLater()
             self.move_button.setEnabled(self._game_idle)
             return True
@@ -463,17 +505,17 @@ class MoveMixin:
                 _done(result)
             finally:
                 release_held()
+                show_boxes()
 
         def _done(result: object) -> None:
             alive = finish()
-            parent = self if alive else None
             if name not in config.profiles:
                 log_move("moved, but the game was removed while it moved")
-                QMessageBox.warning(
+                boxes.append(lambda parent: QMessageBox.warning(
                     parent,
                     "Wine prefix",
                     f"The game was removed while it moved. Its folder is now {dst}.",
-                )
+                ))
                 return
             stuck = (
                 f"Nadare moved the folder to {dst} but could not update the game. Use "
@@ -493,7 +535,8 @@ class MoveMixin:
                     )
             except relink_core.RelinkError as exc:
                 log_move(f"moved, but the game could not be updated: {exc}")
-                QMessageBox.warning(parent, "Wine prefix", f"{exc}\n\n{stuck}")
+                why = f"{exc}\n\n{stuck}"
+                boxes.append(lambda parent: QMessageBox.warning(parent, "Wine prefix", why))
                 return
             pending: dict = dict(config.profiles[name])
             for original, copy in originals:
@@ -502,7 +545,7 @@ class MoveMixin:
                 plan = dataclasses.replace(plan, changes=changes)
             if not self._commit_relink(config, name, plan):
                 log_move("moved, but the game could not be updated")
-                QMessageBox.warning(parent, "Wine prefix", stuck)
+                boxes.append(lambda parent: QMessageBox.warning(parent, "Wine prefix", stuck))
                 return
             log = log_move("moved")
             if import_move is not None:
@@ -526,16 +569,16 @@ class MoveMixin:
                     if cancel.cancelled
                     else "Nadare did not make it, so it does not delete it"
                 )
-                QMessageBox.information(
-                    self,
-                    "Moved",
+                text = (
                     f"Moved {title}. Now using {dst}.\n\nThe original is still at "
                     + ", ".join(str(p) for p in kept)
-                    + f" ({why}). Delete it yourself when you are happy with the new one.",
+                    + f" ({why}). Delete it yourself when you are happy with the new one."
                 )
+                boxes.append(lambda parent: QMessageBox.information(parent, "Moved", text))
             else:
                 # Also an instant rename says it happened (#1352): the note alone was missed.
-                self._confirm_moved(f"Moved {title} to {dst}.")
+                said = f"Moved {title} to {dst}."
+                boxes.append(lambda parent: parent is not None and self._confirm_moved(said))
 
         def failed(message: str) -> None:
             release_held()  # normally already released by the worker
@@ -549,12 +592,13 @@ class MoveMixin:
             if cancel.cancelled:
                 self.note.setText("Move cancelled; nothing was changed.")
                 return
-            QMessageBox.warning(
-                self, "Wine prefix", f"{message}\n\nNothing was changed."
-            )
+            boxes.append(lambda parent: QMessageBox.warning(
+                parent, "Wine prefix", f"{message}\n\nNothing was changed."
+            ))
+            show_boxes()
 
-        task.signals.done.connect(done)
-        task.signals.failed.connect(failed)
+        task.signals.done.connect(outside_progress(done))
+        task.signals.failed.connect(outside_progress(failed))
         QThreadPool.globalInstance().start(task)
 
     def _confirm_moved(self, text: str) -> None:

@@ -8,9 +8,8 @@
 # every push and pull request.  Publishing the Yostar manifests is a separate,
 # schedulable job: see ci/yostar-manifests/workflow.yml.
 #
-# Note: actions are pinned to full commit SHAs (tag in a trailing comment).  A
-# hardened release setup should keep them pinned (see the audit
-# note in this repository's reports); update both here together.
+# Note: actions are pinned to full commit SHAs (tag in a trailing comment). Keep
+# them pinned when updating; change both workflow files together.
 name: ci
 
 on:
@@ -68,6 +67,8 @@ jobs:
     env:
       # No display on the runner; Qt uses its offscreen platform plugin.
       QT_QPA_PLATFORM: offscreen
+      # The shared runner with -n auto is slow under load: stretch wall-clock bounds (#1024).
+      NADARE_TEST_TIME_FACTOR: "3"
     steps:
       - name: Check out the source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -81,16 +82,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libegl1 libgl1 libxkbcommon0 libdbus-1-3
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3 gnupg
 
-      - name: Install dependencies
+      - name: Install dependencies from the lock
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install -e ".[dev]"
+          python -m pip install --upgrade pip uv
+          uv lock --check
+          uv sync --frozen --extra dev --python "${{ matrix.python-version }}"
 
       - name: Test
-        run: python -m pytest tests -q
+        # Tests are isolated per test, so they run in parallel; a file stays on one worker
+        # (module-scoped Qt fixtures). 6 workers cut a job from ~19 min to ~3 (2026-11-06).
+        run: uv run --frozen --extra dev python -m pytest tests -q -n auto --dist loadfile
 
       - name: Lifecycle lane (production policies, #1463)
         # The default run leaves out the "lifecycle" tests (pyproject addopts). They keep the

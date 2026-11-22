@@ -38,7 +38,8 @@ def _setup(tmp_path):
 
 def _killed_after(cfg, library, keys):
     """Journal written and the trees in ``keys`` renamed; then the process died."""
-    move = importmove.plan(cfg, "g", library)
+    # As run(): each source gets its marker, then the journal records it (folderproof).
+    move = importmove._stamp_sources(importmove.plan(cfg, "g", library))
     importmove._write_journal(move)
     for key, source, destination in move.trees:
         if key in keys:

@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import libraries, pending, relink, relocate, removal
+from . import folderproof, libraries, pending, relink, relocate, removal
 from .events import Cancel
 
 log = logging.getLogger(__name__)
@@ -67,8 +67,10 @@ def _write_journal(
 ) -> None:
     """Write the journal; ``copies`` maps a copied tree's key to its copy's ``[dev, ino]``.
 
-    Each tree also records its source's ``[dev, ino]`` before anything moves: a rename keeps
-    it, so recovery adopts a destination only when it is still that folder (#1487).
+    Each tree also records its source's ``[dev, ino]`` and the token of the marker written
+    into it before anything moves: a rename keeps both and a copy carries the marker, so
+    recovery adopts or removes a destination only when it is still that folder (#1487, and
+    folderproof: ext4 gives the inode number to a later folder).
     """
     if move.journal is None:
         return
@@ -86,6 +88,7 @@ def _write_journal(
                 # only when it is still this very folder (#1400).
                 **({"copy_id": copies[key]} if key in copies else {}),
                 **({"source_id": sources[key]} if key in sources else {}),
+                **({"token": move.tokens[key]} if key in move.tokens else {}),
             }
             for key, source, destination in move.trees
         ],
@@ -175,6 +178,7 @@ def _recover_move(config, name: str, library: str | Path) -> ImportMove | None:
     done: list[str] = []
     copies: dict[str, list[int]] = {}
     sources: dict[str, list[int]] = {}
+    tokens: dict[str, str] = {}
     for item in raw_trees:
         if not isinstance(item, dict):
             return None
@@ -196,14 +200,20 @@ def _recover_move(config, name: str, library: str | Path) -> ImportMove | None:
         if current and not _same_path(Path(current).expanduser(), source):
             return None  # the profile changed since the journal was written
         copy_id, source_id = _id_pair(item.get("copy_id")), _id_pair(item.get("source_id"))
+        token = item.get("token")
         if source_id is not None:
             sources[str(key)] = source_id
+        if folderproof.valid_token(token):
+            tokens[str(key)] = token
         if os.path.lexists(destination):
             # Only the very folder this move made counts as moved (#1487): the copy it
-            # recorded, or the renamed source. A link, a replacement or a journal that
-            # recorded neither (older versions) is not adopted, and nothing is touched.
+            # recorded, or the renamed source, each carrying the move's marker. A link, a
+            # replacement, a folder that got the same inode number, or a journal without a
+            # token (b25 and older) is not adopted, and nothing is touched.
             expected = copy_id if copy_id is not None else source_id
-            if expected is None or relocate._identity(destination) != tuple(expected):  # noqa: SLF001
+            if not folderproof.matches(
+                destination, "import", folderproof.record_of(expected, token)
+            ):
                 raise Unverified(
                     f"{destination} is not the folder the move put there (it may have been "
                     "replaced or is a link)"
@@ -226,6 +236,7 @@ def _recover_move(config, name: str, library: str | Path) -> ImportMove | None:
         done=tuple(done),
         copies=copies,
         sources=sources,
+        tokens=tokens,
     )
 
 
@@ -250,6 +261,8 @@ class ImportMove:
     copies: dict[str, list[int]] = field(default_factory=dict)
     #: Each tree's source ``{key: [dev, ino]}`` before it moved (#1487).
     sources: dict[str, list[int]] = field(default_factory=dict)
+    #: Each tree's marker token (folderproof), written into the source before it moved.
+    tokens: dict[str, str] = field(default_factory=dict)
 
 
 def movable(config, name: str) -> bool:
@@ -349,6 +362,28 @@ def _source_ids(trees, done=()) -> dict[str, list[int]]:
     return found
 
 
+def _stamp_sources(move: ImportMove) -> ImportMove:
+    """Mark every tree that has not moved yet; the journal written next records the marks.
+
+    The marker goes with the folder (rename) or is copied with it, so the next start can prove
+    the destination is this folder (folderproof). One that cannot take it is never adopted or
+    removed by a recovery (it is kept, and the player settles it).
+    """
+    sources, tokens = dict(move.sources), dict(move.tokens)
+    for key, source, _ in move.trees:
+        if key in move.done:
+            continue
+        proof = folderproof.try_stamp(source, "import")
+        tokens.pop(key, None)
+        if proof is not None:
+            sources[key], tokens[key] = [proof.dev, proof.ino], proof.token
+        else:
+            identity = relocate._identity(source)  # noqa: SLF001 - same package
+            if identity is not None:
+                sources[key] = list(identity)
+    return dataclasses.replace(move, sources=sources, tokens=tokens)
+
+
 def run(
     move: ImportMove,
     *,
@@ -356,9 +391,7 @@ def run(
     progress: Callable[[int, int], None] | None = None,
 ) -> list[relocate.Moved]:
     """Move every folder; on any failure put the ones already moved back, then re-raise."""
-    move = dataclasses.replace(
-        move, sources={**move.sources, **_source_ids(move.trees, move.done)}
-    )
+    move = _stamp_sources(move)
     try:
         _write_journal(move, move.copies, claim=True)
     except OSError as exc:
@@ -522,8 +555,9 @@ def finish_interrupted(config) -> list[str]:
             # Copied to another disk: the original is still there. Only a copy that is still
             # the very folder the run made goes (#1400); anything else is kept.
             recorded = move.copies.get(key)
-            if (recorded is not None and source.is_dir()
-                    and relocate._identity(destination) == tuple(recorded)):  # noqa: SLF001
+            if source.is_dir() and folderproof.matches(
+                destination, "import", folderproof.record_of(recorded, move.tokens.get(key))
+            ):
                 copies.append(destination)
                 continue
             return [f"{name}: {source} is in the way of putting the game back; {kept}"]

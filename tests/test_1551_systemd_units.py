@@ -126,6 +126,28 @@ def test_systemd_analyze_verify_accepts_both_units() -> None:
     # The templates point at %h checkouts that do not exist on the test machine; that is
     # the one expected message. Anything else (unknown/typo'd key, bad value) is a fail.
     unexpected = [
-        line for line in text.splitlines() if line.strip() and "is not executable" not in line
+        line
+        for line in text.splitlines()
+        if line.strip() and "is not executable" not in line and not _host_unit_line(line)
     ]
     assert not unexpected, text
+
+
+def _host_unit_line(line: str) -> bool:
+    """A message about one of the machine's own unit files, not ours (b25 public CI).
+
+    ``verify`` also loads the units ours depend on; GitHub's runner image ships
+    ``walinuxagent.service`` and ``xfs_scrub_all.service`` with a removed ``CPUAccounting=``.
+    """
+    head = line.split(":", 1)[0]
+    return head.startswith("/") and Path(head).parent not in (_UNIT_DIR, _UNIT_DIR.resolve())
+
+
+def test_only_messages_about_other_unit_files_are_ignored() -> None:
+    ours = _UNIT_DIR / _UNITS[0]
+    assert _host_unit_line(
+        "/usr/lib/systemd/system/walinuxagent.service:21: Support for option CPUAccounting= "
+        "has been removed and it is ignored"
+    )
+    assert not _host_unit_line(f"{ours}:5: Unknown key name 'ExecStrat' in section 'Service'")
+    assert not _host_unit_line("Failed to load unit file: Invalid argument")

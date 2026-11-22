@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import diskspace, prefixmove
+from . import diskspace, folderproof, prefixmove
 from .events import Cancel
 
 #: Left free on the destination disk besides the size of the copy.
@@ -306,7 +306,9 @@ def move_tree(
 
 #: Written by Nadare into the new game folder after the copy (libraries.sync_game): not part
 #: of the comparison, or the original of a moved game folder would always be kept (review A4).
-_OWN_FILES = frozenset({"nadare-game.json", ".nadare-game.json.tmp"})
+#: Nadare's proof markers (:mod:`folderproof`) are its own too: the original carries one the
+#: copy does not.
+_OWN_FILES = frozenset({"nadare-game.json", ".nadare-game.json.tmp"}) | folderproof.MARKER_NAMES
 
 
 def _sizes(root: Path) -> dict[str, int]:
@@ -477,28 +479,39 @@ def with_pending_original(
     current = profile.get(PENDING_ORIGINALS)
     entries = [list(e) for e in current if _entry(e)] if isinstance(current, list) else []
     entry: list[Any] = [str(old), str(new)]
-    identity = _identity(old)
-    if identity is not None:
-        entry += list(identity)
+    # Device and inode alone are reused by ext4 for a later folder at that path: the original
+    # gets a marker too, and without one the entry is never acted on (folderproof).
+    proof = folderproof.try_stamp(old, "original")
+    if proof is not None:
+        entry += [proof.dev, proof.ino, proof.token]
     entries.append(entry)
     return {**changes, PENDING_ORIGINALS: entries}
 
 
 def _identity(folder: Path) -> tuple[int, int] | None:
-    """``(device, inode)`` of ``folder`` itself (not followed through a link)."""
-    try:
-        info = os.lstat(folder)
-    except (OSError, ValueError):
-        return None
-    return (info.st_dev, info.st_ino) if stat.S_ISDIR(info.st_mode) else None
+    """``(device, inode)`` of ``folder`` itself (not followed through a link).
+
+    Only for checks within one running Move: a record kept across a restart needs a
+    :class:`folderproof.Proof` (ext4 reuses inode numbers).
+    """
+    return folderproof.identity(folder)
 
 
 def _entry(value: Any) -> bool:
-    if not isinstance(value, (list, tuple)) or len(value) not in (2, 4):
+    """``[old, new]``, b25's ``[old, new, dev, ino]`` or ``[old, new, dev, ino, token]``."""
+    if not isinstance(value, (list, tuple)) or len(value) not in (2, 4, 5):
         return False
     paths_ok = all(isinstance(v, str) and v.strip() and "\x00" not in v for v in value[:2])
-    ids_ok = all(isinstance(v, int) and not isinstance(v, bool) for v in value[2:])
-    return paths_ok and ids_ok
+    ids_ok = all(isinstance(v, int) and not isinstance(v, bool) for v in value[2:4])
+    token_ok = len(value) < 5 or folderproof.valid_token(value[4])
+    return paths_ok and ids_ok and token_ok
+
+
+def _proven(entry: Any) -> dict[str, Any] | None:
+    """The proof record of a pending original, or ``None`` (never acted on)."""
+    if not _entry(entry) or len(entry) != 5:
+        return None
+    return folderproof.record_of(entry[2:4], entry[4])
 
 
 def _game_places(profile: Mapping[str, Any]) -> list[Path]:
@@ -531,14 +544,15 @@ def pending_originals(config: Any) -> list[tuple[str, Path, Path]]:
             continue
         places = _game_places(profile)
         for entry in entries:
-            if not _entry(entry) or len(entry) != 4:
-                continue  # no identity: never acted on (round 3: a stale record is not proof)
+            proof = _proven(entry)
+            if proof is None:
+                continue  # no proof: never acted on (round 3: a stale record is not proof)
             old, new = (Path(os.path.expanduser(v)) for v in entry[:2])
             try:
-                # The original must be the very folder the Move copied (same device and
-                # inode), not a later backup or a folder a restored config happens to name
-                # (storage review round 3, B-F3 / C-F1).
-                if new.resolve() in places and _identity(old) == (entry[2], entry[3]):
+                # The original must be the very folder the Move copied (same device, inode
+                # and marker), not a later backup, a folder a restored config happens to name
+                # (storage review round 3, B-F3 / C-F1) or one that got its inode number.
+                if new.resolve() in places and folderproof.matches(old, "original", proof):
                     found.append((name, old, new))
             except (OSError, ValueError):
                 continue
@@ -553,10 +567,9 @@ def prune_pending_originals(profile: dict[str, Any]) -> bool:
     kept = []
     if isinstance(entries, list):
         for entry in entries:
-            # Entries without the folder's identity are never acted on: drop them.
+            # Entries without the folder's proof (b25 and older) are never acted on: drop them.
             if (
-                _entry(entry)
-                and len(entry) == 4
+                _proven(entry) is not None
                 and os.path.lexists(os.path.expanduser(entry[0]))
             ):
                 kept.append(list(entry))
@@ -593,10 +606,15 @@ MOVE_IN_PROGRESS = "move_in_progress"
 def begin_move(profile: dict[str, Any], src: Path, dst: Path) -> None:
     """Record a Move about to start (the caller saves the config before moving)."""
     anchor = _nearest_existing(Path(dst).parent).absolute()
+    # The marker travels with the folder (a rename) or is copied with it, so the next start can
+    # tell the moved folder from one that later got its inode number (folderproof). Without it
+    # (a read-only folder) the record still guards this Move but proves nothing after a crash.
+    proof = folderproof.try_stamp(Path(src), "move")
     profile[MOVE_IN_PROGRESS] = {
         "from": str(src), "to": str(dst),
-        "source_id": list(_identity(Path(src)) or ()),
+        "source_id": [proof.dev, proof.ino] if proof else list(_identity(Path(src)) or ()),
         "anchor": str(anchor), "anchor_id": list(_identity(anchor.resolve()) or ()),
+        **({"token": proof.token} if proof else {}),
     }
 
 
@@ -646,8 +664,21 @@ def _check_move_identity(record: Mapping[str, Any], src: Path, dst: Path) -> Non
 
 
 def record_partial(record: dict[str, Any], partial: Path) -> None:
-    """Record only the actual partial this Move created, never a guessed name."""
-    identity = _identity(partial)
+    """Record only the actual partial this Move created, never a guessed name.
+
+    The partial gets the Move's marker first (the source has carried it since
+    :func:`begin_move`, so the finished copy holds the same file): the next start removes or
+    adopts the partial only on that proof, not on an inode number ext4 may hand on.
+    """
+    token = record.get("token")
+    try:
+        if folderproof.valid_token(token):
+            proof = folderproof.stamp(partial, "move", token)
+            identity: tuple[int, int] | None = (proof.dev, proof.ino)
+        else:
+            identity = _identity(partial)
+    except (OSError, ValueError):
+        identity = None
     if identity is None:
         raise RelocateError("The unfinished copy is no longer the folder this Move created.")
     record["partial_id"] = list(identity)
@@ -680,11 +711,16 @@ def finish_interrupted_moves(profiles: Mapping[str, Any]) -> list[str]:
                 f"{name}: Move identity cannot be verified; files and recovery record kept."
             )
             continue
+        token = record.get("token")
         present = _identity(src)
         if present == source_id:
+            # The game still uses src; this branch only forgets the record. The one thing it
+            # deletes, the partial copy, needs its proof.
             partial = dst.with_name(dst.name + PARTIAL_SUFFIX)
             partial_id = _record_id(record, "partial_id")
-            if partial_id is not None and _identity(partial) == partial_id:
+            if partial_id is not None and folderproof.matches(
+                partial, "move", folderproof.record_of(partial_id, token)
+            ):
                 _remove_partial(partial)
                 notes.append(f"{name}: removed its verified unfinished copy at {partial}")
             elif os.path.lexists(partial):
@@ -694,10 +730,12 @@ def finish_interrupted_moves(profiles: Mapping[str, Any]) -> list[str]:
             profile.pop(MOVE_IN_PROGRESS, None)
             continue
         copied_id = _record_id(record, "partial_id")
-        destination_id = _identity(dst)
-        if not os.path.lexists(src) and destination_id is not None and (
-                destination_id == source_id
-                or (copied_id is not None and destination_id == copied_id)):
+        # The renamed source or the published copy, proven by its marker: a folder that later
+        # got the same inode number is not adopted (folderproof).
+        if not os.path.lexists(src) and any(
+            folderproof.matches(dst, "move", folderproof.record_of(pair, token))
+            for pair in (source_id, copied_id) if pair is not None
+        ):
             _repoint(profile, src, dst)
             try:
                 real_src = src.resolve()
