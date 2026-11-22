@@ -17,20 +17,31 @@ Source code and the issue tracker are at
 
 ### 1. Install Nadare
 
-**Flatpak (recommended).** From our own signed repository at `https://flatpak.nadare.app/`
-(not Flathub yet).
+Nadare comes in **two separate forms. Pick one, not both:**
+
+| | **Option A: Flatpak** (recommended) | **Option B: AppImage** |
+|---|---|---|
+| What it is | Installed by your software centre | One portable file you run directly |
+| Updates | Through your software centre | Nadare updates the file itself |
+
+#### Option A: Flatpak
+
+From our own signed repository at `https://flatpak.nadare.app/` (not Flathub yet).
 
 - Download **[nadare.flatpakref](https://flatpak.nadare.app/nadare.flatpakref)** and open it.
   Linux Mint's Software Manager, GNOME Software and KDE Discover install Nadare from there.
 - **Bazzite (Bazaar), or if that file does not open:** download
-  **[nadare.flatpak](https://flatpak.nadare.app/nadare.flatpak)** and open it instead.
-  Updates still come from our repository.
+  **[nadare.flatpak](https://flatpak.nadare.app/nadare.flatpak)** and open it instead. (Same
+  Flatpak, different way in: you need only one of these two files. Updates still come from our
+  repository.)
 - Terminal: `flatpak install --user https://flatpak.nadare.app/nadare.flatpakref`
 
 Then start **Nadare** from your app menu. If a banner says a 32-bit graphics package or system
 libraries are missing, press **Install** on it.
 
-**AppImage (one portable file).** From the
+#### Option B: AppImage
+
+From the
 [latest release](https://github.com/frostlinuxdev/nadare/releases/latest), under **Assets**,
 download **`Nadare-<version>-x86_64.AppImage`** (not the "Source code" zips). Linux does not
 let a downloaded file run yet, so double-clicking it does nothing at first. Pick one:
@@ -47,7 +58,7 @@ let a downloaded file run yet, so double-clicking it does nothing at first. Pick
 
   Without FUSE (containers, some hardened systems), add `--appimage-extract-and-run`.
 
-Nadare updates the AppImage itself. To check the file is ours, see
+To check the file is ours, see
 [Check the download](docs/INSTALL.md#check-the-download-optional).
 
 Step by step, with pictures: [docs/INSTALL.md](docs/INSTALL.md).
