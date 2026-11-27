@@ -28,8 +28,13 @@ Profile keys (all optional):
 
 from __future__ import annotations
 
+import contextlib
 import inspect
+import json
 import logging
+import os
+import time
+from pathlib import Path
 
 from ...core.backends import BackendError, BackendNotInstalled, GameBackend, Option, Status
 from ...core.events import Event, mask
@@ -39,6 +44,11 @@ from .lepton import FGO_PKG, LeptonError, LeptonFgo
 from .news import IMAGE_HOSTS, fetch_fgo_news, hero_key
 
 log = logging.getLogger(__name__)
+
+#: How long a ``lepton-fgo check-update`` answer counts before the background check runs again.
+UPDATE_CHECK_INTERVAL = 6 * 60 * 60
+#: The last answer, per profile (#1831): ``status()`` reads it, never the network.
+UPDATE_CHECK_FILE = "fgo-update-check.json"
 
 #: First-run account-safety notice shown before install/launch.
 ACCOUNT_NOTICE = """\
@@ -147,6 +157,70 @@ class FgoLeptonBackend(GameBackend):
         container = status.get("container") or ""
         return container.endswith("(running)")
 
+    # ---- update check (#1831) ----------------------------------------------
+    def _update_check_path(self) -> Path:
+        return self.ctx.data_path() / UPDATE_CHECK_FILE
+
+    def _read_update_check(self) -> dict | None:
+        try:
+            blob = json.loads(self._update_check_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return blob if isinstance(blob, dict) else None
+
+    def check_update(self) -> None:  # type: ignore[override]
+        """Ask lepton-fgo whether a newer FGO is out and remember the answer (background).
+
+        Never raises for an ordinary failure; an unreadable answer is not stored, so it can
+        never hide an update as "up to date".
+        """
+        try:
+            if not self.ctx.config.data.get("check_updates", True):
+                return
+        except AttributeError:
+            pass
+        if not getattr(self.adapter, "installed", False):
+            return
+        cached = self._read_update_check()
+        if cached is not None:
+            try:
+                age = time.time() - float(cached.get("checked_at", 0))
+            except (TypeError, ValueError):
+                age = -1
+            if 0 <= age < UPDATE_CHECK_INTERVAL:
+                return
+        try:
+            report = self.adapter.check_update()
+        except Exception as exc:  # noqa: BLE001 - a background check must never fail
+            log.debug("FGO: update check failed: %s", exc)
+            return
+        available, installed = report.get("available"), report.get("installed")
+        if not isinstance(available, bool) or not isinstance(installed, str) or not installed:
+            log.debug("FGO: update check gave no usable answer")
+            return
+        blob = {
+            "installed": installed,
+            "newest": report.get("newest"),
+            "available": available,
+            "checked_at": time.time(),
+        }
+        path = self.ctx.data_dir() / UPDATE_CHECK_FILE
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_text(json.dumps(blob), "utf-8")
+            os.replace(tmp, path)
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+            log.debug("FGO: could not keep the update check: %s", exc)
+
+    def _update_available(self, version: str | None) -> bool:
+        """The last check's answer, only while it was made for the version installed now."""
+        cached = self._read_update_check()
+        if not cached or not version:
+            return False
+        return cached.get("available") is True and cached.get("installed") == version
+
     # ---- contract ----------------------------------------------------------
     def status(self) -> Status:
         try:
@@ -167,8 +241,11 @@ class FgoLeptonBackend(GameBackend):
             "installed": "installed",
             "running": "running",
         }.get(state, "")
+        data = dict(parsed)
+        if state != "not_installed":
+            data["update_available"] = self._update_available(parsed.get("fgo"))
         return Status(
-            state=state, version=parsed.get("fgo"), running=running, message=message, data=parsed
+            state=state, version=parsed.get("fgo"), running=running, message=message, data=data
         )
 
     def install(self) -> None:

@@ -18,8 +18,31 @@ _TOKEN_KEYS = re.compile(
     r"(?i)(access_token|refresh_token|client_secret|password|auth_code|"
     r"authorization|captcha[-_]?token|rtCredential|api[-_]?key|token|"
     # Sign-in cookies, login tickets and session ids are as good as the password (#1593).
-    r"(?:set-)?cookie|ticket|[a-z]*sessid|session[-_]?(?:id|key))"
+    # The old unbounded ``[a-z]*`` backtracked over a whole 20 KB token at every
+    # start position (quadratic, seconds per line); a real identifier prefix is short.
+    r"(?:set-)?cookie|ticket|[a-z]{0,32}sessid|session[-_]?(?:id|key)|"
+    # Plain ``secret=`` / ``passwd=`` pairs (#1875 review); not ``pass``, which is in "bypass".
+    r"secret|passwd)"
 )
+
+#: A signed or sign-in URL carries its secret in a named query parameter: a CDN or S3
+#: signature, an OAuth ``code``/``state``, a device key. Only inside a URL query (after ``?``
+#: or ``&``, also percent-encoded inside another URL), so ``exit code=1`` stays readable.
+_QUERY_SECRET_RE = re.compile(
+    r"(?i)((?:[?&]|%3F|%26)"
+    r"(?:sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token|code|state|key|"
+    r"secret|credential|passwd|pwd|device[-_]?key|pf_key|access[-_]?token|auth[-_]?key|sign)"
+    r"(?:=|%3D))"
+    r"""((?:(?!%26)[^&#\s"'])+)"""
+)
+
+#: A bare JSON Web Token (header.payload.signature), wherever it sits.
+_JWT_RE = re.compile(r"\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}")
+
+
+def _mask_urls_and_jwts(text: str) -> str:
+    out = _QUERY_SECRET_RE.sub(lambda m: m.group(1) + _REDACTED, text)
+    return _JWT_RE.sub(_REDACTED, out)
 
 #: An HTTP cookie header carries several ``name=value;`` pairs: an unquoted value runs to the
 #: end of the line, a quoted one to its closing quote, so no pair after the first leaks (#1593).
@@ -83,7 +106,7 @@ _WINE_CRASH_LINE_RE = re.compile(
     r"Unhandled (?:page fault|exception)"
     r"|^\s*(?:=>)?\s*\d+ 0x[0-9a-fA-F]+ in "
     r"|^\s*(?:[re]?[a-z]{2}|r\d{1,2}|eflags):[0-9a-fA-F]{4,16}(?:\s|$)"
-    r"|^(?:PE|ELF)\s+[0-9a-fA-F]+-[0-9a-fA-F]+\s"
+    r"|^\s*(?:PE(?:-Wine)?|ELF)\s+[0-9a-fA-F]+-[0-9a-fA-F]+\s"
     r"|^0x[0-9a-fA-F]+ \S+\+0x[0-9a-fA-F]+: "
 )
 
@@ -130,7 +153,13 @@ _SECRET_SUFFIX = re.compile(r"(?i).+[_-](token|secret|password|passwd|key|ticket
 def is_secret_key(key: Any) -> bool:
     """True when ``key`` names a value that must never be logged verbatim."""
     text = str(key)
-    return bool(_TOKEN_KEYS.fullmatch(text) or _SECRET_SUFFIX.fullmatch(text))
+    return bool(
+        _TOKEN_KEYS.fullmatch(text)
+        or _SECRET_SUFFIX.fullmatch(text)
+        # ``_TOKEN_KEYS`` bounds the letters before ``sessid`` (linear masking); a key
+        # name is short, so check the suffix itself too.
+        or (text.isalpha() and text.lower().endswith("sessid"))
+    )
 
 
 @dataclass
@@ -201,7 +230,7 @@ def mask_known(text: str) -> str:
     Unlike :func:`mask` this leaves long hashes, paths and timestamps alone, so it suits text
     people read (the log viewer) while the length heuristic suits text written to disk.
     """
-    out = _mask_cookies(_USERINFO_RE.sub(f"{_REDACTED}@", text))
+    out = _mask_cookies(_USERINFO_RE.sub(f"{_REDACTED}@", _mask_urls_and_jwts(text)))
     out = _TOKEN_VALUE_RE.sub(lambda m: f"{m.group(1)}={_REDACTED}", out)
     return _mask_flag_values(out)
 
@@ -276,7 +305,7 @@ def mask(text: str) -> str:
             return value
         return _masked_value(value)
 
-    out = _mask_cookies(_USERINFO_RE.sub(f"{_REDACTED}@", text))
+    out = _mask_cookies(_USERINFO_RE.sub(f"{_REDACTED}@", _mask_urls_and_jwts(text)))
     out = _TOKEN_VALUE_RE.sub(lambda m: f"{m.group(1)}={_REDACTED}", out)
     out = _mask_flag_values(out)
     return _SECRET_OR_PLACEHOLDER_RE.sub(_replace, out)

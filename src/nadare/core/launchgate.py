@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import flatpakgl, holds, nvidiarestart
+from . import execmount, flatpakgl, holds, nvidiarestart
 from .backends import BackendError
 
 #: ``nadare launch`` exit code when a maintainer's hold refuses the launch (#805).
@@ -37,6 +37,8 @@ def check(backend: Any, *, ignore_hold: bool = False) -> None:
     flatpakgl.guard_launch(backend)
     # An NVIDIA driver updated without a restart (the game would crash at start).
     nvidiarestart.guard_launch(backend)
+    # A drive mounted noexec (the game would stop at once with "exit code 5"; #1861).
+    execmount.guard_launch(backend)
     # A maintainer's signed hold list (#805). Test doubles without a context skip it.
     context = getattr(backend, "ctx", None)
     if not ignore_hold and context is not None:

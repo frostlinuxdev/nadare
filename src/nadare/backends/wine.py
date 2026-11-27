@@ -275,8 +275,10 @@ class ProcessQuery:
     Matching a bare substring of a path is *never* enough: a shell, editor or
     file manager that merely mentions the prefix must not read as "running".
     A process in a *different* Wine prefix is never counted, even when its exe
-    name coincides. ``match`` is an explicit user override and is still matched
-    as a substring of the full command line only when set.
+    name coincides. ``match`` is an explicit user override: outside
+    :attr:`require_name` it is a substring of the full command line; with
+    :attr:`require_name` it must be inside the prefix and appears in ``argv[0]``
+    only, so a stub that merely mentions the game in its arguments is not it.
     """
 
     prefix: str = ""
@@ -288,6 +290,9 @@ class ProcessQuery:
     arg_runners: tuple[str, ...] = ()
     #: Require the executable name as well as prefix ownership (launcher games).
     require_name: bool = False
+    #: With :attr:`require_name`: executables that are never the game, not even through
+    #: :attr:`match` (the launcher and its windowless helpers, #1852).
+    not_names: tuple[str, ...] = ()
     _extra: tuple[str, ...] = field(default=(), repr=False)
 
 
@@ -319,6 +324,13 @@ def _environ_map(entry: Path) -> dict[str, str]:
     return out
 
 
+def environ_of(
+    pid: int, *, proc_root: str | os.PathLike[str] = "/proc"
+) -> dict[str, str]:
+    """The environment ``pid`` was started with, or ``{}`` when it cannot be read."""
+    return _environ_map(Path(proc_root) / str(pid))
+
+
 def _same_path(first: str | None, second: str | None) -> bool:
     if not first or not second:
         return False
@@ -334,6 +346,17 @@ def _is_prefix(value: str, prefix: str) -> bool:
     return _same_path(value, prefix) or _same_path(value, os.path.join(prefix, "pfx"))
 
 
+def _executable_path(argv: list[str]) -> str:
+    """``argv[0]`` lowercased, cut after its first ``.exe``.
+
+    Wine can show a whole Windows command line as one ``argv[0]``; the arguments after
+    the executable must not match a ``process_match`` rule.
+    """
+    first = argv[0].lower() if argv else ""
+    end = first.find(".exe")
+    return first if end < 0 else first[: end + 4]
+
+
 def _query_matches(query: ProcessQuery, argv: list[str], env: dict[str, str]) -> bool:
     prefix = str(query.prefix).strip() if query.prefix else ""
     names = {name.lower() for name in query.names if name}
@@ -345,12 +368,24 @@ def _query_matches(query: ProcessQuery, argv: list[str], env: dict[str, str]) ->
         value for value in (env.get("WINEPREFIX"), env.get("STEAM_COMPAT_DATA_PATH")) if value
     ]
     if query.require_name:
-        basename = (
-            os.path.basename(argv[0]).replace("\\", "/").rsplit("/", 1)[-1].lower() if argv else ""
-        )
-        return basename in names and (
-            not env_prefixes or any(_is_prefix(value, prefix) for value in env_prefixes)
-        )
+        # Cut after ``.exe`` first: Wine can show ``Game.exe -arg`` (or a launcher command
+        # line naming the game) as one ``argv[0]`` (#1852).
+        basename = _executable_path(argv).replace("\\", "/").rsplit("/", 1)[-1]
+        if basename in {name.lower() for name in query.not_names if name}:
+            return False
+        owned = not env_prefixes or any(_is_prefix(value, prefix) for value in env_prefixes)
+        if not owned:
+            return False
+        if basename in names:
+            return True
+        # ``match`` stays the user's explicit override: a launcher ``exe_name`` that
+        # spawns the game under another name is found through it (#1821). It is looser
+        # than an exact name, so it needs the prefix in the environment (a host editor
+        # or ``grep`` mentioning the game is not it), and only the executable itself
+        # counts: a stub carrying the game path in argv[1..] is still the stub (NEON 9).
+        if prefix and not env_prefixes:
+            return False
+        return bool(extra) and extra.lower() in _executable_path(argv)
     belongs = bool(prefix) and any(_is_prefix(value, prefix) for value in env_prefixes)
     if not belongs and names and not env_prefixes:
         basename = os.path.basename(argv[0]).lower()
@@ -434,6 +469,9 @@ class GamePidsMixin:
     def game_pids(self) -> Callable[[], list[int]] | None:
         return game_pids(self)
 
+    def game_processes(self) -> Callable[[], bool] | None:
+        return game_processes(self)
+
 
 def game_pids(backend) -> Callable[[], list[int]] | None:
     """The pids Stop would treat as ``backend``'s game, as a callable for the launch monitor.
@@ -453,6 +491,70 @@ def game_pids(backend) -> Callable[[], list[int]] | None:
     if query is None:
         return None
     return lambda: scan_pids(query)
+
+
+def game_processes(backend) -> Callable[[], bool] | None:
+    """A callable saying whether ``backend``'s game itself is running (#1821).
+
+    ``game_process_names`` names the game where the backend knows it (a publisher
+    launcher runs before it). Where that is empty, the backend's own process rule is
+    narrowed to the names it adds beyond its launcher and any windowless helper, then
+    required by name so a prefix-wide Stop rule does not count the launcher or its
+    webview helpers. The prefix and the user's ``process_match`` come from that same
+    rule: ``WineBackend`` has ``_prefix()``, not ``prefix()``, and a launcher
+    ``exe_name`` needs ``process_match`` to follow the game it spawns. When the backend
+    does not name its game and ``process_match`` is set, only ``process_match`` opens
+    the gate (the started exe may be the stub), never on a launcher or helper exe.
+    ``None`` when no narrower rule exists; never raises.
+    """
+    try:
+        patterns = getattr(backend, "_patterns", None)
+        query = patterns() if callable(patterns) else None
+        names = tuple(getattr(backend, "game_process_names", ()) or ())
+        first_frame = tuple(getattr(backend, "first_frame_process_names", ()) or ())
+        profile = getattr(getattr(backend, "ctx", None), "profile", None)
+        if first_frame and not (
+            isinstance(profile, dict)
+            and (profile_setting(profile, "exe_name") or profile_setting(profile, "launch_exe"))
+        ):
+            # The gate follows the exe Nadare starts; an override replaces the known game exe.
+            names = first_frame
+        launcher = getattr(backend, "_launcher_query", None)
+        launcher_names = set()
+        if callable(launcher):
+            launcher_names = {name.lower() for name in getattr(launcher(), "names", ()) if name}
+        excluded = {
+            name.lower() for name in getattr(backend, "game_process_exclude", ()) or () if name
+        }
+        # Both come from the rule itself: ``WineBackend`` has ``_prefix()``, not ``prefix()``.
+        prefix = str(getattr(query, "prefix", "") or "")
+        match = str(getattr(query, "match", "") or "").strip()
+        if not names:
+            if match:
+                # The backend does not name its game, so the exe Nadare starts may be a
+                # stub; the user's ``process_match`` names the game instead (#1852).
+                names = ()
+            else:
+                names = tuple(
+                    name
+                    for name in getattr(query, "names", ())
+                    if name
+                    and name.lower() not in launcher_names
+                    and name.lower() not in excluded
+                )
+                if not names:
+                    return None
+        game = ProcessQuery(
+            prefix=prefix,
+            names=names,
+            match=match,
+            require_name=True,
+            # A ``match`` hit on the launcher's own folder is still the launcher (#1852).
+            not_names=tuple(sorted((launcher_names | excluded) - {n.lower() for n in names})),
+        )
+    except Exception:  # noqa: BLE001 - no ownership rule is not a launch failure
+        return None
+    return lambda: bool(scan_pids(game))
 
 
 def scan_pids(
@@ -626,6 +728,20 @@ class WineBackend(GamePidsMixin, SandboxMixin, GameBackend):
     def _prefix(self) -> Path:
         # A pure path (#1465): status() asks for it. _prefix_command makes the profile folder.
         return wine_prefix(self.ctx.profile, self.ctx.data_path())
+
+    def exec_folders(self) -> tuple[Path, ...]:
+        """Folders Wine must run code from: the game's own folder and the prefix (#1861).
+
+        The hand-added ``wine`` kind has no ``install_dir()``/``prefix()`` (other code reads
+        those to tell store games apart), so the noexec guard asks this instead. An unset exe
+        is left out: the launch itself explains that.
+        """
+        folders = [self._prefix()]
+        try:
+            folders.insert(0, self._target().parent)
+        except BackendError:
+            pass
+        return tuple(folders)
 
     def _target(self) -> Path:
         raw = (
@@ -834,6 +950,7 @@ class WineBackend(GamePidsMixin, SandboxMixin, GameBackend):
         argv, env = self._prefix_command(
             [str(target), *args], sandboxed=self.secure_mode_enabled()
         )
+        process.apply_first_frame_env(env)  # the game only, not wineboot or an installer
         argv, env = self._secure_wrap(argv, env)
         return argv, env, self._prefix(), target
 

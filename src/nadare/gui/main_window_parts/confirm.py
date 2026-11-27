@@ -253,7 +253,7 @@ class ConfirmMixin:
             return self._confirm_notice(profile)
         kind = self._backend_kind(profile)
         data = self.config.profiles.get(profile) or {}
-        size = core_backends.install_size_hint(kind)
+        size = core_backends.download_size_hint(kind)
         where = download_folder(kind, data)
         try:
             backend = core_backends.create(profile, self.config)
@@ -262,15 +262,20 @@ class ConfirmMixin:
             self._set_side_status(exc.message)
             return False
         space_error: core_backends.BackendError | None = None
+        space: int | None = None
         try:
             checked = diskspace.install_space(backend)
         except core_backends.BackendError as exc:
             # The same rule the CLI uses; the question says so, and Download cannot proceed.
+            # The peak hint still explains why a smaller download needs more free space.
             space_error = exc
             checked = None
+            space = core_backends.install_space_hint(kind)
         if checked is not None:
-            size, path = checked
+            space, path = checked
             where = str(path)
+            if core_backends.install_choice(kind) is not None:
+                size = space  # the profile's quality, not the generic hint, is the download
         show_unofficial = core_backends.unofficial_notice(kind) and not self._unofficial_accepted()
         notice = (self._notice_for(profile) or "") if self._needs_notice(profile) else ""
         if (
@@ -278,6 +283,7 @@ class ConfirmMixin:
             and not show_unofficial
             and not notice
             and (not size or size < DOWNLOAD_CONFIRM_BYTES)
+            and (not space or space < DOWNLOAD_CONFIRM_BYTES)
         ):
             return True
         try:
@@ -287,6 +293,16 @@ class ConfirmMixin:
         summary = (
             f"Download: about {diskspace.human_size(size)}." if size else "Download size unknown."
         )
+        if (
+            space
+            and size
+            and space > size
+            and diskspace.human_size(space) != diskspace.human_size(size)
+        ):
+            summary += (
+                f" Keep about {diskspace.human_size(diskspace.free_needed(space))} free"
+                " while it installs."
+            )
         if space_error is not None:
             summary += f"\n{space_error.message}"
         dialog = QuickInstallDialog(

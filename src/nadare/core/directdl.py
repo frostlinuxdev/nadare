@@ -24,12 +24,14 @@ Nothing is written outside ``dest``; every path is relative and traversal-free.
 from __future__ import annotations
 
 import contextlib
+import errno
 import gzip
 import hashlib
 import io
 import json
 import logging
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -37,15 +39,26 @@ import threading
 import time
 import zipfile
 import zlib
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
 from concurrent.futures import CancelledError as FutureCancelled
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
-from pathlib import Path
+from concurrent.futures import wait as wait_futures
+from dataclasses import dataclass, field, replace
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from . import archivepins, crc64, diskspace, hdiffsf, installlock, paths, sevenz, sophon
+from . import (
+    archivepins,
+    crc64,
+    directslices,
+    diskspace,
+    hdiffsf,
+    installlock,
+    paths,
+    sevenz,
+    sophon,
+)
 from . import download as download_module
 from .download import DownloadError, download, remote_size
 from .events import Cancel, Cancelled, Emitter, Event, emitter
@@ -61,6 +74,8 @@ log = logging.getLogger(__name__)
 #: Most files fetched in parallel. A game with tens of thousands of small files is latency-bound
 #: per connection, so one install needs well over 16 connections to fill a fast line.
 MAX_WORKERS = 64
+#: Most packs on disk in ``.nadare-dl`` at once: pack N unpacks while pack N+1 downloads (#1817).
+_MAX_INFLIGHT_PACKS = 2
 _PLAN_CHECK_MAX_WORKERS = 16
 #: Fewest seconds between two "checked N of M files" reports (#831: ~47,000 files took a
 #: minute with nothing on screen). Each report is a logged step line, so not too often.
@@ -90,7 +105,17 @@ MAX_UNPACKED_BYTES = 8 << 30
 
 
 class DirectError(RuntimeError):
-    """The plan is invalid, a download failed, or a hash/size did not match."""
+    """The plan is invalid, a download failed, or a hash/size did not match.
+
+    Its text reaches the run log and the error dialog, so every URL in it is cut to
+    scheme, host and path (no query string, fragment or userinfo).
+    """
+
+    def __init__(self, *args: object) -> None:
+        args = tuple(
+            download_module.public_text(a) if isinstance(a, str) else a for a in args
+        )
+        super().__init__(*args)
 
 
 class InstallBusy(DirectError):
@@ -179,6 +204,12 @@ class Archive:
     #: archive every version (Aether Gazer, Brown Dust 2): a record with the same slot and
     #: another name is an earlier version of it, so its dropped files are pruned (#967).
     slot: str = ""
+    #: An incremental archive adds to its slot instead of replacing earlier receipts.
+    #: A later full archive in the same slot can still supersede it.
+    additive: bool = False
+    #: Leading folder stripped from every zip member (e.g. ``"game_mini/"``); members outside
+    #: it are refused.
+    strip_prefix: str = ""
 
 
 @dataclass(frozen=True)
@@ -198,6 +229,22 @@ class Plan:
     #: files are the same plan. A plan with a guard and a streamed archive or Sophon
     #: packages is refused, because those paths could not apply it.
     redirect_allowed: Callable[[str], bool] | None = field(default=None, compare=False)
+    #: Loose-file games (#1825): keep a ledger of :attr:`files` (path, size, md5) and, after a
+    #: successful sync, remove a file the previous ledger listed that this plan no longer does
+    #: (through the same guards as archive members). Off for plans whose file list is partial.
+    prune_files: bool = False
+
+
+class SyncSummary(dict):
+    """What :func:`sync` returns: ``{"downloaded": n, "skipped": m}``, plus ``fetched_bytes``.
+
+    ``fetched_bytes`` (an attribute, so the dict compares as before) is what came over the
+    network: loose files and packs fetched now, files taken from the predownload left out (#1830).
+    """
+
+    def __init__(self, *, downloaded: int, skipped: int, fetched_bytes: int) -> None:
+        super().__init__(downloaded=downloaded, skipped=skipped)
+        self.fetched_bytes = fetched_bytes
 
 
 class _OverallProgress:
@@ -216,6 +263,7 @@ class _OverallProgress:
         self._file_done = dict.fromkeys(self._file_total, 0)
         self._total = sum(self._file_total.values())
         self._done = 0
+        self._cached = 0
         self._last = float("-inf")
 
     def sink(self, rf: RemoteFile) -> Emitter:
@@ -233,6 +281,18 @@ class _OverallProgress:
     def finished(self, rf: RemoteFile) -> None:
         """A file that needed no download (or just ended) counts as complete."""
         self._update(rf.path, self._file_total[rf.path], self._file_total[rf.path])
+
+    def from_cache(self, rf: RemoteFile) -> None:
+        """A file the predownload already had: complete, but not fetched now (#1830)."""
+        with self._lock:
+            self._cached += self._file_total[rf.path] - self._file_done[rf.path]
+        self.finished(rf)
+
+    @property
+    def fetched(self) -> int:
+        """Bytes that came over the network in this sync, cache hits left out."""
+        with self._lock:
+            return max(0, self._done - self._cached)
 
     def _update(self, path: str, done: int, total: int) -> None:
         with self._lock:
@@ -257,6 +317,112 @@ class _OverallProgress:
             self._publish()
 
 
+class _PackProgress:
+    """One overall ``done / total`` across packs, including overlapping downloads.
+
+    Each pack's download reports its own ``done / total``, so with 20 packs (Reverse: 1999,
+    31 GiB) the bar filled and said "less than a minute left" 20 times. Each pack's bytes are
+    tracked independently and summed out of all packs' planned bytes, so overlapping pack N and
+    pack N+1 both move the bar without jumping ahead, going backwards, or exceeding the total.
+    A pack that reports another total (a streamed one fetches ranges, not the whole archive) is
+    scaled to its planned share.
+    """
+
+    def __init__(self, archives: Sequence[Archive], emit: Emitter | None) -> None:
+        self._say = emitter(emit)
+        self._lock = threading.Lock()
+        self._planned_sizes = [_archive_size(archive) for archive in archives]
+        self._sizes = [
+            0 if _is_streamed_archive(archive) else size
+            for archive, size in zip(archives, self._planned_sizes, strict=True)
+        ]
+        self._pack_done = [0] * len(self._sizes)
+        self._total = sum(self._sizes)
+        self._done = 0
+        self._progress = 0.0
+        self._foreground = 0
+
+    def set_foreground(self, index: int) -> None:
+        """Mark ``index`` as the foreground pack whose step events belong in the header."""
+        with self._lock:
+            self._foreground = index
+
+    def finished(self, index: int) -> None:
+        """Count pack ``index`` as fully downloaded (including packs reused from cache)."""
+        with self._lock:
+            size = self._sizes[index]
+        if size > 0:
+            self._advance(index, size, {"stage": "download"})
+
+    def _advance(self, index: int, done: int, data: Mapping[str, Any]) -> None:
+        with self._lock:
+            size = self._sizes[index]
+            if size <= 0:
+                return
+            clamped = max(0, min(done, size))
+            if clamped <= self._pack_done[index]:
+                return
+            self._pack_done[index] = clamped
+            overall = min(self._total, sum(self._pack_done))
+            if overall <= self._done:
+                return
+            self._done = overall
+            self._progress = max(self._progress, overall / self._total)
+            sizes = f"{diskspace.human_size(overall)} / {diskspace.human_size(self._total)}"
+            self._say(
+                Event(
+                    "progress",
+                    f"download: {sizes}",
+                    progress=self._progress,
+                    data={**data, "done": overall, "total": self._total},
+                )
+            )
+
+    def sink(self, index: int) -> Emitter:
+        """The emitter pack ``index`` reports to: its download progress adds into overall."""
+
+        def forward(event: Event) -> None:
+            data = event.data if isinstance(event.data, dict) else {}
+            if event.kind == "step":
+                with self._lock:
+                    if index != self._foreground:
+                        return
+                    self._say(event)
+                return
+            if event.kind != "progress" or data.get("stage") != "download":
+                self._say(event)
+                return
+            done = int(data.get("done") or 0)
+            reported = int(data.get("total") or 0)
+            with self._lock:
+                size = self._sizes[index]
+                if size <= 0:
+                    adopted = self._planned_sizes[index] or (reported if reported > 0 else 0)
+                    if adopted > 0:
+                        self._sizes[index] = adopted
+                        self._total += adopted
+                        size = adopted
+                    elif self._total > 0:
+                        return
+                    else:
+                        if done > self._done:
+                            self._done = done
+                            self._say(event)
+                        return
+            if reported > 0 and reported != size:
+                done = done * size // reported
+            self._advance(index, done, data)
+
+        return forward
+
+
+def _archive_size(archive: Archive) -> int:
+    """The bytes an archive's download moves, from the plan (0 when the plan does not say)."""
+    if archive.parts:
+        return sum(int(_transfer_size(part) or 0) for part in archive.parts)
+    return int(_transfer_size(archive.source) or 0)
+
+
 class _CombinedCancel:
     """A cancellation token set by either the caller or a sync-local stop."""
 
@@ -279,6 +445,89 @@ def _remove_file(path: Path) -> None:
             candidate.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _caused_by_oserror(exc: BaseException) -> bool:
+    """Whether ``exc``, or anything it was raised from, is an ``OSError``.
+
+    ``download()`` wraps a full disk (``ENOSPC``) in a :class:`DownloadError`, which
+    :func:`_download_remote` wraps again in a :class:`DirectError`, so the direct cause alone
+    cannot tell a full disk (keep the resumable ``.part``) from corrupt bytes (drop them).
+    """
+    seen: set[int] = set()
+    cause: BaseException | None = exc
+    while cause is not None and id(cause) not in seen:
+        if isinstance(cause, OSError):
+            return True
+        seen.add(id(cause))
+        cause = cause.__cause__
+    return False
+
+
+def _cache_root_of(path: Path) -> Path | None:
+    """The ``.nadare-dl`` folder ``path`` lives under, if any."""
+    parts = path.parts
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index] == DL_DIR:
+            return Path(*parts[: index + 1])
+    return None
+
+
+def _refuse_cache_symlinks(path: Path, dl_dir: Path | None = None) -> None:
+    """Refuse a cache path that a symlink now stands on, right before Nadare uses it.
+
+    :func:`_cache_path` checks the components that exist while a pack is planned. The write, the
+    unpack and the cleanup happen later, on other threads, so a link planted in that gap could
+    send a download or an ``unlink`` outside the install folder (#963, SEC F3). Every step that
+    touches the cache re-checks here.
+    """
+    root = dl_dir if dl_dir is not None else _cache_root_of(path)
+    if root is None:
+        return
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return
+    # The cache folder itself first: lstat follows links in every earlier component, so
+    # a replaced .nadare-dl would otherwise pass every check below (Neon r1, packsec).
+    probes = [root]
+    for part in relative.parts:
+        probes.append(probes[-1] / part)
+    for probe in probes:
+        try:
+            mode = probe.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise DirectError(f"cannot inspect {probe.name}: {exc}") from exc
+        if stat.S_ISLNK(mode):
+            raise DirectError(
+                f"{probe.name} in the download cache is a symlink; remove it and retry"
+            )
+
+
+def _cache_write_guard(path: Path, dl_dir: Path | None = None) -> Callable[[Path], None] | None:
+    """One reusable before-write symlink guard for a path inside an active download cache."""
+    root = dl_dir if dl_dir is not None else _cache_root_of(path)
+    if root is None:
+        return None
+
+    def guard(target: Path) -> None:
+        _refuse_cache_symlinks(target, root)
+
+    return guard
+
+
+def _remove_cache_file(path: Path) -> None:
+    """Remove one cached download, but never through a link planted below ``.nadare-dl``."""
+    try:
+        _refuse_cache_symlinks(path)
+    except DirectError:
+        log.warning(
+            "not removing %s: a path component in the download cache is a symlink", path
+        )
+        return
+    _remove_file(path)
 
 
 class _JoinedFile(io.RawIOBase):
@@ -373,8 +622,12 @@ class _JoinedFile(io.RawIOBase):
         super().close()
 
 
-def _hash_parts(paths: list[Path], rf: RemoteFile, name: str) -> None:
+def _hash_parts(
+    paths: list[Path], rf: RemoteFile, name: str, cancel: Cancel | None = None
+) -> None:
     """Verify the concatenation of ``paths`` against ``rf`` without joining it."""
+    if cancel is not None:
+        cancel.raise_if_cancelled()
     size = sum(path.stat().st_size for path in paths)
     algorithms = tuple(alg for alg in ("md5", "sha256") if getattr(rf, alg))
     hashers = {alg: hashlib.new(alg) for alg in algorithms}
@@ -382,12 +635,19 @@ def _hash_parts(paths: list[Path], rf: RemoteFile, name: str) -> None:
     wide = crc64.Crc64() if rf.crc64 is not None else None
     for path in paths:
         with open(path, "rb") as fh:
-            while block := fh.read(1 << 20):
+            while True:
+                if cancel is not None:
+                    cancel.raise_if_cancelled()
+                block = fh.read(1 << 20)
+                if not block:
+                    break
                 for hasher in hashers.values():
                     hasher.update(block)
                 crc = zlib.crc32(block, crc)
                 if wide is not None:
                     wide.update(block)
+    if cancel is not None:
+        cancel.raise_if_cancelled()
     mismatch = rf.size is not None and size != rf.size
     if not mismatch:
         for alg, hasher in hashers.items():
@@ -400,6 +660,14 @@ def _hash_parts(paths: list[Path], rf: RemoteFile, name: str) -> None:
         mismatch = True
     if mismatch:
         raise DirectError(f"archive hash/size mismatch for {name}")
+
+
+def _md5_file(path: Path) -> str:
+    digest = hashlib.md5()
+    with open(path, "rb") as fh:
+        while block := fh.read(1 << 20):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def _crc32_file(path: Path) -> str:
@@ -527,11 +795,15 @@ def _download_packed(
     """
     packed = rf.packed
     assert packed is not None
+    cache_root = _cache_root_of(path)
+    write_guard = _cache_write_guard(path, cache_root)
+    _refuse_cache_symlinks(path, cache_root)
     if path.exists() and _declares_hash(rf) and _verify_remote(path, rf, cancel=cancel):
         return
     view = _packed_view(rf)
     staged = path.with_name(path.name + PACKED_SUFFIX)
     output = path.with_name(path.name + ".nadare-new.part")
+    _refuse_cache_symlinks(staged, cache_root)
     staged_ok = staged.is_file() and _declares_hash(view) and _verify_remote(
         staged, view, cancel=cancel
     )
@@ -544,9 +816,11 @@ def _download_packed(
         need += packed.size - have
     if need:
         diskspace.check_space(path.parent, need)
+    dl_extra: dict[str, Any] = {"before_write": write_guard} if write_guard is not None else {}
     for attempt in range(2):
         if staged_ok:
             break
+        _refuse_cache_symlinks(staged, cache_root)
         try:
             download(
                 rf.url,
@@ -559,38 +833,58 @@ def _download_packed(
                 resume=True,
                 pool=pool,
                 redirect_allowed=redirect_allowed,
+                **dl_extra,
             )
         except DownloadError as exc:
-            raise DirectError(f"download failed for {rf.path}: {exc}") from exc
+            raise DirectError(f"download failed for {rf.path}: {exc}") from (
+                download_module.scrub_exception(exc)
+            )
         if _verify_remote(staged, view):
             break
         # A wrong resume base (an older .part) or a bad transfer: once more from scratch.
-        _remove_file(staged)
+        _remove_cache_file(staged)
         if attempt:
             raise DirectError(f"hash mismatch for {rf.path} (as downloaded)")
     limit = rf.size if rf.size is not None else MAX_UNPACKED_BYTES
+    _refuse_cache_symlinks(staged, cache_root)
+    _refuse_cache_symlinks(output, cache_root)
     try:
         _unpack(packed.codec, staged, output, limit=limit, cancel=cancel)
     except Cancelled:
-        _remove_file(output)
+        _remove_cache_file(output)
         raise
     except DirectError:
-        _remove_file(output)
-        _remove_file(staged)
+        _remove_cache_file(output)
+        _remove_cache_file(staged)
         raise
     except (OSError, EOFError, zlib.error) as exc:
-        _remove_file(output)
-        _remove_file(staged)
+        _remove_cache_file(output)
+        _remove_cache_file(staged)
         raise DirectError(f"cannot unpack {rf.path}: {exc}") from exc
     except BaseException:
-        _remove_file(output)
+        _remove_cache_file(output)
         raise
     if not _verify_remote(output, rf):
-        _remove_file(output)
-        _remove_file(staged)
+        _remove_cache_file(output)
+        _remove_cache_file(staged)
         raise DirectError(f"hash mismatch for {rf.path}")
+    _refuse_cache_symlinks(output, cache_root)
+    _refuse_cache_symlinks(path, cache_root)
     os.replace(output, path)
-    _remove_file(staged)
+    _remove_cache_file(staged)
+
+
+def _out_of_space(exc: BaseException) -> bool:
+    """Whether ``exc``, or what caused it, is a full disk or an exceeded quota."""
+    codes = {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OSError) and current.errno in codes:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _download_remote(
@@ -604,6 +898,11 @@ def _download_remote(
 ) -> None:
     if cancel is not None:
         cancel.raise_if_cancelled()
+    # The plan-time check in :func:`_cache_path` can be stale by now: re-check before each
+    # write-side step, including across remote_size(), _verify_remote() and download() retries.
+    cache_root = _cache_root_of(path)
+    write_guard = _cache_write_guard(path, cache_root)
+    _refuse_cache_symlinks(path, cache_root)
     if rf.packed is not None:
         _download_packed(
             rf, path, emit=emit, cancel=cancel, pool=pool, redirect_allowed=redirect_allowed
@@ -614,6 +913,7 @@ def _download_remote(
         # Some APIs report 0 for a multi-GB archive; ask the server instead of
         # falling back to the downloader's cap for undeclared sizes.
         size = remote_size(rf.url, headers=dict(rf.headers), redirect_allowed=redirect_allowed)
+        _refuse_cache_symlinks(path, cache_root)
     preserve_existing = path.exists()
     if (
         preserve_existing
@@ -625,6 +925,7 @@ def _download_remote(
         return
     temporary = path.with_name(path.name + ".nadare-new")
     destination = temporary if preserve_existing else path
+    _refuse_cache_symlinks(destination, cache_root)
     if size:
         # Only what is still to be fetched needs room: a resumed download already holds its
         # .part bytes. A replacement keeps the old file until the new one is verified, so it
@@ -636,8 +937,9 @@ def _download_remote(
             except OSError:
                 have = 0
         diskspace.check_space(path.parent, size - have)
+    dl_extra: dict[str, Any] = {"before_write": write_guard} if write_guard is not None else {}
     try:
-        download(
+        result = download(
             rf.url,
             destination,
             expected_size=size,
@@ -648,21 +950,39 @@ def _download_remote(
             resume=True,
             pool=pool,
             redirect_allowed=redirect_allowed,
+            **dl_extra,
         )
-        if (rf.md5 or rf.crc32 or rf.crc64 is not None) and not _verify_remote(destination, rf):
-            raise DirectError(f"hash mismatch for {rf.path}")
+        if rf.md5 or rf.crc32 or rf.crc64 is not None:
+            if (
+                rf.md5
+                and not rf.crc32
+                and rf.crc64 is None
+                and isinstance(result, download_module.DownloadResult)
+                and result.md5
+            ):
+                if result.md5.lower() != rf.md5.lower():
+                    raise DirectError(f"hash mismatch for {rf.path}")
+            elif not _verify_remote(destination, rf):
+                raise DirectError(f"hash mismatch for {rf.path}")
         if preserve_existing:
+            _refuse_cache_symlinks(temporary, cache_root)
+            _refuse_cache_symlinks(path, cache_root)
             os.replace(temporary, path)
     except DirectError:
         # A corrupt staged copy must never remove the installed file.
-        _remove_file(destination)
-        _remove_file(destination.with_name(destination.name + ".part"))
+        _remove_cache_file(destination)
+        _remove_cache_file(destination.with_name(destination.name + ".part"))
         raise
     except DownloadError as exc:
-        if preserve_existing:
-            _remove_file(temporary)
-            _remove_file(temporary.with_name(temporary.name + ".part"))
-        raise DirectError(f"download failed for {rf.path}: {exc}") from exc
+        # A full disk keeps what arrived, as a plain download does (#1854): once the user
+        # makes room, the next try resumes instead of starting over. download() fails before
+        # it promotes the .part, so there is no finished staged copy to drop then.
+        if preserve_existing and not _out_of_space(exc):
+            _remove_cache_file(temporary)
+            _remove_cache_file(temporary.with_name(temporary.name + ".part"))
+        raise DirectError(f"download failed for {rf.path}: {exc}") from (
+            download_module.scrub_exception(exc)
+        )
     except BaseException:
         # Cancellation or a local write error keeps the .part for resume.
         raise
@@ -679,6 +999,7 @@ def _done_record(
     *,
     verified_hashes: bool = True,
     pin: ArchivePin | None = None,
+    sequence: int | None = None,
 ) -> dict[str, Any]:
     record: dict[str, Any] = {
         "game": plan.game_tag,
@@ -687,6 +1008,11 @@ def _done_record(
     }
     if archive.slot:
         record["slot"] = archive.slot
+    if archive.additive:
+        record["additive"] = True
+    if sequence is not None:
+        # The order receipts were applied, so a delta's last update wins regardless of mtimes.
+        record["sequence"] = sequence
     for name in ("md5", "sha256", "crc32"):
         value = getattr(archive.source, name)
         if value:
@@ -721,10 +1047,10 @@ def _archive_done(plan: Plan, archive: Archive, dest: Path, *, hashes: bool = Fa
         return False
     if not isinstance(record, dict):
         return False
-    if record.get("url") != archive.source.url or not _same_version(
-        record.get("version"), plan.version
-    ):
+    if record.get("url") != archive.source.url:
         return False
+    # Check the cheap parts of the record before the expensive member match: a record that
+    # already disagrees must not cost a full hash pass over the installed packs.
     if record.get("members_truncated") and not _all_members_present(record_path, dest):
         return False  # the record lists only part of the archive (#906)
     if archive.stream:
@@ -743,13 +1069,14 @@ def _archive_done(plan: Plan, archive: Archive, dest: Path, *, hashes: bool = Fa
         elif not isinstance(actual, str) or actual.lower() != expected.lower():
             return False
     members = record.get("members")
+    member_crcs: dict[str, Any] | None = None
     if members is not None:
         if not isinstance(members, list):
             return False
         member_sizes = record.get("member_sizes")
+        member_crcs = record.get("member_crc32")
         if member_sizes is not None and not isinstance(member_sizes, dict):
             return False
-        member_crcs = record.get("member_crc32")
         if member_crcs is not None and not isinstance(member_crcs, dict):
             return False
         for member in members:
@@ -771,24 +1098,49 @@ def _archive_done(plan: Plan, archive: Archive, dest: Path, *, hashes: bool = Fa
                         or path.stat().st_size != expected_size
                     ):
                         return False
-                if hashes and member_crcs is not None:
-                    expected_crc = member_crcs.get(member)
-                    if (
-                        not isinstance(expected_crc, str)
-                        or _crc32_file(path) != expected_crc.upper()
-                    ):
-                        return False
             except OSError:
+                return False
+    if not _same_version(record.get("version"), plan.version):
+        if not directslices.matches(archive, record, dest, hashes=hashes):
+            return False
+        if hashes:
+            # The manifest moved but this pack is unchanged, and its members were just
+            # verified: record the new version so the next check takes the cheap path.
+            record["version"] = plan.version
+            try:
+                _check_work_dirs(dest)
+                _write_record(record_path, record)
+            except (DirectError, OSError):
+                pass  # a failed refresh is harmless: the next check matches again
+            member_crcs = None  # the member match already hashed every file
+    if hashes and member_crcs is not None and members is not None:
+        for member in members:
+            expected_crc = member_crcs.get(member)
+            if (
+                not isinstance(expected_crc, str)
+                or _crc32_file(dest / safe_relative_path(member)) != expected_crc.upper()
+            ):
                 return False
     return True
 
 
-def _zip_entries(zf: zipfile.ZipFile) -> list[tuple[zipfile.ZipInfo, str]]:
+def _zip_entries(
+    zf: zipfile.ZipFile, strip_prefix: str = ""
+) -> list[tuple[zipfile.ZipInfo, str]]:
+    prefix_dir = safe_relative_path(strip_prefix.rstrip("/")) if strip_prefix else ""
+    prefix = f"{prefix_dir}/" if prefix_dir else ""
     entries: list[tuple[zipfile.ZipInfo, str]] = []
     for info in zf.infolist():
         if stat.S_ISLNK((info.external_attr >> 16) & 0xFFFF):
             raise DirectError(f"zip member is a symlink: {info.filename!r}")
-        entries.append((info, safe_relative_path(info.filename)))
+        relative = safe_relative_path(info.filename)
+        if prefix:
+            if relative == prefix_dir and info.is_dir():
+                continue
+            if not relative.startswith(prefix):
+                raise DirectError(f"zip member {info.filename!r} is outside prefix {prefix!r}")
+            relative = safe_relative_path(relative[len(prefix) :])
+        entries.append((info, relative))
     return entries
 
 
@@ -806,7 +1158,11 @@ class _CancelReader:
 
 
 def _extract_zip_to(
-    zip_path: Path | _JoinedFile, target: Path, cancel: Cancel | None = None
+    zip_path: Path | _JoinedFile,
+    target: Path,
+    cancel: Cancel | None = None,
+    *,
+    strip_prefix: str = "",
 ) -> list[str]:
     """Extract ``zip_path`` into ``target`` and return its relative file paths.
 
@@ -815,7 +1171,7 @@ def _extract_zip_to(
     try:
         written: list[str] = []
         with zipfile.ZipFile(zip_path) as zf:
-            entries = _zip_entries(zf)
+            entries = _zip_entries(zf, strip_prefix)
             target.mkdir(parents=True, exist_ok=True)
             for info, relative in entries:
                 out = _safe_destination_path(target, relative, directory=info.is_dir())
@@ -829,8 +1185,11 @@ def _extract_zip_to(
         return written
     except DirectError:
         raise
-    except (OSError, EOFError, zipfile.BadZipFile) as exc:
-        raise DirectError(f"cannot extract {zip_path.name}: {exc}") from exc
+    except (OSError, EOFError, zipfile.BadZipFile, ValueError) as exc:
+        # ValueError: a truncated split pack makes zipfile seek before the start of the
+        # joined parts (_JoinedFile), where a plain file would raise OSError (sim-pack 1126).
+        name = getattr(zip_path, "name", "archive")
+        raise DirectError(f"cannot extract {name}: {exc}") from exc
 
 
 def _safe_destination_path(
@@ -875,7 +1234,42 @@ def _safe_destination_path(
     return target
 
 
-def _merge_tree(source: Path, dest: Path) -> None:
+def _installed_copy_matches(path: Path, expected: tuple[int, str]) -> bool:
+    """Whether ``path`` still is the regular file a finished pack recorded (size and CRC-32)."""
+    size, crc = expected
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size != size:
+            return False
+        return _crc32_file(path) == crc.upper()
+    except OSError:
+        return False
+
+
+def _keep_installed(
+    target: Path, relative: str, keep: Mapping[str, tuple[int, str]] | None
+) -> bool:
+    """Whether ``target`` already belongs to a later installed pack and must stay untouched."""
+    return (
+        keep is not None
+        and relative in keep
+        and _installed_copy_matches(target, keep[relative])
+    )
+
+
+def _merge_tree(
+    source: Path,
+    dest: Path,
+    changed: threading.Event | None = None,
+    *,
+    keep: Mapping[str, tuple[int, str]] | None = None,
+) -> None:
+    """Move every item of ``source`` into ``dest``.
+
+    ``keep`` names files (relative path to the recorded size and CRC-32) a later pack of the
+    plan already installed: those stay as they are, because packs are applied in plan order and
+    the later pack's copy is the one an uninterrupted sync ends with.
+    """
     items = [
         (path, path.relative_to(source).as_posix(), path.is_dir())
         for path in sorted(source.rglob("*"))
@@ -884,27 +1278,38 @@ def _merge_tree(source: Path, dest: Path) -> None:
     for _path, relative, is_dir in items:
         _safe_destination_path(dest, relative, directory=is_dir)
     dest.mkdir(parents=True, exist_ok=True)
+    if changed is not None and items:
+        changed.set()  # the first file of the install is about to be replaced (#1826)
     for path, relative, is_dir in items:
         target = _safe_destination_path(dest, relative, directory=is_dir)
         if is_dir:
             target.mkdir(parents=True, exist_ok=True)
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                os.replace(path, target)
-            except OSError as exc:
-                raise DirectError(f"cannot move {relative} into the install: {exc}") from exc
+            continue
+        if _keep_installed(target, relative, keep):
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.replace(path, target)
+        except OSError as exc:
+            raise DirectError(f"cannot move {relative} into the install: {exc}") from exc
 
 
 def _extract_zip_into_dest(
-    zip_path: Path | _JoinedFile, dest: Path, dl_dir: Path, cancel: Cancel | None = None
+    zip_path: Path | _JoinedFile,
+    dest: Path,
+    dl_dir: Path,
+    cancel: Cancel | None = None,
+    *,
+    strip_prefix: str = "",
+    changed: threading.Event | None = None,
+    keep: Mapping[str, tuple[int, str]] | None = None,
 ) -> list[str]:
     staging = Path(tempfile.mkdtemp(prefix="extract-", dir=dl_dir))
     try:
-        members = _extract_zip_to(zip_path, staging, cancel)
+        members = _extract_zip_to(zip_path, staging, cancel, strip_prefix=strip_prefix)
         if cancel is not None:
             cancel.raise_if_cancelled()  # nothing half-extracted reaches the install
-        _merge_tree(staging, dest)
+        _merge_tree(staging, dest, changed, keep=keep)
         return members
     finally:
         shutil.rmtree(staging, ignore_errors=True)
@@ -916,6 +1321,9 @@ def _extract_slices_into_dest(
     dest: Path,
     dl_dir: Path,
     cancel: Cancel | None = None,
+    changed: threading.Event | None = None,
+    *,
+    keep: Mapping[str, tuple[int, str]] | None = None,
 ) -> list[str]:
     pack_size = pack.size if isinstance(pack, _JoinedFile) else pack.stat().st_size
     for member in members:
@@ -963,7 +1371,7 @@ def _extract_slices_into_dest(
                     raise DirectError(f"crc32 mismatch for slice {member.path!r}")
         if cancel is not None:
             cancel.raise_if_cancelled()
-        _merge_tree(staging, dest)
+        _merge_tree(staging, dest, changed, keep=keep)
         return [safe_relative_path(member.path) for member in members]
     finally:
         if not joined:
@@ -972,7 +1380,13 @@ def _extract_slices_into_dest(
 
 
 def _extract_7z_into_dest(
-    source: Path | _JoinedFile, dest: Path, dl_dir: Path, cancel: Cancel | None
+    source: Path | _JoinedFile,
+    dest: Path,
+    dl_dir: Path,
+    cancel: Cancel | None,
+    changed: threading.Event | None = None,
+    *,
+    keep: Mapping[str, tuple[int, str]] | None = None,
 ) -> list[str]:
     staging = Path(tempfile.mkdtemp(prefix="extract-", dir=dl_dir))
     try:
@@ -985,7 +1399,7 @@ def _extract_7z_into_dest(
             entries = sevenz.list_entries(source)
             source.seek(0)
             sevenz.extract(source, staging, cancel=cancel)
-        _merge_tree(staging, dest)
+        _merge_tree(staging, dest, changed, keep=keep)
         return [entry.path for entry in entries if not entry.is_dir]
     except (sevenz.SevenZipError, OSError) as exc:
         raise DirectError(f"cannot extract the 7z archive: {exc}") from exc
@@ -994,7 +1408,13 @@ def _extract_7z_into_dest(
 
 
 def _extract_hdiff_into_dest(
-    source: Path | _JoinedFile, dest: Path, dl_dir: Path, cancel: Cancel | None
+    source: Path | _JoinedFile,
+    dest: Path,
+    dl_dir: Path,
+    cancel: Cancel | None,
+    changed: threading.Event | None = None,
+    *,
+    keep: Mapping[str, tuple[int, str]] | None = None,
 ) -> list[str]:
     """A full-install HDiffPatch diff (Duet Night Abyss), unpacked by :mod:`hdiffsf`."""
     if not isinstance(source, Path):
@@ -1002,7 +1422,7 @@ def _extract_hdiff_into_dest(
     staging = Path(tempfile.mkdtemp(prefix="extract-", dir=dl_dir))
     try:
         members = hdiffsf.extract(source, staging, cancel=cancel)
-        _merge_tree(staging, dest)
+        _merge_tree(staging, dest, changed, keep=keep)
         return members
     except hdiffsf.HDiffError as exc:
         raise DirectError(f"cannot unpack {source.name}: {exc}") from exc
@@ -1018,15 +1438,28 @@ def _unwrap(
     dest: Path,
     dl_dir: Path,
     cancel: Cancel | None = None,
+    changed: threading.Event | None = None,
+    *,
+    keep: Mapping[str, tuple[int, str]] | None = None,
 ) -> list[str]:
     if archive.unwrap == ("hdiff",):
-        return _extract_hdiff_into_dest(source, dest, dl_dir, cancel)
+        return _extract_hdiff_into_dest(source, dest, dl_dir, cancel, changed, keep=keep)
     if archive.unwrap == ("7z",):
-        return _extract_7z_into_dest(source, dest, dl_dir, cancel)
+        return _extract_7z_into_dest(source, dest, dl_dir, cancel, changed, keep=keep)
     if archive.unwrap == ("slices",):
-        return _extract_slices_into_dest(source, archive.members, dest, dl_dir, cancel)
+        return _extract_slices_into_dest(
+            source, archive.members, dest, dl_dir, cancel, changed, keep=keep
+        )
     if archive.unwrap == ("zip",):
-        return _extract_zip_into_dest(source, dest, dl_dir, cancel)
+        return _extract_zip_into_dest(
+            source,
+            dest,
+            dl_dir,
+            cancel,
+            strip_prefix=archive.strip_prefix,
+            changed=changed,
+            keep=keep,
+        )
     if archive.unwrap != ("zip", "zip"):
         raise DirectError(f"unsupported archive unwrap for {archive.name}: {archive.unwrap!r}")
 
@@ -1042,9 +1475,46 @@ def _unwrap(
         inner = regular[0]
         if archive.inner_crc32 and _crc32_file(inner) != archive.inner_crc32.upper():
             raise DirectError(f"inner crc32 mismatch for {archive.name}")
-        return _extract_zip_into_dest(inner, dest, dl_dir, cancel)
+        return _extract_zip_into_dest(
+            inner,
+            dest,
+            dl_dir,
+            cancel,
+            strip_prefix=archive.strip_prefix,
+            changed=changed,
+            keep=keep,
+        )
     finally:
         shutil.rmtree(outer, ignore_errors=True)
+
+
+def _write_record(record_path: Path, record: Mapping[str, Any]) -> None:
+    """Atomically replace one ``.done`` record with ``record``."""
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = record_path.with_name(f"{record_path.name}.tmp")
+    temporary.unlink(missing_ok=True)
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(record))
+    os.replace(temporary, record_path)
+
+
+def _next_apply_sequence(dest: Path) -> int:
+    """One past the highest sequence among this install's receipts."""
+    state = dest / STATE_DIR
+    highest = 0
+    try:
+        candidates = state.rglob("*.done")
+        for record_path in candidates:
+            record = _read_done(record_path)
+            if record is None:
+                continue
+            value = record.get("sequence")
+            if isinstance(value, int) and not isinstance(value, bool) and value > highest:
+                highest = value
+    except OSError:
+        pass
+    return highest + 1
 
 
 def _write_done(
@@ -1059,9 +1529,14 @@ def _write_done(
     name = safe_relative_path(archive.name)
     _check_work_dirs(dest)
     record_path = dest / STATE_DIR / f"{name}.done"
-    record_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = record_path.with_name(f"{record_path.name}.tmp")
-    record = _done_record(plan, archive, members, verified_hashes=verified_hashes, pin=pin)
+    record = _done_record(
+        plan,
+        archive,
+        members,
+        verified_hashes=verified_hashes,
+        pin=pin,
+        sequence=_next_apply_sequence(dest),
+    )
     if members is not None:
         record["member_sizes"] = {
             member: (dest / safe_relative_path(member)).stat().st_size
@@ -1071,11 +1546,7 @@ def _write_done(
             member: _crc32_file(dest / safe_relative_path(member))
             for member in record["members"]
         }
-    temporary.unlink(missing_ok=True)
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps(record))
-    os.replace(temporary, record_path)
+    _write_record(record_path, record)
     _write_member_list(record_path, members if record.get("members_truncated") else None)
 
 
@@ -1328,6 +1799,8 @@ def _install_streamed_zip(
     cancel: Cancel | None,
     workers: int,
     pin: ArchivePin | None = None,
+    changed: threading.Event | None = None,
+    keep: Mapping[str, tuple[int, str]] | None = None,
 ) -> None:
     """Write the members of an already-open remote zip into ``dest``."""
     for info, relative in entries:
@@ -1340,9 +1813,10 @@ def _install_streamed_zip(
     for info, relative in entries:
         if info.is_dir():
             continue
-        if not _stream_member_current(
-            _safe_destination_path(dest, relative, directory=False), info
-        ):
+        target = _safe_destination_path(dest, relative, directory=False)
+        if _keep_installed(target, relative, keep):
+            continue
+        if not _stream_member_current(target, info):
             todo.append((info, relative))
 
     total = sum(info.file_size for info, _ in todo)
@@ -1386,6 +1860,8 @@ def _install_streamed_zip(
             out = _safe_destination_path(dest, relative, directory=False)
             out.parent.mkdir(parents=True, exist_ok=True)
             out = _safe_destination_path(dest, relative, directory=False)
+            if changed is not None:
+                changed.set()  # this member replaces a file of the install (#1826)
             os.replace(temporary, out)
         except Cancelled:
             _remove_file(temporary)
@@ -1485,6 +1961,8 @@ def _stream_zip_archive(
     cancel: Cancel | None,
     workers: int,
     pin: ArchivePin | None = None,
+    changed: threading.Event | None = None,
+    keep: Mapping[str, tuple[int, str]] | None = None,
 ) -> list[str] | None:
     """Install ``archive`` by ranged reads straight off the server.
 
@@ -1521,7 +1999,7 @@ def _stream_zip_archive(
         except (zipfile.BadZipFile, OSError) as exc:
             raise DirectError(f"cannot open {archive.name}: {exc}") from exc
 
-        entries = _zip_entries(zf)
+        entries = _zip_entries(zf, archive.strip_prefix)
         for info, _relative in entries:
             if info.flag_bits & 0x1:
                 raise DirectError(f"zip member is encrypted: {info.filename!r}")
@@ -1538,6 +2016,8 @@ def _stream_zip_archive(
             cancel=cancel,
             workers=workers,
             pin=pin,
+            changed=changed,
+            keep=keep,
         )
         return [relative for info, relative in entries if not info.is_dir()]
     except DirectError:
@@ -1562,6 +2042,8 @@ def _stream_7z_archive(
     cancel: Cancel | None,
     workers: int = 1,
     pin: ArchivePin | None = None,
+    changed: threading.Event | None = None,
+    keep: Mapping[str, tuple[int, str]] | None = None,
 ) -> list[str] | None:
     """Install a 7z by reading it straight off the server (no archive on disk).
 
@@ -1606,10 +2088,13 @@ def _stream_7z_archive(
                     parents=True, exist_ok=True
                 )
                 continue
-            if entry.size == 0 and not (dest / relative).is_file():
+            target = dest / relative
+            if _keep_installed(target, relative, keep):
+                continue
+            if entry.size == 0 and not target.is_file():
                 wanted.add(entry.path)
                 continue
-            if not _7z_entry_current(dest / relative, entry):
+            if not _7z_entry_current(target, entry):
                 wanted.add(entry.path)
                 total += entry.size
         diskspace.check_space(dest, total)
@@ -1619,6 +2104,8 @@ def _stream_7z_archive(
             def progress(done: int, all_: int) -> None:
                 nonlocal done_bytes
                 done_bytes = done
+                if done and changed is not None:
+                    changed.set()  # members are being written into the install (#1826)
                 download_module._emit_progress(say, "install", done, all_)
 
             try:
@@ -1658,6 +2145,228 @@ def _7z_entry_current(path: Path, entry: sevenz.Entry) -> bool:
         return False
 
 
+def _is_streamed_archive(archive: Archive) -> bool:
+    whole_sha256 = bool(archive.source.sha256) or any(p.sha256 for p in archive.parts)
+    return archive.stream and not whole_sha256 and archive.unwrap in (("7z",), ("zip",))
+
+
+def _archive_remaining_bytes(archive: Archive, dl_dir: Path) -> int:
+    """Bytes of ``archive`` still to be downloaded into ``dl_dir`` (refusing symlinks)."""
+    try:
+        dl_mode = dl_dir.lstat().st_mode
+    except FileNotFoundError:
+        dl_mode = None
+    except OSError as exc:
+        raise DirectError(f"cannot inspect {dl_dir.name}: {exc}") from exc
+    if dl_mode is not None and stat.S_ISLNK(dl_mode):
+        raise DirectError(f"{dl_dir.name} in the install folder is a symlink; remove it and retry")
+    items = archive.parts or (archive.source,)
+    need = 0
+    for rf in items:
+        target = _cache_path(dl_dir, rf.path)
+        size = int(_transfer_size(rf) or 0)
+        if size <= 0:
+            continue
+        have = 0
+        for candidate in (target, Path(f"{target}.part")):
+            try:
+                info = candidate.lstat()
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                have = min(size, info.st_size)
+                break
+        need += max(0, size - have)
+    return need
+
+
+def _pack_space_needed(archives: Sequence[Archive], dl_dir: Path) -> int:
+    """Peak disk room for the packs in flight, including the one being unpacked.
+
+    Up to :data:`_MAX_INFLIGHT_PACKS` archives are in ``.nadare-dl`` at once, and while pack N
+    unpacks the extractor writes a second, unpacked copy into a staging folder before merging
+    it. The plan does not know that unpacked size, so the pack's own download size stands in
+    for it: exact for a stored zip, a floor for a compressed one (SEC F2). Streamed archives
+    drain in-flight packs before running, so packs on opposite sides of one never overlap.
+    """
+    window = max(1, _MAX_INFLIGHT_PACKS)
+    peak = 0
+    #: ``(bytes still to download, full download size)`` per pack, in plan order.
+    run: list[tuple[int, int]] = []
+
+    def finish_run() -> None:
+        nonlocal peak
+        if not run:
+            return
+        # Every pack unpacks once, with the packs after it (up to the window) on disk: the last
+        # one of a run, and a run of one, unpack alone but still need their staging copy (#1854).
+        for start in range(len(run)):
+            chunk = run[start : start + window]
+            staging = chunk[0][1]
+            peak = max(peak, sum(remaining for remaining, _size in chunk) + staging)
+        run.clear()
+
+    for archive in archives:
+        if _is_streamed_archive(archive):
+            finish_run()
+        else:
+            run.append((_archive_remaining_bytes(archive, dl_dir), _archive_size(archive)))
+    finish_run()
+    return peak
+
+
+def _peak_archive_concurrency(archives: Sequence[Archive]) -> int:
+    """Peak archive files/parts that may download concurrently across in-flight packs."""
+    window = max(1, _MAX_INFLIGHT_PACKS)
+    peak = 0
+    run: list[int] = []
+
+    def finish_run() -> None:
+        nonlocal peak
+        if not run:
+            return
+        if len(run) <= window:
+            peak = max(peak, sum(run))
+        else:
+            for i in range(len(run) - window + 1):
+                peak = max(peak, sum(run[i : i + window]))
+        run.clear()
+
+    for archive in archives:
+        items = max(1, len(archive.parts))
+        if _is_streamed_archive(archive):
+            finish_run()
+            peak = max(peak, items)
+        else:
+            run.append(items)
+    finish_run()
+    return peak
+
+
+def _record_hashes_match(archive: Archive, record: Mapping[str, Any]) -> bool:
+    """Whether ``record``'s recorded source hashes agree with ``archive.source``."""
+    streamed = record.get("verified") in ("members", "pin")
+    for name in ("md5", "sha256", "crc32"):
+        expected = getattr(archive.source, name)
+        actual = record.get(f"declared_{name}" if streamed else name)
+        if expected is None:
+            if actual not in (None, ""):
+                return False
+        elif not isinstance(actual, str) or actual.lower() != expected.lower():
+            return False
+    return True
+
+
+def _later_member_owners(
+    plan: Plan, archive: Archive, root: Path, *, installing: Sequence[Archive] = ()
+) -> dict[str, tuple[int, str]]:
+    """Members that packs *later* than ``archive`` in plan order already installed.
+
+    A later pack in ``installing`` is laid down again by this sync, so its receipt is from an
+    older build and says nothing about what it ships now (Neon r1, packsec).
+
+    A resumed sync installs only the packs that are missing. If an earlier missing pack ships a
+    path that a later pack already installed, the later pack's copy must stay: packs apply in
+    plan order, so it is the copy an uninterrupted sync ends with (sim-pack F2). Each entry is
+    the recorded ``(size, crc32)`` the installed file must still match.
+    """
+    try:
+        index = next(i for i, item in enumerate(plan.archives) if item is archive)
+    except StopIteration:
+        return {}
+    owners: dict[str, tuple[int, str]] = {}
+    reinstalled = {id(item) for item in installing}
+    for later in plan.archives[index + 1 :]:
+        if id(later) in reinstalled:
+            continue
+        record_path = root / STATE_DIR / f"{safe_relative_path(later.name)}.done"
+        record = _read_done(record_path)
+        if record is None or record.get("url") != later.source.url:
+            continue
+        if record.get("members_truncated"):
+            continue
+        if not _same_version(record.get("version"), plan.version):
+            if not (
+                _record_hashes_match(later, record)
+                and directslices.matches(later, record, root, hashes=False)
+            ):
+                continue
+        members = record.get("members")
+        sizes = record.get("member_sizes")
+        crcs = record.get("member_crc32")
+        if not (isinstance(members, list) and isinstance(sizes, dict) and isinstance(crcs, dict)):
+            continue
+        for member in members:
+            if not isinstance(member, str):
+                continue
+            size, crc = sizes.get(member), crcs.get(member)
+            if isinstance(size, int) and not isinstance(size, bool) and isinstance(crc, str):
+                owners[member] = (size, crc)
+    return owners
+
+
+def _unpack_with_keep(
+    archive: Archive,
+    source: Path | _JoinedFile,
+    dest: Path,
+    dl_dir: Path,
+    cancel: Cancel | None,
+    changed: threading.Event | None,
+    keep: Mapping[str, tuple[int, str]] | None,
+) -> list[str]:
+    """Call :func:`_unwrap` with the later-owner map when there is one."""
+    if keep:
+        return _unwrap(archive, source, dest, dl_dir, cancel, changed, keep=keep)
+    return _unwrap(archive, source, dest, dl_dir, cancel, changed)
+
+
+def _unpack_downloaded_archive(
+    plan: Plan,
+    archive: Archive,
+    dest: Path,
+    dl_dir: Path,
+    source_path: Path,
+    part_paths: list[Path],
+    cache_paths: list[Path],
+    pin: ArchivePin | None,
+    *,
+    emit: Emitter | None,
+    cancel: Cancel | None,
+    changed: threading.Event | None,
+    keep: Mapping[str, tuple[int, str]] | None = None,
+) -> None:
+    # A link planted under .nadare-dl after the download must not send the unpack outside
+    # the install either (SEC F3).
+    for cached in (source_path, *part_paths):
+        _refuse_cache_symlinks(cached, dl_dir)
+    try:
+        if archive.parts:
+            joined = _JoinedFile(part_paths)
+            try:
+                _say_unpacking(archive, emit)
+                members = _unpack_with_keep(
+                    archive, joined, dest, dl_dir, cancel, changed, keep
+                )
+            finally:
+                joined.close()
+        else:
+            _say_unpacking(archive, emit)
+            members = _unpack_with_keep(
+                archive, source_path, dest, dl_dir, cancel, changed, keep
+            )
+        for path in cache_paths + part_paths:
+            _remove_cache_file(path)
+        _write_done(plan, archive, dest, members, pin=pin)
+    except (DirectError, zipfile.BadZipFile, ValueError) as exc:
+        # The extractors wrap a local write error (a full disk) in DirectError; that
+        # leaves the verified archive intact, so keep it for the next sync.
+        if not _caused_by_oserror(exc):
+            # A corrupt archive: drop it so the next sync fetches a fresh copy.
+            for path in cache_paths + part_paths:
+                _remove_cache_file(path)
+        raise
+
+
 def _sync_archive(
     plan: Plan,
     archive: Archive,
@@ -1667,6 +2376,8 @@ def _sync_archive(
     cancel: Cancel | None,
     workers: int = 4,
     changed: threading.Event | None = None,
+    pool: download_module.HttpClientPool | None = None,
+    keep: Mapping[str, tuple[int, str]] | None = None,
 ) -> None:
     _check_work_dirs(dest)
     dl_dir = dest / DL_DIR
@@ -1680,16 +2391,17 @@ def _sync_archive(
     # to the normal download-then-unpack path, which verifies the whole archive.
     whole_sha256 = bool(archive.source.sha256) or any(p.sha256 for p in archive.parts)
     pin = _pin_for(archive)
-    if (
-        archive.stream
-        and not whole_sha256
-        and archive.unwrap in (("7z",), ("zip",))
-        and changed is not None
-    ):
-        changed.set()  # a streamed archive is unpacked while it downloads
     if archive.stream and not whole_sha256 and archive.unwrap == ("7z",):
         members = _stream_7z_archive(
-            plan, archive, dest, emit=emit, cancel=cancel, workers=workers, pin=pin
+            plan,
+            archive,
+            dest,
+            emit=emit,
+            cancel=cancel,
+            workers=workers,
+            pin=pin,
+            changed=changed,
+            keep=keep,
         )
         if members is not None:
             try:
@@ -1707,6 +2419,8 @@ def _sync_archive(
                 cancel=cancel,
                 workers=workers,
                 pin=pin,
+                changed=changed,
+                keep=keep,
             )
             is not None
         ):
@@ -1717,76 +2431,454 @@ def _sync_archive(
             stop = Cancel()
             combined = _CombinedCancel(cancel, stop)
             overall = _OverallProgress(archive.parts, emit)
+            own_pool = pool is None
+            connections = pool if pool is not None else download_module.HttpClientPool()
+            release_thread = None if own_pool else getattr(connections, "release_thread", None)
 
             def fetch_part(item):
                 index, part, part_path = item
-                combined.raise_if_cancelled()
+                ok = False
+                try:
+                    combined.raise_if_cancelled()
+                    _download_remote(
+                        part,
+                        part_path,
+                        emit=overall.sink(part),
+                        cancel=combined,
+                        pool=connections,
+                        redirect_allowed=plan.redirect_allowed,
+                    )
+                    if pin is not None:
+                        _verify_pinned_file(archive, pin.parts[index], part_path, pin)
+                    overall.finished(part)
+                    ok = True
+                finally:
+                    if release_thread is not None:
+                        release_thread(reuse=ok)
+
+            executor = ThreadPoolExecutor(
+                initializer=download_module.inherit_transfer,
+                initargs=(download_module.current_transfer(),),
+                max_workers=max(1, min(workers, MAX_WORKERS)),
+            )
+            futures: list[Any] = []
+            try:
+                futures = [
+                    executor.submit(fetch_part, (i, part, path))
+                    for i, (part, path) in enumerate(
+                        zip(archive.parts, part_paths, strict=True)
+                    )
+                ]
+                pending = set(futures)
+                poll_timeout = 0.05 if cancel is not None else None
+                while pending:
+                    combined.raise_if_cancelled()
+                    done_set, pending = wait_futures(
+                        pending, timeout=poll_timeout, return_when=FIRST_COMPLETED
+                    )
+                    if done_set:
+                        for future in futures:
+                            if future in done_set:
+                                future.result()
+            except BaseException:
+                stop.cancel()
+                for future in futures:
+                    future.cancel()
+                if own_pool:
+                    # Close sockets before waiting on workers so a stalled read wakes at once.
+                    connections.close()
+                raise
+            finally:
+                executor.shutdown(wait=True)
+                if own_pool:
+                    connections.close()
+            overall.flush()
+            _hash_parts(part_paths, archive.source, archive.name, cancel=cancel)
+        else:
+            release_thread = None if pool is None else getattr(pool, "release_thread", None)
+            ok = False
+            try:
                 _download_remote(
-                    part, part_path, emit=overall.sink(part), cancel=combined,
-                    pool=connections, redirect_allowed=plan.redirect_allowed,
+                    archive.source,
+                    source_path,
+                    emit=emit,
+                    cancel=cancel,
+                    pool=pool,
+                    redirect_allowed=plan.redirect_allowed,
                 )
                 if pin is not None:
-                    _verify_pinned_file(archive, pin.parts[index], part_path, pin)
-                overall.finished(part)
-
-            with download_module.HttpClientPool() as connections:
-                with ThreadPoolExecutor(
-                    initializer=download_module.inherit_transfer,
-                    initargs=(download_module.current_transfer(),),
-                    max_workers=max(1, min(workers, MAX_WORKERS)),
-                ) as executor:
-                    futures = [
-                        executor.submit(fetch_part, (i, part, path))
-                        for i, (part, path) in enumerate(
-                            zip(archive.parts, part_paths, strict=True)
-                        )
-                    ]
-                    try:
-                        for future in as_completed(futures):
-                            future.result()
-                    except BaseException:
-                        stop.cancel()
-                        for future in futures:
-                            future.cancel()
-                        raise
-            overall.flush()
-            _hash_parts(part_paths, archive.source, archive.name)
-            if changed is not None:
-                changed.set()
-            joined = _JoinedFile(part_paths)
-            try:
-                members = _unwrap(archive, joined, dest, dl_dir, cancel)
+                    _verify_pinned_file(archive, pin.parts[0], source_path, pin)
+                ok = True
             finally:
-                joined.close()
-        else:
-            _download_remote(
-                archive.source,
-                source_path,
-                emit=emit,
-                cancel=cancel,
-                redirect_allowed=plan.redirect_allowed,
-            )
-            if pin is not None:
-                _verify_pinned_file(archive, pin.parts[0], source_path, pin)
-            if changed is not None:
-                changed.set()
-            members = _unwrap(archive, source_path, dest, dl_dir, cancel)
-
-        for path in cache_paths + part_paths:
-            _remove_file(path)
-        _write_done(plan, archive, dest, members, pin=pin)
+                if release_thread is not None:
+                    release_thread(reuse=ok)
+        _unpack_downloaded_archive(
+            plan,
+            archive,
+            dest,
+            dl_dir,
+            source_path,
+            part_paths,
+            cache_paths,
+            pin,
+            emit=emit,
+            cancel=cancel,
+            changed=changed,
+            keep=keep,
+        )
     except (DirectError, zipfile.BadZipFile, ValueError) as exc:
-        # The extractors wrap a local write error (a full disk) in DirectError; that
-        # leaves the verified archive intact, so keep it for the next sync.
-        if not isinstance(exc.__cause__, OSError):
-            # A corrupt archive: drop it so the next sync fetches a fresh copy.
+        if not _caused_by_oserror(exc):
             for path in cache_paths + part_paths:
-                _remove_file(path)
+                _remove_cache_file(path)
         raise
     except BaseException:
         # Cancelled, a full disk or any other interruption: keep the verified
         # archive (and any .part) so a later sync can resume instead of refetching.
         raise
+
+
+@dataclass
+class _PackSlot:
+    index: int
+    archive: Archive
+    verified: bool = False
+    streamed: bool = False
+    error: BaseException | None = None
+    dl_dir: Path | None = None
+    source_path: Path | None = None
+    part_paths: list[Path] = field(default_factory=list)
+    cache_paths: list[Path] = field(default_factory=list)
+    pin: ArchivePin | None = None
+
+
+def _sync_archives(
+    plan: Plan,
+    missing_archives: Sequence[Archive],
+    root: Path,
+    *,
+    emit: Emitter | None,
+    cancel: Cancel | None,
+    workers: int,
+    changed: threading.Event | None,
+) -> int:
+    """Install ``missing_archives`` with a 2-pack download/unpack pipeline (#1817).
+
+    Pack N+1 downloads on a shared keep-alive pool and worker pool while pack N finishes its
+    tail, verifies and unpacks. At most :data:`_MAX_INFLIGHT_PACKS` packs occupy ``.nadare-dl``
+    at once, and unpacking runs strictly in plan order on the calling thread.
+    """
+    if not missing_archives:
+        return 0
+    if cancel is not None:
+        cancel.raise_if_cancelled()
+
+    say = emitter(emit)
+    if len(missing_archives) == 1:
+        archive = missing_archives[0]
+        pack_progress = _PackProgress(missing_archives, emit)
+        say(Event("step", f"installing pack 1 of 1: {archive.name}"))
+        _sync_archive(
+            plan,
+            archive,
+            root,
+            emit=pack_progress.sink(0),
+            cancel=cancel,
+            workers=workers,
+            changed=changed,
+            keep=_later_member_owners(plan, archive, root, installing=missing_archives),
+        )
+        return 1
+
+    _check_work_dirs(root)
+    needed = _pack_space_needed(missing_archives, root / DL_DIR)
+    if needed:
+        diskspace.check_space(root, needed)
+
+    pack_progress = _PackProgress(missing_archives, emit)
+    stop = Cancel()
+    combined = _CombinedCancel(cancel, stop)
+    slots = [_PackSlot(index, archive) for index, archive in enumerate(missing_archives)]
+    state_cond = threading.Condition()
+    in_flight = 0
+    first_dl_error: list[BaseException] = []
+    submitted_futures: list[Any] = []
+    max_workers = max(1, min(workers, MAX_WORKERS))
+    connections = download_module.HttpClientPool()
+
+    def record_dl_error(slot: _PackSlot | None, exc: BaseException) -> None:
+        with state_cond:
+            if slot is not None and slot.error is None:
+                slot.error = exc
+            if not isinstance(exc, Cancelled | FutureCancelled) and not first_dl_error:
+                first_dl_error.append(exc)
+            stop.cancel()
+            for fut in submitted_futures:
+                fut.cancel()
+            state_cond.notify_all()
+
+    def download_single(slot: _PackSlot) -> None:
+        assert slot.source_path is not None
+        try:
+            combined.raise_if_cancelled()
+            _download_remote(
+                slot.archive.source,
+                slot.source_path,
+                emit=pack_progress.sink(slot.index),
+                cancel=combined,
+                pool=connections,
+                redirect_allowed=plan.redirect_allowed,
+            )
+            if slot.pin is not None:
+                _verify_pinned_file(slot.archive, slot.pin.parts[0], slot.source_path, slot.pin)
+            combined.raise_if_cancelled()
+            pack_progress.finished(slot.index)
+            with state_cond:
+                combined.raise_if_cancelled()
+                slot.verified = True
+                state_cond.notify_all()
+        except BaseException as exc:
+            if isinstance(exc, DirectError | zipfile.BadZipFile | ValueError):
+                if not _caused_by_oserror(exc):
+                    for path in slot.cache_paths:
+                        _remove_cache_file(path)
+            record_dl_error(slot, exc)
+
+    def download_part(
+        slot: _PackSlot,
+        part_idx: int,
+        part: RemoteFile,
+        part_path: Path,
+        overall: _OverallProgress,
+        remaining: list[int],
+        part_lock: threading.Lock,
+    ) -> None:
+        try:
+            combined.raise_if_cancelled()
+            _download_remote(
+                part,
+                part_path,
+                emit=overall.sink(part),
+                cancel=combined,
+                pool=connections,
+                redirect_allowed=plan.redirect_allowed,
+            )
+            if slot.pin is not None:
+                try:
+                    _verify_pinned_file(slot.archive, slot.pin.parts[part_idx], part_path, slot.pin)
+                except DirectError:
+                    _remove_cache_file(part_path)
+                    raise
+            combined.raise_if_cancelled()
+            overall.finished(part)
+            with part_lock:
+                remaining[0] -= 1
+                is_last = remaining[0] == 0
+            if is_last:
+                overall.flush()
+                combined.raise_if_cancelled()
+                try:
+                    _hash_parts(
+                        slot.part_paths, slot.archive.source, slot.archive.name, cancel=combined
+                    )
+                except DirectError:
+                    for path in slot.part_paths:
+                        _remove_cache_file(path)
+                    raise
+                combined.raise_if_cancelled()
+                pack_progress.finished(slot.index)
+                with state_cond:
+                    combined.raise_if_cancelled()
+                    slot.verified = True
+                    state_cond.notify_all()
+        except BaseException as exc:
+            record_dl_error(slot, exc)
+
+    def feed(dl_pool: ThreadPoolExecutor) -> None:
+        nonlocal in_flight
+        current_slot: _PackSlot | None = None
+        try:
+            for slot in slots:
+                current_slot = slot
+                streamed = _is_streamed_archive(slot.archive)
+                with state_cond:
+                    limit = 0 if streamed else _MAX_INFLIGHT_PACKS - 1
+                    while in_flight > limit and not combined.cancelled:
+                        state_cond.wait(timeout=0.05)
+                    if combined.cancelled:
+                        return
+                    in_flight += 1
+                    if streamed:
+                        slot.streamed = True
+                        state_cond.notify_all()
+                        while in_flight > 0 and not combined.cancelled:
+                            state_cond.wait(timeout=0.05)
+                        continue
+
+                _check_work_dirs(root)
+                dl_dir = root / DL_DIR
+                dl_dir.mkdir(parents=True, exist_ok=True)
+                slot.dl_dir = dl_dir
+                slot.source_path = _cache_path(dl_dir, slot.archive.source.path)
+                slot.part_paths = [_cache_path(dl_dir, p.path) for p in slot.archive.parts]
+                slot.cache_paths = [] if slot.archive.parts else [slot.source_path]
+                slot.pin = _pin_for(slot.archive)
+
+                if slot.archive.parts:
+                    overall = _OverallProgress(slot.archive.parts, pack_progress.sink(slot.index))
+                    remaining = [len(slot.archive.parts)]
+                    part_lock = threading.Lock()
+                    with state_cond:
+                        if combined.cancelled:
+                            return
+                        for part_idx, (part, part_path) in enumerate(
+                            zip(slot.archive.parts, slot.part_paths, strict=True)
+                        ):
+                            submitted_futures.append(
+                                dl_pool.submit(
+                                    download_part,
+                                    slot,
+                                    part_idx,
+                                    part,
+                                    part_path,
+                                    overall,
+                                    remaining,
+                                    part_lock,
+                                )
+                            )
+                else:
+                    with state_cond:
+                        if combined.cancelled:
+                            return
+                        submitted_futures.append(dl_pool.submit(download_single, slot))
+        except BaseException as exc:
+            record_dl_error(current_slot, exc)
+        finally:
+            with state_cond:
+                state_cond.notify_all()
+
+    unpack_error: BaseException | None = None
+    downloaded = 0
+    dl_pool = ThreadPoolExecutor(
+        initializer=download_module.inherit_transfer,
+        initargs=(download_module.current_transfer(),),
+        max_workers=max_workers,
+    )
+    try:
+        feeder = threading.Thread(
+            target=feed, args=(dl_pool,), name="nadare-pack-feeder", daemon=True
+        )
+        feeder.start()
+        try:
+            for number, slot in enumerate(slots, 1):
+                archive = slot.archive
+                if cancel is not None:
+                    cancel.raise_if_cancelled()
+                with state_cond:
+                    emit_step = slot.error is None and not stop.cancelled
+                if emit_step:
+                    say(
+                        Event(
+                            "step",
+                            f"installing pack {number} of {len(slots)}: {archive.name}",
+                        )
+                    )
+                pack_progress.set_foreground(slot.index)
+                while True:
+                    with state_cond:
+                        if (
+                            slot.verified
+                            or slot.streamed
+                            or slot.error is not None
+                            or combined.cancelled
+                        ):
+                            slot_error = slot.error
+                            is_verified = slot.verified
+                            is_streamed = slot.streamed
+                            break
+                        state_cond.wait(timeout=0.05)
+                if cancel is not None and cancel.cancelled:
+                    stop.cancel()
+                    with state_cond:
+                        for fut in submitted_futures:
+                            fut.cancel()
+                        state_cond.notify_all()
+                    cancel.raise_if_cancelled()
+                if slot_error is not None:
+                    raise slot_error
+                if stop.cancelled:
+                    break
+                if not (is_verified or is_streamed):
+                    break
+                if is_streamed:
+                    _sync_archive(
+                        plan,
+                        archive,
+                        root,
+                        emit=pack_progress.sink(slot.index),
+                        cancel=cancel,
+                        workers=workers,
+                        changed=changed,
+                        pool=connections,
+                        keep=_later_member_owners(plan, archive, root, installing=missing_archives),
+                    )
+                else:
+                    assert slot.dl_dir is not None and slot.source_path is not None
+                    _unpack_downloaded_archive(
+                        plan,
+                        archive,
+                        root,
+                        slot.dl_dir,
+                        slot.source_path,
+                        slot.part_paths,
+                        slot.cache_paths,
+                        slot.pin,
+                        emit=emit,
+                        cancel=cancel,
+                        changed=changed,
+                        keep=_later_member_owners(plan, archive, root, installing=missing_archives),
+                    )
+                downloaded += 1
+                with state_cond:
+                    in_flight -= 1
+                    state_cond.notify_all()
+        except BaseException as exc:
+            unpack_error = exc
+            stop.cancel()
+            with state_cond:
+                for fut in submitted_futures:
+                    fut.cancel()
+                state_cond.notify_all()
+        finally:
+            stop.cancel()
+            with state_cond:
+                state_cond.notify_all()
+            feeder.join()
+            # Close the sockets before waiting for the workers: a worker blocked in a
+            # stalled response read only wakes when its socket is shut down (Neon 2).
+            connections.close()
+    finally:
+        dl_pool.shutdown(wait=True)
+
+    if unpack_error is not None:
+        if (
+            isinstance(unpack_error, Cancelled | FutureCancelled)
+            and not (cancel is not None and cancel.cancelled)
+            and first_dl_error
+        ):
+            raise first_dl_error[0]
+        raise unpack_error
+    if first_dl_error:
+        raise first_dl_error[0]
+    if cancel is not None:
+        cancel.raise_if_cancelled()
+    return downloaded
+
+
+def _say_unpacking(archive: Archive, emit: Emitter | None) -> None:
+    """Tell the user a downloaded pack is being unpacked: with the bar full and no word, the
+    tens of seconds a large pack takes read as a finished install."""
+    name = PurePosixPath(archive.source.path).name or archive.name
+    emitter(emit)(Event("step", f"Unpacking {name}…"))
 
 
 _UNWRAPS = frozenset({("zip",), ("zip", "zip"), ("7z",), ("slices",), ("hdiff",)})
@@ -1801,8 +2893,19 @@ def _is_https_or_loopback(url: Any) -> bool:
     return url.startswith(("http://127.0.0.1:", "http://localhost:"))
 
 
+_RANGE_PIECE = re.compile(r"(?P<part>.+\.part)(?:-\d+(?:\.done)?|\.ranges\.json)")
+
+
+def _range_piece_part(name: str) -> str | None:
+    """The ``.part`` a range-download piece belongs to (``x.part-3``, ``x.part-3.done``,
+    ``x.part.ranges.json``), or None for any other name (#1833)."""
+    match = _RANGE_PIECE.fullmatch(name)
+    return match["part"] if match else None
+
+
 def _remove_stale_parts(root: Path, keep: set[str], managed: set[str]) -> None:
-    """Best-effort removal of abandoned ``*.part`` files Nadare itself staged in ``root``.
+    """Best-effort removal of abandoned ``*.part`` files Nadare itself staged in ``root``,
+    and the pieces of a range download of one (#1833).
 
     Only these go: anything inside the download cache, a ``*.nadare-new.part`` or a packed
     file's compressed copy (``*.nadare-gz`` and its ``.part``; names only Nadare uses), and the
@@ -1815,13 +2918,15 @@ def _remove_stale_parts(root: Path, keep: set[str], managed: set[str]) -> None:
                 with contextlib.suppress(OSError):
                     (Path(dirpath) / name).unlink()
                 continue
-            if not name.endswith(".part"):
+            part_name = _range_piece_part(name) or name
+            if not part_name.endswith(".part"):
                 continue
             path = Path(dirpath) / name
             rel = path.relative_to(root).as_posix()
-            if rel in keep:
+            part_rel = (Path(dirpath) / part_name).relative_to(root).as_posix()
+            if rel in keep or part_rel in keep:
                 continue
-            staged = rel[: -len(".part")]
+            staged = part_rel[: -len(".part")]
             ours = (
                 rel.startswith(DL_DIR + "/")
                 or staged.endswith((".nadare-new", PACKED_SUFFIX))
@@ -1835,6 +2940,42 @@ def _remove_stale_parts(root: Path, keep: set[str], managed: set[str]) -> None:
                 pass
 
 
+def _check_cache_path_clash(first: str, second: str) -> None:
+    """Refuse two declared archive cache paths that would share files in ``.nadare-dl``.
+
+    :func:`download` derives ``<path>.part`` and range pieces ``<path>.part-N`` /
+    ``<path>.part-N.done`` / ``<path>.part.ranges.json`` from a cache path; a replacement
+    download stages ``<path>.nadare-new`` and a packed download stages ``<path>.nadare-gz``,
+    each with the same ``.part`` derivatives. A declared path equal to any of another pack's
+    derived names would share the transfer with it (SEC F1, Neon 1, #1854 item 5). A path that
+    needs another pack's file or derived file as a folder cannot coexist with it either.
+    """
+    if first == second:
+        raise DirectError(f"duplicate archive cache path in plan: {first!r}")
+    for path, other in ((first, second), (second, first)):
+        if path in (other + ".nadare-new", other + PACKED_SUFFIX):
+            raise DirectError(
+                f"archive cache paths in the plan clash: {path!r} is the partial or "
+                f"temporary file of {other!r}"
+            )
+        for base in (other, other + ".nadare-new", other + PACKED_SUFFIX):
+            if path == base + ".part":
+                raise DirectError(
+                    f"archive cache paths in the plan clash: {path!r} is the partial or "
+                    f"temporary file of {other!r}"
+                )
+            if path.startswith((base + ".part-", base + ".part.")):
+                raise DirectError(
+                    f"archive cache paths in the plan clash: {path!r} is a piece of the "
+                    f"download of {other!r}"
+                )
+            if path.startswith((base + "/", base + ".part/")):
+                raise DirectError(
+                    f"archive cache paths in the plan clash: {other!r} needs a file where "
+                    f"{path!r} needs a folder"
+                )
+
+
 def _validate_plan(plan: Plan) -> None:
     seen: set[str] = set()
     for rf in plan.files:
@@ -1844,13 +2985,27 @@ def _validate_plan(plan: Plan) -> None:
         seen.add(normalised)
         if rf.packed is not None and rf.packed.codec not in PACKED_CODECS:
             raise DirectError(f"unsupported packing for {rf.path}: {rf.packed.codec!r}")
+    seen_archive_paths: set[str] = set()
+    declared_cache_paths: list[str] = []
     for archive in plan.archives:
         if archive.unwrap not in _UNWRAPS:
             raise DirectError(f"unsupported archive unwrap for {archive.name}: {archive.unwrap!r}")
         safe_relative_path(archive.name)
         safe_relative_path(archive.source.path)
-        for part in archive.parts:
-            safe_relative_path(part.path)
+        for item in archive.parts or (archive.source,):
+            normalised = safe_relative_path(item.path)
+            if normalised in seen_archive_paths:
+                raise DirectError(f"duplicate archive cache path in plan: {normalised!r}")
+            for other in declared_cache_paths:
+                _check_cache_path_clash(normalised, other)
+            first = normalised.split("/", 1)[0]
+            if first == "stream" or first.startswith(_STAGING_PREFIXES):
+                raise DirectError(
+                    f"archive cache path {normalised!r} uses a name Nadare keeps for its own "
+                    "downloads"
+                )
+            seen_archive_paths.add(normalised)
+            declared_cache_paths.append(normalised)
         if archive.unwrap == ("slices",):
             if not archive.members:
                 raise DirectError(f"slices archive {archive.name!r} has no members")
@@ -1864,6 +3019,12 @@ def _validate_plan(plan: Plan) -> None:
             raise DirectError(
                 f"archive {archive.name!r} has members but is not a slices archive"
             )
+        if archive.strip_prefix:
+            if archive.unwrap not in (("zip",), ("zip", "zip")):
+                raise DirectError(
+                    f"strip_prefix is only supported for zip archives: {archive.name!r}"
+                )
+            safe_relative_path(archive.strip_prefix.rstrip("/"))
     if plan.redirect_allowed is not None:
         if plan.sophon:
             raise DirectError("a redirect allow-list cannot be applied to Sophon packages")
@@ -2255,13 +3416,16 @@ def _superseded_records(plan: Plan, root: Path) -> list[Path]:
     """Records of earlier versions of a slotted archive of ``plan`` (renamed every version).
 
     A record with the same slot and another name is one. A record whose ``game`` names another
-    game is never one. A record written before records named their game has no ``game``; it
-    counts only when ``plan`` has a single archive (so every other archive record in that
-    game's folder can only be an older version of it, while beside several archives it may be
-    DLC) and its URL is from a host the plan downloads from.
+    game is never one. When ``plan`` lists the whole install (``prune_files``), every other
+    record of its game is one, slotted or not, even when the new version has no archive at all
+    (NTE/ToF: a version may ship a Pak's files loose, #1824). Otherwise a record without a slot
+    (written before its archive had one) counts only when ``plan`` has a single archive: then
+    every other archive record in that game's folder can only be an older version of it, while
+    beside several archives it may be DLC. A record written before records named their game
+    has no ``game``; it also needs a URL from a host the plan downloads from.
     """
-    slots = {archive.slot for archive in plan.archives if archive.slot}
-    if not slots:
+    slots = {archive.slot for archive in plan.archives if archive.slot and not archive.additive}
+    if not slots and not plan.prune_files:
         return []
     current = {safe_relative_path(archive.name) + ".done" for archive in plan.archives}
     state = root / STATE_DIR
@@ -2282,7 +3446,8 @@ def _superseded_records(plan: Plan, root: Path) -> list[Path]:
             continue
         slot = record.get("slot")
         if not (
-            (isinstance(slot, str) and slot in slots)
+            plan.prune_files
+            or (isinstance(slot, str) and slot in slots)
             or (slot is None and len(plan.archives) == 1)
         ):
             continue
@@ -2292,6 +3457,22 @@ def _superseded_records(plan: Plan, root: Path) -> list[Path]:
     return old
 
 
+def _record_order(record_path: Path, record: Mapping[str, Any]) -> tuple[int, int, int, str]:
+    """When a receipt was applied: its recorded sequence, else base before additive.
+
+    Older receipts have no ``sequence``: order them base first, then by modification time
+    (``lstat``: never follow a link planted at a receipt path) and finally by name.
+    """
+    sequence = record.get("sequence")
+    if isinstance(sequence, int) and not isinstance(sequence, bool):
+        return (1, sequence, 0, record_path.name)
+    try:
+        modified = record_path.lstat().st_mtime_ns
+    except OSError:
+        modified = 0
+    return (0, 1 if record.get("additive") is True else 0, modified, record_path.name)
+
+
 def _recorded_members(plan: Plan, root: Path) -> dict[str, dict[str, Any]]:
     """What the archives of ``plan`` owned before this sync: ``{path: {"size", "crc32"}}``.
 
@@ -2299,9 +3480,14 @@ def _recorded_members(plan: Plan, root: Path) -> dict[str, dict[str, Any]]:
     inventory counts (a truncated or partial one cannot say what is gone)."""
     owned: dict[str, dict[str, Any]] = {}
     paths = [root / STATE_DIR / f"{safe_relative_path(a.name)}.done" for a in plan.archives]
+    records = []
     for record_path in [*_superseded_records(plan, root), *paths]:
         record = _read_done(record_path)
-        if record is None or record.get("members_truncated"):
+        if record is not None:
+            records.append((_record_order(record_path, record), record))
+    # Deltas overwrite base files: the last applied receipt owns their current checksums.
+    for _, record in sorted(records, key=lambda item: item[0]):
+        if record.get("members_truncated"):
             continue
         members, sizes, crcs = (
             record.get("members"),
@@ -2314,6 +3500,192 @@ def _recorded_members(plan: Plan, root: Path) -> dict[str, dict[str, Any]]:
             if isinstance(member, str) and member in sizes and member in crcs:
                 owned[member] = {"size": sizes[member], "crc32": crcs[member]}
     return owned
+
+
+_FILE_LEDGER_LIMIT = 64 << 20
+
+
+def _file_ledger_path(plan: Plan, root: Path) -> Path:
+    name = f"files-{plan.game_tag}.json"
+    if "/" in name or "\\" in name or name.startswith("."):
+        raise DirectError(f"unsafe game tag for a file ledger: {plan.game_tag!r}")
+    return root / STATE_DIR / name
+
+
+def _read_file_ledger(plan: Plan, root: Path) -> dict[str, dict[str, Any]]:
+    """The files the last successful sync of ``plan``'s game installed: ``{path: {size, md5}}``.
+
+    Empty when absent, a link, too big, damaged or another game's: nothing is then removed."""
+    try:
+        fd = os.open(_file_ledger_path(plan, root), os.O_RDONLY | os.O_NOFOLLOW)
+    except (OSError, DirectError):
+        return {}
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return {}
+            raw = handle.read(_FILE_LEDGER_LIMIT + 1)
+        if len(raw) > _FILE_LEDGER_LIMIT:
+            return {}
+        payload = json.loads(raw)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("game") != plan.game_tag:
+        return {}
+    files = payload.get("files")
+    return _usable_ledger_entries(files) if isinstance(files, dict) else {}
+
+
+def _usable_ledger_entries(files: Mapping[Any, Any]) -> dict[str, dict[str, Any]]:
+    """The entries of a ledger (or a caller's seed) that name a safe path, a size and an md5."""
+    usable: dict[str, dict[str, Any]] = {}
+    for path, entry in files.items():
+        if not isinstance(path, str) or not isinstance(entry, dict):
+            continue
+        size, md5 = entry.get("size"), entry.get("md5")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            continue
+        if not isinstance(md5, str) or len(md5) != 32:
+            continue
+        try:
+            path = safe_relative_path(path)
+        except DirectError:
+            continue
+        if path.split("/", 1)[0] in (STATE_DIR, DL_DIR):
+            continue
+        usable[path] = {"size": size, "md5": md5.lower()}
+    return usable
+
+
+_CRC32_TEXT = re.compile(r"[0-9A-Fa-f]{1,8}")
+
+
+def _pending_prune_path(plan: Plan, root: Path) -> Path:
+    name = f"prune-pending-{plan.game_tag}.json"
+    if "/" in name or "\\" in name:
+        raise DirectError(f"unsafe game tag for a prune list: {plan.game_tag!r}")
+    return root / STATE_DIR / name
+
+
+def _read_pending_prune(plan: Plan, root: Path) -> dict[str, dict[str, Any]]:
+    """What the archives and ledger owned when a sync of this game that never finished began.
+
+    Fixed-name archives (R1999 package-00..19) replace their record as each one finishes, so
+    after a stop only this still says what the older version owned (#1829). Entries keep their
+    own check (``crc32`` or ``md5`` and ``size``); anything unreadable counts as nothing.
+    """
+    try:
+        fd = os.open(_pending_prune_path(plan, root), os.O_RDONLY | os.O_NOFOLLOW)
+    except (OSError, DirectError):
+        return {}
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return {}
+            raw = handle.read(_FILE_LEDGER_LIMIT + 1)
+        if len(raw) > _FILE_LEDGER_LIMIT:
+            return {}
+        payload = json.loads(raw)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("game") != plan.game_tag:
+        return {}
+    files = payload.get("files")
+    if not isinstance(files, dict):
+        return {}
+    usable = _usable_ledger_entries(
+        {p: e for p, e in files.items() if isinstance(e, dict) and "md5" in e}
+    )
+    for path, entry in files.items():
+        if not isinstance(path, str) or not isinstance(entry, dict) or "md5" in entry:
+            continue
+        size, crc = entry.get("size"), entry.get("crc32")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            continue
+        if not (isinstance(crc, str) and _CRC32_TEXT.fullmatch(crc)):
+            continue  # records keep CRC-32 as hex text
+        try:
+            safe = safe_relative_path(path)
+        except DirectError:
+            continue
+        if safe.split("/", 1)[0] in (STATE_DIR, DL_DIR):
+            continue
+        usable[safe] = {"size": size, "crc32": crc}
+    return usable
+
+
+def _write_pending_prune(plan: Plan, root: Path, owned: Mapping[str, Any]) -> None:
+    """Keep ``owned`` until a sync of this game completes (#1829); nothing to keep, no file."""
+    if not owned:
+        return
+    try:
+        if not root.is_dir():
+            return  # a first install: there is nothing it could have dropped
+        _write_record(_pending_prune_path(plan, root), {"game": plan.game_tag, "files": owned})
+    except (OSError, DirectError):
+        log.debug("could not keep the pending prune list", exc_info=True)
+
+
+def _clear_pending_prune(plan: Plan, root: Path) -> None:
+    try:
+        _pending_prune_path(plan, root).unlink(missing_ok=True)
+    except (OSError, DirectError):
+        log.debug("could not remove the pending prune list", exc_info=True)
+
+
+def _write_file_ledger(plan: Plan, root: Path) -> None:
+    files = {
+        safe_relative_path(rf.path): {"size": rf.size, "md5": rf.md5.lower()}
+        for rf in plan.files
+        if rf.md5 and rf.size is not None
+    }
+    try:
+        _write_record(
+            _file_ledger_path(plan, root),
+            {"game": plan.game_tag, "version": str(plan.version), "files": files},
+        )
+    except (OSError, DirectError) as exc:
+        log.debug("%s: could not record the installed files: %s", plan.game_tag, exc)
+
+
+def _dropped_loose_files(
+    plan: Plan,
+    root: Path,
+    keep: Iterable[str] = (),
+    seed: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Ledger entries ``plan`` (and ``keep``) no longer lists; a case-only rename is no drop.
+
+    Without a ledger, ``seed`` (the caller's own record of the previous version) stands in."""
+    if not plan.prune_files:
+        return {}
+    current = {safe_relative_path(rf.path).lower() for rf in plan.files}
+    current.update(name.lower() for name in keep)
+    before = _read_file_ledger(plan, root)
+    if not before and seed:
+        before = _usable_ledger_entries(seed)
+    return {p: e for p, e in before.items() if p.lower() not in current}
+
+
+def prune_dropped_files(
+    plan: Plan,
+    root: Path | str,
+    *,
+    keep: Iterable[str] = (),
+    seed: Mapping[str, Mapping[str, Any]] | None = None,
+) -> int:
+    """For an updater that synced only part of ``plan`` (#1825, CZN): remove the files the
+    previous version installed that ``plan`` no longer lists, then record ``plan`` as installed.
+
+    Call it only after the update succeeded, holding the install lock. ``plan`` is the whole
+    version (every file it ships); ``keep`` names paths the updater never manages and so must
+    never remove. The same guards as a full sync apply. Returns how many files were removed.
+    """
+    root = Path(root)
+    plan = replace(plan, prune_files=True)
+    removed = _prune_dropped_members(plan, root, _dropped_loose_files(plan, root, keep, seed))
+    _write_file_ledger(plan, root)
+    return removed
 
 
 def _prune_dropped_members(
@@ -2334,6 +3706,7 @@ def _prune_dropped_members(
     if not before:
         return 0
     owned = {safe_relative_path(rf.path) for rf in plan.files}
+    owned_lower = {path.lower() for path in owned}
     state = root / STATE_DIR
     try:
         # An archive name may hold folders (its record is then in a sub-folder): the glob must
@@ -2356,16 +3729,35 @@ def _prune_dropped_members(
             owned.update(line for line in ledger.read_text(encoding="utf-8").splitlines() if line)
         except (OSError, UnicodeError):
             return 0
+    try:
+        own_ledger: Path | None = _file_ledger_path(plan, root)
+    except DirectError:
+        own_ledger = None
+    for ledger in state.glob("files-*.json"):
+        if ledger == own_ledger:
+            continue  # this plan's previous ledger is what ``before`` came from
+        try:
+            payload = json.loads(ledger.read_bytes())
+            listed = payload["files"]
+        except (OSError, ValueError, TypeError, KeyError):
+            return 0  # cannot tell what another install owns: remove nothing
+        if not isinstance(listed, dict):
+            return 0
+        owned.update(path for path in listed if isinstance(path, str))
+        owned_lower.update(path.lower() for path in listed if isinstance(path, str))
     removed = 0
     for member, old in before.items():
-        if member in owned:
+        if member in owned or ("md5" in old and member.lower() in owned_lower):
             continue
         try:
             path = _safe_destination_path(root, safe_relative_path(member))
             info = path.lstat()
             if not stat.S_ISREG(info.st_mode) or info.st_size != old["size"]:
                 continue
-            if _crc32_file(path) != str(old["crc32"]).upper():
+            if "md5" in old:  # a loose file's ledger entry (#1825)
+                if _md5_file(path) != old["md5"]:
+                    continue
+            elif _crc32_file(path) != str(old["crc32"]).upper():
                 continue
             path.unlink()
             removed += 1
@@ -2388,6 +3780,7 @@ def sync(
     cancel: Cancel | None = None,
     workers: int = 4,
     check_workers: int | None = None,
+    verify: bool = True,
     changed: threading.Event | None = None,
     chunk_cache: Path | None = None,
     lock: bool = True,
@@ -2395,10 +3788,11 @@ def sync(
     """Install ``plan`` into ``dest``. Returns ``{"downloaded": n, "skipped": m}``
     counting files plus archives. Idempotent: a second run fetches nothing.
 
-    ``changed`` is set as soon as a file in ``dest`` was replaced or an archive started
-    to unpack, so a caller whose sync fails can tell an untouched install from a half-updated
-    one (replacements are per file, there is no rollback). ``lock=False`` only for a caller
-    that already holds :func:`install_lock` for ``dest``."""
+    ``verify=False`` compares sizes only where a caller just wrote every file from an archive
+    (the md5 pass is Verify's job). ``changed`` is set as soon as a file in ``dest`` was replaced
+    or an archive started to unpack, so a caller whose sync fails can tell an untouched install
+    from a half-updated one (replacements are per file, there is no rollback). ``lock=False`` only
+    for a caller that already holds :func:`install_lock` for ``dest``."""
     _validate_plan(plan)
     root = Path(dest).expanduser()
     if root.exists() and not root.is_dir():
@@ -2408,7 +3802,7 @@ def sync(
         _install_lock(root) if lock else contextlib.nullcontext(),
     ):
         measurement = download_module.current_transfer()
-        concurrent_files = max([len(plan.files), *(len(a.parts) for a in plan.archives)])
+        concurrent_files = max(len(plan.files), _peak_archive_concurrency(plan.archives))
         measurement.range_workers = max(
             1, min(workers, MAX_WORKERS) // max(1, min(concurrent_files, workers))
         )
@@ -2419,6 +3813,7 @@ def sync(
             cancel=cancel,
             workers=workers,
             check_workers=check_workers,
+            verify=verify,
             changed=changed,
             chunk_cache=chunk_cache,
         )
@@ -2432,6 +3827,7 @@ def _sync(
     cancel: Cancel | None,
     workers: int,
     check_workers: int | None = None,
+    verify: bool = True,
     changed: threading.Event | None = None,
     chunk_cache: Path | None = None,
 ) -> dict[str, int]:
@@ -2440,16 +3836,25 @@ def _sync(
         cancel.raise_if_cancelled()
     _sweep_stale_staging(root)
     superseded = _superseded_records(plan, root)
-    owned_before = _recorded_members(plan, root)
+    # Loose ledger first: an archive record that also lists a path has the final say. What a
+    # stopped earlier sync saw comes first of all: since then a finished archive's record may
+    # already be the new version's (#1829).
+    owned_before = {
+        **_read_pending_prune(plan, root),
+        **_dropped_loose_files(plan, root),
+        **_recorded_members(plan, root),
+    }
+    _write_pending_prune(plan, root, owned_before)
 
     def checking(done: int, total: int) -> None:
         # A step, not "progress": the bar and its consumers mean download progress.
         say(Event("step", f"Checking the files already on disk: {done:,} of {total:,}"))
 
     missing_files, missing_archives = plan_missing(
-        plan, root, check_workers=check_workers, cancel=cancel, progress=checking
+        plan, root, verify=verify, check_workers=check_workers, cancel=cancel, progress=checking
     )
     downloaded = 0
+    fetched_bytes = 0
     stop = Cancel()
     combined = _CombinedCancel(cancel, stop)
 
@@ -2471,7 +3876,7 @@ def _sync(
                     _take_cached_file(cached, target)
                     if changed is not None:
                         changed.set()
-                    overall.finished(rf)
+                    overall.from_cache(rf)
                     return
             _download_remote(
                 rf,
@@ -2510,6 +3915,7 @@ def _sync(
         if first_error is not None:
             raise first_error
         overall.flush()
+        fetched_bytes += overall.fetched
 
     if missing_files and missing_archives:
         # The loose files may have been most of the bytes (NTE: 89 GB, then 7 packs); say that
@@ -2518,24 +3924,36 @@ def _sync(
         packs = f"{len(missing_archives)} pack{'s' if len(missing_archives) != 1 else ''}"
         total = f" ({diskspace.human_size(size)})" if size else ""
         say(Event("step", f"Second pass: {packs}{total}"))
-    for number, archive in enumerate(missing_archives, 1):
-        if cancel is not None:
-            cancel.raise_if_cancelled()
-        say(Event("step", f"installing pack {number} of {len(missing_archives)}: {archive.name}"))
-        _sync_archive(
-            plan, archive, root, emit=emit, cancel=cancel, workers=workers, changed=changed
+    if missing_archives:
+        # Count what really crossed the wire for the packs: a verified archive reused from
+        # .nadare-dl after a stop fetches nothing (#1830, sim-pack F1). The transfer meter
+        # already sums every body byte read, so snapshot it around the pack phase.
+        measurement = download_module.current_transfer()
+        fetched_before = getattr(measurement, "bytes", 0)
+        downloaded += _sync_archives(
+            plan,
+            missing_archives,
+            root,
+            emit=emit,
+            cancel=cancel,
+            workers=workers,
+            changed=changed,
         )
-        downloaded += 1
+        fetched_bytes += max(0, getattr(measurement, "bytes", 0) - fetched_before)
 
     for pkg in plan.sophon:
         if cancel is not None:
             cancel.raise_if_cancelled()
         say(Event("step", f"installing {pkg.name}"))
-        if changed is not None:
-            changed.set()  # chunks are written into the files as they arrive
         try:
             sophon.sync_package(
-                pkg, root, emit=emit, cancel=cancel, workers=workers, chunk_cache=chunk_cache
+                pkg,
+                root,
+                emit=emit,
+                cancel=cancel,
+                workers=workers,
+                chunk_cache=chunk_cache,
+                changed=changed,
             )
         except sophon.SophonError as exc:
             raise DirectError(str(exc)) from exc
@@ -2558,7 +3976,10 @@ def _sync(
         pass
 
     _prune_dropped_members(plan, root, owned_before, superseded)
+    if plan.prune_files:
+        _write_file_ledger(plan, root)
+    _clear_pending_prune(plan, root)
     skipped = (
         len(plan.files) + len(plan.archives) + len(plan.sophon) - downloaded
     )
-    return {"downloaded": downloaded, "skipped": skipped}
+    return SyncSummary(downloaded=downloaded, skipped=skipped, fetched_bytes=fetched_bytes)

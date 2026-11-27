@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from runner_layout import make_runner as make_runner_layout
 
 from nadare.core import runners
 
@@ -29,10 +30,7 @@ def root(tmp_path, monkeypatch):
 
 
 def _make(root: Path, name: str) -> Path:
-    d = root / name
-    d.mkdir()
-    (d / "proton").write_text("#!/bin/sh\n")
-    return d
+    return make_runner_layout(root / name)
 
 
 OLD = "dwproton-11.0-14-x86_64"

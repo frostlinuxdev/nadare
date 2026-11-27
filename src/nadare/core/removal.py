@@ -1318,7 +1318,7 @@ def _remove_locked(
                     except OSError as exc:
                         result.warnings.append(f"could not remove data dir: {exc}")
 
-    # The owned VKD3D cache is disposable even when the profile's data is kept.
+    # The owned per-game cache folder is disposable even when the profile's data is kept.
     # Check every component below cache_dir: resolving a linked parent could delete
     # another game's cache or user files. Never follow profile environment overrides.
     if not keep_profile:
@@ -1339,8 +1339,8 @@ def _remove_locked(
                     linked = linked or current.is_symlink()
                 if linked:
                     result.warnings.append(f"refusing to delete linked shader cache: {target}")
-                elif target.is_dir():
-                    outcome = _rmtree_safely(target)
+                elif target.parent.is_dir():
+                    outcome = _rmtree_safely(target.parent)
                     for mount in outcome.mounts:
                         result.warnings.append(
                             f"shader cache {mount} is a mounted drive, left alone"

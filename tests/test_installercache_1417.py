@@ -2,7 +2,7 @@
 # Copyright (C) 2026 Nadare contributors
 """#1417 phase 2b: installers are kept only while a library game needs them.
 
-File names are the ones measured on the test desktop and flxpc (2026-11-16).
+File names are the ones measured on the test desktop and an NVIDIA PC (2026-11-16).
 """
 
 from __future__ import annotations

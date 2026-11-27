@@ -125,6 +125,7 @@ from .main_window_parts.selfupdate import (
 from .main_window_parts.shared import (
     DOWNLOAD_CONFIRM_BYTES,
 )
+from .main_window_parts.shortcuts import ShortcutsMixin, shortcut_state
 from .main_window_parts.store_actions import (
     StoreActionsMixin,
 )
@@ -163,6 +164,17 @@ STATUS_ERROR_MAX_INTERVAL_MS = 10 * 60_000
 log = logging.getLogger(__name__)
 
 
+def game_log_folders(profiles: Any) -> dict[str, tuple[Path | None, Path | None]]:
+    """Each game's (install, prefix), for the logs the game wrote itself in the log zip."""
+    from ..core import gamelogs
+
+    return {
+        name: gamelogs.folders(profile, name=name)
+        for name, profile in dict(profiles).items()
+        if isinstance(profile, dict)
+    }
+
+
 class MainWindow(
     AccountsMixin,
     BannersMixin,
@@ -174,6 +186,7 @@ class MainWindow(
     ProbesMixin,
     RemovalMixin,
     SelfUpdateMixin,
+    ShortcutsMixin,
     StoreActionsMixin,
     WindowStateMixin,
     PredownloadMixin,
@@ -286,6 +299,9 @@ class MainWindow(
         self._update_checked: dict[str, float] = {}
         #: Profiles whose Remember-me change arrived while a worker owned them.
         self._remember_pending: set[str] = set()
+        #: Backend kinds whose patch index is currently being refreshed in the background.
+        self._patch_refreshing: set[str] = set()
+        self._patch_refresh_tasks: dict[str, Any] = {}
         #: Startup status probes waiting for a free slot, and the ones running (#388 F-07).
         self._probe_queue: deque[str] = deque()
         self._probe_active: dict[str, float] = {}  # profile -> when its probe started
@@ -337,6 +353,7 @@ class MainWindow(
         self._start_notices_check()
         self._start_holds_check()
         self._start_steam_shortcut_cleanup()
+        self._start_shortcut_repair()
         # After start-up settles: a bumped runner pin is fetched before the next Play (#1425).
         QTimer.singleShot(20_000, self._start_runner_prefetch)
         QTimer.singleShot(3_000, self._start_sandbox_broad_check)
@@ -522,10 +539,14 @@ class MainWindow(
         self.game.console_preference_changed.connect(self._save_console_preference)
         self.game.remove_requested.connect(self._on_remove_requested)
         self.game.move_requested.connect(self._open_move)
+        self.game.shortcut_requested.connect(self._on_shortcut_requested)
+        self.game.shortcut_state = shortcut_state
         self.library.remove_game.connect(self._on_remove_requested)
         self.library.favourite_toggled.connect(self._on_favourite_toggled)
         self.game.report_requested.connect(self._show_support_report)
         self.game.steam_setup_requested.connect(self._open_steam_setup)
+        self.game.patch_toggled.connect(self._on_patch_toggled)
+        self.game.patch_update_requested.connect(self._on_patch_update_requested)
         self.game.safety_check_requested.connect(self._run_safety_check)
         self.game.safety_dismissed.connect(self._dismiss_safety)
         self.settings.saved.connect(self._on_settings_saved)
@@ -933,6 +954,8 @@ class MainWindow(
             bool(self.config.profiles[profile].get("remember_me", False)),
         )
         self._sync_sandbox(profile)
+        self._sync_patch(profile)
+        self._start_patch_index_refresh(profile)
         self.stack.setCurrentIndex(PAGE_GAME)
         self._set_active_nav("library")
         self.sidebar_games.set_active(profile)
@@ -1002,6 +1025,86 @@ class MainWindow(
         task = ReportTask(dict(self.config.data), profile, getattr(self.config, "path", None))
         task.signals.finished.connect(self._report_dialog.set_report)
         QThreadPool.globalInstance().start(task)
+
+    def _patch_spec(self, profile: str):
+        from ..core import patchspecs
+
+        data = self.config.profiles.get(profile) or {}
+        specs = patchspecs.specs_for(str(data.get("backend") or ""))
+        return specs[0] if specs else None
+
+    def _sync_patch(self, profile: str) -> None:
+        """Tick the English patch switch when the install holds the patch (#1866)."""
+        from ..core import patchops
+
+        spec = self._patch_spec(profile)
+        if spec is None or profile != self._current_profile:
+            return
+        try:
+            backend = core_backends.create(profile, self.config)
+        except core_backends.BackendError:
+            self.game.set_patch(False)
+            return
+        applied = spec.id in patchops.recorded(backend)
+        outdated = applied and patchops.is_outdated(backend, spec)
+        self.game.set_patch(applied, outdated=outdated, note=patchops.page_note(backend, spec))
+
+    def _start_patch_index_refresh(self, profile: str) -> None:
+        """Refresh patch index pins once off the GUI thread when opening a patched game."""
+        from ..core import patchspecs
+        from .workers import CallTask
+
+        if self._closing:
+            return
+        data = self.config.profiles.get(profile) or {}
+        kind = str(data.get("backend") or "")
+        if not kind or not patchspecs.SPECS.get(kind) or kind in self._patch_refreshing:
+            return
+        self._patch_refreshing.add(kind)
+        task = CallTask(lambda k=kind: patchspecs.refresh(k))
+        self._patch_refresh_tasks[kind] = task
+        task.signals.done.connect(lambda _specs, k=kind: self._on_patch_index_refreshed(k))
+        task.signals.failed.connect(lambda _err, k=kind: self._on_patch_index_refreshed(k))
+        QThreadPool.globalInstance().start(task)
+
+    def _on_patch_index_refreshed(self, kind: str) -> None:
+        self._patch_refreshing.discard(kind)
+        self._patch_refresh_tasks.pop(kind, None)
+        current = self._current_profile
+        if self._closing or not current:
+            return
+        data = self.config.profiles.get(current) or {}
+        if str(data.get("backend") or "") != kind:
+            return
+        self._sync_patch(current)
+
+    def _confirm_patch(self, spec) -> bool:
+        from . import patch_choice
+
+        choice = patch_choice.offer(spec)
+        box = QMessageBox(QMessageBox.Icon.Question, choice.title, choice.text, parent=self)
+        go = box.addButton(choice.button, QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        return box.clickedButton() is go
+
+    def _on_patch_toggled(self, profile: str, on: bool) -> None:
+        """The English patch switch: on asks about the risk, then applies; off removes."""
+        spec = self._patch_spec(profile)
+        if spec is None:
+            return
+        if on and not self._confirm_patch(spec):
+            self._sync_patch(profile)  # said no: the switch shows the files again
+            return
+        self._start(profile, "apply_patch" if on else "remove_patch", spec.id)
+
+    def _on_patch_update_requested(self, profile: str) -> None:
+        """Update an applied English patch to the newer pinned upload."""
+        spec = self._patch_spec(profile)
+        if spec is None:
+            return
+        self._start(profile, "update_patch", spec.id)
 
     def _open_steam_setup(self) -> None:
         """Open the Set up checklist for the Steam game on the open page."""
@@ -1131,7 +1234,10 @@ class MainWindow(
         if profile not in self.config.profiles:
             profile = self.config.active
         self._logs_dialog = LogsDialog(
-            list(self.config.profiles), profile=profile, parent=self
+            list(self.config.profiles),
+            profile=profile,
+            parent=self,
+            game_folders=game_log_folders(self.config.profiles),
         )
         self._logs_dialog.report_requested.connect(self._show_support_report)
         self._logs_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -1307,17 +1413,19 @@ class MainWindow(
         return True
 
     def _has_direct_manifest(self, profile: str) -> bool:
-        """Whether this profile's Yostar backend really uses a published manifest."""
+        """Whether this profile's game has a background update check (manifest, or FGO's)."""
         data = self.config.profiles.get(profile) or {}
         kind = str(data.get("backend") or "")
         if kind == "stellasora-yostar" or kind in DIRECT_KINDS:
             return True  # always direct-download
+        if kind == "fgo-lepton":
+            return True  # lepton-fgo check-update (#1831)
         if kind == "launcher-nikke":
             # Without its launcher Nadare keeps NIKKE's client current itself.
             extra = data.get("extra")
             nested = extra.get("launcherless") if isinstance(extra, dict) else None
             return data.get("launcherless", nested) is True
-        if kind != "arknights-yostar":
+        if kind not in ("arknights-yostar", "hbr-yostar", "azurpromilia-jp-yostar"):
             return False
         from ..core import yostar
 

@@ -127,6 +127,32 @@ def test_store_card_keyboard_activation_emits_kind(qapp, key):
         page.close()
 
 
+def test_yostar_cards_show_a_size_and_bpsr_matches_its_page_text(qapp):
+    """A Store card shows the finished install; BPSR's figure matches its page notice."""
+    from nadare.core import backends
+
+    page = _shown_page(qapp)
+    try:
+        expected = {
+            "Heaven Burns Red": "hbr-yostar",
+            "Azur Promilia": "azurpromilia-jp-yostar",
+            "Blue Protocol": "direct-bpsr",
+        }
+        for title, kind in expected.items():
+            page.search.setText(title)
+            qapp.processEvents()
+            card = page._cards[kind]
+            size = backends.download_size_hint(kind)
+            assert size and not card.size_label.isHidden()
+            assert card.size_label.text() == f"~{human_size(size)}"
+        notice = backends.page_notice("direct-bpsr")[0]
+        download = human_size(backends.download_size_hint("direct-bpsr"))
+        assert f"about {download} to download" in notice
+        assert page._cards["direct-bpsr"].size_label.text() == f"~{download}"
+    finally:
+        page.close()
+
+
 def test_store_card_click_emits_kind(qapp):
     page = _shown_page(qapp)
     try:

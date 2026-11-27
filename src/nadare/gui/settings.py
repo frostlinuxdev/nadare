@@ -79,6 +79,11 @@ from .settings_parts.persistence import (
 from .settings_parts.prefix_tools import (
     PrefixToolsMixin,
 )
+from .settings_parts.search import (
+    SearchMixin,
+    SettingsSearchCard,
+    SettingsSearchForm,
+)
 from .settings_parts.shared import (
     _ENV_NAME,
     GAME_SUBTITLE,
@@ -110,6 +115,7 @@ class SettingsPage(
     OptionsMixin,
     PersistenceMixin,
     PrefixToolsMixin,
+    SearchMixin,
     QWidget,
 ):
     """Editable settings for one profile plus the shared language/update options."""
@@ -167,6 +173,14 @@ class SettingsPage(
         self._pending_art: dict[str, str] = {}
         self._loaded_state: dict[str, Any] | None = None
         self._app_only = False
+        # Search state, kept apart from the page's own visibility decisions (#1810).
+        self._search_cards: list[Any] = []
+        self._search_hidden_cards: set[Any] = set()
+        self._search_active = False
+        self._search_applying = False
+        self._search_loading = False
+        self._search_titles: list[str] | None = None
+        self._search_tab = 0
 
         root = QVBoxLayout(self)
         root.setContentsMargins(32, 24, 32, 28)
@@ -192,6 +206,10 @@ class SettingsPage(
         self.subtitle.setObjectName("Subtitle")
         intro.addWidget(self.subtitle)
         root.addLayout(intro)
+
+        self._build_search()
+        root.addWidget(self.search)
+        root.addWidget(self.search_empty)
 
         # One tab per area. Each tab scrolls on its own so the cards never clip on short displays.
         self.tabs = QTabWidget()
@@ -295,7 +313,7 @@ class SettingsPage(
         self.runner_behind = QLabel("")
         self.runner_behind.setObjectName("Muted")
         self.runner_behind.setWordWrap(True)
-        self.runner_behind.setVisible(False)
+        self._set_widget_visible(self.runner_behind, False)
         files_form.addRow("", self.runner_behind)
         self.runner.currentIndexChanged.connect(lambda _index: self._update_runner_behind())
         self.runner.editTextChanged.connect(lambda _text: self._update_runner_behind())
@@ -333,6 +351,8 @@ class SettingsPage(
         )
         self.show_advanced = QCheckBox("Show advanced options")
         self.show_advanced.toggled.connect(self._apply_advanced)
+        # An active search must hide the rows this just showed, and keep hiding page-hidden ones.
+        self.show_advanced.toggled.connect(self._search_options_toggled)
         options_form.addRow("", self.show_advanced)
         self.options_note = QLabel("")
         self.options_note.setObjectName("Muted")
@@ -344,7 +364,7 @@ class SettingsPage(
             "Put the options in this section back to their defaults. "
             "Nothing is saved until you press Save changes."
         )
-        self.restore_defaults.setVisible(False)
+        self._set_widget_visible(self.restore_defaults, False)
         self.restore_defaults.clicked.connect(self._restore_option_defaults)
         options_form.addRow("", self.restore_defaults)
         self._options_host = QWidget()
@@ -461,7 +481,7 @@ class SettingsPage(
         )
         self.remove_fgo_selinux.setChecked(False)
         launcher_form.addRow("", self.remove_fgo_selinux)
-        self.remove_fgo_selinux.hide()
+        self._set_widget_visible(self.remove_fgo_selinux, False)
         self._check_fgo_selinux_module()
         self.move_to_flatpak_button = QPushButton("Move to the Flatpak…")
         self.move_to_flatpak_button.setObjectName("GhostButton")
@@ -474,12 +494,12 @@ class SettingsPage(
         )
         launcher_form.addRow("", self.move_to_flatpak_button)
         # Only an AppImage/source build on a host where the Flatpak is installed.
-        self.move_to_flatpak_button.setVisible(flatpakmove.probably_installed())
+        self._set_widget_visible(self.move_to_flatpak_button, flatpakmove.probably_installed())
         # With a single shipped locale the picker is meaningless: hide the row
         # until a second catalogue makes it actionable.
         multiple_languages = len(i18n.available()) > 1
-        self.language_label.setVisible(multiple_languages)
-        self.language.setVisible(multiple_languages)
+        self._set_widget_visible(self.language_label, multiple_languages)
+        self._set_widget_visible(self.language, multiple_languages)
         launcher_tab_layout.addWidget(launcher_card)
 
         # ---- libraries (Steam-like; Add/Remove act at once, not on Save) ----------------
@@ -502,6 +522,9 @@ class SettingsPage(
         )
         self.disk_space_panel = DiskSpacePanel(self)
         self.disk_space_panel.runners_requested.connect(self._open_runners_from_card)
+        # A measurement landing only changes text; re-filter so an active search does
+        # not keep showing stale results (#1810 follow-up).
+        self.disk_space_panel.texts_changed.connect(self._search_reapply_soon)
         disk_form.addRow(self.disk_space_panel)
         launcher_tab_layout.addWidget(disk_card)
         # Measured only when the all-games tab is shown: it walks the runner folders.
@@ -537,6 +560,8 @@ class SettingsPage(
         self.note.setObjectName("Muted")
         self.note.setWordWrap(True)
         self.note.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        # The paths are there to be copied into a bug report or a file manager (#1875).
+        self.note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         footer.addWidget(actions_box, 1)
         save = QPushButton("Save changes")
         save.setObjectName("Primary")
@@ -546,12 +571,17 @@ class SettingsPage(
         footer.addWidget(save, 0, Qt.AlignmentFlag.AlignBottom)
         root.addWidget(self.note)
         root.addLayout(footer)
+        # Tab from the search box goes to the tabs, then into the rows of the open tab.
+        self.setTabOrder(self.search, self.tabs)
+        self.setTabOrder(self.tabs.tabBar(), self.profile_name)
 
     def _tab_page(self, title: str) -> QVBoxLayout:
         """Add a scrolling tab called ``title`` and return the layout its cards go into."""
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # Tab from the tab bar should reach the first setting row, not this viewport.
+        scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         content = QWidget()
         content.setObjectName("SettingsContent")
         layout = QVBoxLayout(content)
@@ -588,7 +618,7 @@ class SettingsPage(
 
     # ---- helpers -----------------------------------------------------------
     def _section(self, title: str, subtitle: str) -> tuple[QFrame, QFormLayout]:
-        frame = QFrame()
+        frame = SettingsSearchCard(self)
         frame.setObjectName("Card")
         outer = QVBoxLayout(frame)
         outer.setContentsMargins(22, 18, 22, 20)
@@ -607,7 +637,7 @@ class SettingsPage(
         head.addWidget(hint)
         outer.addLayout(head)
 
-        form = QFormLayout()
+        form = SettingsSearchForm(self)
         form.setContentsMargins(0, 0, 0, 0)
         form.setHorizontalSpacing(20)
         form.setVerticalSpacing(14)
@@ -616,6 +646,7 @@ class SettingsPage(
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
         outer.addLayout(form)
+        self._search_add_card(frame, heading, hint, form)
         return frame, form
 
     def _with_browse(
@@ -753,10 +784,10 @@ class SettingsPage(
             if self._config is not None and self._profile
             else None
         )
-        self.import_move_button.setVisible(False)
+        self._set_widget_visible(self.import_move_button, False)
         if place is None or place.folder is None:
-            self.place_label.setVisible(False)
-            self.reset_stray_button.setVisible(False)
+            self._set_widget_visible(self.place_label, False)
+            self._set_widget_visible(self.reset_stray_button, False)
             return
         folder = str(place.folder)
         if place.library is not None and place.made_by_nadare:
@@ -782,9 +813,9 @@ class SettingsPage(
             names = ", ".join(_FOLDER_KEY_NAMES.get(key, key) for key in place.stray)
             text += f"\nThese settings point outside the game folder: {names}."
         self.place_label.setText(text)
-        self.place_label.setVisible(True)
-        self.reset_stray_button.setVisible(bool(resettable))
-        self.import_move_button.setVisible(not place.made_by_nadare)
+        self._set_widget_visible(self.place_label, True)
+        self._set_widget_visible(self.reset_stray_button, bool(resettable))
+        self._set_widget_visible(self.import_move_button, not place.made_by_nadare)
 
     def _move_import(self) -> None:
         """Move an import into a library (#1229): pick, check, ask, then run the move."""

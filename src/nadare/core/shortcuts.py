@@ -22,8 +22,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from . import atomicfile, process, sandbox, steamtools
-from .profilenames import profile_display
+from . import atomicfile, gameicons, process, sandbox, steamtools
+from .profilenames import profile_display, short_name
 from .steamtools import config_lock
 
 #: Application id under which the Flatpak build is published.
@@ -129,18 +129,27 @@ def desktop_entry(
 ) -> str:
     """Render a freedesktop entry that launches ``profile`` through Nadare.
 
-    Without an ``icon``: Nadare's own, by the name the host knows it under (a Flatpak exports
-    it as its app ID; ``nadare`` resolved to nothing there, rig 2026-11-15).
+    Without an ``icon``: the game's own once :func:`install_desktop_entry` made it (#1876), else
+    Nadare's, by the name the host knows it under (a Flatpak exports it as its app ID;
+    ``nadare`` resolved to nothing there, rig 2026-11-15).
     """
     if icon is None:
-        icon = FLATPAK_ID if sandbox.in_flatpak() else "nadare"
+        own = gameicons.existing(profile)
+        if own is not None:
+            icon = str(own)
+        else:
+            icon = FLATPAK_ID if sandbox.in_flatpak() else "nadare"
     exec_args = " ".join(_quote_exec(str(a)) for a in argv)
     exec_line = f"{exec_args} launch -p {_quote_exec(profile)}".strip()
     label = profile_display(profile, {"title": title}, profiles)
+    data = (profiles or {}).get(profile)
+    kind = str(data.get("backend") or "") if isinstance(data, Mapping) else ""
     lines = [
         "[Desktop Entry]",
         "Type=Application",
         f"Name={_value(label)}",
+        f"Comment={_value(f'Play {label} with Nadare')}",
+        f"Keywords={_keywords(profile, kind)}",
         f"Exec={exec_line}",
         f"Icon={icon}",
         "Terminal=false",
@@ -149,6 +158,19 @@ def desktop_entry(
         "StartupNotify=false",
     ]
     return "\n".join(lines) + "\n"
+
+
+def _keywords(profile: str, kind: str) -> str:
+    """``Keywords=`` for a launcher's search: the short name players use (CZN, HSR) (#1876).
+
+    The Name is the full title, so typing "czn" found nothing. Each item is escaped like a
+    string value and its ``;`` as ``\\;``, so a profile key cannot add or split an item.
+    """
+    items: list[str] = []
+    for item in (short_name(kind), profile, "Nadare"):
+        if item and item.casefold() not in {i.casefold() for i in items}:
+            items.append(item)
+    return "".join(_value(item).replace(";", "\\;") + ";" for item in items)
 
 
 def _host_home() -> Path:
@@ -236,6 +258,11 @@ def _applications_dir(applications_dir: str | os.PathLike[str] | None) -> Path:
     return Path(base) / "applications"
 
 
+def applications_dir() -> Path:
+    """The folder app-menu entries go in (the host's, under Flatpak)."""
+    return _applications_dir(None)
+
+
 def _atomic_write_bytes(path: Path, data: bytes, mode: int) -> None:
     atomicfile.write(path, data, mode=mode, make_parent=True)
 
@@ -269,6 +296,7 @@ def install_desktop_entry(
 ) -> list[Path]:
     """Write ``nadare-<slug>.desktop`` to the menu (and optionally the desktop)."""
     resolved = list(argv) if argv is not None else launcher_argv()
+    _make_icon(profile, profiles)
     text = desktop_entry(profile, title, resolved, profiles=profiles)
     name = f"nadare-{slug(profile)}.desktop"
     dirs = [_applications_dir(applications_dir)]
@@ -327,7 +355,40 @@ def remove_desktop_entries(
             except FileNotFoundError:
                 continue
             removed.append(path)
+    if removed and not any(owner == profile for _, owner in _entries_in(dirs)):
+        if not _in_steam(profile):
+            gameicons.remove(profile)
     return removed
+
+
+def _make_icon(profile: str, profiles: Mapping[str, Mapping[str, Any]] | None) -> Path | None:
+    """Make ``profile``'s icon from its art (#1876); never fails a shortcut."""
+    data = (profiles or {}).get(profile)
+    if not isinstance(data, Mapping):
+        return None
+    try:
+        return gameicons.write(profile, data)
+    except Exception:  # noqa: BLE001 - an icon is a nicety; the shortcut must still be made
+        return None
+
+
+def _entries_in(dirs: list[Path]) -> list[tuple[Path, str]]:
+    found = []
+    for directory in dirs:
+        if directory.is_dir():
+            for path in sorted(directory.glob("nadare-*.desktop")):
+                owner = _owned_profile(path)
+                if owner is not None:
+                    found.append((path, owner))
+    return found
+
+
+def _in_steam(profile: str) -> bool:
+    """``profile`` still has a Steam shortcut (unreadable counts as yes: keep its icon)."""
+    try:
+        return any(owner == profile for _, owner, _ in installed_steam_shortcuts())
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def installed_desktop_entries(
@@ -401,6 +462,136 @@ def refresh_desktop_entries(
                     continue
                 removed.append(path)
     return {"updated": updated, "removed": removed, "warnings": warnings}
+
+
+_EXEC_KEY = re.compile(r"Exec\s*=\s*")
+_VALUE_ESCAPES = {"s": " ", "n": "\n", "t": "\t", "r": "\r", "\\": "\\"}
+
+
+def _exec_program(entry_text: str) -> str | None:
+    """The program an entry's ``Exec`` runs (its first argument), or None when unreadable.
+
+    Undoes :func:`_quote_exec`: first the string-value escapes, then the quoting. Only the
+    ``[Desktop Entry]`` group counts (an action's ``Exec`` is not the entry's), and spaces round
+    ``=`` are allowed, as the spec says.
+    """
+    group = None
+    for line in entry_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            group = stripped
+            continue
+        match = _EXEC_KEY.match(line)
+        if group == "[Desktop Entry]" and match:
+            value = line[match.end() :]
+            break
+    else:
+        return None
+    value = re.sub(
+        r"\\(.)", lambda m: _VALUE_ESCAPES.get(m.group(1), "\\" + m.group(1)), value
+    ).lstrip()
+    if not value:
+        return None
+    if not value.startswith('"'):
+        return re.split(r"[ \t]", value, maxsplit=1)[0].replace("%%", "%")
+    out: list[str] = []
+    index = 1
+    while index < len(value):
+        char = value[index]
+        if char == "\\" and index + 1 < len(value):
+            out.append(value[index + 1])
+            index += 2
+            continue
+        if char == '"':
+            return "".join(out).replace("%%", "%")
+        out.append(char)
+        index += 1
+    return None
+
+
+def _host_exists(path: str) -> bool | None:
+    """Ask the host whether ``path`` exists (Flatpak); None when it cannot answer."""
+    try:
+        result = subprocess.run(
+            sandbox.host_argv(["test", "-e", path]),
+            env=process.child_environ(),
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return {0: True, 1: False}.get(result.returncode)
+
+
+def _program_missing(program: str | None) -> bool:
+    """True only for an absolute path that is gone; ``flatpak`` or a bare name never is.
+
+    The Flatpak sees only some host folders (no ~/Downloads, its own /usr), so a path it cannot
+    see is asked about on the host; with no clear answer it is not stale. Guessing "gone" there
+    pointed working shortcuts of other builds at the Flatpak (#1876 review).
+    """
+    if not program or not os.path.isabs(program):
+        return False
+    try:
+        if _host_path(Path(program)).exists():
+            return False
+    except (OSError, ValueError):
+        return False
+    if not sandbox.in_flatpak():
+        return True
+    return _host_exists(program) is False
+
+
+def repair_stale_desktop_entries(
+    profiles: Mapping[str, Mapping[str, Any]],
+    *,
+    applications_dir: str | os.PathLike[str] | None = None,
+    desktop_dir: str | os.PathLike[str] | None = None,
+    argv: list[str] | None = None,
+) -> dict[str, list[Path] | list[str]]:
+    """Point Nadare's entries whose program is gone at the running Nadare (#1876).
+
+    An AppImage replaced by a newer one, or a removed checkout, left every shortcut made from
+    it doing nothing. Only an entry whose program no longer exists is rewritten: one that
+    starts another build that still works is left alone, so a test build never takes over the
+    player's shortcuts. Entries of removed games and foreign files are not touched.
+    """
+    result: dict[str, list[Path] | list[str]] = {"updated": [], "warnings": []}
+    if not profiles:
+        return result
+    resolved = list(argv) if argv is not None else launcher_argv()
+    if not resolved or _program_missing(str(resolved[0])):
+        return result  # never swap one broken path for another
+    updated: list[Path] = []
+    warnings: list[str] = []
+    dirs: list[tuple[Path, int]] = [(_applications_dir(applications_dir), 0o644)]
+    if desktop_dir is not None:
+        dirs.append((Path(desktop_dir), 0o755))
+    for directory, mode in dirs:
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.glob("nadare-*.desktop")):
+            if path.is_symlink():
+                continue  # never read or rewrite through a link the player made
+            owner = _owned_profile(path)
+            if owner is None or owner not in profiles:
+                continue
+            try:
+                current = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if not _program_missing(_exec_program(current)):
+                continue
+            title = str(profiles[owner].get("title") or owner)
+            try:
+                _atomic_write(path, desktop_entry(owner, title, resolved, profiles=profiles), mode)
+            except OSError as exc:
+                warnings.append(f"could not repair {path}: {exc}")
+                continue
+            updated.append(path)
+    result["updated"], result["warnings"] = updated, warnings
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -628,9 +819,15 @@ def add_steam_shortcut(
     icon: str = "",
     profiles: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> bool:
-    """Append a non-Steam-game entry for ``profile``; ``False`` if it exists."""
+    """Append a non-Steam-game entry for ``profile``; ``False`` if it exists.
+
+    Without an ``icon``: the game's own, made from its art (#1876), else none (Steam's default).
+    """
     if steam_running():
         raise ShortcutError("Steam is running; close it before adding a shortcut")
+    if not icon:
+        made = _make_icon(profile, profiles)
+        icon = str(made) if made is not None else ""
     path = Path(shortcuts_vdf)
     # Fail before waiting for the lock; the authoritative read is repeated under
     # it so an entry added meanwhile is still there when we write.
@@ -651,6 +848,7 @@ def add_steam_shortcut(
                 and entry.get("LaunchOptions") == launch_options
                 and entry.get("Exe") == exe
                 and entry.get("StartDir") == start_dir
+                and (not icon or entry.get("icon") == icon)
             ):
                 return False
             # Nadare moved, changed title or came from another install method: repair its own
@@ -658,6 +856,8 @@ def add_steam_shortcut(
             entry["AppName"] = plain_title
             entry["LaunchOptions"] = launch_options
             entry["Exe"], entry["StartDir"] = exe, start_dir
+            if icon:
+                entry["icon"] = icon
             backup = path.with_name(path.name + ".nadare-bak")
             if not backup.exists():
                 backup.write_bytes(path.read_bytes())
@@ -724,6 +924,9 @@ def remove_steam_shortcuts(profile: str) -> tuple[list[Path], list[str]]:
                 changed.append(path)
         except ShortcutError as exc:
             warnings.append(str(exc))
+    if changed and not warnings and not _in_steam(profile):
+        if not any(owner == profile for _, owner in installed_desktop_entries()):
+            gameicons.remove(profile)
     return changed, warnings
 
 
@@ -764,12 +967,14 @@ def refresh_steam_shortcuts(
     argv: list[str] | None = None,
     *,
     orphans_only: bool = False,
+    repair_stale: bool = False,
 ) -> dict[str, list[str] | list[Path]]:
     """Update Nadare Steam shortcut titles and drop deleted profiles.
 
     With ``argv`` (how Nadare starts now), a shortcut of Nadare's that still points at an older
     path is repaired too. ``orphans_only`` (the automatic run at start) only drops entries whose
-    game is gone and changes nothing else (#1031).
+    game is gone and changes nothing else (#1031). With ``repair_stale`` and ``argv`` it also
+    points a shortcut whose program no longer exists at ``argv`` (#1876); a working one stays.
 
     Files that cannot be read or written are reported in ``warnings`` and left
     untouched, as is every file while Steam is running.
@@ -780,6 +985,8 @@ def refresh_steam_shortcuts(
     updated: list[Path] = []
     removed: list[str] = []
     warnings: list[str] = []
+    # Never swap one broken path for another; asked once, as in the Flatpak it is a host call.
+    can_repair = bool(repair_stale and argv and not _program_missing(str(argv[0])))
     for path in find_steam_shortcut_files():
         with config_lock(path):
             try:
@@ -800,6 +1007,9 @@ def refresh_steam_shortcuts(
                     gone.append(profile)
                     continue
                 if orphans_only:
+                    if can_repair and _program_missing(_steam_exe(entry)):
+                        _point_at(entry, profile, argv)
+                        changed = True
                     kept.append(entry)
                     continue
                 title = _plain_vdf_text(
@@ -814,7 +1024,9 @@ def refresh_steam_shortcuts(
                         os.path.dirname(str(argv[0])) or ".",
                     )
                     if entry.get("Exe") != exe or entry.get("StartDir") != start_dir:
-                        entry["Exe"], entry["StartDir"] = exe, start_dir
+                        # The options carry argv[1:] ("-m nadare", "run <app id>"): a new
+                        # program with the old options would not start Nadare (#1876).
+                        _point_at(entry, profile, argv)
                         changed = True
                 kept.append(entry)
             if not changed:
@@ -833,6 +1045,20 @@ def refresh_steam_shortcuts(
             updated.append(path)
             removed.extend(f"{profile} ({path})" for profile in gone)
     return {"updated": updated, "removed": removed, "warnings": warnings}
+
+
+def _steam_exe(entry: Mapping[str, Any]) -> str | None:
+    exe = str(entry.get("Exe") or "")
+    if len(exe) >= 2 and exe.startswith('"') and exe.endswith('"'):
+        return _steam_unquote(exe[1:-1])
+    return exe or None
+
+
+def _point_at(entry: dict[str, Any], profile: str, argv: list[str]) -> None:
+    """Make a Steam entry start ``profile`` with ``argv`` (program, folder and options)."""
+    entry["Exe"] = _steam_quote(str(argv[0]))
+    entry["StartDir"] = os.path.dirname(str(argv[0])) or "."
+    entry["LaunchOptions"] = _steam_launch_options(profile, argv)
 
 
 def find_steam_shortcut_files() -> list[Path]:
@@ -888,7 +1114,9 @@ __all__ = [
     "installed_desktop_entries",
     "installed_steam_shortcuts",
     "launcher_argv",
+    "applications_dir",
     "refresh_desktop_entries",
+    "repair_stale_desktop_entries",
     "refresh_steam_shortcuts",
     "remove_desktop_entries",
     "slug",

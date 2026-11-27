@@ -38,7 +38,8 @@ any desktop or Steam shortcut you ask it to create).
 | `lepton-fgo`'s stack | FGO install/update/launch | Whatever `install.sh` and the lepton CLIs contact (upstream sources, FGO manifest/APKs, the NVIDIA/Venus stack). Nadare does not add any. |
 
 Links Nadare only opens in your browser when you click them (the community Discord,
-`discord.gg` / `discord.com`, and publisher web pages) are not requests by Nadare.
+`discord.gg` / `discord.com`, and publisher web pages such as `azurpromilia.jp`) are
+not requests by Nadare.
 
 ### Publishers by game
 
@@ -48,13 +49,19 @@ Links Nadare only opens in your browser when you click them (the community Disco
 | Wuthering Waves, Punishing: Gray Raven | `kurogame.com`, `kurogame.net`, `kurogames.com`, `kurogames.net` |
 | Arknights: Endfield | `gryphline.com` |
 | Neverness to Everness | `perfectworld.com` |
+| Tower of Fantasy | `htkrydpatch1.wmupd.com` (game files and the publisher's launcher installer), `htkrydpatch2.wmupd.com` (the launcher's own updates), `toweroffantasy-global.com` (official site) |
 | Girls' Frontline 2 | `sunborngame.com` (Darkwinter), `haoplay.com` (Haoplay) |
 | Aether Gazer | `yongshigame.com`, `aethergazer.com` |
 | Brown Dust 2 | `pmang.cloud`, `browndust2.com` |
 | Mongil: Star Dive | `netmarble.com` |
+| Reverse: 1999 | `hotupdate-hw.sl916.com`, `download.bluepoch.com` |
 | Duet Night Abyss | `dna-panstudio.com` |
+| Strinova | `resource-download.strinova.com` |
 | Snowbreak: Containment Zone | `amazingseasuncdn.com`, `amazingseasun.com` |
+| Blue Protocol: Star Resonance | `pc-download.playbpsr.com` |
 | Chaos Zero Nightmare | `onstove.com` |
+| Heaven Burns Red (EN) | `launcher-pkg-hbr-en.yo-star.com` (game files), `yo-star.com` (manifest media); Nadare index (download manifests) |
+| Azur Promilia (JP) | `launcher-pkg-azupro-jp.yo-star.com` (game files), `launcher-pkg-azupro-jp-bk.yo-star.com` (backup game files), `webusstatic.yo-star.com` (art); Nadare index (download manifests) |
 | Arknights, Stella Sora | `yo-star.com`, `arknights.global`, `stellasora.global` |
 | NIKKE | `nikke-en.com`, `playerinfinite.com`, `jupiterlauncher.com` |
 | Fate/Grand Order (NA) | `fate-go.us` |

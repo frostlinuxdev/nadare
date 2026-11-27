@@ -8,9 +8,11 @@ launch therefore records what Stop needs beside the run lock (:mod:`nadare.core.
 from the command and environment it already resolved:
 
 * ``taskkill``: one non-forced ``taskkill /IM <exe>`` per known game executable,
-  run in the launch's own prefix and environment (an unsandboxed game);
-* ``x11``: the game is Sandboxed, so Stop sends ``_NET_CLOSE_WINDOW`` to the game's
-  windows instead of starting a Wine helper outside the Sandbox;
+  run in the launch's own prefix and environment. With ``inside`` the command is the one
+  the game runs inside its Sandbox, and Stop runs it there (:mod:`nadare.core.sandboxjoin`,
+  #1766); without the Sandbox it runs as it is;
+* ``x11``: the game is Sandboxed where Nadare cannot join it (the Flatpak), so Stop sends
+  ``_NET_CLOSE_WINDOW`` to the game's windows instead of starting a Wine helper outside;
 * ``none``: the launch knew no executable to ask (Stop goes straight to signals).
 
 The file is private (0600) and holds only what Stop needs: the command, and the
@@ -30,7 +32,8 @@ from pathlib import Path
 from . import atomicfile, runlock
 
 #: Bumped when the shape changes; an older file is ignored, never guessed at.
-VERSION = 1
+#: 2: ``inside`` (#1766). An older Nadare would run an inside command outside the Sandbox.
+VERSION = 2
 
 #: The three things a saved close request can say.
 KINDS = frozenset({"taskkill", "x11", "none"})
@@ -66,6 +69,7 @@ def save(
     kind: str,
     commands: list[list[str]] | tuple[tuple[str, ...], ...] = (),
     env: dict[str, str] | None = None,
+    inside: bool = False,
 ) -> None:
     """Write the close request for ``prefix`` (private, atomic).
 
@@ -77,6 +81,7 @@ def save(
     payload = {
         "version": VERSION,
         "kind": kind,
+        "inside": bool(inside),
         "commands": [[str(part) for part in argv] for argv in commands],
         "env": {
             str(key): str(value) for key, value in _persisted_env(env or {}).items()
@@ -98,6 +103,9 @@ def load(prefix: str | os.PathLike[str]) -> dict | None:
     kind = data.get("kind")
     commands = data.get("commands", [])
     env = data.get("env", {})
+    inside = data.get("inside", False)
+    if not isinstance(inside, bool):
+        return None
     if kind not in KINDS or not isinstance(commands, list) or not isinstance(env, dict):
         return None
     clean: list[list[str]] = []
@@ -114,6 +122,7 @@ def load(prefix: str | os.PathLike[str]) -> dict | None:
     return {
         "version": VERSION,
         "kind": kind,
+        "inside": inside,
         "commands": clean,
         "env": dict(env),
     }

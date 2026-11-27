@@ -83,7 +83,7 @@ def test_a_title_cannot_escape_the_library(data):
 def test_the_whole_profile_folder_moves_into_the_library_layout(data, tmp_path):
     profile = _old(data)
     home = relink.managed_home(profile)
-    library = tmp_path / "izuna"
+    library = tmp_path / "games2"
     library.mkdir()
     new_home = relink.free_home(library, relink.home_name(profile, home), {})
     relocate.move_tree(home, new_home)
@@ -98,7 +98,7 @@ def test_the_whole_profile_folder_moves_into_the_library_layout(data, tmp_path):
 def test_a_missing_game_folder_stays_missing_and_is_re_rooted(data, tmp_path):
     profile = _old(data, install=False)
     home = relink.managed_home(profile)
-    new_home = tmp_path / "izuna" / "Nadare" / "NIKKE"
+    new_home = tmp_path / "games2" / "Nadare" / "NIKKE"
     relocate.move_tree(home, new_home)
     plan = relink.plan_home_move(profile, new_home, install_existed=False)
     relink.apply(profile, plan)
@@ -109,7 +109,7 @@ def test_a_missing_game_folder_stays_missing_and_is_re_rooted(data, tmp_path):
 def test_a_game_folder_that_existed_must_arrive(data, tmp_path):
     profile = _old(data)
     home = relink.managed_home(profile)
-    new_home = tmp_path / "izuna" / "Nadare" / "NIKKE"
+    new_home = tmp_path / "games2" / "Nadare" / "NIKKE"
     relocate.move_tree(home, new_home)
     (new_home / "install" / "game.exe").unlink()
     (new_home / "install").rmdir()
@@ -120,28 +120,28 @@ def test_a_game_folder_that_existed_must_arrive(data, tmp_path):
 # ---- a prefix-only move names the folder after the game ----------------------------------------
 def test_a_generic_prefix_folder_is_named_after_the_game(tmp_path):
     old = tmp_path / "x" / "prefix"
-    dst = relink.prefix_destination({"title": "NIKKE"}, old, tmp_path / "izuna")
-    assert dst == tmp_path / "izuna" / "NIKKE prefix"
+    dst = relink.prefix_destination({"title": "NIKKE"}, old, tmp_path / "games2")
+    assert dst == tmp_path / "games2" / "NIKKE prefix"
 
 
 def test_a_meaningful_prefix_folder_name_is_kept(tmp_path):
     old = tmp_path / "testing" / "CZN"
-    assert relink.prefix_destination({"title": "CZN"}, old, tmp_path / "izuna") == (
-        tmp_path / "izuna" / "CZN"
+    assert relink.prefix_destination({"title": "CZN"}, old, tmp_path / "games2") == (
+        tmp_path / "games2" / "CZN"
     )
 
 
 def test_a_taken_prefix_destination_gets_a_number(tmp_path):
     old = tmp_path / "x" / "prefix"
-    lib = tmp_path / "izuna"
+    lib = tmp_path / "games2"
     (lib / "NIKKE prefix").mkdir(parents=True)
     assert relink.prefix_destination({"title": "NIKKE"}, old, lib) == lib / "NIKKE prefix 2"
 
 
 def test_a_prefix_destination_title_cannot_escape_the_folder(tmp_path):
     old = tmp_path / "x" / "prefix"
-    dst = relink.prefix_destination({"title": "../../evil"}, old, tmp_path / "izuna")
-    assert dst.parent == tmp_path / "izuna"
+    dst = relink.prefix_destination({"title": "../../evil"}, old, tmp_path / "games2")
+    assert dst.parent == tmp_path / "games2"
 
 
 # ---- scrutiny: only a folder holding nothing but the game and its prefix moves as a unit --------

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""A Proton game never runs on a random plain Wine (#1338, flxpc 2026-11-14).
+"""A Proton game never runs on a random plain Wine (#1338, an NVIDIA PC 2026-11-14).
 
 A dev update pinned DW-Proton 11.0-16, which the desktop did not have yet. Launcherless NIKKE
 skipped the runner setup the normal Play path does, ``resolve_runner()`` (which never

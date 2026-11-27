@@ -99,6 +99,12 @@ def resolve(fetch: Fetch | None = None) -> directdl.Plan:
     return directdl.Plan(
         game_tag="endfield",
         version=version,
-        archives=(directdl.Archive(name=name, source=source, parts=tuple(parts), stream=True),),
+        archives=(
+            # Renamed every build (Beyond_Release_v1d7-...): the slot lets the next version
+            # prune what this one installed (#967).
+            directdl.Archive(
+                name=name, source=source, parts=tuple(parts), stream=True, slot="client"
+            ),
+        ),
         exe="Endfield.exe",
     )

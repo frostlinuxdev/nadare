@@ -64,6 +64,8 @@ def _patch_stop(monkeypatch, alive: set[int], calls: list[tuple[str, list[int]]]
     patch_everywhere(monkeypatch, wg, "scan_pids", scan)
     patch_everywhere(monkeypatch, wg, "stop_pids", stop_pids)
     patch_everywhere(monkeypatch, wg, "stop_runner_wineserver", lambda **_kw: None)
+    # A fake PID has no real environment: never read this host's /proc/<pid>/environ.
+    patch_everywhere(monkeypatch, wg, "environ_of", lambda _pid: {})
 
 
 def _seed_polite_stop(
@@ -415,6 +417,7 @@ def test_a_sandboxed_launch_saves_an_x11_request(tmp_path, monkeypatch):
     assert saved == {
         "version": stopstate.VERSION,
         "kind": "x11",
+        "inside": False,
         "commands": [],
         "env": {},
     }
@@ -532,6 +535,8 @@ def test_a_sandboxed_game_without_a_window_goes_straight_to_signals(
     _seed_polite_stop(backend, kind="x11")
     sent: list[list[int]] = []
     _fake_x11(monkeypatch, windows, sent)
+    # No game process is left to borrow a display from: this fake environment is empty.
+    monkeypatch.setattr(launching, "environ_of", lambda _pid: {})
     if display is None:
         monkeypatch.delenv("DISPLAY", raising=False)
     else:

@@ -141,3 +141,63 @@ def test_the_live_sources_declare_their_client_slot():
     }
     plan = bd2.resolve(lambda url, headers=None: json.dumps(meta).encode())
     assert [a.slot for a in plan.archives] == ["client"]
+
+
+def test_endfield_declares_its_client_slot():
+    """Endfield names its pack after the build (``Beyond_Release_v1d7-...``): without a slot the
+    1.6.4 -> 1.7.2 update left the whole 1.6.4 VFS behind (test desktop, 11-25: 73 -> 124 GB)."""
+    from nadare.core.sources import endfield
+
+    url = (
+        "https://cdn.example/1.7.2/packs/"
+        "Beyond_Release_v1d7-Rel-os-11793826-1_prod_obt_official.zip.001"
+    )
+    payload = {
+        "action": 1, "version": "1.7.2",
+        "pkg": {"packs": [{"url": url, "package_size": "10", "md5": "0" * 32}]},
+    }
+    plan = endfield.resolve(lambda url, headers=None: json.dumps(payload).encode())
+    assert [a.slot for a in plan.archives] == ["client"]
+
+
+def test_an_install_updated_before_the_slot_is_cleaned_by_the_next_sync(server, tmp_path):  # noqa: F811
+    """The test-desktop case: both versions installed without a slot, so the update kept the old
+    record and its files. The next sync, with the slot and nothing to download, prunes them."""
+    z1 = make_zip({"game.exe": b"v1", "VFS/shared.chk": b"same", "VFS/old.chk": b"old"})
+    z2 = make_zip({"game.exe": b"v2", "VFS/shared.chk": b"same", "VFS/new.chk": b"new"})
+    srv = server({"/v1.zip": z1, "/v2.zip": z2})
+    dd.sync(dd.Plan("T", "1", archives=(_archive(srv, "g-1", z1, "/v1.zip"),)), tmp_path)
+    dd.sync(dd.Plan("T", "2", archives=(_archive(srv, "g-2", z2, "/v2.zip"),)), tmp_path)
+    assert (tmp_path / "VFS" / "old.chk").is_file()  # what the unslotted update left behind
+    summary = dd.sync(
+        dd.Plan("T", "2", archives=(_archive(srv, "g-2", z2, "/v2.zip", slot="client"),)),
+        tmp_path,
+    )
+    assert summary["downloaded"] == 0
+    assert not (tmp_path / "VFS" / "old.chk").exists()
+    assert (tmp_path / "VFS" / "shared.chk").read_bytes() == b"same"
+    assert (tmp_path / "VFS" / "new.chk").read_bytes() == b"new"
+    assert _state(tmp_path) == ["g-2.done"]
+
+
+def test_flx_pc_record_shapes_without_game_or_sequence_are_cleaned(server, tmp_path):  # noqa: F811
+    """The real test-desktop state (#1822): the old record predates ``game`` and ``sequence``, the
+    new one has them; neither has a slot. Only what the old record alone owns goes."""
+    z1 = make_zip({"game.exe": b"v1", "VFS/shared.chk": b"same", "VFS/old.chk": b"old"})
+    z2 = make_zip({"game.exe": b"v2", "VFS/shared.chk": b"same", "VFS/new.chk": b"new"})
+    srv = server({"/v1.zip": z1, "/v2.zip": z2})
+    dd.sync(dd.Plan("T", "1", archives=(_archive(srv, "g-1", z1, "/v1.zip"),)), tmp_path)
+    old = tmp_path / dd.STATE_DIR / "g-1.done"
+    record = json.loads(old.read_text())
+    for key in ("game", "sequence", "slot"):
+        record.pop(key, None)
+    old.write_text(json.dumps(record))
+    dd.sync(dd.Plan("T", "2", archives=(_archive(srv, "g-2", z2, "/v2.zip"),)), tmp_path)
+    (tmp_path / "Saved.log").write_bytes(b"the game wrote this")
+    dd.sync(dd.Plan("T", "2", archives=(_archive(srv, "g-2", z2, "/v2.zip", slot="client"),)),
+            tmp_path)
+    assert not (tmp_path / "VFS" / "old.chk").exists()
+    assert (tmp_path / "VFS" / "shared.chk").read_bytes() == b"same"
+    assert (tmp_path / "game.exe").read_bytes() == b"v2"
+    assert (tmp_path / "Saved.log").is_file()
+    assert _state(tmp_path) == ["g-2.done"]

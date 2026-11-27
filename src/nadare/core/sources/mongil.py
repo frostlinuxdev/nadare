@@ -70,7 +70,10 @@ def resolve(fetch: Fetch | None = None) -> directdl.Plan:
         md5=md5,
         headers=tuple(_HEADERS.items()),
     )
-    archive = directdl.Archive(name=name, source=source, unwrap=("zip",), stream=True)
+    # The zip is named per build: the slot lets the next build prune this one (#967, #1822).
+    archive = directdl.Archive(
+        name=name, source=source, unwrap=("zip",), stream=True, slot="client"
+    )
     return directdl.Plan(
         game_tag=_GAME_TAG,
         version=version,

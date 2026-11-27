@@ -62,7 +62,7 @@ def test_no_singular_category_in_these_languages(tmp_path, monkeypatch, code, n)
     assert i18n.translate_plural("items", n, locale=code) == "other"
 
 
-@pytest.mark.parametrize("code", ["ru", "uk", "pl"])
+@pytest.mark.parametrize("code", ["ru", "uk"])
 @pytest.mark.parametrize(
     ("n", "expected"),
     [
@@ -76,10 +76,45 @@ def test_no_singular_category_in_these_languages(tmp_path, monkeypatch, code, n)
         (25, "many"),
     ],
 )
-def test_slavic_integer_categories(tmp_path, monkeypatch, code, n, expected) -> None:
+def test_east_slavic_integer_categories(tmp_path, monkeypatch, code, n, expected) -> None:
     _write_locale(tmp_path, code, {"items": CATEGORIES})
     monkeypatch.setattr(i18n, "locale_dir", lambda: tmp_path)
     assert i18n.translate_plural("items", n, locale=code) == expected
+
+
+@pytest.mark.parametrize(
+    ("n", "expected"),
+    [
+        (0, "many"),
+        (1, "one"),
+        (2, "few"),
+        (4, "few"),
+        (5, "many"),
+        (11, "many"),
+        (12, "many"),
+        (14, "many"),
+        (21, "many"),
+        (22, "few"),
+        (25, "many"),
+        (101, "many"),
+        (102, "few"),
+        (112, "many"),
+        (1001, "many"),
+    ],
+)
+def test_polish_integer_categories(tmp_path, monkeypatch, n, expected) -> None:
+    # CLDR pl: "one" is exactly 1, so 21, 101 and 1001 are "many", unlike ru/uk.
+    _write_locale(tmp_path, "pl", {"items": CATEGORIES})
+    monkeypatch.setattr(i18n, "locale_dir", lambda: tmp_path)
+    assert i18n.translate_plural("items", n, locale="pl") == expected
+
+
+@pytest.mark.parametrize("code", ["ru", "uk", "pl"])
+@pytest.mark.parametrize("n", [0.5, 1.5, 2.5, 21.5])
+def test_slavic_non_integer_counts_use_the_other_form(tmp_path, monkeypatch, code, n) -> None:
+    _write_locale(tmp_path, code, {"items": CATEGORIES})
+    monkeypatch.setattr(i18n, "locale_dir", lambda: tmp_path)
+    assert i18n.translate_plural("items", n, locale=code) == "other"
 
 
 def test_unknown_language_falls_back_to_other(tmp_path, monkeypatch) -> None:

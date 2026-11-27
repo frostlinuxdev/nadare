@@ -32,6 +32,7 @@ def no_background_work(monkeypatch):
         "_start_update_check",
         "_start_notices_check",
         "_start_steam_shortcut_cleanup",
+        "_start_shortcut_repair",
     ):
         monkeypatch.setattr(MainWindow, name, lambda self: None)
 

@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """A modal sheet contained inside the main window while a game starts.
 
-It has no close button and no Escape/click-outside exit: only Stop ends it early.
-It goes away by itself when the game's window is seen, when the launch ends, or
-after :data:`~nadare.core.launch_window.WATCH_SECONDS`, when it offers Hide so a
-missed window signal can never leave it stuck.
+It has no close button and no Escape/click-outside exit: Stop is always there, and
+Hide appears after :data:`HIDE_AFTER` so a missed window signal never traps the
+player. It goes away by itself when the game's first frame is seen or the launch
+ends, and at :data:`~nadare.core.launch_window.WATCH_SECONDS` its status says the
+launch is still starting.
 """
 from __future__ import annotations
 
@@ -15,6 +16,10 @@ from PyQt6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayou
 
 from ..core.launch_window import WATCH_SECONDS
 from . import i18n, theme
+
+#: How long the player waits before the sheet offers Hide. Stop is always there; this
+#: only stops a missed window signal from keeping the sheet up for the whole timeout.
+HIDE_AFTER = 10.0
 
 
 class LaunchSheet(QWidget):
@@ -94,7 +99,7 @@ class LaunchSheet(QWidget):
         self.stop.setFocus()
 
     def buttons(self) -> list[QPushButton]:
-        """The buttons a user can press now (the Hide button appears only at the timeout)."""
+        """The buttons a user can press now (Hide appears after :data:`HIDE_AFTER`)."""
         return [self.stop] + ([self.hide_button] if not self.hide_button.isHidden() else [])
 
     def eventFilter(self, obj, event):
@@ -132,14 +137,15 @@ class LaunchSheet(QWidget):
 
     def tick(self, now: float | None = None) -> None:
         now = time.monotonic() if now is None else now
-        elapsed = max(0, int(now - self.started))
-        self.elapsed.setText(i18n.tr("{seconds} s", seconds=elapsed))
+        elapsed = max(0.0, now - self.started)
+        self.elapsed.setText(i18n.tr("{seconds} s", seconds=int(elapsed)))
+        if elapsed >= HIDE_AFTER:
+            self.hide_button.show()
         if elapsed >= WATCH_SECONDS:
             self.timed_out = True
             self.status.setText(
                 i18n.tr("Still starting. Its own launcher or anti-cheat can take a while.")
             )
-            self.hide_button.show()
         elif self.running_at is not None and now - self.running_at >= 1:
             self.status.setText(i18n.tr("Waiting for the window"))
 

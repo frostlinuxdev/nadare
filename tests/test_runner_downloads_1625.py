@@ -75,6 +75,57 @@ def test_game_speed_fraction_fallback_connections_and_reset(
         _close(window, qapp)
 
 
+def test_game_connections_stay_when_the_speed_momentarily_disappears(
+    tmp_path, qapp, monkeypatch,
+):
+    """A tick with no speed yet still shows the connections it knows about."""
+    window = _window(tmp_path, monkeypatch)
+    try:
+        _start(window, "a")
+        window.show_downloads()
+        clock = [10.0]
+        monkeypatch.setattr(
+            "nadare.gui.main_window_parts.downloads.time.monotonic", lambda: clock[0]
+        )
+        # The first tick has no rate yet; it does know the connections.
+        window._on_event("a", Event("progress", progress=0.1,
+                                    data={"done": 10 * MI, "total": 100 * MI,
+                                          "connections": 32}))
+        assert "32 connections" in window.downloads.row("a").eta_label.text()
+        clock[0] = 11.0
+        # The next tick measures a speed and does not repeat the count.
+        window._on_event("a", Event("progress", progress=0.2,
+                                    data={"done": 20 * MI, "total": 100 * MI}))
+        text = window.downloads.row("a").eta_label.text()
+        assert "MiB/s" in text
+        assert "32 connections" in text  # kept from the last tick
+    finally:
+        _close(window, qapp)
+
+
+def test_runner_connections_stay_when_the_speed_momentarily_disappears(
+    tmp_path, qapp, monkeypatch,
+):
+    window = _window(tmp_path, monkeypatch)
+    try:
+        _start(window, "a")
+        window.show_downloads()
+        clock = [10.0]
+        monkeypatch.setattr(
+            "nadare.gui.main_window_parts.downloads.time.monotonic", lambda: clock[0]
+        )
+        # The first tick has no rate yet; it does know the connections.
+        window._on_event("a", runner_event(progress=0.1, done=10 * MI, connections=8))
+        assert "8 connections" in window.downloads.row(KEY).eta_label.text()
+        clock[0] = 11.0
+        window._on_event("a", runner_event(progress=0.2, done=20 * MI))
+        text = window.downloads.row(KEY).eta_label.text()
+        assert "MiB/s" in text
+        assert "8 connections" in text  # kept from the last tick
+    finally:
+        _close(window, qapp)
+
+
 def test_runner_grouping_updates_terminal_timer_and_no_game_progress(
     tmp_path, qapp, monkeypatch,
 ):
@@ -259,6 +310,9 @@ def test_runner_install_labels_every_event_and_only_finishes_after_extract(tmp_p
     runners.install("dwproton", emit=events.append)
     assert all(e.data.get("runner") == "dwproton" and e.data.get("tag") == TAG for e in events)
     assert events[0].data["total"] == 7
+    # One formatter: the status line is human_size, not a hand-made "0 MB".
+    assert runners.diskspace.human_size(7) in events[0].message
+    assert " MB)" not in events[0].message
     assert [e for e in events if e.data.get("runner_finished")] == [events[-1]]
 
 
@@ -315,6 +369,22 @@ def test_unpacking_runner_clears_the_download_rate_and_eta(tmp_path, qapp, monke
         window._on_runner_download_event("a", runner_event("status", None, stage="extract"))
         assert window.downloads.row(KEY).status_label.text() == "Unpacking"
         assert window.downloads.row(KEY).eta_label.text() == ""
+    finally:
+        _close(window, qapp)
+
+
+def test_unpacking_a_runner_turns_its_full_bar_busy(tmp_path, qapp, monkeypatch):
+    """The runner transfer is at 100%, but extracting has no percentage of its own."""
+    window = _window(tmp_path, monkeypatch)
+    try:
+        window.show_downloads()
+        window._on_runner_download_event(
+            "a", runner_event(progress=1.0, done=100 * MI)
+        )
+        assert window.downloads.row(KEY).bar.maximum() == 100
+        window._on_runner_download_event("a", runner_event("status", None, stage="extract"))
+        assert window.downloads.row(KEY).status_label.text() == "Unpacking"
+        assert window.downloads.row(KEY).bar.maximum() == 0
     finally:
         _close(window, qapp)
 

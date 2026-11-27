@@ -17,7 +17,10 @@ import pytest
 from nadare.core import paths, shadercache, storagecard
 
 GIB = 1024**3
-GAME_TEXT = "Large: over 1 GB. Clearing is safe; the game may stutter while it rebuilds."
+GAME_TEXT = (
+    f"Large: over {storagecard.diskspace.human_size(storagecard.GAME_WARN_BYTES)}. "
+    "Clearing is safe; the game may stutter while it rebuilds."
+)
 
 
 def _dir(path: Path) -> Path:

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from _backend_helpers import make_context
 
-from nadare.backends import direct
+from nadare.backends import direct, webview2_signin
 from nadare.backends.czn import backend as czn_backend
 from nadare.core import paths, webview2
 from nadare.core.backends import BackendError
@@ -81,7 +81,9 @@ def test_webview2_installer_uses_haoplay_prefix_runner_and_xwayland(tmp_path, mo
 
     monkeypatch.setattr(backend, "_prefix_command", command)
     monkeypatch.setattr(
-        direct, "stream", lambda cmd, env, **kwargs: seen.append((cmd, env, kwargs["cwd"])) or 0
+        webview2_signin,
+        "stream",
+        lambda cmd, env, **kwargs: seen.append((cmd, env, kwargs["cwd"])) or 0,
     )
 
     backend._ensure_webview2()
@@ -110,7 +112,7 @@ def test_webview2_install_is_refused_when_the_installer_did_not_land(tmp_path, m
     monkeypatch.setattr(paths, "cache_dir", lambda: tmp_path)
     monkeypatch.setattr(webview2, "verify", lambda path, **kwargs: None)
     monkeypatch.setattr(backend, "_prefix_command", lambda args, extra_env=None: (["x"], {}))
-    monkeypatch.setattr(direct, "stream", lambda cmd, env, **kwargs: 1)
+    monkeypatch.setattr(webview2_signin, "stream", lambda cmd, env, **kwargs: 1)
 
     with pytest.raises(BackendError, match="WebView2 Runtime install failed"):
         backend._ensure_webview2()

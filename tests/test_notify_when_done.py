@@ -80,7 +80,7 @@ def test_other_operations_have_no_notification(operation):
 def test_send_never_raises_without_a_notification_service():
     # The suite's guard (tests/conftest.py) hands out a session bus that is never connected.
     # Setting DBUS_SESSION_BUS_ADDRESS here did nothing: Qt caches the session bus per process,
-    # so inside a desktop session this test posted a real "hello" (flxpc, 2026-11-15).
+    # so inside a desktop session this test posted a real "hello" (an NVIDIA PC, 2026-11-15).
     assert notify.send("Nadare test", "body") is False
 
 

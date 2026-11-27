@@ -84,7 +84,8 @@ TOTAL_WARN_SHARE = 0.05
 
 #: The short line a large game's rows carry.
 GAME_WARNING = (
-    "Large: over 1 GB. Clearing is safe; the game may stutter while it rebuilds."
+    f"Large: over {diskspace.human_size(GAME_WARN_BYTES)}. Clearing is safe; "
+    "the game may stutter while it rebuilds."
 )
 
 

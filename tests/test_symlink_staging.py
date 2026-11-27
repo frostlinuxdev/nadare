@@ -66,5 +66,7 @@ def test_done_record_does_not_follow_a_planted_temp_symlink(tmp_path):
     assert victim.read_bytes() == b"KEEP"
     record_path = state / "game.done"
     assert_regular(record_path)
-    assert json.loads(record_path.read_text(encoding="utf-8")) == dd._done_record(plan, archive)
+    written = json.loads(record_path.read_text(encoding="utf-8"))
+    written.pop("sequence", None)  # the apply-order field is assigned when written
+    assert written == dd._done_record(plan, archive)
     assert not (state / "game.done.tmp").exists()

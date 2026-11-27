@@ -12,7 +12,12 @@ Every catalog game carries a support tier, shown on its card in the **Store** (t
 | Tier | Meaning |
 |---|---|
 | **Verified** | A maintainer installed it through Nadare and played it past the title screen on a real machine. Currently: Brown Dust 2, Aether Gazer, Punishing: Gray Raven, Girls' Frontline 2: Exilium (Darkwinter build), Girls' Frontline 2 (Haoplay global build), Honkai Impact 3rd, Genshin Impact, Honkai: Star Rail, Zenless Zone Zero, Wuthering Waves, NIKKE: Goddess of Victory, Arknights: Endfield, Neverness to Everness (the direct install) and Mongil: Star Dive. |
-| **Experimental** | The install path is covered by tests and fixtures, but nobody has played it end to end yet, or it needs a workaround (an anti-cheat, a publisher launcher, a login). It can break when a publisher changes something. Currently: Snowbreak: Containment Zone (installs from Seasun's public file list; no end-to-end play yet). |
+| **Experimental** | The install path is covered by tests and fixtures, but nobody has played it end to end yet, or it needs a workaround (an anti-cheat, a publisher launcher, a login). It can break when a publisher changes something. Currently: Blue Protocol: Star Resonance (`direct-bpsr`, global A Plus build; about 42.8 GB download and 48.0 GB installed; ships Anti-Cheat Expert and may not run under Wine; Steam app 3681810 is the easier route), Reverse: 1999 (`direct-r1999`, about 29.6 GB download and 33.2 GB installed; no end-to-end play yet), Tower of Fantasy (`direct-tof`, about 129.3 GB installed / 132.8 GB downloaded; the game only starts through Perfect World's launcher, which Nadare fetches with 7-Zip; no end-to-end play yet) and Snowbreak: Containment Zone (installs from Seasun's public file list; no end-to-end play yet). |
+
+**Held back:** Strinova (`direct-strinova`) is not offered for new installs. Nadare starts it through
+its own launcher (#1819), but that launcher patches the game behind Nadare's back and its download
+server often does not answer, so Nadare can show a stale Update and Stop cannot end a stuck connect
+(#1905). A Strinova profile made by an earlier build still opens, updates and can be removed.
 
 The HoYo games (Genshin Impact, Honkai: Star Rail, Honkai Impact 3rd, Zenless Zone Zero) are offered
 like the others. All four are Verified and install through HoYo's chunked "Sophon" downloads.
@@ -44,12 +49,35 @@ publisher API  ->  nadare.core.sources.<game>.resolve()  ->  directdl.Plan  ->  
   (a zip holding one zip, as Brown Dust 2 ships), `("7z",)` (older HoYo archives, via
   `nadare/core/sevenz.py`, a streaming 7z reader on the standard `lzma` module) and
   `("slices",)` (small files cut out of a downloaded pack by offset and size, as Neverness to
-  Everness ships). Any of them can be split into ordered `parts`, which are read as one virtual
+  Everness and Tower of Fantasy ship). Any of them can be split into ordered `parts`, which are read as one virtual
   file and never joined on disk.
 * `nadare/backends/direct.py` is a thin class per game on top of the Wine/Proton machinery
   that Arknights and Stella Sora already share.
 
+Strinova (`direct-strinova`, Experimental) chooses a single update archive when one exists
+for the installed version; otherwise it downloads the full archive set. Individual files
+are unavailable from this CDN. Verify and post-install checks use the target file manifest.
+Repair fetches full archives only when files are missing or damaged. Updates remove unchanged
+managed files that the target manifest no longer lists, while preserving user files. When the
+publisher launcher updates the game itself, Nadare records the version the launcher installed and
+never tells the launcher an older one; Install, Update and Repair ask you to close the launcher first.
+
 Streamed archives can also be verified against published per-block checksums: see [ARCHIVE-PINS.md](ARCHIVE-PINS.md).
+
+### Tower of Fantasy (experimental)
+
+`direct-tof` installs the Windows client from `htkrydpatch1.wmupd.com`, checks each
+object's MD5 and size, and extracts Pak members by their offsets and sizes. It installs
+`Client/WindowsNoEditor/Hotta/Binaries/Win64/QRSL.exe` and starts it through Perfect World's
+launcher (below). Allow about 129.3 GB installed and 132.8 GB of downloads. Updates read
+the latest `ResVersion` and fetch changed objects whole; unchanged objects are reused.
+Patch lists are not applied. The old `launcher-tower-of-fantasy` kind is retired.
+
+The game's sign-in only works while Perfect World's launcher is running, so Nadare also
+fetches `Launcher/HottaLauncher.exe` from the publisher's installer (the payload's
+`HottaLaunch/` directory; 7-Zip needed) and starts it with `/launcher /autoplay`. The launcher
+collapses to a small bar and starts the game by itself. On the very first start the launcher
+updates itself once (a minute or two).
 
 ### Adding a direct game
 
@@ -120,7 +148,17 @@ Two practical notes that are not about capturing traffic:
   (`check_kuro_tokens.py`; it checks `catalog/kuro-tokens.json` in the index, else the built-in
   tokens). To rotate one without a release, publish the new `50004_<token>` / `50015_<token>` in
   that file; Nadare reads it before its built-in value;
-* the pinned NTE installer changed size or vanished, or the Endfield installer now comes from a
-  host Nadare does not allow (`check_installer_pins.py`);
+* the pinned NTE or Tower of Fantasy installer changed size or vanished, or the Endfield
+  installer now comes from a host Nadare does not allow (`check_installer_pins.py`);
 * with the catalog on (`NADARE_INDEX_CATALOG=1`), a game's source failed three catalog runs in a
   row (`publish_index.py`).
+
+Heaven Burns Red (EN), kind `hbr-yostar`, is **Experimental**. It downloads directly
+from the Yostar manifest feed (about 38.7 GB, 21,974 files). A published manifest
+is required for Install and Update. No end-to-end play has been verified yet.
+
+Azur Promilia (JP), kind `azurpromilia-jp-yostar`, is **Experimental**. It is the
+Japanese client (a Japanese account is needed) and downloads directly from the
+Yostar JP manifest feed (about 84.2 GB, 40,299 files). The game ships
+AntiCheatExpert, which has not been tested under Proton. A published manifest is
+required for Install and Update. No end-to-end play has been verified yet.

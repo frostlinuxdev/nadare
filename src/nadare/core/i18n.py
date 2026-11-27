@@ -191,8 +191,10 @@ _ONE_IF_ONE = frozenset({"en", "de", "nl", "sv", "it", "es", "pt"})
 _ONE_IF_ZERO_OR_ONE = frozenset({"fr"})
 #: No singular form at all.
 _OTHER_ONLY = frozenset({"ja", "ko", "zh"})
-#: CLDR's one/few/many integer rules.
-_SLAVIC = frozenset({"ru", "uk", "pl"})
+#: CLDR's one/few/many integer rules; 21, 31 and 101 are "one" here.
+_SLAVIC = frozenset({"ru", "uk"})
+#: CLDR Polish: "one" is exactly 1, so 21, 101 and 1001 are "many".
+_POLISH = frozenset({"pl"})
 
 
 def _plural_category(locale: str, n: float) -> str:
@@ -203,6 +205,16 @@ def _plural_category(locale: str, n: float) -> str:
         return "one" if n in (0, 1) else "other"
     if language in _OTHER_ONLY:
         return "other"
+    if language in _POLISH:
+        number = float(n)
+        if not number.is_integer():
+            return "other"
+        i = abs(int(number))
+        if i == 1:
+            return "one"
+        if 2 <= i % 10 <= 4 and not 12 <= i % 100 <= 14:
+            return "few"
+        return "many"
     if language in _SLAVIC:
         number = float(n)
         if not number.is_integer():

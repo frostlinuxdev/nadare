@@ -15,6 +15,7 @@ from .hosts import (
     DEFAULT_RESOURCE_PATH,
     GAME_AUTH_NAME,
     GAME_ID,
+    INTL_EXIT_LAUNCHER_SIGN_IN,
     INTL_HOST_NAME,
     PARENT_NAME,
     SAIL_HOST_NAME,
@@ -45,6 +46,7 @@ from .session import build_session, trim_game_auth
 __all__ = [
     "DEFAULT_RESOURCE_PATH",
     "GAME_ID",
+    "INTL_EXIT_LAUNCHER_SIGN_IN",
     "INTL_HOST_NAME",
     "PARENT_NAME",
     "SAIL_HOST_NAME",

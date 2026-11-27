@@ -375,3 +375,13 @@ def test_a_flatpak_config_without_profiles_still_moves(home):
 def test_no_flatpak_folders_at_all_still_moves(home):
     cfg = _appimage_world(home)
     assert flatpakmove.refusal(cfg, home=home, run=FakeFlatpak()) is None
+
+
+@pytest.mark.parametrize("rel", [".local/share/Steam/steamapps/common/BA",
+                                 ".steam/debian-installation/steamapps/common/BA"])
+def test_a_game_in_native_steam_is_visible_to_the_flatpak(home, rel):
+    """#1594: the Flatpak sees native Steam's folders, so their games are not flagged."""
+    data = {"profiles": {"ba": {"title": "Blue Archive", "install_dir": str(home / rel)}}}
+    assert flatpakmove._unreachable(data, home) == []  # noqa: SLF001
+    data["profiles"]["ba"]["install_dir"] = str(home / "Elsewhere/BA")
+    assert any("Blue Archive" in n for n in flatpakmove._unreachable(data, home))  # noqa: SLF001

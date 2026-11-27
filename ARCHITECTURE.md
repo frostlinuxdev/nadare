@@ -11,18 +11,20 @@ stacks (Wine/Proton, native Steam, Android-in-a-container, shell scripts).
 |---|---|---|
 | Chaos Zero Nightmare | `stove-czn` | umu/Proton + native STOVE login + a PCSDK stub |
 | Arknights (EN) | `arknights-yostar` | Proton/Wine + a CI-signed Yostar manifest (direct download) |
+| Heaven Burns Red (EN) | `hbr-yostar` | Proton/Wine + a CI-signed Yostar manifest (direct download; experimental) |
+| Azur Promilia (JP) | `azurpromilia-jp-yostar` | Proton/Wine + a CI-signed Yostar manifest (direct download; experimental) |
 | Stella Sora (EN) | `stellasora-yostar` | Proton/Wine + a CI-signed Yostar manifest (direct download) |
 | Fate/Grand Order (NA) | `fgo-lepton` | lepton-x86 Android context + Venus/virgl, via the `lepton-fgo` CLI |
 | Wine / Steam / script | `wine`, `steam`, `script` | scaffolding; you supply the prefix, exe or app |
-| Catalog: 13 direct-download games | `direct-<game>` | Proton/Wine prefix + the publisher's patch API |
-| Catalog: 3 publisher-launcher games | `launcher-<game>` | Proton/Wine prefix + the publisher's installer/launcher |
+| Catalog: 19 direct-download games | `direct-<game>` | Proton/Wine prefix + the publisher's patch API |
+| Catalog: 1 publisher-launcher game | `launcher-<game>` | Proton/Wine prefix + the publisher's installer/launcher |
 
-The `direct-*` kinds are `direct-bd2`, `direct-aethergazer`, `direct-mongil`, `direct-dna`, `direct-snowbreak`,
+The `direct-*` kinds are `direct-r1999`, `direct-bpsr`, `direct-bd2`, `direct-aethergazer`, `direct-mongil`, `direct-dna`, `direct-snowbreak`, `direct-strinova`, `direct-tof`,
 `direct-wuwa`, `direct-gfl2`, `direct-endfield`, `direct-pgr`, `direct-nte`,
 `direct-gfl2-haoplay`, `direct-genshin`, `direct-hsr`, `direct-hi3` and
 `direct-zzz`. The only `launcher-*` kind is `launcher-nikke` (its sign-in needs the
 publisher's launcher); `launcher-nte` and `launcher-gfl2-haoplay` were retired for their direct
-kinds (2026-11-10). Their catalogue rows live in
+kinds (2026-11-10). `launcher-tower-of-fantasy` is also retired in favor of `direct-tof`. Catalogue rows live in
 `core/directkinds.py`; see [docs/CATALOG.md](docs/CATALOG.md) for how they work
 and how to add one.
 
@@ -67,7 +69,7 @@ src/nadare/
                         # news.py (stub source: stub/pcsdk-go/)
     fgo/                # fgo-lepton: backend.py, installer.py, lepton.py,
                         # news.py, readiness.py
-    arknights.py  arknights_news.py  stellasora.py   # Yostar backends
+    arknights.py  arknights_news.py  stellasora.py  hbr.py  azurpromilia.py  # Yostar backends
     winegame.py                          # neutral Wine/Proton base class
     wine.py  steam.py  script.py         # generic backends
   gui/                  # PyQt6: main_window, library, game_view, settings,
@@ -163,7 +165,6 @@ FGO-free target.
 
 - `packaging/nadare.spec` is the PyInstaller onedir recipe (onedir by default).
 - `scripts/build_appimage.sh` builds the AppImage with `appimagetool`.
-- `scripts/build_deb.sh` builds the `.deb`.
 - `packaging/flatpak/` builds the Flatpak: `stage_repo.py` stages the AppImage's
   files as `/app` (nothing is compiled against the SDK), `build_repo.sh` exports and
   signs the repository and bundle, `upload.sh` publishes it. The Flatpak ships
@@ -183,9 +184,13 @@ Sandbox:
 
 ```
 ~/.cache/nadare/sandbox-cache/shader-cache/
-  mesa/                         # one shared Mesa cache (MESA_SHADER_CACHE_DIR)
+  mesa/                         # shared Mesa cache, capped at 2 GB by default
   games/<profile>/vkd3d/        # one VKD3D cache per game (VKD3D_SHADER_CACHE_PATH)
 ```
+
+Profiles can override the cache paths and `MESA_SHADER_CACHE_MAX_SIZE` through their
+Environment setting. Removing a game deletes only its `games/<profile>/` cache folder;
+the shared Mesa cache is kept. Uninstalling Nadare also removes the cache root.
 
 DXVK keeps its cache inside the game's prefix,
 `<prefix>/drive_c/users/<user>/AppData/Local/dxvk` (`steamuser` under Proton, the desktop

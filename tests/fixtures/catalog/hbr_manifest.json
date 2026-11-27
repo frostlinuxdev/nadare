@@ -1,0 +1,17 @@
+{
+  "game_tag": "HBR_EN",
+  "version": "4.0.3",
+  "base_url": "https://launcher-pkg-hbr-en.yo-star.com/prod/HBR_EN",
+  "files": [
+    {
+      "path": "HeavenBurnsRed.exe",
+      "size": 2,
+      "crc64": 6683223467371886641
+    },
+    {
+      "path": "HeavenBurnsRed_Data/app.info",
+      "size": 3,
+      "crc64": 13250048574261318167
+    }
+  ]
+}

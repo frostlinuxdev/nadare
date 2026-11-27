@@ -593,6 +593,56 @@ def game_running() -> bool:
     return launching.game_running(PREFIX, GAME_DIR)
 
 
+def _inventory(manifest: object) -> tuple[list[Row], set[str]]:
+    """The managed file rows of ``manifest`` and the prerequisite paths it lists (never ours)."""
+    rows: list[Row] = []
+    prereqs: set[str] = set()
+    if not isinstance(manifest, dict):
+        return rows, prereqs
+    for kind, path, vf, ci, md5u, md5p, usize in parse_files(manifest):
+        if kind != "F":
+            continue
+        relative = _relative(path)
+        if path.lstrip("/").lower().startswith(PREREQ_PREFIXES):
+            prereqs.add(relative)
+        else:
+            rows.append(Row(path, vf, ci, md5u, md5p, usize))
+    return rows, prereqs
+
+
+def _cached_inventory() -> dict[str, dict[str, object]]:
+    """The previous version's files from the cached manifest: the seed of the first ledger."""
+    try:
+        cached = json.loads(MANIFEST_CACHE.read_text())
+        check_manifest(cached)
+        rows, _prereqs = _inventory(cached)
+    except (OSError, ValueError, ManifestError):
+        return {}
+    return {
+        _relative(row.path): {"size": row[5], "md5": str(row[3] or "").lower()}
+        for row in rows
+        if row[5] is not None
+    }
+
+
+def _remove_dropped(manifest: dict, version: object) -> None:
+    """After a successful update: remove what the previous version shipped and this one dropped
+    (#1825). Never fails the update; a manifest it cannot read removes nothing."""
+    try:
+        rows, prereqs = _inventory(manifest)
+        whole = to_plan(rows, version) if rows else None
+        if whole is None:
+            return
+        removed = directdl.prune_dropped_files(
+            whole, GAME_DIR, keep=prereqs, seed=_cached_inventory()
+        )
+    except (OSError, ValueError, ManifestError, directdl.DirectError) as e:
+        print(f"  [!] could not check for files the new version dropped: {e}")
+        return
+    if removed:
+        print(f"[+] removed {removed} file(s) the new version no longer ships.")
+
+
 def _cache_manifest(manifest: dict) -> None:
     try:
         MANIFEST_CACHE.parent.mkdir(parents=True, exist_ok=True)
@@ -732,15 +782,7 @@ def main(argv=None) -> int:
             # The files already match this manifest; still advance the marker,
             # or the status keeps showing the old number when a release
             # changed nothing under the client files.
-            try:
-                with directdl.install_lock(GAME_DIR):
-                    _write_local_version(manifest, target)
-            except directdl.InstallBusy as e:
-                print(f"[!] {e}")
-                return EXIT_BUSY
-            except directdl.DirectError as e:  # an unusable lock folder
-                print(f"[!] {e}")
-                return 1
+            return _apply_unchanged(manifest, target)
         _cache_manifest(manifest)
         return 0
     print(f"[*] {len(to_dl)} file(s) differ / missing, {total / 1e6:.1f} MB to fetch:")
@@ -766,6 +808,31 @@ def main(argv=None) -> int:
     except directdl.DirectError as e:  # an unusable lock folder, or a failed download
         print(f"[!] {e}")
         return 1
+
+
+def _apply_unchanged(manifest: dict, target: int) -> int:
+    """Every file already matches ``manifest``: advance the marker and drop what it dropped.
+
+    Still advance the marker, or the status keeps showing the old number when a release
+    changed nothing under the client files.
+    """
+    try:
+        with directdl.install_lock(GAME_DIR):
+            if game_running():
+                # Never pull a file from under the game. No ledger is written, so the next
+                # update with the game closed removes them.
+                print("  [*] the game is running; files it no longer ships are left for now")
+            else:
+                _remove_dropped(manifest, manifest.get("version_no", target))
+            _write_local_version(manifest, target)
+    except directdl.InstallBusy as e:
+        print(f"[!] {e}")
+        return EXIT_BUSY
+    except directdl.DirectError as e:  # an unusable lock folder
+        print(f"[!] {e}")
+        return 1
+    _cache_manifest(manifest)
+    return 0
 
 
 def _apply(manifest: dict, target: int, sync_plan, to_dl, dirs, total: int) -> int:
@@ -799,6 +866,7 @@ def _apply(manifest: dict, target: int, sync_plan, to_dl, dirs, total: int) -> i
     except directdl.DirectError as e:
         print(f"[!] {e}")
         return 1
+    _remove_dropped(manifest, manifest.get("version_no", target))
     _write_local_version(manifest, target)
     _cache_manifest(manifest)
     print(

@@ -258,7 +258,7 @@ class RangeReader(io.RawIOBase):
             if attempt < self._retries:
                 # The server's own Retry-After (already capped) wins over our backoff, as in
                 # a full download (#1496); either wait stops at once on cancel.
-                delay = getattr(error, "retry_after", None)
+                delay = download.usable_retry_after(error)
                 if delay is None:
                     delay = self._backoff * 2**attempt
                 if delay > 0:

@@ -186,7 +186,7 @@ _PROBED_RTX = {
 
 
 def test_a_crashed_vulkaninfo_asks_the_driver_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """vulkaninfo that segfaults on an X connection says nothing about the GPU (flxpc,
+    """vulkaninfo that segfaults on an X connection says nothing about the GPU (an NVIDIA PC,
     2026-11-19): the driver probe must decide, not "no Vulkan" -> WineD3D -> D3D11 error."""
     monkeypatch.setattr(graphics, "_vulkaninfo_path", lambda: "/usr/bin/vulkaninfo")
     monkeypatch.setattr(

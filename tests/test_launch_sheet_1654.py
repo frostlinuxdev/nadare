@@ -83,6 +83,7 @@ def test_window_seen_is_feedback_not_a_console_line(window):
 def test_progress_timeout_and_hide(window, qtbot):
     window._start("g", "launch")
     sheet = window._launch_sheet
+    sheet.started = float(int(sheet.started))  # whole seconds: started + N - started == N
     window._on_event("g", Event("step", "Starting Chaos Zero Nightmare…"))
     assert sheet.status.text() == "Starting Wine"
     window._on_event("g", Event("step", "launching Example.exe"))

@@ -160,7 +160,7 @@ class ExtrasMixin:
 
     def _fgo_selinux_available(self, available: object) -> None:
         # A bound page method disconnects when Qt deletes its receiver.
-        self.remove_fgo_selinux.setVisible(bool(available))
+        self._set_widget_visible(self.remove_fgo_selinux, bool(available))
 
     def _remove_fgo_selinux_module(self) -> None:
         """Run the password prompt for FGO's policy module off the GUI thread.
@@ -264,6 +264,7 @@ class ExtrasMixin:
         cover = paths.get("cover") or next(iter(paths.values()))
         self.background.setText(str(cover))
         self.note.setText(f"Fetched {count_text(len(paths), 'image')} to {Path(cover).parent}")
+        self._search_reapply_soon()  # the Background field now shows other text (#1855)
 
     def _on_art_failed(self, message: str) -> None:
         if self._fetch_button is not None:
@@ -303,7 +304,9 @@ class ExtrasMixin:
         self.disk_space_panel.refresh()
 
     def _tab_shown(self, index: int) -> None:
-        if index == self._app_tab:
+        # Switching to the tab because a search found its first hit must not start a
+        # disk walk; only a real tab click does. The clear-time switch back is quiet too.
+        if index == self._app_tab and not self._search_applying:
             self.disk_space_panel.refresh_if_stale()
 
     def _update_runner_behind(self) -> None:
@@ -328,14 +331,14 @@ class ExtrasMixin:
         behind = runners_core.behind_pin(profile)
         if behind is None:
             label.setText("")
-            label.setVisible(False)
+            self._set_widget_visible(label, False)
             return
         build, tag = behind
         label.setText(
             f"This game is set to {build}; the recommended build is now {tag}. "
             "Choose the recommended build to follow new tested releases."
         )
-        label.setVisible(True)
+        self._set_widget_visible(label, True)
 
     def _reload_runners(self, selected: str) -> bool:
         """Refill the picker and select ``selected``; False when it is not a listed runner."""

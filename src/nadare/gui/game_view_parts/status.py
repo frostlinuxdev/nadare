@@ -19,6 +19,7 @@ from ...core.backends import (
     supports_update,
 )
 from ...core.gamefacts import InstallFacts, display_state, primary_operation
+from ..i18n import tr
 from ..theme import badge_style, set_state_property
 
 #: Primary button label for each operation.
@@ -35,12 +36,18 @@ PRIMARY_LABELS = {
 }
 
 
-def _version_text(version: object) -> str:
-    """``v``-prefixed version for the pill row; some backends already include the ``v``."""
+def _version_text(version: object, *, download: bool = False) -> str:
+    """``v``-prefixed version for the pill row; some backends already include the ``v``.
+
+    ``download`` marks a number that names the package Nadare downloads, not the build the
+    game itself shows; the tooltip explains it, and "files" keeps it short next to the meta
+    row's own "Direct download" wording.
+    """
     text = str(version or "").strip()
     if not text:
         return ""
-    return text if text[0] in "vV" and text[1:2].isdigit() else f"v{text}"
+    text = text if text[0] in "vV" and text[1:2].isdigit() else f"v{text}"
+    return f"{text} files" if download else text
 
 
 #: Shown while another process holds this game's operation lock (r3b05/r3b07 F2).
@@ -54,6 +61,18 @@ class StatusMixin:
     """Mixin for :class:`GameView`; see the module text."""
 
     # ---- status ------------------------------------------------------------
+    def await_status(self) -> None:
+        """Hold the primary action until the next status lands (it is about to change)."""
+        if self._busy_op is None:
+            self._awaiting_status = True
+            self._refresh_actions()
+
+    def stop_awaiting_status(self) -> None:
+        """The awaited status will not come: show the last one again."""
+        if self._awaiting_status:
+            self._awaiting_status = False
+            self._refresh_actions()
+
     def set_status(self, status: Status) -> None:
         self._awaiting_status = False
         self._apply_status(status)
@@ -80,12 +99,22 @@ class StatusMixin:
         # Only "now playing" says something; the other two just repeat the page.
         self.kicker.setVisible(playing)
         self._set_badge(shown, facts.message)
-        version = _version_text(facts.version)
         data = facts.extensions
+        download = data.get("version_kind") == "download"
+        version = _version_text(facts.version, download=download)
         latest = _version_text(facts.latest_version) if facts.update_available else ""
         if version and latest:
             version = f"{version} · {latest} available"
         self.version_label.setText(version)
+        if download and version:
+            self.version_label.setToolTip(
+                tr(
+                    "The version of the game files Nadare downloads. The game can show a "
+                    "different build on its own screen."
+                )
+            )
+        else:
+            self.version_label.setToolTip("")
         self._mark_pending_quality(data.get("pending_quality"))
         self._set_account(status)
         self._set_detail(facts.message or "")
@@ -335,6 +364,7 @@ class StatusMixin:
     def _refresh_steam_setup(self) -> None:
         """Set up is offered only for a known Steam game with no operation running."""
         self.steam_setup_btn.setVisible(self._steam_setup_available())
+        self._apply_patch_switch()
 
     def _steam_setup_available(self) -> bool:
         if self._busy_op is not None:

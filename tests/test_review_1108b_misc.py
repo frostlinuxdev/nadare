@@ -178,7 +178,7 @@ def test_doctor_prints_already_collected_diagnostics_when_a_later_probe_fails(
         print("GPU/Vulkan: fake but useful")
         raise RuntimeError("vulkaninfo exploded")
 
-    monkeypatch.setattr(cli_app, "_doctor_report", failing_report)
+    monkeypatch.setattr("nadare.doctor._doctor_report", failing_report)
     with pytest.raises(RuntimeError):
         cli_app._run_doctor(object())
     assert "GPU/Vulkan: fake but useful" in capsys.readouterr().out
@@ -324,6 +324,7 @@ def test_the_direct_launch_stops_the_relay_if_it_fails_before_streaming(tmp_path
     relay = SimpleNamespace(stopped=False)
     backend.direct_target = lambda: exe
     backend._run_vcredist = lambda created=False: None
+    backend.prefix = lambda: tmp_path / "pfx"  # no drive_c: the "Preparing" step runs too
     backend._prefix_command = lambda argv, env=None, **_kw: (argv, {})
     backend._direct_argv = lambda target: [str(target)]
     backend.launch_extra_env = lambda: None

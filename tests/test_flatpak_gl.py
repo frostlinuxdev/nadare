@@ -19,7 +19,7 @@ from nadare.core import flatpakgl
 
 OPEN = (
     "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  615.78.08  Release Build  "
-    "(root@flxpc)  Mon Oct 20 12:00:00 UTC 2026\n"
+    "(root@host)  Mon Oct 20 12:00:00 UTC 2026\n"
 )
 CLOSED = "NVRM version: NVIDIA UNIX x86_64 Kernel Module  550.54.14  Thu Feb 22 01:44:30 UTC 2024\n"
 

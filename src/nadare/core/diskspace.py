@@ -113,6 +113,17 @@ def human_speed(bytes_per_second: float) -> str:
     return f"{human_size(bytes_per_second)}/s"
 
 
+def free_needed(needed_bytes: int, margin: float = DEFAULT_MARGIN) -> int:
+    """The free space :func:`check_space` asks for ``needed_bytes``: the need plus the margin.
+
+    Every "keep about X free" text uses this figure, so the page, the install sheet and the
+    "Not enough disk space" error name one number (user 11-24: 85 vs 89 GiB).
+    """
+    if needed_bytes <= 0:
+        return 0
+    return int(needed_bytes * (1.0 + max(0.0, margin)))
+
+
 def check_space(
     path: str | os.PathLike[str],
     needed_bytes: int,
@@ -126,7 +137,7 @@ def check_space(
     """
     if needed_bytes <= 0:
         return
-    required = int(needed_bytes * (1.0 + max(0.0, margin)))
+    required = free_needed(needed_bytes, margin)
     available = free_bytes(path)
     if available < required:
         mount = mount_point(path)
@@ -172,10 +183,15 @@ def install_space(
     ``(size, folder)`` for the caller's wording, or ``None`` when either is unknown.
     """
     from . import backends as core_backends
+    from . import execmount
 
+    execmount.guard_install(backend)  # games cannot run from a noexec drive (#1861)
     kind = str(getattr(backend, "kind", "") or "")
     folder = getattr(backend, "install_dir", None)
-    size = getattr(backend, "install_size_hint", None)
+    # The peak: a fresh install may keep its archive while the tree unpacks (#1809).
+    size = getattr(backend, "install_space_hint", None) or getattr(
+        backend, "install_size_hint", None
+    )
     if not size or not callable(folder):
         return None
     asked = core_backends.install_choice(kind) if kind else None
@@ -533,6 +549,7 @@ def reserve(
 
 __all__ = [
     "DEFAULT_MARGIN",
+    "free_needed",
     "Reservation",
     "check_space",
     "reserve",

@@ -310,9 +310,17 @@ class GameBackend(ABC):
     #: told once (per game type) before the first install, login or launch.
     unofficial_notice: ClassVar[bool] = False
 
-    #: Rough size of a fresh install in bytes, so the GUI can ask before a very
-    #: large download. ``None`` means unknown (no prompt).
+    #: Rough size of a fresh install in bytes, so the GUI can ask before a very large
+    #: download. A backend whose fresh install needs more room than the finished tree
+    #: (an archive kept while it unpacks) declares :attr:`install_space_hint`.
     install_size_hint: ClassVar[int | None] = None
+
+    #: Bytes a fresh install downloads when that differs from the finished size.
+    download_size_hint: ClassVar[int | None] = None
+
+    #: Peak free space a fresh install needs when that is more than the finished size
+    #: (an archive plus the tree it unpacks to). ``None`` falls back to ``install_size_hint``.
+    install_space_hint: ClassVar[int | None] = None
 
     def __init__(self, ctx: BackendContext) -> None:
         self.ctx = ctx
@@ -354,6 +362,15 @@ class GameBackend(ABC):
 
         ``None`` when the backend has no reliable process rule: the launch monitor then
         does nothing and the launch sheet's timeout takes over.
+        """
+        return None
+
+    def game_processes(self) -> Callable[[], bool] | None:
+        """A function saying whether the game itself is running (#1821).
+
+        Unlike :meth:`game_pids`, a publisher launcher or an install helper does not
+        count: a presenter line from one must not end the launch sheet. ``None`` means
+        the backend has no narrower rule than :meth:`game_pids`.
         """
         return None
 
@@ -536,6 +553,28 @@ def install_size_hint(kind: str) -> int | None:
         return get(kind).install_size_hint
     except BackendError:
         return None
+
+
+def _declared_hint(kind: str, attribute: str) -> int | None:
+    """``kind``'s declared hint, else :func:`install_size_hint`; ``None`` for unknown kinds."""
+    try:
+        backend = get(kind)
+    except BackendError:
+        return None
+    declared = getattr(backend, attribute, None)
+    if declared is not None:
+        return declared  # a declared 0 is a figure, not "unset"
+    return install_size_hint(kind)
+
+
+def download_size_hint(kind: str) -> int | None:
+    """What a fresh install of ``kind`` downloads: its own figure, else ``install_size_hint``."""
+    return _declared_hint(kind, "download_size_hint")
+
+
+def install_space_hint(kind: str) -> int | None:
+    """Peak free bytes a fresh install of ``kind`` needs, else :func:`install_size_hint`."""
+    return _declared_hint(kind, "install_space_hint")
 
 
 def install_choice(kind: str) -> tuple[Option, dict[str, int]] | None:
@@ -749,6 +788,8 @@ __all__ = [
     "existing_profile",
     "unofficial_notice",
     "install_size_hint",
+    "download_size_hint",
+    "install_space_hint",
     "wine_prefix",
     "install_choice_label",
     "install_choice",

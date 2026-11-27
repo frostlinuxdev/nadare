@@ -52,6 +52,10 @@ def _is_loader_env(name: str) -> bool:
     return name.startswith("LD_")
 
 
+#: The same rule, for code that runs a host helper into the Sandbox (sandboxjoin, #1766).
+is_loader_env = _is_loader_env
+
+
 #: Where a Sandboxed game's shader caches go: its own folder inside Nadare's cache folder, so
 #: they survive between launches without showing the game the rest of ``~/.cache``.
 _CACHE_FOLDER = "sandbox-cache"

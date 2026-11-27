@@ -134,6 +134,9 @@ class MoveMixin:
 
     def show_move_section(self) -> None:
         """Switch to the tab that holds the Move button."""
+        # "Move game…" means this section: an earlier query must not keep it hidden.
+        if self.search.text():
+            self.search.clear()
         for index in range(self.tabs.count()):
             if self.tabs.widget(index).isAncestorOf(self.move_button):
                 self.tabs.setCurrentIndex(index)

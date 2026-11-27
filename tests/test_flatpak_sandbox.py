@@ -143,6 +143,7 @@ def test_owned_shader_paths_reach_the_flatpak_child(layout, monkeypatch):
     env_file = next(layout["envdir"].iterdir())
     entries = dict(c.split("=", 1) for c in env_file.read_text().split("\0") if c)
     cache = Path(entries["XDG_CACHE_HOME"])
+    assert entries["MESA_SHADER_CACHE_MAX_SIZE"] == "2G"
     assert f"--sandbox-expose-path={cache.resolve()}" in _spawn_args(argv)
     for key in ("MESA_SHADER_CACHE_DIR", "VKD3D_SHADER_CACHE_PATH"):
         folder = Path(entries[key])

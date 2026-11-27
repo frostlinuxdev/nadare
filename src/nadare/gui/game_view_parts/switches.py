@@ -7,9 +7,11 @@ Split out of :mod:`nadare.gui.game_view`; the code is unchanged.
 
 from __future__ import annotations
 
-from ...core import gamefacts
+from ...core import gamefacts, patchspecs
 from ...core.gamefacts import SandboxFacts
 from .shared import (
+    _PATCH_TIP,
+    _PATCH_UPDATE_TIP,
     _SANDBOX_TIP,
 )
 
@@ -92,3 +94,51 @@ class SwitchesMixin:
     def _on_sandbox_clicked(self, checked: bool) -> None:
         self._apply_sandbox()
         self.sandbox_toggled.emit(bool(checked))
+
+    # ---- the English patch switch (#1866) --------------------------------------------
+    def set_patch(self, applied: bool, *, outdated: bool = False, note: str = "") -> None:
+        """Tick the switch when the patched files are in the install (the window reads them).
+
+        ``note`` says why the patch is not active (the game moved to another build, #1894);
+        Update is hidden then, since no newer copy for the old build can help.
+        """
+        self._patch_applied = bool(applied)
+        self._patch_outdated = bool(applied and outdated and not note)
+        self._patch_note = note
+        self._apply_patch_switch()
+
+    def _apply_patch_switch(self) -> None:
+        """Shown for an installed game with a declared overlay; locked while busy or running."""
+        status = self._status
+        offered = bool(patchspecs.SPECS.get(str(self._profile_data.get("backend") or "")))
+        installed = status is not None and status.state in ("installed", "update_available")
+        shown = offered and installed
+        self.patch_switch.setVisible(shown)
+        running = gamefacts.is_running(status)
+        enabled = not running and self._busy_op is None
+        if running:
+            tip = "The game is running: close it to turn the English patch on or off."
+            update_tip = "The game is running: close it to update the English patch."
+        elif self._busy_op is not None:
+            tip = "Wait for the current task to finish."
+            update_tip = tip
+        else:
+            tip = _PATCH_TIP
+            update_tip = _PATCH_UPDATE_TIP
+        self.patch_switch.setEnabled(enabled)
+        self.patch_switch.setToolTip(tip)
+        self.patch_switch.blockSignals(True)
+        self.patch_switch.setChecked(self._patch_applied)
+        self.patch_switch.blockSignals(False)
+        self.patch_update_btn.setVisible(shown and self._patch_applied and self._patch_outdated)
+        self.patch_update_btn.setEnabled(enabled)
+        self.patch_update_btn.setToolTip(update_tip)
+        note = getattr(self, "_patch_note", "")
+        self.patch_note.setText(note)
+        self.patch_note.setVisible(shown and bool(note))
+
+    def _on_patch_clicked(self, checked: bool) -> None:
+        self.patch_toggled.emit(self._profile, bool(checked))
+
+    def _on_patch_update_clicked(self) -> None:
+        self.patch_update_requested.emit(self._profile)

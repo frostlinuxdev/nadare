@@ -1,0 +1,6 @@
+<ResList version="6.4.3" tag="baseTag">
+<Res filename="Client/WindowsNoEditor/Hotta/Binaries/Win64/QRSL.exe" filesize="2" md5="ac6ad5d9b99757c3a878f2d275ace198"/>
+<Package><Pak filesize="12" md5="29ddc6fd87917d12614f8b787e5222ce">
+<Entry name="data/b.bin" start="0" offset="9" size="3" md5="bfa99df33b137bc8fb5f5407d7e58da8"/>
+<Entry name="data/a.bin" start="999" offset="3" size="5" md5="5d41402abc4b2a76b9719d911017c592"/>
+</Pak></Package></ResList>

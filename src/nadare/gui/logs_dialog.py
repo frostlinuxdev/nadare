@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import os
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 
@@ -52,15 +53,21 @@ class LogsDialog(QDialog):
         directory: Path | str | None = None,
         follow: bool = True,
         parent: QWidget | None = None,
+        game_folders: Mapping[str, tuple[Path | None, Path | None]] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Logs")
-        self.setMinimumSize(900, 560)
+        #: Each game's (install, prefix): the zip also takes the logs the game wrote there.
+        self._game_folders = dict(game_folders or {})
+        self.setMinimumSize(720, 440)
+        self.resize(900, 560)
         self._profiles = list(profiles)
         self._profile = profile
         self._operation = operation
         self._directory = Path(directory) if directory is not None else paths.logs_dir()
         self._file_text = ""
+        #: A last line with no newline yet: shown, but following appends only whole lines.
+        self._partial = ""
         self._raw_text = ""
         #: Bytes of the selected file already shown, up to its last complete line (#624).
         self._read_upto = 0
@@ -70,9 +77,11 @@ class LogsDialog(QDialog):
         self._stat: tuple[int, int] | None = None
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
         heading = QLabel("Logs")
         heading.setObjectName("Title")
+        heading.setWordWrap(True)
         layout.addWidget(heading)
         note = QLabel(
             "Nadare's own log and the logs from each game operation. Copy or save a "
@@ -149,11 +158,19 @@ class LogsDialog(QDialog):
         self.refresh_button.setObjectName("GhostButton")
         self.refresh_button.clicked.connect(self.refresh)
         buttons.addWidget(self.refresh_button)
-        right.addLayout(buttons)
         content.addLayout(right, 3)
         layout.addLayout(content, 1)
+        layout.addLayout(buttons)
+        margins = layout.contentsMargins()
+        want_w = max(900, buttons.sizeHint().width() + margins.left() + margins.right())
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            want_w = min(want_w, avail.width())
+        self.resize(want_w, 560)
 
         self.files.currentRowChanged.connect(self._load_selected)
+        self.files.currentRowChanged.connect(self._update_folder_hint)
         # Filtering re-reads the whole tail: wait until typing pauses, not every keystroke
         # (#624). Enter filters at once.
         self._search_delay = QTimer(self)
@@ -168,6 +185,7 @@ class LogsDialog(QDialog):
         self._reload_files()
         self.zip_btn.setEnabled(self.files.count() > 0)
         self._load_selected()
+        self._update_folder_hint()
 
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
@@ -227,6 +245,7 @@ class LogsDialog(QDialog):
         path = self._selected_path()
         if path is None:
             self._file_text = ""
+            self._partial = ""
             self._stat = None
             self._render()
             return
@@ -238,9 +257,11 @@ class LogsDialog(QDialog):
         except OSError:
             self._stat = None
             self._file_id = None
-        # A half-written last line waits for its end, so following can append whole lines.
+        # A half-written last line is kept apart, so following can append whole lines; it is
+        # still shown, or a crash's last words (no newline) would never be seen (#1875 review).
         cut = text.rfind("\n") + 1
         self._file_text = text[:cut]
+        self._partial = text[cut:]
         self._read_upto = max(0, end_offset - partial_bytes)
         self._render()
 
@@ -250,7 +271,7 @@ class LogsDialog(QDialog):
 
     def _render(self, *_args: object) -> None:
         self._search_delay.stop()  # anything that renders also applies the current search
-        text = self._file_text
+        text = self._file_text + self._partial
         if self.latest_only.isChecked():
             parts = logview.sessions(text)
             text = parts[-1] if parts else ""
@@ -290,7 +311,7 @@ class LogsDialog(QDialog):
         if not name:
             return
         try:
-            Path(name).write_text(self.current_text(), encoding="utf-8")
+            _write_private(Path(name), self.current_text())
         except OSError as exc:
             # A full disk or a vanished drive must not escape the slot and abort the launcher.
             QMessageBox.warning(self, "Save log", f"Could not save the log: {exc}")
@@ -309,12 +330,30 @@ class LogsDialog(QDialog):
                 name,
                 profile=self._profile,
                 redact=self.redact_box.isChecked(),
+                game_folders=self._game_folders,
             )
         except OSError as exc:
             QMessageBox.warning(self, "Save logs as zip", f"Could not save the zip: {exc}")
 
+    def folder_to_open(self) -> Path:
+        """The game's own log folder, else the selected log's folder, else the logs folder (#1875).
+
+        Never a folder that does not exist: a game with no runs yet opens the logs folder.
+        """
+        if self._profile:
+            own = self._directory / runlog.game_id(self._profile)
+            if own.is_dir():
+                return own
+        path = self._selected_path()
+        if path is not None and path.parent.is_dir():
+            return path.parent
+        return self._directory
+
+    def _update_folder_hint(self) -> None:
+        self.folder.setToolTip(f"Open {self.folder_to_open()} in your file manager")
+
     def _open_folder(self) -> None:
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._directory)))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.folder_to_open())))
 
     def _newer_run(self, path: Path) -> Path | None:
         """A later run of the same operation in the same game folder, if one has started."""
@@ -385,6 +424,8 @@ class LogsDialog(QDialog):
         grown = size - self._read_upto
         if grown < 0 or grown > self._APPEND_LIMIT:
             return False  # rotated, truncated or a big burst
+        if self._partial and grown:
+            return False  # the shown half line grew: render it again whole
         if len(self._file_text) > 2 * self._APPEND_LIMIT:
             return False  # keep the in-memory text to about the tail read_tail would give
         try:
@@ -413,3 +454,11 @@ class LogsDialog(QDialog):
 
 
 __all__ = ["LogsDialog"]
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Write ``text`` readable by the user only: even redacted, a log says what they ran."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        handle.write(text)

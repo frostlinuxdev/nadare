@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Snowbreak defaults to X11 (XWayland): on native Wayland its sign-in window (a full-screen
 layered window) is drawn black and placed off-centre, part of it off the screen; on X11 the same
-prefix and runner show it centred and transparent (amdnode KDE Wayland, 2026-11-21, b25-rc2)."""
+prefix and runner show it centred and transparent (an AMD PC, KDE Wayland, 2026-11-21, b25-rc2)."""
 
 from __future__ import annotations
 

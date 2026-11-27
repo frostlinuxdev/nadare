@@ -74,3 +74,63 @@ def test_an_available_update_is_named_next_to_the_version(qapp):
         assert view.version_label.text() == "v1.1.0"
     finally:
         view.deleteLater()
+
+
+def test_a_download_version_says_it_is_the_download(qapp):
+    """HBR's feed number is the package Nadare downloads, not the build the game shows."""
+    view = GameView()
+    try:
+        view.set_profile("hbr", {"backend": "hbr-yostar", "title": "Heaven Burns Red"})
+        view.set_status(
+            Status("installed", version="4.0.3", data={"version_kind": "download"})
+        )
+        assert view.version_label.text() == "v4.0.3 files"
+        assert "download" in view.version_label.toolTip().lower(), (
+            "the page must explain that this is not the game's own build"
+        )
+        view.set_status(
+            Status(
+                "installed",
+                version="4.0.2",
+                data={
+                    "version_kind": "download",
+                    "update_available": True,
+                    "latest_version": "4.0.3",
+                },
+            )
+        )
+        assert view.version_label.text() == "v4.0.2 files · v4.0.3 available"
+        view.set_status(Status("installed", version="4.0.3"))
+        assert view.version_label.text() == "v4.0.3"
+        assert view.version_label.toolTip() == ""
+    finally:
+        view.deleteLater()
+
+
+def test_switching_games_clears_the_download_tooltip(qapp):
+    """The previous game's explanation must not stay over the new game's empty label."""
+    view = GameView()
+    try:
+        view.set_profile("hbr", {"backend": "hbr-yostar", "title": "Heaven Burns Red"})
+        view.set_status(
+            Status("installed", version="4.0.3", data={"version_kind": "download"})
+        )
+        assert view.version_label.toolTip()
+
+        view.set_profile("czn", {"backend": "stove-czn", "title": "CZN"})
+
+        assert view.version_label.text() == ""
+        assert view.version_label.toolTip() == ""
+    finally:
+        view.deleteLater()
+
+
+def test_a_download_kind_without_a_version_has_no_tooltip(qapp):
+    view = GameView()
+    try:
+        view.set_profile("hbr", {"backend": "hbr-yostar", "title": "Heaven Burns Red"})
+        view.set_status(Status("not_installed", data={"version_kind": "download"}))
+        assert view.version_label.text() == ""
+        assert view.version_label.toolTip() == ""
+    finally:
+        view.deleteLater()

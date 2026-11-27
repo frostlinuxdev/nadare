@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from _backend_helpers import make_context
 
-from nadare.backends import direct
+from nadare.backends import direct, webview2_signin
 from nadare.backends.czn import backend as czn_backend
 from nadare.backends.czn.backend import CznBackend
 from nadare.core import paths, webview2
@@ -129,7 +129,7 @@ def test_haoplay_runs_the_installer_in_its_own_prefix_through_xwayland(tmp_path,
         ran.append((cmd, env, kwargs))
         return 0
 
-    monkeypatch.setattr(direct, "stream", fake_stream, raising=False)
+    monkeypatch.setattr(webview2_signin, "stream", fake_stream)
     import nadare.backends.arknights as arknights
 
     monkeypatch.setattr(arknights, "stream", fake_stream)

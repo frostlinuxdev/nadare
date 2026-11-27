@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 import pytest
+from runner_layout import make_runner as make_runner_layout
 
 from nadare.core import runners
 from nadare.core.events import Event
@@ -35,12 +36,7 @@ def own(tmp_path, monkeypatch):
 
 
 def _runner(root: Path, name: str, version: str | None = None) -> Path:
-    d = root / name
-    d.mkdir()
-    (d / "proton").write_text("#!/bin/sh\n")
-    if version:
-        (d / "version").write_text(version + "\n")
-    return d
+    return make_runner_layout(root / name, version=version)
 
 
 def test_the_recommended_build_is_reported_as_recommended(own):

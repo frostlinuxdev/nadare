@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import QApplication, QPushButton
 
 from nadare.core.backends import Status
 from nadare.core.config import Config
-from nadare.gui import library, theme
+from nadare.gui import library, library_cards, theme
 from nadare.gui.main_window import MainWindow
 
 
@@ -257,7 +257,8 @@ def test_exact_new_boundary(monkeypatch):
         def now(cls, tz=None):
             return datetime(2026, 11, 17, tzinfo=UTC)
 
-    monkeypatch.setattr(library, "datetime", Clock)
+    # ``_is_new`` moved to library_cards (#1601); it reads that module's datetime.
+    monkeypatch.setattr(library_cards, "datetime", Clock)
     assert library._is_new("2026-11-03T00:00:01+00:00")
     assert not library._is_new("2026-11-03T00:00:00+00:00")
     assert not library._is_new("2026-11-18T00:00:00+00:00")

@@ -38,7 +38,7 @@ JOURNAL = ".move-to-flatpak.json"
 RETIRED = "config.json.moved-to-flatpak"
 NOTE = "MOVED-TO-FLATPAK.txt"
 #: Folders the Flatpak can see by default besides its own (packaging/flatpak manifest).
-_VISIBLE = ("Games", ".var/app/com.valvesoftware.Steam")
+_VISIBLE = ("Games", ".var/app/com.valvesoftware.Steam", ".local/share/Steam", ".steam")
 _VISIBLE_ROOTS = ("/mnt", "/media", "/run/media")
 
 Runner = Callable[..., subprocess.CompletedProcess]

@@ -13,11 +13,11 @@ from __future__ import annotations
 import os
 import re
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import atomicfile, events, paths, report, runlog
+from . import atomicfile, events, gamelogs, paths, report, runlog
 
 #: The app's own rotating log and its numbered backups.
 _APP_LOG = re.compile(r"^nadare\.log(?:\.\d+)?$")
@@ -293,8 +293,13 @@ def bundle(
     profile: str | None = None,
     redact: bool = True,
     max_bytes_per_file: int = BUNDLE_FILE_BYTES,
+    game_folders: Mapping[str, tuple[Path | None, Path | None]] | None = None,
 ) -> int:
     """Write every listed log (see :func:`list_logs`) into one zip at ``dest``.
+
+    ``game_folders`` maps a profile to its (install, prefix) folders: the logs the game, Proton
+    and DXVK wrote there (see :mod:`gamelogs`) go in under ``<game-id>/game/``, for ``profile``
+    only when one is given.
 
     Returns how many logs went in. Runs keep their game folder in the zip (old flat logs stay
     flat), a long log keeps its start and its end and, with ``redact``, has the username, paths and
@@ -338,6 +343,21 @@ def bundle(
                 used.add(arcname)
                 zf.writestr(arcname, redacted(text) if redact else text)
                 count += 1
+            game_count = 0
+            for owner, (install, prefix) in sorted((game_folders or {}).items()):
+                if profile is not None and owner != profile:
+                    continue
+                for item in gamelogs.find(install, prefix):
+                    text = read_head_and_tail(item.path, head_bytes, tail_bytes)
+                    arcname = f"{runlog.game_id(owner)}/game/{item.name}"
+                    if redact:
+                        arcname = redacted(arcname)
+                    if arcname in used:
+                        continue
+                    used.add(arcname)
+                    zf.writestr(arcname, gamelogs.mask(redacted(text)) if redact else text)
+                    game_count += 1
+            count += game_count
             hidden = (
                 "Your username, home path, host name and public addresses are hidden."
                 if redact
@@ -353,6 +373,8 @@ def bundle(
                 f"{f' for {shown}' if shown else ''}, each cut to its first "
                 f"{head_bytes // 1024} KiB and its last "
                 f"{tail_bytes // 1024} KiB.\n"
+                f"{game_count} game {'log' if game_count == 1 else 'logs'} "
+                f"(what the game, Proton and DXVK wrote themselves) under <game>/game/.\n"
                 f"{hidden}\n"
             )
             zf.writestr("README.txt", readme)

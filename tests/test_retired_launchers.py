@@ -16,7 +16,7 @@ import pytest
 from nadare.core import backends, removal, storecatalog
 from nadare.core.config import Config
 
-RETIRED = ("launcher-nte", "launcher-gfl2-haoplay")
+RETIRED = ("launcher-nte", "launcher-gfl2-haoplay", "launcher-tower-of-fantasy")
 
 
 @pytest.fixture
@@ -43,6 +43,7 @@ def test_the_retired_kinds_are_gone_and_nikke_stays():
     [
         ("launcher-nte", "Neverness to Everness", "direct-nte"),
         ("launcher-gfl2-haoplay", "Girls' Frontline 2", "direct-gfl2-haoplay"),
+        ("launcher-tower-of-fantasy", "Tower of Fantasy", "direct-tof"),
     ],
 )
 def test_a_retired_kind_explains_what_to_do(kind, title, direct):

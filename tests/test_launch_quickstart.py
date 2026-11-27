@@ -92,7 +92,7 @@ def test_the_word_boundary_is_read_right(tmp_path):
 
 
 # Virtual keyboards claim every key code, gamepad buttons included; udev calls them keyboards.
-# Seen on flxpc (2026-11-19): with ydotoold running every Play said "gamepad connected".
+# Seen on an NVIDIA PC (2026-11-19): with ydotoold running every Play said "gamepad connected".
 YDOTOOLD = (
     "ffffffffff 0 ffffff0003007f 1000f7fffffff 7fe001fffff000f 7ffffffffffffff "
     "ffffffff0003fdff 7fff8fff00ff03ff 1fffffffffff"

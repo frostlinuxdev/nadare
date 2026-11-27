@@ -82,12 +82,15 @@ from .game_view_parts.qr import (
 )
 from .game_view_parts.shared import (
     _NEWS_THUMB_MAX_H,
+    _PATCH_TIP,
+    _PATCH_UPDATE_TIP,
     _QR_SCAN_HINT,
     _REMEMBER_TEXT,
     _REMEMBER_TIP,
     _SANDBOX_TIP,
     ElidedLabel,
     NewsCard,
+    OneLineLabel,
     _format_news_date,
     _make_keyboard_link,
     _QrPanel,
@@ -144,15 +147,54 @@ class HeroCard(QFrame):
         self._cropped_key = None
         self._cropped = None
         self.update()
+        if isinstance(self.parentWidget(), _GamePage):
+            self.parentWidget().update()
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+        """The height the layout needs at the current width, never less.
+
+        The page keeps the hero at its size hint (a Maximum policy: spare height goes
+        to the page below), so a hint that ignored button wrapping squeezed the copy
+        column on a narrow page and the Sandbox switch drew over "Report a problem"
+        (b29, Strinova installing). The card's height depends on its width: ask the
+        layout for it.
+        """
+        hint = super().sizeHint()
+        if self.width() > 0:
+            needed = self.heightForWidth(self.width())
+            if needed > hint.height():
+                return QSize(hint.width(), needed)
+        return hint
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        """Ask for a new height when the width changes.
+
+        The height the card needs depends on how the buttons wrap, and the page keeps the
+        card at its size hint. A hint reserved at the old width leaves a narrow page with
+        the switches over the buttons, and a wide one with a bloated card.
+        """
+        super().resizeEvent(event)
+        self.updateGeometry()
+
+    def _background_height(self) -> int:
+        page = self.parentWidget()
+        if isinstance(page, _GamePage) and page.extends_art():
+            bottom = page.layout().contentsMargins().bottom()
+            return max(self.height(), page.height() - self.y() - bottom)
+        return self.height()
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().paintEvent(event)
+        painter = QPainter(self)
+        self._paint_background(painter)
+        painter.end()
+
+    def _paint_background(self, painter: QPainter) -> None:
         if self._source is None:
             return
-        width, height = self.width(), self.height()
+        width, height = self.width(), self._background_height()
         if width <= 1 or height <= 1:
             return
-        painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         path = QPainterPath()
         path.addRoundedRect(QRectF(0, 0, width, height), 16, 16)
@@ -189,6 +231,27 @@ class HeroCard(QFrame):
         painter.setPen(QPen(QColor(255, 255, 255, 26), 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(QRectF(0.5, 0.5, width - 1, height - 1), 15.5, 15.5)
+
+
+class _GamePage(QWidget):
+    """Continue the hero's painting into spare space without stretching its layout."""
+
+    def __init__(self, view: GameView) -> None:
+        super().__init__()
+        self._view = view
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+    def extends_art(self) -> bool:
+        return hasattr(self._view, "news_frame") and self._view.news_frame.isHidden()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().paintEvent(event)
+        if not self.extends_art():
+            return
+        hero = self._view.hero
+        painter = QPainter(self)
+        painter.translate(hero.pos())
+        hero._paint_background(painter)
         painter.end()
 
 
@@ -372,6 +435,9 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
     report_requested = pyqtSignal(str)
     found_copy_requested = pyqtSignal(str)  # profile name: use a copy found on disk (#1293)
     steam_setup_requested = pyqtSignal()
+    patch_toggled = pyqtSignal(str, bool)  # profile, on: the English patch switch (#1866)
+    patch_update_requested = pyqtSignal(str)  # profile: update an outdated English patch
+    shortcut_requested = pyqtSignal(str, str)  # profile, shortcuts ACTIONS entry (#1759)
     remember_toggled = pyqtSignal(bool)  # the user ticked/unticked Remember me
     sandbox_toggled = pyqtSignal(bool)  # the user turned the Sandbox on or off
     safety_check_requested = pyqtSignal(str)  # profile name: run the manual check
@@ -398,6 +464,8 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         self._sandbox_ready = True
         #: Whether the running launch was started sandboxed (None when not running or unknown).
         self._sandbox_active: bool | None = None
+        self._patch_applied = False  # what the install holds, as the window last read it
+        self._patch_outdated = False  # applied archive hash differs from the current spec
         self._paused_op: str | None = None
         self._failed_op: str | None = None  # what RETRY runs again after a failure
         self._found_copy: str | None = None  # a folder the start-up check found (#1293)
@@ -411,11 +479,15 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         self._news_shown = False  # intended news visibility (hidden while busy)
         self._started_at = 0.0
         self._last_step_at = 0.0  # last phase step; play time is counted from it
+        #: True after a download reached 100%, until the page reports its next phase.
+        self._download_finished = False
         # OUTPUT starts folded (#993): it is noise unless something fails. The user's own
         # Show/Hide choice is kept for every game and operation (the window saves it).
         self._console_preference = False
         self._console_expanded = False
         self._last_done = ""  # the running operation's "done" line, said again when it ends
+        self._last_sync = None  # (changed, unchanged) from the sync summary of the running op
+        self._last_versions = None  # (old, new) from the running update's receipt
         self._last_line = ""  # the console's newest line, so a repeated check error shows once
         # Something the user asked for (a RETRY of a check) may fail with the same words again:
         # that failure is news and is shown (round 5).
@@ -446,7 +518,7 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         outer.addWidget(self.scroll)
 
-        content = QWidget()
+        content = _GamePage(self)
         content.setObjectName("Page")
         self.scroll.setWidget(content)
         root = QVBoxLayout(content)
@@ -469,7 +541,9 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         self.more_button = QPushButton("\u22ef")
         self.more_button.setObjectName("GhostButton")
         self.more_button.setAccessibleName("More")
-        self.more_button.setToolTip("More: move or remove this game")
+        self.more_button.setToolTip(
+            i18n.tr("More: move or remove this game, add it to the app menu or Steam")
+        )
         self.more_menu = QMenu(self.more_button)
         self.more_menu.addAction("Move game…").triggered.connect(
             lambda: self.move_requested.emit(self._profile)
@@ -477,6 +551,15 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         self.more_menu.addAction("Uninstall or remove…").triggered.connect(
             lambda: self.remove_requested.emit(self._profile)
         )
+        # App menu / Steam (#1759): the label says what a click does now.
+        self.more_menu.addSeparator()
+        self.menu_shortcut_action = self.more_menu.addAction(i18n.tr("Add to app menu"))
+        self.menu_shortcut_action.triggered.connect(lambda: self._emit_shortcut("menu"))
+        self.steam_shortcut_action = self.more_menu.addAction(i18n.tr("Add to Steam"))
+        self.steam_shortcut_action.setToolTip(i18n.tr("As a non-Steam game; Steam must be closed"))
+        self.steam_shortcut_action.triggered.connect(lambda: self._emit_shortcut("steam"))
+        self._shortcut_present = {"menu": False, "steam": False}
+        self.more_menu.aboutToShow.connect(self._refresh_shortcut_actions)
         self.more_button.setMenu(self.more_menu)
         header.addWidget(self.more_button)
         root.addLayout(header)
@@ -549,7 +632,9 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         meta_row.addWidget(self.account_label)
         copy.addLayout(meta_row)
 
-        self.detail_label = QLabel("")
+        # One line, elided, with the whole step in the tooltip (#1737): a wrapped
+        # status used to draw two lines inside one line of pill height and clip both.
+        self.detail_label = OneLineLabel("")
         self.detail_label.setObjectName("Hint")
         # A soft pill sized to its text: readable over white key art without reading as a
         # second, empty progress bar across the page (2026-11-20, user).
@@ -557,7 +642,6 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
             "color: rgba(255, 255, 255, 235); background-color: rgba(10, 14, 22, 165); "
             "border: 1px solid rgba(255, 255, 255, 28); padding: 3px 10px; border-radius: 10px;"
         )
-        self.detail_label.setWordWrap(True)
         copy.addWidget(self.detail_label, 0, Qt.AlignmentFlag.AlignLeft)
 
         # Informational note from the backend (e.g. "coming to Steam").
@@ -597,7 +681,7 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         primary_row.addWidget(self.primary, 1)
         # Like Steam: the big button says PLAYING and a small x ends the session.
         self.stop_button = QPushButton("\u2715")
-        self.stop_button.setObjectName("GhostButton")
+        self.stop_button.setObjectName("StopButton")  # solid over the art (user sim r2v 015)
         self.stop_button.setAccessibleName("Stop game")
         self.stop_button.setToolTip("Stop game")
         self.stop_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -744,6 +828,31 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         self.sandbox.setVisible(False)
         self.sandbox.clicked.connect(self._on_sandbox_clicked)
         copy.addWidget(self.sandbox)
+
+        # The English patch (#1866): ticked means the patched files are in the install.
+        patch_row = QHBoxLayout()
+        patch_row.setContentsMargins(0, 0, 0, 0)
+        patch_row.setSpacing(8)
+        self.patch_switch = QCheckBox("English patch (KiboTL, unofficial)")
+        self.patch_switch.setToolTip(_PATCH_TIP)
+        self.patch_switch.setVisible(False)
+        self.patch_switch.clicked.connect(self._on_patch_clicked)
+        patch_row.addWidget(self.patch_switch)
+        self.patch_update_btn = QPushButton(i18n.tr("Update patch"))
+        self.patch_update_btn.setObjectName("GhostButton")
+        self.patch_update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.patch_update_btn.setToolTip(_PATCH_UPDATE_TIP)
+        self.patch_update_btn.setVisible(False)
+        self.patch_update_btn.clicked.connect(self._on_patch_update_clicked)
+        patch_row.addWidget(self.patch_update_btn)
+        patch_row.addStretch(1)
+        copy.addLayout(patch_row)
+        # Why the patch is not active, e.g. the game updated itself to another build (#1894).
+        self.patch_note = QLabel("")
+        self.patch_note.setObjectName("Muted")
+        self.patch_note.setWordWrap(True)
+        self.patch_note.setVisible(False)
+        copy.addWidget(self.patch_note)
 
         hero_layout.addLayout(copy, 1)
 
@@ -961,6 +1070,25 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         self.safety_banner.setVisible(False)
         self.safety_dismissed.emit(self._profile)
 
+    #: ``profile -> (in the app menu, in Steam)``; MainWindow sets the real one (#1759).
+    shortcut_state = staticmethod(lambda profile: (False, False))
+
+    def _refresh_shortcut_actions(self) -> None:
+        in_menu, in_steam = self.shortcut_state(self._profile) if self._profile else (False, False)
+        self._shortcut_present = {"menu": in_menu, "steam": in_steam}
+        remove_menu, add_menu = i18n.tr("Remove from app menu"), i18n.tr("Add to app menu")
+        remove_steam, add_steam = i18n.tr("Remove from Steam"), i18n.tr("Add to Steam")
+        self.menu_shortcut_action.setText(remove_menu if in_menu else add_menu)
+        self.steam_shortcut_action.setText(remove_steam if in_steam else add_steam)
+        self.menu_shortcut_action.setEnabled(bool(self._profile))
+        self.steam_shortcut_action.setEnabled(bool(self._profile))
+
+    def _emit_shortcut(self, where: str) -> None:
+        if not self._profile:
+            return
+        verb = "remove" if self._shortcut_present.get(where) else "add"
+        self.shortcut_requested.emit(self._profile, f"{where}-{verb}")
+
     def set_profile(
         self,
         name: str,
@@ -981,6 +1109,8 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         self._found_copy = None  # an offer for one game never follows to the next
         self._unfinished_removal = []
         self._busy_elsewhere = False
+        self._patch_applied = False
+        self._patch_outdated = False
         # Until this game's status lands, the previous game's predownload button must not show.
         self._predownload_version = ""
         self._predownload_ready = False
@@ -1010,6 +1140,7 @@ class GameView(BusyMixin, ConsoleMixin, NewsMixin, QrMixin, StatusMixin, Switche
         self.backend_label.setVisible(kind.strip().lower() not in _SELF_EVIDENT_BACKENDS)
         self._set_page_notice(str(profile.get("backend") or ""))
         self.version_label.setText("")
+        self.version_label.setToolTip("")
         choice = install_choice_label(kind, profile)
         self.choice_label.setText(choice)
         self.choice_label.setVisible(bool(choice))
@@ -1198,6 +1329,7 @@ __all__ = [
     "_make_keyboard_link",
     "_format_news_date",
     "ElidedLabel",
+    "OneLineLabel",
     "_ThumbnailLabel",
     "NewsCard",
     "_REMEMBER_TEXT",

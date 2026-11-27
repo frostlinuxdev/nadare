@@ -74,6 +74,24 @@ def test_shipped_english_strings_are_unchanged():
         assert i18n.translate(key) == gui_i18n.tr(key) == expected
 
 
+def test_the_install_queue_plural_key_is_the_english_other_form():
+    """A plural key is the English ``other`` form (core/i18n.py), not the singular one."""
+    key = "{n} installs ahead"
+    assert i18n.translate_plural(key, 1) == "1 install ahead"
+    assert i18n.translate_plural(key, 2) == "2 installs ahead"
+
+
+def test_the_install_queue_plural_falls_back_to_the_other_form(tmp_path, monkeypatch):
+    monkeypatch.setattr(i18n, "locale_dir", lambda: tmp_path)  # no catalogue at all
+    assert i18n.translate_plural("{n} installs ahead", 2) == "2 installs ahead"
+
+
+def test_the_old_install_queue_key_is_kept_for_external_catalogues():
+    """Unused keys are kept, so an external catalogue with the old key still works."""
+    catalogue = json.loads((i18n.locale_dir() / "en.json").read_text(encoding="utf-8"))
+    assert "Waiting · {n} installs ahead of this one" in catalogue
+
+
 @pytest.fixture(params=["core", "gui"])
 def entrypoint(request):
     if request.param == "core":

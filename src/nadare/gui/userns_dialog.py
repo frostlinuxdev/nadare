@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core import userns
+from .dialog_layout import fit_dialog, make_scroll_body
 
 _COPIED = "Copied. Paste it into a terminal, then try again."
 _WAITING = "Waiting for your password…"
@@ -47,31 +48,42 @@ class UsernsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Permission needed")
         self.setMinimumWidth(560)
+        self._shown_once = False
         self._message = message
         self._retry_op = retry_op
         #: True when the player pressed the retry button after a successful fix.
         self.retry_requested = False
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
+
+        heading = QLabel(self.windowTitle())
+        heading.setObjectName("Title")
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+
+        self._scroll, _body, body_layout = make_scroll_body(spacing=12)
 
         summary = (userns.RUNTIME_MOVED_MESSAGE if userns.RUNTIME_MOVED_MESSAGE in message
                    else userns.SHORT_MESSAGE + "\n\n" + userns.WITHOUT_IT)
         self.summary = QLabel(summary)
         self.summary.setWordWrap(True)
-        layout.addWidget(self.summary)
+        body_layout.addWidget(self.summary)
 
         self.status = QLabel("")
         self.status.setWordWrap(True)
-        layout.addWidget(self.status)
+        body_layout.addWidget(self.status)
 
         self.details = QPlainTextEdit()
         self.details.setReadOnly(True)
         self.details.setFont(QFont("monospace"))
+        self.details.setMinimumHeight(180)
         head, _details = userns.split_hint(message)
         self.details.setPlainText((f"{head}\n\n" if head else "") + userns.hint())
         self.details.hide()
-        layout.addWidget(self.details)
+        body_layout.addWidget(self.details)
+        layout.addWidget(self._scroll, 1)
 
         footer = QHBoxLayout()
         self.details_button = QPushButton("Show details")
@@ -102,13 +114,23 @@ class UsernsDialog(QDialog):
         footer.addWidget(self.close_button)
 
         layout.addLayout(footer)
+        self._fit_height()
 
         self.fixed.connect(self._on_fixed)
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        self._fit_height(keep_width=self._shown_once)
+        self._shown_once = True
+
+    def _fit_height(self, *, keep_width: bool = False) -> None:
+        fit_dialog(self, min_width=560, scroll=self._scroll, keep_width=keep_width)
 
     def _toggle_details(self) -> None:
         visible = self.details.isHidden()
         self.details.setVisible(visible)
         self.details_button.setText("Hide details" if visible else "Show details")
+        self._fit_height(keep_width=self._shown_once)
 
     def _copy_command(self) -> None:
         clipboard = QApplication.clipboard()

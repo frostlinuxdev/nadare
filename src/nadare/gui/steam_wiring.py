@@ -277,7 +277,14 @@ def build_dialog(
     def progress(event: Event) -> None:
         # Also reports to the window, which turns it into a Downloads row (#1625).
         report_runner(current_cancel[0], event)
-        if event.kind != "progress" or event.progress is None or not shown:
+        if not shown:
+            return
+        if event.kind == "step":
+            # The runner download's own steps ("Unpacking the runner…") replace the last
+            # percentage instead of leaving a frozen 100% on the dialog.
+            shown[0].report_progress(event.message or "")
+            return
+        if event.kind != "progress" or event.progress is None:
             return
         data = event.data if isinstance(event.data, dict) else {}
         done = data.get("done")

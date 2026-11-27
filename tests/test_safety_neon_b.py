@@ -10,6 +10,7 @@ a safety check left running when the window closes.
 from __future__ import annotations
 
 import os
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -52,7 +53,8 @@ def _parse_rule(
 
 
 def _shots() -> Path:
-    folder = Path(os.environ.get("NADARE_SAFETY_SHOTS", "/mnt/kikyou/work/b28/safety"))
+    default = Path(tempfile.gettempdir()) / "nadare-safety-shots"
+    folder = Path(os.environ.get("NADARE_SAFETY_SHOTS", default))
     try:
         folder.mkdir(parents=True, exist_ok=True)
         probe = folder / ".write-probe"

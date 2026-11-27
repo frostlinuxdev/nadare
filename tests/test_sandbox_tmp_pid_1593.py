@@ -30,11 +30,33 @@ from nadare.core import gamesandbox, sandbox
 from nadare.core.backends import BackendError
 
 
+def _paths_the_sandbox_must_see() -> list[str]:
+    """What the ``test_real_*`` tests run inside the Sandbox: this Python, its prefix, the repo."""
+    repo = str(Path(__file__).resolve().parent.parent)
+    return [sys.executable, str(Path(sys.executable).resolve()), sys.prefix, sys.base_prefix, repo]
+
+
+def _hidden_by_the_sandbox(paths: list[str]) -> str | None:
+    """Why the game Sandbox cannot see one of ``paths`` (#1751), or None."""
+    for path in paths:
+        for mount in gamesandbox._HIDDEN_MOUNTS:
+            if path == mount or path.startswith(mount + "/"):
+                return (
+                    f"{path} is under {mount}, which the game Sandbox hides: the real-bwrap "
+                    "tests cannot run this Python there (#1751). Run them from a checkout under "
+                    "your home, like release/suite.sh does."
+                )
+    return None
+
+
 @pytest.fixture
 def real_bwrap():
     binary = shutil.which("bwrap")
     if binary is None:
         pytest.skip("bubblewrap is absent")
+    hidden = _hidden_by_the_sandbox(_paths_the_sandbox_must_see())
+    if hidden:
+        pytest.skip(hidden)
     probe = subprocess.run(
         [binary, "--ro-bind", "/", "/", "--unshare-pid", "--proc", "/proc", "--", "/bin/true"],
         capture_output=True,

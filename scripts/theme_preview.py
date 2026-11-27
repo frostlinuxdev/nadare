@@ -229,7 +229,7 @@ def library_preview() -> int:
         config = Config.load(workdir / "config.json")
         art_root = Path(os.environ.get(
             "NADARE_PREVIEW_ART",
-            "/mnt/kikyou/work/visual-refresh-2026-11-13/proto-art/nadare/covers",
+            str(Path.home() / "nadare-preview-art"),
         ))
 
         def local_art(profile, title=None, kind="cover", **kwargs):

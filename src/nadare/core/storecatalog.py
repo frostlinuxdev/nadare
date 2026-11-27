@@ -12,6 +12,7 @@ from .directkinds import (
     ART,
     DIRECT_LABEL,
     DIRECT_WIZARD,
+    HELD_BACK_KINDS,
     HOYO_KINDS,
     LAUNCHER_LABEL,
     LAUNCHER_WIZARD,
@@ -29,6 +30,13 @@ _LEGACY_ROWS: tuple[tuple[str, str, str, str], ...] = (
     ("stove-czn", "Chaos Zero Nightmare", DIRECT_LABEL, TIER_VERIFIED),
     ("arknights-yostar", "Arknights", DIRECT_LABEL, TIER_VERIFIED),
     ("stellasora-yostar", "Stella Sora", DIRECT_LABEL, TIER_VERIFIED),
+    ("hbr-yostar", "Heaven Burns Red", DIRECT_LABEL, TIER_EXPERIMENTAL),
+    (
+        "azurpromilia-jp-yostar",
+        "Azur Promilia (JP)",
+        DIRECT_LABEL,
+        TIER_EXPERIMENTAL,
+    ),
     ("fgo-lepton", "Fate/Grand Order", CONTAINER_LABEL, TIER_EXPERIMENTAL),
 )
 
@@ -85,7 +93,7 @@ def unavailable_games() -> list[tuple[str, str]]:
     games hidden by ``NADARE_HIDE_HOYO`` are ignored, as are builtins outside the
     store catalog.
     """
-    unavailable = set(backends.unavailable()) - backends.OPTIONAL_KINDS
+    unavailable = set(backends.unavailable()) - backends.OPTIONAL_KINDS - HELD_BACK_KINDS
     if not hoyo_visible():
         unavailable -= HOYO_KINDS
     return [
@@ -107,7 +115,7 @@ def entries(
     tier: str | None = None,
 ) -> list[StoreEntry]:
     """Build the available store entries, optionally filtered by title and tier."""
-    unavailable = set(backends.unavailable())
+    unavailable = set(backends.unavailable()) | HELD_BACK_KINDS
     if not hoyo_visible():
         unavailable.update(HOYO_KINDS)
 
@@ -130,7 +138,8 @@ def entries(
                 if steamstore.app_id_of(kind)
                 else TIER_HELP[game_tier],
                 delivery_label=delivery,
-                size_bytes=backends.install_size_hint(kind),
+                # What a fresh install fetches, the same figure the install sheet names.
+                size_bytes=backends.download_size_hint(kind),
                 has_art=kind in ART
                 or kind in publisher_art_kinds()
                 or steamstore.app_id_of(kind) is not None,

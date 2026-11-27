@@ -7,7 +7,7 @@ shape ("whose folder is it", "may Uninstall delete it", "is it used by another g
 into a golden file, so the storage consolidation can change those answers only on purpose.
 
 Placeholders in paths: ``{HOME}`` the home, ``{DATA}`` Nadare's data folder, ``{LIB}`` and
-``{LIB2}`` library drives, ``{MNT}`` the maintainer's library drive (flxpc world).
+``{LIB2}`` library drives, ``{MNT}`` the maintainer's library drive (a real desktop).
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ def s01_add_game_library(w: World) -> dict[str, Any]:
 
 
 def s02_default_library_no_records(w: World) -> dict[str, Any]:
-    """b22-b24 default library, no ownership records (flxpc aether-gazer)."""
+    """b22-b24 default library, no ownership records (aether-gazer, NVIDIA PC)."""
     home = "{DATA}/profiles/aether-gazer"
     p = {
         "backend": "direct-aethergazer",
@@ -109,7 +109,7 @@ def s02_default_library_no_records(w: World) -> dict[str, Any]:
 
 
 def s03_default_library_trees_no_dirs(w: World) -> dict[str, Any]:
-    """Default library with owned_trees + owned_paths but no owned_dirs (flxpc wuwa)."""
+    """Default library with owned_trees + owned_paths but no owned_dirs (wuwa, NVIDIA PC)."""
     home = "{DATA}/profiles/wuthering-waves"
     p = {
         "backend": "direct-wuwa",
@@ -259,7 +259,7 @@ def s13_generic_wine_default_prefix(w: World) -> dict[str, Any]:
 
 
 def s14_steam_game(w: World) -> dict[str, Any]:
-    """A Steam game (flxpc Blue Archive): Steam keeps its own prefix and game files, so Nadare
+    """A Steam game (Blue Archive, NVIDIA PC): Steam keeps its own prefix and game files, so Nadare
     records no folder at all, only the Steam app id."""
     p = {
         "backend": "steam",
@@ -379,10 +379,10 @@ def s22_folders_only_under_extra(w: World) -> dict[str, Any]:
     }
 
 
-def flxpc_world(w: World) -> dict[str, Any]:
-    """The maintainer's real profiles on flxpc (2026-11-14), location keys only, paths
+def desktop_world(w: World) -> dict[str, Any]:
+    """Real profiles from a test desktop (2026-11-14), location keys only, paths
     templated; every folder they name is created (the real disk has them)."""
-    data = json.loads((Path(__file__).parent / "data" / "storage_world_flxpc.json").read_text())
+    data = json.loads((Path(__file__).parent / "data" / "storage_world_desktop.json").read_text())
     text = w.fill(json.dumps(data))
     data = json.loads(text)
     for profile in data["profiles"].values():
@@ -421,6 +421,6 @@ SHAPES: dict[str, Builder] = {
         s20_linked_catalog_profile,
         s21_mixed_no_records,
         s22_folders_only_under_extra,
-        flxpc_world,
+        desktop_world,
     )
 }

@@ -41,6 +41,7 @@ ADVANCED = (
     "remove",
     "move-to-flatpak",
     "uninstall-all",
+    "patch",
 )
 
 #: One minimal argv per advanced command (and per ``shortcut`` action).
@@ -57,6 +58,7 @@ ADVANCED_ARGV = (
     ["remove", "-p", "game", "--yes"],
     ["move-to-flatpak", "--yes"],
     ["uninstall-all", "--yes", "--with-games"],
+    ["patch", "status", "-p", "game"],
 )
 
 

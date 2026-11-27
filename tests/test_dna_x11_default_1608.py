@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Duet Night Abyss defaults to X11 (XWayland) (#1608): on native Wayland its window stays white
 (DXVK and wined3d alike); on X11 the same prefix, runner and Sandbox reach the game's first
-screen (amdnode, 2026-11-18)."""
+screen (an AMD PC, 2026-11-18)."""
 
 from __future__ import annotations
 

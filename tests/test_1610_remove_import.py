@@ -8,6 +8,7 @@ import pytest
 from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox, QPushButton
 
 from nadare.core.config import Config
+from nadare.core.directkinds import HELD_BACK_KINDS
 from nadare.gui.add_game import CATALOG, AddGameDialog
 from nadare.gui.main_window import MainWindow
 from nadare.gui.quick_install import QuickInstallDialog
@@ -28,7 +29,10 @@ def test_quick_install_has_no_import_controls(qapp):
         dialog.deleteLater()
 
 
-@pytest.mark.parametrize("kind", [g.kind for g in CATALOG if g.group == "Games"])
+@pytest.mark.parametrize(
+    "kind",
+    [g.kind for g in CATALOG if g.group == "Games" and g.kind not in HELD_BACK_KINDS],
+)
 def test_catalog_dialog_has_no_import_mode_or_direct_prefix_picker(tmp_path, qapp, kind):
     dialog = AddGameDialog(Config.load(tmp_path / "config.json"), kind=kind)
     try:
@@ -103,8 +107,11 @@ def test_old_import_opens_and_remove_keeps_external_folders(tmp_path, qapp, monk
         folder.mkdir()
         (folder / "keep.txt").write_text("player data")
     profile = {
-        "backend": "direct-snowbreak", "title": "Snowbreak",
-        "install_dir": str(install), "prefix": str(prefix), "made_by_nadare": [],
+        "backend": "direct-snowbreak",
+        "title": "Snowbreak",
+        "install_dir": str(install),
+        "prefix": str(prefix),
+        "made_by_nadare": [],
     }
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"profiles": {"snowbreak": profile}}))

@@ -128,3 +128,15 @@ def test_cover_only_documents_still_answer_without_wide_art():
     assert artindex.valid_document(doc)
     assert artindex.lookup("direct-genshin", art="wide", wait=True) == []
     assert artindex.lookup("direct-genshin", wait=True) == [(PORTRAIT, ("cdn2.unrealengine.com",))]
+
+
+@pytest.mark.parametrize("kind", ["hbr-yostar", "azurpromilia-jp-yostar"])
+def test_the_seed_has_art_for_the_yostar_games_without_a_news_feed(kind):
+    # HBR and Azur Promilia have no news feed to borrow a cover from, so without a seed entry
+    # their store card stayed on the placeholder (release prep 11-27).
+    doc = json.loads(SEED.read_text(encoding="utf-8"))
+    cover = artindex.parse(doc)
+    wide = artindex.parse_wide(doc)
+    assert cover.get(kind), kind
+    assert wide.get(kind), kind
+    assert wide[kind][0].width > wide[kind][0].height, kind

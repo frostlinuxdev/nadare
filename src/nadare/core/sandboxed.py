@@ -81,6 +81,10 @@ class SandboxMixin:
     #: bubblewrap here), and Stop must then treat the game as the unsandboxed one it is.
     _sandbox_wrapped: bool | None = None
 
+    #: The command and environment as they run inside the last bubblewrap Sandbox, so Stop
+    #: can run its ``taskkill`` there (#1766); ``None`` when there is none to join.
+    _sandbox_inside: tuple[list[str], dict[str, str]] | None = None
+
     def _sandbox_prefix(self) -> Path:
         """The Wine prefix the Sandbox binds writable."""
         raise NotImplementedError
@@ -159,6 +163,7 @@ class SandboxMixin:
         bubblewrap or Flatpak is an error, not a fallback; on only by default, the program
         still starts and says why it is not sandboxed.
         """
+        self._sandbox_inside = None
         if not self.secure_mode_enabled():
             self._sandbox_wrapped = False
             return argv, env
@@ -276,6 +281,7 @@ class SandboxMixin:
             raise
         self.info(f"Sandbox: your home folder is hidden from {thing}.", sandbox=True)
         self._sandbox_wrapped = True
+        self._sandbox_inside = _inside_command(argv, wrapped)
         return wrapped
 
     def _run_unwrapped(self, argv: list[str], env: dict[str, str], *, on_line) -> int:  # noqa: ANN001
@@ -344,3 +350,21 @@ class SandboxMixin:
         relay, self._link_relay = self._link_relay, None
         if relay is not None:
             relay.stop()
+
+
+def _inside_command(
+    argv: list[str], wrapped: tuple[list[str], dict[str, str]]
+) -> tuple[list[str], dict[str, str]] | None:
+    """``argv`` and the environment it sees inside bubblewrap's ``wrapped`` command.
+
+    That is bubblewrap's environment plus the loader variables it passes with ``--setenv``.
+    """
+    outer, env = wrapped
+    if len(outer) <= len(argv) or outer[-len(argv) - 1 :] != ["--", *argv]:
+        return None
+    inside = dict(env)
+    flags = outer[: -len(argv) - 1]
+    for i, part in enumerate(flags[:-2]):
+        if part == "--setenv":
+            inside[flags[i + 1]] = flags[i + 2]
+    return list(argv), inside

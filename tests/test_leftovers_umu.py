@@ -3,7 +3,7 @@
 
 umu downloads and unpacks the Steam Runtime in ``TemporaryDirectory(dir=<umu folder>,
 prefix=".")`` while it holds ``umu.lock``. A Stop, a closed Nadare or a power cut kills it
-there, and nothing ever removes that folder (kill test 2: 210 MB; flxpc: 985 MB). The
+there, and nothing ever removes that folder (kill test 2: 210 MB; an NVIDIA PC: 985 MB). The
 runtimes themselves are shared with other umu apps and are never touched.
 """
 

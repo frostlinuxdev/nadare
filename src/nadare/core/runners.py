@@ -627,11 +627,27 @@ def installed_pinned(family: str = DEFAULT_FAMILY) -> Path | None:
     for path in all_runners():
         if runner_family(path) != family or not _is_pin_folder(path.name, tag):
             continue
-        # Nadare's own copy was sha256-checked when it was installed; one from elsewhere must
-        # show it is that release (a b24 player's games all crashed on some other build).
-        if path in own or _is_complete_release(path, tag):
+        # Our downloads already proved the release by sha256, but files can go missing later.
+        # A copy from elsewhere must also show it is that release.
+        if (_own_copy_intact(path) if path in own else _is_complete_release(path, tag)):
             return path
     return None
+
+
+#: In a verified download whose layout lacks files we expect (a newer upstream layout): the
+#: files that were absent then. Only more missing files than that count as damage (#1735).
+_LAYOUT_NOTE = ".nadare-accepted-layout"
+
+
+def _own_copy_intact(path: Path) -> bool:
+    missing = _missing_core_files(path)
+    if not missing:
+        return True
+    try:
+        accepted = set((path / _LAYOUT_NOTE).read_text(encoding="utf-8").split())
+    except (OSError, ValueError):
+        return False
+    return set(missing) <= accepted
 
 
 #: The Windows side of Wine every game loads first; a tree without them cannot start anything.
@@ -652,15 +668,28 @@ def _is_complete_release(path: Path, tag: str) -> bool:
         words = (path / "version").read_text(encoding="utf-8", errors="replace").split()
         if tag.lower() not in (word.lower() for word in words):
             return False
-        if not (path / "proton").is_file() or not (path / "files" / "bin" / "wine").is_file():
-            return False
-        for lib in ("lib", "lib64"):
-            windows = path / "files" / lib / "wine" / "x86_64-windows"
-            if all((windows / dll).is_file() for dll in _CORE_DLLS):
-                return True
+        return not _missing_core_files(path)
     except (OSError, ValueError):
         return False
-    return False
+
+
+def _missing_core_files(path: Path) -> tuple[str, ...]:
+    """Wine's required files, shared by our downloads and Steam release checks.
+
+    All three DLLs must live together in lib or lib64, as in the release check.
+    Report the closer layout when neither is complete.
+    """
+    missing = tuple(
+        name for name in ("proton", "files/bin/wine") if not (path / name).is_file()
+    )
+    layouts = []
+    for lib in ("lib", "lib64"):
+        windows = path / "files" / lib / "wine" / "x86_64-windows"
+        dlls = tuple(dll for dll in _CORE_DLLS if not (windows / dll).is_file())
+        if not dlls:
+            return missing
+        layouts.append(dlls)
+    return missing + min(layouts, key=len)
 
 
 def launch_facts(proton: str | os.PathLike[str] | None, *, wine: str | None = None) -> dict:
@@ -705,7 +734,28 @@ def ensure_pinned(
     found = installed_pinned(family)
     if found is not None:
         return found
-    return install(family, latest=False, emit=emit, cancel=cancel)
+    say = emitter(emit)
+    tag = pinned_tag(family)
+    for path in nadare_runners():
+        if runner_family(path) == family and tag and _is_pin_folder(path.name, tag):
+            missing = _missing_core_files(path)
+            if missing:
+                say(Event("log", f"runner {path.name} is missing files {', '.join(missing)}; "
+                          "downloading it again"))
+    found = install(family, latest=False, emit=emit, cancel=cancel)
+    missing = _missing_core_files(found)
+    if missing:
+        # A verified release may have changed its layout. Let this launch use it;
+        # never retry the download merely because our file check is out of date.
+        warning = (f"runner {found.name} is missing files {', '.join(missing)} "
+                   "after download; using it anyway")
+        log.warning(warning)
+        say(Event("log", f"Warning: {warning}"))
+        try:
+            (found / _LAYOUT_NOTE).write_text("\n".join(missing) + "\n", encoding="utf-8")
+        except OSError:
+            pass  # Without the note the next launch downloads again; never fail this one.
+    return found
 
 
 def _github_asset_host_allowed(url: str) -> bool:
@@ -776,7 +826,7 @@ def install(
     say(
         Event(
             "status",
-            f"{spec.name} {rel['tag']} ({size >> 20} MB) from github.com/{spec.repo}",
+            f"{spec.name} {rel['tag']} ({diskspace.human_size(size)}) from github.com/{spec.repo}",
             data={"runner": runner_id, "tag": rel["tag"], "tested": not latest, "total": size},
         )
     )
@@ -959,6 +1009,9 @@ def _extract(tar_path: Path, *, cancel: Cancel | None, emit: Emitter) -> Path:
     try:
         leases.append(ownerlease.take(tmp))
         emit(Event("status", "unpacking runner", data={"stage": "extract"}))
+        # The transfer is over (the bar said 100%); unpacking a runner is minutes of work,
+        # so the step line must say what is happening instead of the finished download.
+        emit(Event("step", "Unpacking the runner…", data={"stage": "extract"}))
         if cancel is not None:
             cancel.raise_if_cancelled()
         try:
@@ -1035,7 +1088,15 @@ def _extract(tar_path: Path, *, cancel: Cancel | None, emit: Emitter) -> Path:
 
 #: Backends whose profiles use :data:`DEFAULT_FAMILY` when they name no runner.
 PROTON_DEFAULT_BACKENDS = frozenset(
-    {"stove-czn", "arknights-yostar", "stellasora-yostar", "wine", *CATALOG_KINDS}
+    {
+        "stove-czn",
+        "arknights-yostar",
+        "stellasora-yostar",
+        "hbr-yostar",
+        "azurpromilia-jp-yostar",
+        "wine",
+        *CATALOG_KINDS,
+    }
 )
 
 

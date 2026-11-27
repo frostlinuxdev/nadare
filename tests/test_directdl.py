@@ -362,9 +362,9 @@ def test_split_archive_is_never_joined_on_disk(server, tmp_path, monkeypatch):
     seen: list[bool] = []
     real = dd._extract_zip_to
 
-    def spy(source, target, cancel=None):
+    def spy(source, target, cancel=None, **kwargs):
         seen.append((tmp_path / dd.DL_DIR / "g.zip").exists())
-        return real(source, target, cancel)
+        return real(source, target, cancel, **kwargs)
 
     monkeypatch.setattr(dd, "_extract_zip_to", spy)
     dd.sync(dd.Plan("T", "1", archives=(arc,)), tmp_path)
@@ -813,3 +813,48 @@ def test_sync_closes_its_connection_pool_after_a_successful_run(tmp_path, monkey
     finally:
         s.close()
     assert closed == [1]
+
+
+def test_packs_report_one_overall_progress_not_one_per_pack(server, tmp_path):
+    """Reverse: 1999 installs 20 packs; each one used to report its own ``done / total``, so the
+    bar filled and said "less than a minute left" 20 times over 31 GiB. One total for all packs."""
+    z1 = make_zip({"a.bin": bytes(range(256)) * 40})
+    z2 = make_zip({"b.bin": bytes(range(255, -1, -1)) * 90})
+    s = server({"/p1.zip": z1, "/p2.zip": z2})
+    plan = dd.Plan(
+        "T",
+        "1",
+        archives=(
+            dd.Archive("p1", dd.RemoteFile("p1.zip", s.url + "/p1.zip", len(z1), md5=md5(z1))),
+            dd.Archive("p2", dd.RemoteFile("p2.zip", s.url + "/p2.zip", len(z2), md5=md5(z2))),
+        ),
+    )
+    seen: list[Event] = []
+    dd.sync(plan, tmp_path, emit=seen.append)
+    progress = [
+        e.data for e in seen
+        if e.kind == "progress" and isinstance(e.data, dict) and e.data.get("stage") == "download"
+    ]
+    assert progress
+    assert {p["total"] for p in progress} == {len(z1) + len(z2)}
+    dones = [p["done"] for p in progress]
+    assert dones == sorted(dones)
+    assert dones[-1] == len(z1) + len(z2)
+    assert any(e.kind == "step" and "pack 2 of 2" in e.message for e in seen)
+
+
+def test_a_pack_says_it_is_unpacking_after_its_download(server, tmp_path):
+    """A full bar while a 1.4 GiB pack unpacks for 40 s read as "done"; say what is happening."""
+    z = make_zip({"a.bin": b"a" * 2000})
+    s = server({"/p.zip": z})
+    arc = dd.Archive("p", dd.RemoteFile("p.zip", s.url + "/p.zip", len(z), md5=md5(z)))
+    seen: list[Event] = []
+    dd.sync(dd.Plan("T", "1", archives=(arc,)), tmp_path, emit=seen.append)
+    kinds = [(e.kind, e.message) for e in seen]
+    unpack = [i for i, (k, m) in enumerate(kinds) if k == "step" and m.startswith("Unpacking")]
+    last_download = max(
+        i for i, e in enumerate(seen)
+        if e.kind == "progress" and isinstance(e.data, dict) and e.data.get("stage") == "download"
+    )
+    assert unpack and unpack[0] > last_download
+    assert "p.zip" in kinds[unpack[0]][1]

@@ -12,7 +12,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import diskspace, process, vcredist
+from . import diskspace, execmount, process, vcredist
 from .backends import BackendError
 
 
@@ -134,6 +134,26 @@ POLICIES = {
         cancellable=False,
         reprobe=True,
     ),
+    # A declared overlay (#1866): the download can stop, the swap itself is journaled.
+    "apply_patch": OperationPolicy(
+        ("operation",),
+        mutating=True,
+        wait_for_paused=True,
+        reprobe=True,
+    ),
+    "update_patch": OperationPolicy(
+        ("operation",),
+        mutating=True,
+        wait_for_paused=True,
+        reprobe=True,
+    ),
+    "remove_patch": OperationPolicy(
+        ("operation",),
+        mutating=True,
+        cancellable=False,
+        wait_for_paused=True,
+        reprobe=True,
+    ),
 }
 
 
@@ -170,7 +190,10 @@ def operation_lock(operation: str, name: str):
 
 def reserve_install_space(backend: object, name: str) -> diskspace.Reservation | None:
     """Promise the missing install bytes; an unknown folder retains the old best effort rule."""
-    size = getattr(backend, "install_size_hint", None)
+    execmount.guard_install(backend)  # games cannot run from a noexec drive (#1861)
+    size = getattr(backend, "install_space_hint", None) or getattr(
+        backend, "install_size_hint", None
+    )
     folder = getattr(backend, "install_dir", None)
     if not size or not callable(folder):
         return None

@@ -14,7 +14,7 @@
 # Design notes
 # ------------
 # * **onedir is the default** (EXE + COLLECT). It starts fast, patches cleanly
-#   (replace files in place) and is what the .deb / AppImage recipes wrap.
+#   (replace files in place) and is what the AppImage recipe wraps.
 # * **onefile** is possible but not recommended for a launcher: it re-extracts
 #   PyQt6 to /tmp on every start, which is slow and can fail on noexec /tmp.
 #   For a onefile build, change the tail of this file to:

@@ -153,6 +153,8 @@ class OperationsMixin:
         else:
             self._end_runner_downloads(profile)
             self._apply_pending_remember(profile)
+            if profile == self._current_profile:
+                self._sync_patch(profile)  # apply, remove, update and repair change the files
             if operation == "launch":
                 self.controller.launch_ended(profile)
             self._maybe_finish_background_close()
@@ -578,8 +580,11 @@ class OperationsMixin:
         if operation == "media":
             return
         if operation == "check_update":
-            # The cached published version may now differ: refresh the badge.
-            self._start(profile, "status", silent=True)
+            # The cached published version may now differ: refresh the badge. Until it lands
+            # the page offers no Play, which would start an install the check just found
+            # outdated (Strinova, 2026-11-27).
+            if self._start(profile, "status", silent=True) and profile == self._current_profile:
+                self.game.await_status()
             return
         if operation in ("repair", "install", "update"):
             # Fresh files supersede the failed check (Repair, or an install/update rewrote them).
@@ -662,7 +667,7 @@ class OperationsMixin:
             self._remember_notice.pop(profile, None)
         if operation == "status":
             # A status probe is background noise; show it as a badge, never a dialog.
-            self._mark_status_error(profile, message)
+            self._mark_status_error(profile, message)  # its error status ends any wait too
             return
         terms = self._is_terms_failure(profile, operation, message)
         if profile == self._current_profile:
@@ -772,6 +777,8 @@ class OperationsMixin:
             self.library.set_busy(profile, None)  # a queued job that never ran has no busy(False)
         if operation == "status":
             self._probe_finished(profile)
+            if profile == self._current_profile:
+                self.game.stop_awaiting_status()
         if operation == "set_remember":
             self._remember_watching.discard(profile)
             self._remember_notice.pop(profile, None)

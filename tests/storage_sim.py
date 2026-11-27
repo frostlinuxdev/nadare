@@ -64,8 +64,8 @@ from nadare.core import (  # noqa: E402
 )
 from nadare.core.config import Config  # noqa: E402
 
-#: Shapes mixed into random worlds (flxpc_world is its own world: its names overlap others).
-MIXABLE = sorted(name for name in SHAPES if name != "flxpc_world")
+#: Shapes mixed into random worlds (desktop_world is its own world: its names overlap others).
+MIXABLE = sorted(name for name in SHAPES if name != "desktop_world")
 LIBRARIES = ("{LIB}", "{LIB2}", "{LIB3}")
 SENTINELS = (
     "{HOME}/Documents/thesis.txt",
@@ -162,7 +162,7 @@ def build_world(seed: int, base: Path) -> tuple[Config, list[str], World]:
     for lib in LIBRARIES:
         world.path(lib).mkdir(parents=True, exist_ok=True)
     if rng.random() < 0.1:
-        chosen = ["flxpc_world"]
+        chosen = ["desktop_world"]
     else:
         chosen = rng.sample(MIXABLE, rng.randint(1, 5))
     data: dict[str, Any] = {"profiles": {}, "libraries": []}

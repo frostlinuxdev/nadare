@@ -54,3 +54,52 @@ def test_the_dialog_shows_progress_from_a_worker_thread(monkeypatch):
         assert dialog.result_label.text() != "late"  # a finished step keeps its result line
     finally:
         dialog.deleteLater()
+
+
+def test_set_up_shows_the_runner_unpack_step_not_a_frozen_100_percent(
+    tmp_path, monkeypatch
+):
+    """The runner download ends at 100%, then extracting has only a step line to show."""
+    try:
+        from PyQt6.QtWidgets import QApplication
+    except Exception:  # noqa: BLE001
+        pytest.skip("PyQt6 is not importable")
+    from nadare.core.steamrun import ActionResult
+    from nadare.gui import steam_wiring
+
+    app = QApplication.instance() or QApplication([])
+    root = tmp_path / "Steam"
+    (root / "steamapps").mkdir(parents=True)
+    (root / "config").mkdir()
+    captured: dict = {}
+
+    def fake_make_actions(app_id, **kwargs):
+        captured["emit"] = kwargs["emit"]
+        return lambda item: ActionResult(True, "done")
+
+    monkeypatch.setattr(steam_wiring.steamglue, "make_actions", fake_make_actions)
+    dialog = steam_wiring.build_dialog(
+        None,
+        "3224770",
+        root=root,
+        vulkan_version_fn=lambda: None,
+        async_plan=False,
+        confirm_fn=lambda *args: True,
+    )
+    try:
+        dialog._busy = True
+        item = steamsetup.SetupItem(
+            key="runner", label="Runner", state="todo", action="set_runner"
+        )
+        dialog._act_fn(item)
+        captured["emit"](Event("progress", "download: 1 MB / 2 MB", 0.5))
+        app.processEvents()
+        assert dialog.result_label.text() == "Downloading the runner: 50 %"
+        captured["emit"](
+            Event("step", "Unpacking the runner…", data={"stage": "extract"})
+        )
+        app.processEvents()
+        assert dialog.result_label.text() == "Unpacking the runner…"
+    finally:
+        dialog.deleteLater()
+        app.processEvents()

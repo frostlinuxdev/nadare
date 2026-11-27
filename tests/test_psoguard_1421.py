@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """#1421: a cut-short Endfield shader cache is replaced by the last good copy.
 
-Seen on flxpc 2026-11-15: a 38 s session (it ended with exit 0) left a 1 MB
+Seen on an NVIDIA PC 2026-11-15: a 38 s session (it ended with exit 0) left a 1 MB
 ``vulkan_pso_cache.bin`` over the 189 MB one; the next start rejected it and compiled every
 pipeline again. Same GPU, same driver: the header identity matched. A driver update changes that
 identity, and then a smaller fresh cache is right.

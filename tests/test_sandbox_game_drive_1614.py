@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""The Sandbox must not move Proton's game drive S: (#1614, NTE on flxpc, 2026-11-17).
+"""The Sandbox must not move Proton's game drive S: (#1614, NTE on an NVIDIA PC, 2026-11-17).
 
 umu walks up from the game's folder to the first mount point and Proton maps it as drive ``S:``
 (umu forces the game drive on). Outside the Sandbox that is the real disk (``/mnt/games``), so

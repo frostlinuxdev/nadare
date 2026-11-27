@@ -18,6 +18,7 @@ import sys
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from runner_layout import make_runner as make_runner_layout
 from test_release_signature import sign
 
 from nadare.core import download, hosting, indexfetch, releasesig, runners
@@ -91,9 +92,7 @@ def feed(monkeypatch):
 
 def make_runner(tag: str):
     folder = runners.paths.runners_dir() / f"{tag}-x86_64"
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "proton").write_text("fixture")
-    return folder
+    return make_runner_layout(folder)
 
 
 @pytest.mark.parametrize("signature", ["wrong", "missing"])

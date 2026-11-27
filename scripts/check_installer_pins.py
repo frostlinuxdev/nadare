@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Nadare contributors
-"""Warn when a pinned NTE or Endfield installer has been replaced or moved.
+"""Warn when a pinned NTE, Tower of Fantasy, Strinova or Endfield installer was replaced.
 
-Nadare downloads the Neverness to Everness installer from a fixed URL and pins
-its SHA-256 and size, and it takes the Endfield launcher installer from an API
-response whose host must be allowed. This asks the publisher for the current
-installer and reports a missing NTE file, a changed size, or an Endfield host
-that Nadare would refuse, so a stale pin can turn the refresh job's heartbeat
-"down" before users hit it.
+Nadare downloads the Neverness to Everness, Tower of Fantasy and Strinova installers from
+fixed URLs and pins their SHA-256 and size, and it takes the Endfield launcher installer
+from an API response whose host must be allowed. This asks the publishers for the current
+installers and reports a missing file, a changed size, or an Endfield host that Nadare would
+refuse, so a stale pin can turn the refresh job's heartbeat "down" before users hit it.
 
 Once a day it also downloads the Endfield launcher installer and checks that it still yields
 ``Games.exe`` (what Nadare needs to start the game), using the same extraction code the app uses.
@@ -41,7 +40,12 @@ _USER_AGENT = "nadare-installer-canary"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from nadare.core import download as _dl  # noqa: E402
-from nadare.core import endfield_shim, nte_launcher, sevenzip  # noqa: E402
+from nadare.core import (  # noqa: E402
+    endfield_shim,
+    nte_launcher,
+    sevenzip,
+    strinova_launcher,
+)
 
 #: The installer is ~124 MiB: look inside it at most once a day, and retry a failure hourly.
 DEEP_INTERVAL = 24 * 3600
@@ -58,8 +62,14 @@ def _blind(message: str) -> None:
     BLIND.append(message)
 
 
-def check_nte(head: Callable[[str], tuple[int, int | None]]) -> list[str]:
-    """Check the pinned NTE installer and list the problems.
+def _check_installer(
+    label: str,
+    url: str,
+    size: int,
+    pin_prefix: str,
+    head: Callable[[str], tuple[int, int | None]],
+) -> list[str]:
+    """Check one pinned installer and list the problems.
 
     ``head`` returns ``(status, content_length)``; missing lengths, 5xx answers,
     timeouts and network errors are only noted, so a flaky CDN never raises a
@@ -67,27 +77,63 @@ def check_nte(head: Callable[[str], tuple[int, int | None]]) -> list[str]:
     """
     problems: list[str] = []
     try:
-        status, length = head(nte_launcher.INSTALLER_URL)
+        status, length = head(url)
     except Exception as exc:  # noqa: BLE001 - a flaky CDN must not stop the run
-        _blind(f"could not check the NTE installer: {exc}")
+        _blind(f"could not check the {label} installer: {exc}")
         return problems
     if status in (404, 410):
         problems.append(
-            f"NTE installer URL is gone (HTTP {status}); find the new installer "
-            "and re-pin INSTALLER_URL, INSTALLER_SHA256 and INSTALLER_SIZE"
+            f"{label} installer URL is gone (HTTP {status}); find the new installer "
+            f"and re-pin {pin_prefix}_URL, {pin_prefix}_SHA256 and {pin_prefix}_SIZE"
         )
     elif status == 200:
         if length is None:
-            _blind("the NTE installer returned no Content-Length")
-        elif length != nte_launcher.INSTALLER_SIZE:
+            _blind(f"the {label} installer returned no Content-Length")
+        elif length != size:
             problems.append(
-                f"NTE installer changed size (now {length}, "
-                f"pinned {nte_launcher.INSTALLER_SIZE}); "
-                "re-pin INSTALLER_SHA256 and INSTALLER_SIZE"
+                f"{label} installer changed size (now {length}, pinned {size}); "
+                f"re-pin {pin_prefix}_SHA256 and {pin_prefix}_SIZE"
             )
     else:
-        _blind(f"the NTE installer returned HTTP {status}")
+        _blind(f"the {label} installer returned HTTP {status}")
     return problems
+
+
+def check_nte(head: Callable[[str], tuple[int, int | None]]) -> list[str]:
+    """Check the pinned NTE installer and list the problems."""
+    return _check_installer(
+        "NTE",
+        nte_launcher.INSTALLER_URL,
+        nte_launcher.INSTALLER_SIZE,
+        "INSTALLER",
+        head,
+    )
+
+
+def check_tof(head: Callable[[str], tuple[int, int | None]]) -> list[str]:
+    """Check the pinned Tower of Fantasy installer and list the problems."""
+    return _check_installer(
+        "Tower of Fantasy",
+        nte_launcher.TOF_INSTALLER_URL,
+        nte_launcher.TOF_INSTALLER_SIZE,
+        "TOF_INSTALLER",
+        head,
+    )
+
+
+def check_strinova(head: Callable[[str], tuple[int, int | None]]) -> list[str]:
+    """Check the pinned Strinova installer and list the problems.
+
+    Its URL is still marked unconfirmed (no network during #1819): this only watches the
+    size at that URL, so a moved or replaced installer shows up before users hit it.
+    """
+    return _check_installer(
+        "Strinova",
+        strinova_launcher.INSTALLER_URL,
+        strinova_launcher.INSTALLER_SIZE,
+        "INSTALLER",
+        head,
+    )
 
 
 def check_endfield(get_json: Callable[[str], object]) -> list[str]:
@@ -251,7 +297,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     BLIND.clear()
-    problems = check_nte(_head) + check_endfield(_get_json)
+    problems = (
+        check_nte(_head)
+        + check_tof(_head)
+        + check_strinova(_head)
+        + check_endfield(_get_json)
+    )
     problems += check_endfield_games_exe(
         _get_json,
         _download,

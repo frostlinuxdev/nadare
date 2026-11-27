@@ -52,6 +52,7 @@ from .arknights_news import IMAGE_HOSTS
 from .wine import (
     GamePidsMixin,
     ProcessQuery,
+    environ_of,  # noqa: F401 - re-exported: tests and callers reach it through this module
     path_option,
     profile_setting,
     scan_pids,
@@ -160,6 +161,12 @@ class WineGameBackend(
     install_subdir: Path = DEFAULT_INSTALL_SUBDIR
     launcher_names: tuple[str, ...] = LAUNCHER_NAMES
     game_process_names: tuple[str, ...] = ()
+    #: The game itself for the launch sheet's first-frame gate (#1821 round 3). Kept apart
+    #: from ``game_process_names``, which also drives the Flatpak run lock and the auto-stop.
+    #: Empty means ``game_process_names``.
+    first_frame_process_names: tuple[str, ...] = ()
+    #: Processes a launch starts that are not the game (a windowless host that runs first).
+    game_process_exclude: tuple[str, ...] = ()
     direct_exe: str = "Arknights.exe"
     #: Installer defaults and trust, overridable by launcher-only games.
     default_installer_url: str = DEFAULT_INSTALLER_URL
@@ -297,6 +304,11 @@ class WineGameBackend(
     supports_secure_mode = False
     sandbox_default_on: bool = True
 
+    #: Whether the recorded version is the download package's, not the build the game shows.
+    #: HBR's feed said 4.0.3 while its own title screen said 4.0.2(72) (11-24), so the page
+    #: labels it as the download version instead of presenting it as the game's build.
+    version_is_download = False
+
     def status(self) -> Status:
         prefix = self.prefix()
         direct = self.direct_mode()
@@ -372,6 +384,8 @@ class WineGameBackend(
         version = str(record["version"]) if record else None
         if version:
             additions["version"] = version
+            if self.version_is_download:
+                additions["version_kind"] = "download"
         latest = self._read_latest()
         published = str(latest["version"]) if latest else None
         # Purely local: the published version is refreshed by check_update(). Compare with the

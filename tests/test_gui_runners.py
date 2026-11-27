@@ -10,6 +10,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from runner_layout import make_runner as make_runner_layout
 
 try:  # pragma: no cover - exercised only when PyQt6 is missing
     from PyQt6.QtWidgets import QApplication, QPushButton
@@ -40,9 +41,7 @@ def root(tmp_path, monkeypatch):
 
 
 def _make(root: Path, name: str, payload: int = 100) -> Path:
-    d = root / name
-    d.mkdir()
-    (d / "proton").write_text("#!/bin/sh\n")
+    d = make_runner_layout(root / name)
     (d / "blob").write_bytes(b"x" * payload)
     return d
 
@@ -503,3 +502,19 @@ def test_manage_runners_keeps_the_default_runner_empty(root, tmp_path, qapp, mon
         assert page._runner_value() == ""
     finally:
         page.deleteLater()
+
+
+def test_the_background_signal_object_outlives_the_dialog(root, qapp):
+    """Measuring/deleting threads emit on _worker; deleting the dialog must not delete it under
+    them (CI segfault in _measure, 2026-11-26: the worker was a child of the dialog)."""
+    from PyQt6 import sip
+    from PyQt6.QtCore import QCoreApplication, QEvent
+
+    _make(root, "dwproton-11.0-13-x86_64")
+    dialog = ManageRunnersDialog({})
+    worker = dialog._worker
+    dialog.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert sip.isdeleted(dialog)
+    assert not sip.isdeleted(worker)
+    worker.size_ready.emit("gone", 1)  # a late thread's emit reaches no slot and does not crash

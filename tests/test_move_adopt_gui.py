@@ -44,7 +44,7 @@ def _legacy(root, *, install: bool) -> dict:
 def test_a_profiles_folder_game_without_a_game_folder_moves_into_the_library(
     make, tmp_path, profiles_dir
 ):
-    lib = tmp_path / "izuna"
+    lib = tmp_path / "games2"
     lib.mkdir()
     rig = make([lib], {"nikke": _legacy(profiles_dir, install=False)})
     data = rig.move("nikke")

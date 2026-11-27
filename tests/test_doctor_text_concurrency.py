@@ -21,7 +21,7 @@ def test_overlapping_doctor_runs_keep_their_own_output_and_restore_stdout(monkey
         print(f"{label} line 2")
         return 0
 
-    monkeypatch.setattr(cli_app, "_run_doctor", fake_doctor)
+    monkeypatch.setattr("nadare.doctor._run_doctor", fake_doctor)
     results: dict[str, str] = {}
 
     def run(label: str) -> None:

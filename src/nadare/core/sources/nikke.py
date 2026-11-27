@@ -229,6 +229,7 @@ def install_launcher(
         fetch=fetch or fetch_object,
         emit=emit,
         cancel=cancel,
+        ledger="nikke-launcher",  # #1825
     )
 
 
@@ -299,4 +300,5 @@ def install_game(
         fetch=fetch or fetch_object,
         emit=emit,
         cancel=cancel,
+        ledger="nikke-client",  # #1825
     )

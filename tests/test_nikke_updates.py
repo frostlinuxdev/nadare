@@ -343,3 +343,21 @@ def test_play_does_not_update_under_another_instances_game(env, api, installs, m
     with contextlib.suppress(Exception):
         backend.launch()
     assert installs == []
+
+
+# ---- #1832: Repair replaces files too, so it has the same running check as Update -----------
+def test_repair_refuses_while_the_game_runs(env, api, installs, monkeypatch):
+    backend = _nikke(env)
+    monkeypatch.setattr(launcher_module, "scan_pids", lambda *a, **k: [4242])
+    with pytest.raises(BackendError, match="Stop the game"):
+        backend.repair()
+    assert installs == []
+
+
+def test_repair_refuses_while_another_instance_runs_the_game(env, api, installs, monkeypatch):
+    backend = _nikke(env)
+    monkeypatch.setattr(launcher_module, "scan_pids", lambda *a, **k: [])
+    monkeypatch.setattr(NikkeBackend, "_running_elsewhere", lambda self: True)
+    with pytest.raises(BackendError, match="Stop the game"):
+        backend.repair()
+    assert installs == []

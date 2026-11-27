@@ -19,7 +19,7 @@ try:  # pragma: no cover - exercised only when PyQt6 is missing
 except Exception:  # noqa: BLE001
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
-from nadare.gui import theme
+from nadare.gui import theme, theme_qss
 from nadare.gui.theme import _seed_colors
 
 #: A hue is "green/teal" when it lands in this band and is at all saturated.
@@ -43,8 +43,15 @@ def _hue_saturation(value: str) -> tuple[float, float]:
     return hue * 360.0, saturation
 
 
+def _theme_sources() -> str:
+    """The palette module and the stylesheet module (split in #1601)."""
+    return "".join(
+        Path(module.__file__).read_text(encoding="utf-8") for module in (theme, theme_qss)
+    )
+
+
 def _literal_colours() -> set[str]:
-    source = Path(theme.__file__).read_text(encoding="utf-8")
+    source = _theme_sources()
     return {"#" + match for match in HEX_RE.findall(source)}
 
 
@@ -57,7 +64,7 @@ def _token_colours() -> set[str]:
 
 
 def _stylesheet_rgb_triples() -> set[str]:
-    source = Path(theme.__file__).read_text(encoding="utf-8")
+    source = _theme_sources()
     return {
         f"#{int(r):02x}{int(g):02x}{int(b):02x}"
         for r, g, b in RGB_TRIPLE_RE.findall(source)

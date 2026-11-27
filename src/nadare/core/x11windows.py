@@ -100,6 +100,26 @@ class _XEvent(ctypes.Union):
 _XErrorHandler = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
 
 
+class _XResClientIdSpec(ctypes.Structure):
+    """``XResClientIdSpec`` from ``X11/extensions/XRes.h``."""
+
+    _fields_ = [("client", ctypes.c_ulong), ("mask", ctypes.c_uint)]
+
+
+class _XResClientIdValue(ctypes.Structure):
+    """``XResClientIdValue`` from ``X11/extensions/XRes.h``."""
+
+    _fields_ = [
+        ("spec", _XResClientIdSpec),
+        ("length", ctypes.c_long),
+        ("value", ctypes.c_void_p),
+    ]
+
+
+#: ``XRES_CLIENT_ID_PID_MASK``: ask for the pid of the client (X-Resource 1.2).
+_XRES_CLIENT_ID_PID_MASK = 1 << 1
+
+
 @_XErrorHandler
 def _ignore_error(_display: int, _event: int) -> int:
     """Swallow X errors for the duration of a walk (a window may vanish mid-walk)."""
@@ -545,6 +565,112 @@ def request_close(windows: Iterable[int]) -> int | None:
             sent = sum(_send_close(lib, display, root, window, atom) for window in ids)
             lib.XFlush(display)
             return sent
+        finally:
+            lib.XSetErrorHandler(previous)
+            lib.XCloseDisplay(display)
+
+
+def _load_xres() -> Any | None:
+    """libXRes with the calls :func:`client_pids` makes, or ``None`` when it is missing."""
+    try:
+        lib = ctypes.CDLL(ctypes.util.find_library("XRes") or "libXRes.so.1")
+        lib.XResQueryExtension.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+        ]
+        lib.XResQueryExtension.restype = ctypes.c_int
+        lib.XResQueryVersion.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+        ]
+        lib.XResQueryVersion.restype = ctypes.c_int
+        lib.XResQueryClientIds.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_long,
+            ctypes.POINTER(_XResClientIdSpec),
+            ctypes.POINTER(ctypes.c_long),
+            ctypes.POINTER(ctypes.POINTER(_XResClientIdValue)),
+        ]
+        lib.XResQueryClientIds.restype = ctypes.c_int
+        lib.XResGetClientPid.argtypes = [ctypes.POINTER(_XResClientIdValue)]
+        lib.XResGetClientPid.restype = ctypes.c_int
+        lib.XResClientIdsDestroy.argtypes = [
+            ctypes.c_long,
+            ctypes.POINTER(_XResClientIdValue),
+        ]
+        lib.XResClientIdsDestroy.restype = None
+    except (OSError, AttributeError):
+        return None
+    return lib
+
+
+def _client_pid(xres: Any, display: int, window: int) -> int | None:
+    """The pid of the X client that owns ``window``, as the X server knows it."""
+    spec = _XResClientIdSpec(window, _XRES_CLIENT_ID_PID_MASK)
+    count = ctypes.c_long(0)
+    values = ctypes.POINTER(_XResClientIdValue)()
+    # One window per request: the reply names the client's resource base, not the window.
+    status = xres.XResQueryClientIds(
+        display, 1, ctypes.byref(spec), ctypes.byref(count), ctypes.byref(values)
+    )
+    if status != 0 or not values:  # Success is 0 here
+        return None
+    try:
+        for index in range(count.value):
+            pid = xres.XResGetClientPid(ctypes.byref(values[index]))
+            if pid > 0:
+                return int(pid)
+        return None
+    finally:
+        xres.XResClientIdsDestroy(count, values)
+
+
+def client_pids(windows: Iterable[int]) -> dict[int, int] | None:
+    """``{window: pid}`` of the X client that made each window (X-Resource extension).
+
+    The pid is the one the X server sees, so in the host's PID namespace: unlike
+    ``_NET_WM_PID``, which a Sandboxed game fills with a namespace-local pid that another
+    Sandboxed game can share. A window whose client is unknown (gone, remote, or the
+    server cannot tell) is left out. ``None`` when libXRes, the display or the extension
+    (1.2 or newer) is unavailable.
+    """
+    ids = [int(window) for window in windows if int(window)]
+    if not ids:
+        return {}
+    if not os.environ.get("DISPLAY"):
+        return None
+    xres = _load_xres()
+    if xres is None:
+        return None
+    try:
+        lib = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
+        _configure(lib)
+    except (OSError, AttributeError):
+        return None
+    display = lib.XOpenDisplay(None)
+    if not display:
+        return None
+    with _WALK_LOCK:
+        previous = lib.XSetErrorHandler(ctypes.cast(_ignore_error, ctypes.c_void_p))
+        try:
+            event_base, error_base = ctypes.c_int(), ctypes.c_int()
+            if not xres.XResQueryExtension(
+                display, ctypes.byref(event_base), ctypes.byref(error_base)
+            ):
+                return None
+            major, minor = ctypes.c_int(), ctypes.c_int()
+            if not xres.XResQueryVersion(display, ctypes.byref(major), ctypes.byref(minor)):
+                return None
+            if (major.value, minor.value) < (1, 2):
+                return None
+            found: dict[int, int] = {}
+            for window in ids:
+                pid = _client_pid(xres, display, window)
+                if pid is not None:
+                    found[window] = pid
+            return found
         finally:
             lib.XSetErrorHandler(previous)
             lib.XCloseDisplay(display)

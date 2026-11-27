@@ -38,11 +38,12 @@ def _violations(folder: str, forbidden: tuple[str, ...]) -> list[str]:
 
 
 def test_core_does_not_import_backends_gui_or_app():
-    assert _violations("core", ("nadare.backends", "nadare.gui", "nadare.app")) == []
+    forbidden = ("nadare.backends", "nadare.gui", "nadare.app", "nadare.doctor")
+    assert _violations("core", forbidden) == []
 
 
 def test_backends_do_not_import_gui_or_app():
-    assert _violations("backends", ("nadare.gui", "nadare.app")) == []
+    assert _violations("backends", ("nadare.gui", "nadare.app", "nadare.doctor")) == []
 
 
 def test_gui_does_not_import_a_concrete_backend():

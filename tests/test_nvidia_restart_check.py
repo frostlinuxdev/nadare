@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """NVIDIA driver updated but the PC not restarted: say "restart your PC", not a game crash.
 
-Seen on flxpc 2026-11-15: pacman updated nvidia-utils 615.78.08 -> 620.70.06 with no reboot; the
+Seen 2026-11-15 (NVIDIA PC): pacman updated nvidia-utils 615.78.08 -> 620.70.06 with no reboot; the
 loaded kernel module stayed 615.78.08, ``vkCreateInstance`` failed host-wide and Aether Gazer
 crashed three times in DXVK. The library files keep the package's build time as mtime (Nov 7), so
 "installed since boot" is read from their ctime.
@@ -177,7 +177,7 @@ def _fake_times(monkeypatch, times):
 
 
 def test_a_package_keeps_its_build_time_as_mtime(tmp_path, monkeypatch):
-    # flxpc: libnvidia-glcore.so.620.70.06 says Nov 7 (built), installed Nov 15 after boot.
+    # an NVIDIA PC: libnvidia-glcore.so.620.70.06 says Nov 7 (built), installed Nov 15 after boot.
     now = time.time()
     _fake_times(monkeypatch, {"620.70.06": (now - 8 * 86400, now - 60)})
     found = nvidiarestart.check(_root(tmp_path))

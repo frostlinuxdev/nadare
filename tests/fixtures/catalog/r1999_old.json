@@ -1,0 +1,21 @@
+{
+  "code": 200,
+  "msg": "success",
+  "data": {
+    "targetVersion": "3.9.1",
+    "forceUpdate": true,
+    "fullPackage": {
+      "packageUrls": [
+        "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1526706130_size_1344034891_md5_0d76c696279bed513bc99db24745cf72_12.7z",
+        "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1553999981_size_1374375425_md5_6f6f51431efa8ccb95480a86e33343f8_4.7z",
+        "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1594966695_size_1392611987_md5_99eaf80ff500d473e44dcf428f350be3_18.7z"
+      ],
+      "packageSize": 4111022303,
+      "packageRealSize": 33174670153,
+      "packageMd5": null,
+      "packageJson": null,
+      "downloadType": 0
+    },
+    "diffPackage": null
+  }
+}

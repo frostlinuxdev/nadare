@@ -282,11 +282,40 @@ def build_env(
         if runner:
             env["PROTONPATH"] = str(Path(runner).expanduser())
             reserved.add("PROTONPATH")
-        env.setdefault("WINEDEBUG", env.get("WINEDEBUG", "-all"))
+        # Wine's own err: lines stay on (only fixme is off): "noexec filesystem?" and the like
+        # are often the only words on why a game stopped (2026-11-26). A host or profile value wins.
+        env.setdefault("WINEDEBUG", WINEDEBUG_DEFAULT)
 
     configured = profile_value(profile or {}, "extra_env")
     apply_extra_env(env, configured if isinstance(configured, dict) else None, reserved=reserved)
     apply_extra_env(env, extra, reserved=reserved)
+    return env
+
+
+#: Wine channels a launch logs unless the host or the profile sets WINEDEBUG.
+WINEDEBUG_DEFAULT = "fixme-all"
+
+
+#: #1821: the translation-layer log levels the launch sheet's first-frame signal needs.
+#: Proton sets both levels to none when PROTON_LOG is unset, and DXVK writes per-exe
+#: .log files unless told to use stderr only.
+FIRST_FRAME_ENV = {
+    "DXVK_LOG_LEVEL": "info",
+    "DXVK_LOG_PATH": "none",
+    "VKD3D_DEBUG": "info",
+}
+
+
+def apply_first_frame_env(env: dict[str, str]) -> dict[str, str]:
+    """Ask DXVK/VKD3D for their presenter line, for the game launch only (#1821).
+
+    ``setdefault``, so a profile or host value wins. The shared :func:`build_env`
+    deliberately leaves these out: only the command that starts the game (or the
+    publisher launcher that starts it) needs them, not wineboot, an installer, a
+    script or Lepton, whose output would only grow.
+    """
+    for name, value in FIRST_FRAME_ENV.items():
+        env.setdefault(name, value)
     return env
 
 

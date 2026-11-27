@@ -14,6 +14,17 @@
 #include <io.h>
 #include <fcntl.h>
 
+/* Service 0.0.6.904 (2026-11-26) first asks its launcher to let the sign-in through the
+ * firewall (FIREWALL_REQUEST) and waits for FIREWALL_RESPONSE before it opens the browser; the
+ * launcher used to be the service itself. Wine has no firewall, so the helper answers "done".
+ * If the service still will not go on, the helper exits EXIT_LAUNCHER_SIGN_IN: it is windowless,
+ * so under Proton its printed lines go nowhere and the exit code is how Nadare tells. */
+#define FIREWALL_REQUEST_CMD 388
+#define FIREWALL_RESPONSE_CMD 389
+#define FIREWALL_RESPONSE_FIELD 93
+#define MAX_FIREWALL_ANSWERS 4
+#define EXIT_LAUNCHER_SIGN_IN 4
+
 static FILE *g_log = NULL;
 #define LOG(...) fprintf(g_log ? g_log : stdout, __VA_ARGS__)
 
@@ -142,6 +153,22 @@ static int pb_next(const unsigned char *b, size_t len, size_t *o, int *field, in
     if(*wt==2){ unsigned long long l=0; sh=0; while(*o<len){ unsigned char c=b[(*o)++]; l|=(unsigned long long)(c&0x7f)<<sh; if(!(c&0x80)) break; sh+=7; } if(*o+l>len) l=len-*o; *data=b+*o; *dlen=(size_t)l; *o+=(size_t)l; return 1; }
     return 0;
 }
+static int pb_varint(const unsigned char *b, size_t len, int field, unsigned long long *out){
+    size_t o=0; int f,wt; unsigned long long v=0; const unsigned char *d; size_t dl;
+    while(pb_next(b,len,&o,&f,&wt,&v,&d,&dl)){ if(f==field && wt==0){ *out=v; return 1; } }
+    return 0;
+}
+/* Answer a FIREWALL_REQUEST in g_last: cmd, our seq_id, its seq_id as callback, result 0. */
+static void answer_firewall(HANDLE h){
+    unsigned long long their_seq=0;
+    pb_varint(g_last,g_lastlen,3,&their_seq);
+    unsigned char rsp[8]; size_t rlen;
+    n=0; put_u64(1,0); rlen=n; memcpy(rsp,buf,rlen);
+    n=0; put_u64(1,FIREWALL_RESPONSE_CMD); put_u64(3,3); put_u64(4,their_seq);
+    put_bytes(FIREWALL_RESPONSE_FIELD,rsp,rlen);
+    LOG("the service asks to open the firewall for the sign-in (seq %llu): answered\n",their_seq);
+    send_msg(h);
+}
 static int extract_auth(const unsigned char *msg, size_t len, const unsigned char **out, size_t *outlen){
     size_t o=0; int f,wt; unsigned long long v; const unsigned char *d; size_t dl;
     const unsigned char *auth=NULL; size_t al=0;
@@ -215,12 +242,27 @@ int main(int argc,char**argv){
     size_t lrlen=n; unsigned char lr[256]; memcpy(lr,buf,lrlen);
     n=0; put_u64(1,301); put_u64(3,2); put_bytes(7,lr,lrlen);
     send_msg(srv);
-    if(recv_msg(srv)!=0) LOG("login recv failed\n");
+    int received=recv_msg(srv)==0;
+    unsigned long long rsp_cmd=0;
+    for(int answers=0; received && answers<MAX_FIREWALL_ANSWERS; ++answers){
+        rsp_cmd=0;
+        if(!pb_field1(g_last,g_lastlen,&rsp_cmd) || rsp_cmd!=FIREWALL_REQUEST_CMD) break;
+        answer_firewall(srv);
+        received=recv_msg(srv)==0;
+    }
+    if(!received) LOG("login recv failed\n");
     const unsigned char *auth=NULL; size_t alen=0;
     if(extract_auth(g_last,g_lastlen,&auth,&alen)){
         LOG("auth_encypt_data len=%zu\n",alen);
         FILE *f=fopen(out,"wb"); if(f){ fwrite(auth,1,alen,f); fclose(f); LOG("wrote %s\n",out); } else LOG("open %s failed err=%lu\n",out,GetLastError());
-    } else LOG("auth_encypt_data not found in last response (len=%zu)\n",g_lastlen);
+    } else {
+        LOG("auth_encypt_data not found in last response (len=%zu)\n",g_lastlen);
+        rsp_cmd=0;
+        if(!auto_login && pb_field1(g_last,g_lastlen,&rsp_cmd) && rsp_cmd==FIREWALL_REQUEST_CMD){
+            LOG("the service still waits for its launcher (reply %llu)\n",rsp_cmd);
+            return EXIT_LAUNCHER_SIGN_IN;
+        }
+    }
     LOG("done, service pid %lu still running\n",(unsigned long)pi.dwProcessId);
     return 0;
 }

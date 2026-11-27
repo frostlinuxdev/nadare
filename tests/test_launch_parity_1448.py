@@ -32,6 +32,8 @@ PREFIX_KINDS = sorted(
         *directkinds.DIRECT_KINDS,
         *directkinds.LAUNCHER_KINDS,
         "arknights-yostar",
+        "azurpromilia-jp-yostar",
+        "hbr-yostar",
         "stellasora-yostar",
         "stove-czn",
         "wine",

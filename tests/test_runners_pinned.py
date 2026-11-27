@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from runner_layout import make_runner as make_runner_layout
 
 from nadare.core import runners
 
@@ -20,10 +21,7 @@ def root(tmp_path, monkeypatch):
 
 
 def _make(root: Path, name: str) -> Path:
-    d = root / name
-    d.mkdir()
-    (d / "proton").write_text("#!/bin/sh\n")
-    return d
+    return make_runner_layout(root / name)
 
 
 @pytest.mark.parametrize(
@@ -81,16 +79,7 @@ def test_ensure_pinned_downloads_the_pin_once_when_only_other_builds_exist(root,
 
 def test_a_pin_already_in_steams_tool_dir_is_reused(root, tmp_path, monkeypatch):
     steam = tmp_path / "steam" / "GE-Proton11-7-x86_64"
-    steam.mkdir(parents=True)
-    (steam / "proton").write_text("#!/bin/sh\n")
-    # A copy Nadare did not install must be the release (test_runner_pin_check.py).
-    (steam / "version").write_text("1789520217 GE-Proton11-7\n")
-    (steam / "files" / "bin").mkdir(parents=True)
-    (steam / "files" / "bin" / "wine").write_text("#!/bin/sh\n")
-    windows = steam / "files" / "lib" / "wine" / "x86_64-windows"
-    windows.mkdir(parents=True)
-    for dll in ("ntdll.dll", "kernel32.dll", "kernelbase.dll"):
-        (windows / dll).write_bytes(b"MZ")
+    make_runner_layout(steam, version="1789520217 GE-Proton11-7")
     monkeypatch.setattr(runners, "steam_runners", lambda: [steam])
     monkeypatch.setattr(runners, "install", lambda *a, **k: pytest.fail("downloaded"))
     assert runners.ensure_pinned("ge") == steam

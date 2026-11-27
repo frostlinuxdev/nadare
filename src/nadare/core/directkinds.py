@@ -37,12 +37,40 @@ _DIRECT: dict[str, tuple[str, str, str, str, str]] = {
         "DuetNightAbyss",
         "EM.exe",
     ),
+    "direct-tof": (
+        "TofBackend",
+        "Tower of Fantasy",
+        "drive_c/Games",
+        "TowerOfFantasy",
+        "Client/WindowsNoEditor/Hotta/Binaries/Win64/QRSL.exe",
+    ),
+    "direct-r1999": (
+        "R1999Backend",
+        "Reverse: 1999",
+        "drive_c/Games",
+        "Reverse1999",
+        "reverse1999.exe",
+    ),
+    "direct-strinova": (
+        "StrinovaBackend",
+        "Strinova",
+        "drive_c/Games",
+        "Strinova",
+        "Strinova.exe",
+    ),
     "direct-snowbreak": (
         "SnowbreakBackend",
         "Snowbreak: Containment Zone",
         "drive_c/Games",
         "Snowbreak",
         "Game/Binaries/Win64/Game.exe",
+    ),
+    "direct-bpsr": (
+        "BpsrBackend",
+        "Blue Protocol: Star Resonance",
+        "drive_c/Games",
+        "BlueProtocolStarResonance",
+        "BPSR.exe",
     ),
     "direct-mongil": (
         "MongilBackend",
@@ -138,6 +166,8 @@ _LAUNCHER: dict[str, tuple[str, str, str, str, str]] = {
 #: Kinds Nadare no longer offers -> (game, the direct kind to install instead). The catalog is
 #: direct-only; NIKKE keeps its launcher because its sign-in needs it (user, 2026-11-10).
 RETIRED_KINDS: dict[str, tuple[str, str]] = {
+    "launcher-tower-of-fantasy": ("Tower of Fantasy", "direct-tof"),
+    "launcher-strinova": ("Strinova", "direct-strinova"),
     "launcher-nte": ("Neverness to Everness", "direct-nte"),
     "launcher-gfl2-haoplay": ("Girls' Frontline 2", "direct-gfl2-haoplay"),
 }
@@ -150,7 +180,11 @@ ART: dict[str, int | None] = {
     "direct-aethergazer": None,
     "direct-mongil": None,
     "direct-dna": 3950020,
+    "direct-r1999": 3092660,
     "direct-snowbreak": 2668080,
+    "direct-tof": 2064650,
+    "direct-strinova": 1282270,
+    "direct-bpsr": 3681810,
     "direct-wuwa": 3513350,
     "direct-pgr": 4125930,
     "direct-gfl2": 3347400,
@@ -184,6 +218,8 @@ BUILTIN_BACKENDS: dict[str, str] = {
     "script": "nadare.backends.script:ScriptBackend",
     "arknights-yostar": "nadare.backends.arknights:ArknightsBackend",
     "stellasora-yostar": "nadare.backends.stellasora:StellaSoraBackend",
+    "hbr-yostar": "nadare.backends.hbr:HbrBackend",
+    "azurpromilia-jp-yostar": "nadare.backends.azurpromilia:AzurPromiliaBackend",
     **CATALOG_BACKENDS,
 }
 
@@ -259,6 +295,13 @@ VERIFIED_KINDS = frozenset(
 #: HoYo's games. They are offered like the rest; ``NADARE_HIDE_HOYO=1`` keeps them out of the
 #: Add Game wizard and the published catalog (a profile that already exists still works).
 HOYO_KINDS = frozenset({"direct-genshin", "direct-hsr", "direct-hi3", "direct-zzz"})
+
+
+#: Games that are not offered for new installs in this build, because they cannot start yet.
+#: A profile that already exists still loads, updates and can be removed. Strinova starts
+#: through its own launcher (#1819), but that launcher patches the game behind Nadare's back
+#: and its download server often does not answer, so it is held back again (#1905).
+HELD_BACK_KINDS: frozenset[str] = frozenset({"direct-strinova"})
 
 
 def hoyo_visible() -> bool:

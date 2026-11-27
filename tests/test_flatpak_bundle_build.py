@@ -28,6 +28,12 @@ case "$(basename "$0") $1" in
   "flatpak build-bundle")
     for a in "$@"; do case "$a" in --gpg-keys=*) cp "${a#--gpg-keys=}" "$STUB_KEYCOPY" ;; esac; done
     out="${@: -3:1}"; printf 'BUNDLE' > "$out" ;;
+  "appstreamcli compose")
+    for a in "$@"; do case "$a" in --result-root=*) root="${a#--result-root=}" ;; esac; done
+    if [ -n "${root:-}" ]; then
+      d="$root/share/swcatalog/icons/io.github.frostlinuxdev.Nadare/64x64"; mkdir -p "$d"
+      printf 'ICON' > "$d/io.github.frostlinuxdev.Nadare.png"
+    fi ;;
 esac
 if [ -n "${STUB_FAIL_BUNDLE:-}" ] && [ "$(basename "$0") $1" = "flatpak build-bundle" ]; then
   exit 1

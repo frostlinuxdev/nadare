@@ -3,7 +3,8 @@
 
 A publisher installer Nadare downloads and runs is either pinned by a block pin the index
 publishes (NIKKE's miniloader, Endfield's launcher installer) or by a sha256 in this build
-(the lepton-fgo tarball, NTE's launcher, the VC++ and WebView2 redistributables). A missing
+(the lepton-fgo tarball, NTE's and Tower of Fantasy's launchers, the VC++ and WebView2
+redistributables). A missing
 or malformed pin is refused before a single byte is requested. A URL the user typed in the
 profile is not an index entry and keeps working without one.
 """
@@ -26,6 +27,7 @@ from nadare.core import (
     endfield_shim,
     nte_launcher,
     storecatalog,
+    strinova_launcher,
     vcredist,
     webview2,
 )
@@ -198,6 +200,15 @@ def test_nte_refuses_a_malformed_pin_before_download(tmp_path, monkeypatch, sha)
 
 
 @pytest.mark.parametrize("sha", ["", "not-a-hash", "a" * 63, "g" * 64])
+def test_tof_refuses_a_malformed_pin_before_download(tmp_path, monkeypatch, sha):
+    monkeypatch.setattr(nte_launcher, "TOF_INSTALLER_SHA256", sha)
+    calls = []
+    with pytest.raises(nte_launcher.TofLauncherError, match="no valid checksum"):
+        nte_launcher._fetch_tof_installer(tmp_path / "ToF_setup.exe", lambda *a: calls.append(a))
+    assert calls == []
+
+
+@pytest.mark.parametrize("sha", ["", "not-a-hash", "a" * 63, "g" * 64])
 def test_fgo_refuses_a_malformed_pin_before_download(tmp_path, sha):
     calls = []
     pin = fgo_installer.InstallerPin("1.0", "lepton-fgo-1.0.tar.zst", sha)
@@ -256,6 +267,8 @@ def test_every_shipped_index_pinned_installer_refuses_without_its_pin(
     for digest in (
         fgo_installer.PIN.sha256,
         nte_launcher.INSTALLER_SHA256,
+        nte_launcher.TOF_INSTALLER_SHA256,
+        strinova_launcher.INSTALLER_SHA256,
         vcredist.VCREDIST_SHA256,
         webview2.PINNED_SHA256,
     ):

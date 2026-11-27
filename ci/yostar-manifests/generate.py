@@ -12,7 +12,7 @@ three launcher endpoints, and publishes a plain, normalised manifest per game::
                                       "generated_at", "files": [
                                           {"path", "size", "crc64"}]}
 
-Three-step launcher flow (all under ``API_BASE``):
+Three-step launcher flow (under ``api_base(tag)``, the game tag's own host):
 
 1. ``GET /api/launcher/game/config``            -> ``data.game_latest_version``,
                                                     ``data.game_latest_file_path``
@@ -66,7 +66,18 @@ if str(_SRC) not in sys.path:
 from nadare.core import yostar  # noqa: E402
 
 API_BASE = "https://api-launcher-en.yo-star.com"
+
+#: Launcher API base per game tag.  Games not listed use ``API_BASE`` (the EN host);
+#: Azur Promilia (JP) is served by Yostar's JP host.
+API_BASES: dict[str, str] = {"AZUPRO_JP": "https://api-launcher-jp.yo-star.com"}
+
 DEFAULT_TIMEOUT = 30
+
+
+def api_base(tag: str) -> str:
+    """The launcher API base for ``tag``; every signed call uses this."""
+    return API_BASES.get(tag, API_BASE)
+
 
 #: Exit code for "no game could be generated this run" (nothing to publish).
 #: Distinct from 1 (a real error) so ``scripts/publish_index.py`` can tell a
@@ -121,7 +132,7 @@ def _api_get(
     query: str = "",
 ) -> Any:
     headers = yostar.signed_headers(tag, version, salt)
-    payload = json.loads(fetch(API_BASE + path + query, headers).decode("utf-8"))
+    payload = json.loads(fetch(api_base(tag) + path + query, headers).decode("utf-8"))
     return _unwrap(payload)
 
 
@@ -261,19 +272,21 @@ def write_outputs(
     out.mkdir(parents=True, exist_ok=True)
     index: dict[str, Any] = {}
     for manifest in manifests:
-        name = f"{manifest['game_tag']}.json"
+        key = yostar.index_key(manifest["game_tag"])
+        name = f"{key}.json"
         data = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
         _atomic_write_bytes(out / name, data)
-        index[manifest["game_tag"]] = {
+        index[key] = {
             "version": manifest["version"],
             "url": name,
             "sha256": hashlib.sha256(data).hexdigest(),
         }
     for tag, payload in (media or {}).items():
-        entry = index.get(tag)
+        key = yostar.index_key(tag)
+        entry = index.get(key)
         if entry is None:
             continue
-        name = f"{tag}.media.json"
+        name = f"{key}.media.json"
         data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
         _atomic_write_bytes(out / name, data)
         entry["media"] = name
@@ -403,7 +416,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         # Only a tag that can actually be generated (salt *and* version) counts
         # as configured; a half-rolled-out game must not fail the publish job.
-        configured.append(tag)
+        configured.append(yostar.index_key(tag))
         try:
             manifest = generate_game(tag, version, salt, generated_at=args.now)
         except (YostarApiError, KeyError, ValueError, OSError) as exc:

@@ -33,14 +33,14 @@ Gear Lever 4.6.2: the default handler changes from the disk-image mounter to Gea
 Double-clicking never installs Nadare — there is no installer step, the Store is inside
 the app.
 
-The beta is published as a single x86_64 AppImage (there is no Flatpak or
-`.deb` release yet). Its bundled runtime needs no `libfuse2` package: it uses
+The beta is published as an x86_64 AppImage and a Flatpak (there are no `.deb` or
+RPM packages). Its bundled runtime needs no `libfuse2` package: it uses
 the host's `fusermount3` (or `fusermount`). If FUSE is unavailable, run
 `./Nadare-*.AppImage --appimage-extract-and-run`.
 
 On an X11-only session (or with `QT_QPA_PLATFORM=xcb`) the AppImage bundles the
 Qt xcb platform libraries itself, so `libxcb-cursor` is no longer needed on the
-host for it. It is still needed when running from source or from the `.deb`
+host for it. It is still needed when running from source
 (`apt install libxcb-cursor0`, `dnf install xcb-util-cursor`); Wayland sessions
 do not need it.
 

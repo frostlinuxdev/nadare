@@ -13,7 +13,6 @@ import threading
 
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QCheckBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -26,6 +25,7 @@ from PyQt6.QtWidgets import (
 
 from ..core import diskspace
 from ..core.gamefinder import Copy, Spare
+from .dialog_layout import WrappedCheckBox, fit_dialog, make_scroll_body
 
 
 def copy_text(copy: Copy, size: int | None = None) -> str:
@@ -53,9 +53,15 @@ class FoundCopiesDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"{title}: use a folder Nadare found")
         self.setMinimumWidth(620)
+        self._shown_once = False
         self._copies = list(copies)
         #: ``Copy`` when the user picked one, ``"ignore"`` for Not now, else None.
         self.choice: Copy | str | None = None
+
+        heading = QLabel(f"{title}: use a folder Nadare found")
+        heading.setObjectName("Title")
+        heading.setWordWrap(True)
+        heading.setTextFormat(Qt.TextFormat.PlainText)
 
         intro = QLabel(
             f"Nadare found {title} in these folders. Pick the one to use; "
@@ -98,9 +104,23 @@ class FoundCopiesDialog(QDialog):
         buttons.addWidget(use)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(intro)
-        layout.addWidget(self.list, 1)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
+        layout.addWidget(heading)
+        self._scroll, _body, body_layout = make_scroll_body(spacing=12)
+        body_layout.addWidget(intro)
+        body_layout.addWidget(self.list, 1)
+        layout.addWidget(self._scroll, 1)
         layout.addLayout(buttons)
+        self._fit_height()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        self._fit_height(keep_width=self._shown_once)
+        self._shown_once = True
+
+    def _fit_height(self, *, keep_width: bool = False) -> None:
+        fit_dialog(self, min_width=620, scroll=self._scroll, keep_width=keep_width)
 
     def _measure(self, copies: list[Copy]) -> None:
         for row, copy in enumerate(copies):
@@ -151,7 +171,12 @@ class SpareCopiesDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"{title}: other copies")
         self.setMinimumWidth(620)
+        self._shown_once = False
         self._spares = list(spares)
+        heading = QLabel(f"{title}: other copies")
+        heading.setObjectName("Title")
+        heading.setWordWrap(True)
+        heading.setTextFormat(Qt.TextFormat.PlainText)
         intro = QLabel(
             f"{title} now runs from the folder you picked. Nadare also made these folders "
             "for other copies of it. Tick the ones to delete to free the space; a Wine prefix "
@@ -160,14 +185,19 @@ class SpareCopiesDialog(QDialog):
         intro.setObjectName("Subtitle")
         intro.setWordWrap(True)
         layout = QVBoxLayout(self)
-        layout.addWidget(intro)
-        self.boxes: list[QCheckBox] = []
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
+        layout.addWidget(heading)
+        self._scroll, _body, body_layout = make_scroll_body(spacing=12)
+        body_layout.addWidget(intro)
+        self.boxes: list[WrappedCheckBox] = []
         for spare in self._spares:
-            box = QCheckBox(spare_text(spare))
+            box = WrappedCheckBox(spare_text(spare))
             box.setToolTip(str(spare.path))
             box.toggled.connect(self._update)
-            layout.addWidget(box)
+            body_layout.addWidget(box)
             self.boxes.append(box)
+        layout.addWidget(self._scroll, 1)
         self.delete_button = QPushButton("Delete ticked folders")
         self.delete_button.setObjectName("GhostButton")
         self.delete_button.setEnabled(False)
@@ -181,6 +211,15 @@ class SpareCopiesDialog(QDialog):
         buttons.addStretch(1)
         buttons.addWidget(keep)
         layout.addLayout(buttons)
+        self._fit_height()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        self._fit_height(keep_width=self._shown_once)
+        self._shown_once = True
+
+    def _fit_height(self, *, keep_width: bool = False) -> None:
+        fit_dialog(self, min_width=620, scroll=self._scroll, keep_width=keep_width)
 
     def ticked(self) -> list[Spare]:
         return [s for s, box in zip(self._spares, self.boxes, strict=True) if box.isChecked()]

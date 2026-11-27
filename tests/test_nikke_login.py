@@ -357,3 +357,49 @@ def test_a_successful_play_keeps_the_sail_helper_log(tmp_path, monkeypatch):
     sail = [n for n in notes if n.startswith("sail: ")]
     assert "sail: << frame (9 proto bytes) cmd=106" in sail
     assert "sail: *** game accepted init (cmd=101)" in sail
+
+
+# ---- launcher 0.0.6.904: the service no longer opens the Google sign-in itself (2026-11-27) ----
+
+
+def test_the_host_answers_the_firewall_request_before_the_sign_in_opens():
+    """Service 0.0.6.904 asks its launcher to open the firewall (388) and waits for 389.
+
+    The host answers it, so the service goes on and opens the Google page in the browser.
+    """
+    text = (ROOT / "src/nadare/backends/nikke/hosts_src/intlsvc_host.c").read_text()
+    assert "FIREWALL_REQUEST_CMD 388" in text and "FIREWALL_RESPONSE_CMD 389" in text
+    assert "FIREWALL_RESPONSE_FIELD 93" in text
+    assert "answer_firewall(srv);" in text
+
+
+def test_the_host_has_its_own_exit_code_when_the_service_still_waits():
+    """Should the service keep asking, the windowless host says so by its exit code alone."""
+    text = (ROOT / "src/nadare/backends/nikke/hosts_src/intlsvc_host.c").read_text()
+    assert h.INTL_EXIT_LAUNCHER_SIGN_IN == 4
+    assert "return EXIT_LAUNCHER_SIGN_IN;" in text and "EXIT_LAUNCHER_SIGN_IN 4" in text
+
+
+def test_a_launcher_only_sign_in_says_how_to_sign_in_instead(tmp_path, monkeypatch):
+    backend = make_install(tmp_path)
+    _quiet(backend, monkeypatch)
+    monkeypatch.setattr(
+        launcher_module, "stream", lambda *a, **k: h.INTL_EXIT_LAUNCHER_SIGN_IN
+    )
+
+    with pytest.raises(BackendError) as caught:
+        backend.login()
+    text = str(caught.value)
+    assert "Start the game without the NIKKE launcher" in text
+    assert "Play" in text
+    assert "try again" not in text
+    assert not h.has_cache(backend._session_cache())
+
+
+def test_any_other_failed_sign_in_still_asks_to_try_again(tmp_path, monkeypatch):
+    backend = make_install(tmp_path)
+    _quiet(backend, monkeypatch)
+    monkeypatch.setattr(launcher_module, "stream", lambda *a, **k: 0)
+
+    with pytest.raises(BackendError, match="try again"):
+        backend.login()

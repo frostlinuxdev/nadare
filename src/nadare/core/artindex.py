@@ -56,7 +56,11 @@ ALLOWED_HOSTS: dict[str, tuple[str, ...]] = {
     "direct-gfl2-haoplay": STEAM_HOSTS,
     "direct-endfield": STEAM_HOSTS,
     "direct-dna": STEAM_HOSTS,
+    "direct-r1999": STEAM_HOSTS,
     "direct-snowbreak": STEAM_HOSTS,
+    "direct-tof": STEAM_HOSTS,
+    "direct-strinova": STEAM_HOSTS,
+    "direct-bpsr": STEAM_HOSTS,
     "stellasora-yostar": STEAM_HOSTS,
     "direct-nte": (*STEAM_HOSTS, "nte.perfectworld.com"),
     "launcher-nikke": ("nikke-en.com",),
@@ -66,6 +70,11 @@ ALLOWED_HOSTS: dict[str, tuple[str, ...]] = {
     "stove-czn": ("static-pubcomm.onstove.com",),
     "fgo-lepton": ("fate-go.us",),
     "arknights-yostar": ("webusstatic.yo-star.com",),
+    "hbr-yostar": ("webusstatic.yo-star.com", "launcher-pkg-hbr-en.yo-star.com"),
+    "azurpromilia-jp-yostar": (
+        "webusstatic.yo-star.com",
+        "launcher-pkg-azupro-jp.yo-star.com",
+    ),
 }
 
 

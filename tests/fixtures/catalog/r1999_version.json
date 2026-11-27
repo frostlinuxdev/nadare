@@ -1,0 +1,8 @@
+{
+  "code": 200,
+  "msg": "success",
+  "data": {
+    "latestVersion": "3.9.1",
+    "forceUpdate": true
+  }
+}

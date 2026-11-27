@@ -7,12 +7,14 @@ Split out of :mod:`nadare.gui.game_view`; the code is unchanged.
 
 from __future__ import annotations
 
+import re
 import time
 
-from ...core import operation_policy
+from ...core import operation_policy, runner_failures
 from ...core.eta import format_eta, format_speed
 from ...core.events import Event
 from ...core.exitcode import STOPPED_EXIT_CODES, crash_signal, play_time
+from ...core.winecrash import WineCrash
 
 #: User-facing operation names used in dialogs (never the raw operation id).
 OPERATION_TITLES = {
@@ -26,7 +28,18 @@ OPERATION_TITLES = {
     "status": "Checking",
     "remove": "Removing",
     "remove_qualities": "Removing old quality files",
+    "apply_patch": "Applying the patch",
+    "update_patch": "Updating the patch",
+    "remove_patch": "Removing the patch",
 }
+
+
+def start_label(operation: str) -> str:
+    """The step text when ``operation`` starts: the patch operations get their title, the
+    others keep the plain verb they always showed."""
+    if operation.endswith("_patch"):
+        return operation_title(operation)
+    return operation.capitalize()
 
 
 def operation_title(operation: str) -> str:
@@ -48,6 +61,9 @@ _BUSY_STATES = {
     "set_remember": "saving",
     "logout": "logging out",
     "remove_qualities": "cleaning",
+    "apply_patch": "updating",
+    "update_patch": "updating",
+    "remove_patch": "updating",
 }
 
 #: A second click right after a button turns into CANCEL must not cancel the new job.
@@ -75,6 +91,40 @@ _GAME_END_LINES = frozenset(
 _RETRYABLE = operation_policy.operations_with("retryable")
 
 
+#: The file sync's own summary line (``direct`` and Arknights backends): what a sync changed.
+_SYNC_SUMMARY = re.compile(r"synced (\d+) item\(s\), (\d+) already up to date")
+#: The update receipt (``direct.update_receipt``): the version really changed.
+_UPDATE_RECEIPT = re.compile(r"update (\S+) -> (\S+):")
+#: A backend's launch step: the game is starting, so a post-download bar has done its job.
+_LAUNCHING_STEP = re.compile(r"\blaunching\b")
+
+
+def result_line(
+    operation: str,
+    last_done: str,
+    sync: tuple[int, int] | None,
+    versions: tuple[str, str] | None = None,
+) -> str:
+    """What the progress line says after ``operation`` succeeded (user sim r2 #6).
+
+    A sync summary says what really happened (nothing to fix, N files fixed, already up to
+    date); without one the backend's own "done" line, else "<operation> finished".
+    """
+    if operation == "update" and versions is not None:
+        return f"Update finished: {versions[0]} -> {versions[1]}"
+    if sync is not None and operation in ("repair", "update"):
+        changed, kept = sync
+        files = "file" if changed == 1 else "files"
+        if operation == "repair":
+            if changed == 0:
+                return f"Repair finished: nothing needed fixing ({kept} checked)"
+            return f"Repair finished: {changed} {files} fixed"
+        if changed == 0:
+            return "Already up to date: nothing to download"
+        return f"Update finished: {changed} {files} updated"
+    return last_done or f"{operation_title(operation)} finished"
+
+
 def can_pause_kind(kind: str) -> bool:
     """Whether installs of backend ``kind`` resume from what is already on disk."""
     from ...core.backends import supports_resume
@@ -92,11 +142,17 @@ class BusyMixin:
         self._paused_op = None
         self._failed_op = None
         self._last_done = ""
+        self._last_sync = None  # (changed, unchanged) from the sync summary, if any
+        self._last_versions = None  # (old, new) from an update receipt, if any
         self._queue_waiting = False
+        # A user operation supersedes a pending status wait: if it is cancelled while still
+        # queued, the status worker it detached never reports back (Neon, 2026-11-27).
+        self._awaiting_status = False
         self._busy_op = operation
         self._operation_detail = operation_title(operation)
         self._set_detail("")
         if operation == "launch":
+            self._wine_crash = WineCrash()
             self._launch_runner = {}  # what this launch runs on, once the backend says (#1732)
             # What this launch has is fixed now; the switch can change later, the process cannot.
             # Only a guess until the backend reports: never one the machine cannot keep.
@@ -110,6 +166,7 @@ class BusyMixin:
         self.news_frame.setVisible(False)
         self._started_at = time.time()
         self._last_step_at = 0.0
+        self._download_finished = False
         # Remove sends no progress events: show the busy animation, not a dead 0%.
         self.progress.setRange(0, 0 if operation == "remove" else 100)
         self.progress.setVisible(operation != "launch")
@@ -121,7 +178,7 @@ class BusyMixin:
             if operation == "remove"
             else "Resuming: checking what is already downloaded…"
             if resumed
-            else operation.capitalize()
+            else start_label(operation)
         )
         if resumed:
             self._append_line("resumed", "status")
@@ -169,6 +226,7 @@ class BusyMixin:
         """Return the progress area to its idle shape when an operation ends."""
         self._queue_waiting = False
         self._sandbox_active = None
+        self._download_finished = False
         self._apply_sandbox()
         self.skip_button.setHidden(True)
         self.progress.setRange(0, 100)  # never leave the busy animation running
@@ -196,8 +254,18 @@ class BusyMixin:
         # A background refresh ending must not drop a pause on this page.
         if operation not in BACKGROUND:
             self._paused_op = None
+        # Nor the result of the operation before it: every success starts a status re-probe,
+        # and its end wiped "✓ Repair finished" at once (user sim r2 #6).
+        kept_result = (
+            self.step_label.text()
+            if operation in BACKGROUND and self._busy_op is None
+            and self.step_label.text().startswith("✓ ")
+            else ""
+        )
         self._busy_op = None
         self._clear_busy_progress()
+        if kept_result:
+            self.step_label.setText(kept_result)
         self.news_frame.setVisible(self._news_shown)
         self._timer.stop()
         self._hide_qr()
@@ -209,6 +277,19 @@ class BusyMixin:
             # The pause survives a background refresh, and so does its message (#1207 b160).
             self.step_label.setText(_PAUSED_TEXT)
         if operation == "launch":
+            crash = "" if stop_requested else crash_signal(exit_code)
+            fast_failure = (
+                not stop_requested and exit_code != 0
+                and exit_code not in STOPPED_EXIT_CODES and elapsed < _LAUNCH_EXIT_GRACE_S
+            )
+            success = not stop_requested and (
+                exit_code == 0 or (elapsed >= _LAUNCH_EXIT_GRACE_S and not crash)
+            )
+            facts = getattr(self, "_launch_runner", None) or {}
+            runner_notice = runner_failures.record_result(
+                self._profile, str(facts.get("runner") or ""),
+                "failure" if fast_failure else "success" if success else "neutral",
+            )
             if exit_code == 0:
                 if self._last_done.lower() not in _GAME_END_LINES:  # CZN says it itself
                     if not stop_requested and elapsed < _LAUNCH_EXIT_GRACE_S:
@@ -222,8 +303,40 @@ class BusyMixin:
                     else:
                         self._append_line("game exited normally", "done")
                 return
-            crash = "" if stop_requested else crash_signal(exit_code)
             runner_note, other_runner = self._runner_note()
+            broken_runner = ""
+            if runner_notice:
+                name = str(facts["runner"])
+                default = str(facts.get("runner_default") or "the recommended runner")
+                advice = (
+                    " This is already the recommended runner. Open the logs for details."
+                    if facts.get("runner_recommended") else
+                    f" Try the recommended runner ({default}): in this game's settings, "
+                    "set Runner to Default · recommended."
+                )
+                broken_runner = (
+                    f"Different games failed at startup on {name} in the last 24 hours."
+                    f" This runner may be broken.{advice}"
+                )
+            wine_crash = getattr(self, "_wine_crash", None)
+            if not stop_requested and wine_crash is not None and wine_crash.detected:
+                module = wine_crash.module
+                message = (
+                    f"The game crashed inside {module} (Wine)"
+                    if module else "The game crashed (Wine)"
+                )
+                # A startup Wine crash also counts against the runner (#1733): its one-time
+                # notice goes in this box, or it would be used up unseen.
+                tail = (f" {broken_runner}" if broken_runner
+                        else f"{runner_note} Open the logs for details.")
+                self.show_error(
+                    "The game crashed",
+                    f"{message}, exit code {exit_code}.{tail}",
+                    retry_op=retry_op,
+                    failed=True,
+                    settings=other_runner,
+                )
+                return
             if crash and elapsed >= _LAUNCH_EXIT_GRACE_S:
                 # A real session that ended in a crash signal is not a normal quit (#1031).
                 self.show_error(
@@ -244,6 +357,13 @@ class BusyMixin:
             ):
                 self._append_line(f"Game closed (exit code {exit_code})", "status")
                 return
+            if broken_runner:
+                self.show_error(
+                    "This runner may be broken",
+                    broken_runner,
+                    retry_op=retry_op, failed=True, settings=other_runner,
+                )
+                return
             # A launch that failed at once: say what it ran on (#1732).
             self.show_error(
                 "Operation failed",
@@ -255,7 +375,9 @@ class BusyMixin:
             )
             return
         if exit_code == 0 and operation in _ANNOUNCED_ON_SUCCESS:
-            done = self._last_done or f"{operation_title(operation)} finished"
+            done = result_line(
+                operation, self._last_done, self._last_sync, self._last_versions
+            )
             self.step_label.setText(f"✓ {done}")  # cleared by the next operation
         if exit_code != 0:
             self.show_error(
@@ -356,6 +478,22 @@ class BusyMixin:
     def append_event(self, event: Event) -> None:
         kind = event.kind
         data = event.data or {}
+        if self._busy_op == "launch" and (
+            kind == "game_running"
+            or (kind == "step" and _LAUNCHING_STEP.search(event.message or ""))
+        ):
+            # The game is starting. A bar shown earlier for a runner download has done its job.
+            self.progress.setRange(0, 100)
+            self.progress.setVisible(False)
+        if self._busy_op == "launch" and kind == "log":
+            self._wine_crash.feed(event.message or "")
+        if kind == "log" and self._busy_op in ("repair", "update") and event.message:
+            match = _SYNC_SUMMARY.search(event.message)
+            if match:
+                self._last_sync = (int(match.group(1)), int(match.group(2)))
+            receipt = _UPDATE_RECEIPT.search(event.message)
+            if receipt:
+                self._last_versions = (receipt.group(1), receipt.group(2))
         if self._busy_op is not None and kind in ("step", "done", "error"):
             # A finished step must not linger while the next phase is being prepared. Progress
             # counters stay in the bar below: the header names the phase only (2026-11-20).
@@ -377,13 +515,20 @@ class BusyMixin:
             self._last_step_at = time.time()
             self.step_label.setText(event.message or "")
             data = event.data or {}
+            # A step after a finished download is work with no percentage of its own
+            # (unpacking, hashing, setting up). A busy bar says "working", not a frozen 100%.
+            post_download = self._download_finished
+            self._download_finished = False
+            if post_download:
+                self.progress.setVisible(True)
+                self.progress.setRange(0, 0)
             png = data.get("png")
             url = data.get("url")
             if not self._show_qr(png) and url:
                 self._show_qr_link(str(url))
             if data.get("qr_state"):
                 self._set_qr_state(str(data["qr_state"]))
-            if event.progress is not None:
+            if event.progress is not None and not post_download:
                 self._set_progress(event.progress)
         elif kind == "progress":
             if (event.data or {}).get("indeterminate"):
@@ -394,6 +539,9 @@ class BusyMixin:
                 self._set_progress(event.progress)
             if event.message:
                 self.step_label.setText(self._with_speed(event))
+            self._download_finished = (
+                event.progress is not None and event.progress >= 1.0
+            )
         elif kind == "status":
             if event.message:
                 self._set_detail(event.message)

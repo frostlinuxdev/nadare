@@ -188,6 +188,7 @@ def test_owned_shader_paths_survive_the_native_wrapper(layout, monkeypatch):
     shadercache.prepare("My Game", layout["env"], lambda line: None)
     argv, env = _wrap(layout)
     cache = Path(env["XDG_CACHE_HOME"])
+    assert env["MESA_SHADER_CACHE_MAX_SIZE"] == "2G"
     assert (str(cache), str(cache)) in _pairs(_flags(argv), "--bind")
     for key in ("MESA_SHADER_CACHE_DIR", "VKD3D_SHADER_CACHE_PATH"):
         folder = Path(env[key])

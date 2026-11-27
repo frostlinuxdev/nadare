@@ -4,7 +4,7 @@
 
 After a driver update the new libraries are on disk while the old kernel module is still loaded.
 Until a restart every Vulkan program fails to create its instance; a game under Proton crashes
-inside DXVK with nothing that names the cause (flxpc, 2026-11-15: 615.78.08 loaded, 620.70.06
+inside DXVK with nothing that names the cause (an NVIDIA PC, 2026-11-15: 615.78.08 loaded, 620.70.06
 installed, Aether Gazer crashed three times).
 
 The running version comes from ``/proc/driver/nvidia/version``; the installed one from the file

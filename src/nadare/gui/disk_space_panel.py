@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
 from ..core import diskspace, libraries, profilefolders, runners, steamsetup, storagecard, umu
 from ..core.config import Config
 from . import i18n
+from .dialog_layout import WrappedCheckBox, fit_dialog, make_scroll_body
 from .library import count_text
 
 log = logging.getLogger(__name__)
@@ -139,6 +140,9 @@ class DiskSpacePanel(QWidget):
 
     #: The Manage runners dialog: Settings opens it (it knows the form's unsaved runner).
     runners_requested = pyqtSignal()
+    #: The card's text changed without a show/hide (a measurement landed); an active
+    #: Settings search must filter again, or its results stay stale (#1810 follow-up).
+    texts_changed = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -328,6 +332,8 @@ class DiskSpacePanel(QWidget):
             self.installers_label.setText(RECOVERED_TEXT)
             for category in self.categories.values():
                 category.reset(i18n.tr(RECOVERED_TEXT))
+            # No measurement follows, so this is the card's final text: re-filter now.
+            self.texts_changed.emit()
             return
         self.runtime_label.setText("umu runtimes: checking…")
         self.runners_label.setText("Unused runners: checking…")
@@ -419,6 +425,7 @@ class DiskSpacePanel(QWidget):
             self.installers_button.setEnabled(False)
             for category in self.categories.values():
                 category.reset(i18n.tr("Could not check (see the log)."))
+            self.texts_changed.emit()
             return
 
         installers = report.installers
@@ -464,6 +471,7 @@ class DiskSpacePanel(QWidget):
 
         if self._clearing:
             self._set_busy(True)
+        self.texts_changed.emit()
 
     @staticmethod
     def _game_key(key: str, entry: object) -> str | None:
@@ -714,6 +722,7 @@ class ProfileFoldersDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Folders of removed games")
         self.setMinimumWidth(560)
+        self._shown_once = False
         self._config = config
         self._folders = list(folders)
         self.deleted_any = False
@@ -722,15 +731,22 @@ class ProfileFoldersDialog(QDialog):
         self._signals.deleted.connect(self._on_deleted)
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
+        self.heading = QLabel("Folders of removed games")
+        self.heading.setObjectName("Title")
+        self.heading.setWordWrap(True)
+        layout.addWidget(self.heading)
+
+        self._scroll, _body, body_layout = make_scroll_body(spacing=12)
         self.note = QLabel(FOLDERS_NOTE)
         self.note.setObjectName("Subtitle")
         self.note.setWordWrap(True)
-        layout.addWidget(self.note)
+        body_layout.addWidget(self.note)
 
-        self.boxes: list[QCheckBox] = []
+        self.boxes: list[WrappedCheckBox] = []
         for folder in self._folders:
-            box = QCheckBox(f"{folder.path.name}  ({diskspace.human_size(folder.size)})")
+            box = WrappedCheckBox(f"{folder.path.name}  ({diskspace.human_size(folder.size)})")
             box.setToolTip(str(folder.path))
             box.toggled.connect(self._update_delete)
             open_button = QPushButton("Open")
@@ -744,13 +760,14 @@ class ProfileFoldersDialog(QDialog):
             row = QHBoxLayout()
             row.addWidget(box, 1)
             row.addWidget(open_button)
-            layout.addLayout(row)
+            body_layout.addLayout(row)
             self.boxes.append(box)
 
         self.status = QLabel("")
         self.status.setObjectName("Muted")
         self.status.setWordWrap(True)
-        layout.addWidget(self.status)
+        body_layout.addWidget(self.status)
+        layout.addWidget(self._scroll, 1)
 
         footer = QHBoxLayout()
         self.delete_button = QPushButton("Delete ticked folders")
@@ -764,6 +781,15 @@ class ProfileFoldersDialog(QDialog):
         close.clicked.connect(self.accept)
         footer.addWidget(close)
         layout.addLayout(footer)
+        self._fit_height()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        self._fit_height(keep_width=self._shown_once)
+        self._shown_once = True
+
+    def _fit_height(self, *, keep_width: bool = False) -> None:
+        fit_dialog(self, min_width=560, scroll=self._scroll, keep_width=keep_width)
 
     def _ticked(self) -> list[profilefolders.Folder]:
         return [
@@ -855,6 +881,7 @@ class RuntimeFoldersDialog(ProfileFoldersDialog):
     def __init__(self, config: Config, folders: list[tuple[Path, int]], parent=None) -> None:  # noqa: ANN001
         super().__init__(config, [profilefolders.Folder(*pair) for pair in folders], parent)
         self.setWindowTitle("umu runtimes")
+        self.heading.setText("umu runtimes")
         # The inherited explanatory label describes removed games; replace it here.
         note = self.note
         note.setText("Nadare can download its runtime again. Shared umu runtimes may be used "
@@ -864,6 +891,7 @@ class RuntimeFoldersDialog(ProfileFoldersDialog):
             name = ("Nadare's umu runtime" if folder.path == umu.runtime_base()
                     else "Shared umu runtime (other apps may use it)")
             box.setText(f"{name} ({diskspace.human_size(folder.size)})")
+        self._fit_height()
 
     def _confirm(self, items: list[profilefolders.Folder]) -> bool:
         names = "\n".join(str(item.path) for item in items)

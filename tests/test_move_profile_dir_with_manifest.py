@@ -2,7 +2,7 @@
 """A game in ``profiles/<id>/`` still moves whole after Nadare wrote its manifest there.
 
 Since the b22 folder rule every game folder gets ``nadare-game.json``. The whole-folder check
-only allowed ``prefix`` and ``install``, so on flxpc (2026-11-14) Arknights showed "Move prefix
+only allowed ``prefix`` and ``install``, so (2026-11-14) Arknights showed "Move prefix
 only..." and a folder picker instead of "Move game and prefix...". Anything else in the folder
 (a backend's own state) still keeps the game on the prefix-only move.
 """
@@ -56,7 +56,7 @@ def test_the_manifest_moves_with_the_folder_and_still_describes_it(data, tmp_pat
     profile = _old(data, "arknights", title="Arknights")
     libraries.write_manifest(profile, data / "arknights")
     home = relink.managed_home(profile)
-    library = tmp_path / "izuna"
+    library = tmp_path / "games2"
     library.mkdir()
     new_home = relink.free_home(library, relink.home_name(profile, home), {})
     relocate.move_tree(home, new_home)

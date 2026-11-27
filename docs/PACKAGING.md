@@ -12,7 +12,6 @@ One version string, everywhere: `0.1.0bN` from `pyproject.toml` (mirrored in
 | AppImage | `Nadare-<version>-x86_64.AppImage` (signed) + `.zsync` + `SHA256SUMS` + detached `.asc` signatures | `scripts/build_appimage.sh`, signed with `scripts/sign_appimage.py`, uploaded to the GitHub release | Nadare's in-app update check; AppImageUpdate-based tools read the embedded update information |
 | Flatpak | signed Flatpak repository + `.flatpakref` + single-file `.flatpak` bundle | `packaging/flatpak/stage_repo.py` (stages the AppImage's files), `build_repo.sh` (export, sign, bundle), `upload.sh` | Flatpak (`flatpak update`); runtimes come from Flathub |
 | AUR `nadare-bin` (draft, not published yet) | the release AppImage, unpacked into `/opt/nadare` | `packaging/aur/nadare-bin/PKGBUILD` | pacman |
-| `.deb` | `dist/nadare_<version>_<arch>.deb` (built, not published) | `scripts/build_deb.sh` | dpkg/apt |
 | Source | this checkout | `docs/SOURCE-INSTALL.md` | the user's own `git pull` |
 
 ## AppImage signing and update information
@@ -71,8 +70,6 @@ will offer a manual AppImage download that the package manager would overwrite.
   `make` and `g++`; the build is reproducible and `core/sevenzip.py` pins the result.
 - `LICENSE` under the package's licence directory.
 - The desktop file, icon and (Flatpak/AppImage) the AppStream metainfo.
-- The `.deb` derives its `libc6 (>= ...)` floor from `readelf -V` on the bundle
-  instead of assuming the build host's glibc.
 
 ## SBOM and build provenance
 

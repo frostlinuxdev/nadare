@@ -51,9 +51,17 @@ def _collect_garbage_between_tests():
     collection allocated more), the process segfaulted; the original single file only got lucky.
     Deferred deletes first, then the collection, so it never runs under a live Qt call."""
     yield
+    collect_garbage()
+
+
+def collect_garbage() -> None:
+    """Deferred deletes (once running threads and pool workers are done), then the GC.
+
+    The shared flush waits for pool workers first: deleting a page while its image workers
+    still emit on it segfaulted CI 3.13 on #1865 (the same race as #1863)."""
     import gc
 
-    from PyQt6.QtCore import QCoreApplication, QEvent
+    from conftest import flush_deferred_deletes
 
-    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    flush_deferred_deletes()
     gc.collect()

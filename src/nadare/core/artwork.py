@@ -145,9 +145,13 @@ _PUBLISHER_FIXED: dict[str, tuple[str, tuple[str, ...]]] = {
     ),
 }
 
-#: Games with no stable cover URL (Arknights' key visual is a hashed asset, Stella Sora's page
-#: advertises a favicon): the newest image of their official news feed stands in.
-_PUBLISHER_NEWS: frozenset[str] = frozenset({"arknights-yostar", "stellasora-yostar"})
+#: Games with no stable cover URL: the newest image of their official news feed stands in
+#: (Arknights' key visual is a hashed asset, Stella Sora's page advertises a favicon). HBR and
+#: Azur Promilia have no news feed of their own; their CI media documents are published like
+#: Arknights', so the Store asks the curated index for their covers (``has_art``).
+_PUBLISHER_NEWS: frozenset[str] = frozenset(
+    {"arknights-yostar", "stellasora-yostar", "hbr-yostar", "azurpromilia-jp-yostar"}
+)
 
 
 #: HoYoverse games, whose backend class carries ``art_source`` (the launcher games feed: a cover

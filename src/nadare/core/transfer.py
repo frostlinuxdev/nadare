@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import fcntl
 import functools
+import http.client
 import inspect
 import json
 import logging
@@ -206,6 +207,36 @@ def measure(workers, emit):
             emit(Event("log", message, data=data))
 
 
+def _declared_length(response) -> int | None:
+    """Declared ``Content-Length`` for a response whose body is not chunked or empty-by-status."""
+    status = getattr(response, "status", None)
+    if status in (204, 304):
+        return None
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    raw_len = None
+    transfer_enc = None
+    if hasattr(headers, "items"):
+        for key, value in headers.items():
+            lower = str(key).lower()
+            if lower == "content-length" and raw_len is None:
+                raw_len = value
+            elif lower == "transfer-encoding":
+                transfer_enc = value
+    elif hasattr(headers, "get"):
+        raw_len = headers.get("Content-Length")
+        transfer_enc = headers.get("Transfer-Encoding")
+    if transfer_enc and "chunked" in str(transfer_enc).lower():
+        return None
+    if raw_len is None:
+        return None
+    text = str(raw_len).strip()
+    if not text.isdigit():
+        return None
+    return int(text)
+
+
 class Response:
     """Keep the response API while charging bounded reads to the shared bucket."""
 
@@ -214,11 +245,23 @@ class Response:
         self._measurement = current_transfer()
         self._active = True
         self.cancel = None
+        raw = getattr(response, "_response", response)
+        self._raw_http = raw if isinstance(raw, http.client.HTTPResponse) else None
+        self._expected_length = None if self._raw_http is not None else _declared_length(response)
+        self._bytes_read = 0
         if self._measurement is not None:
             self._measurement.opened_response(url, opened)
 
     def __getattr__(self, name):
         return getattr(self._response, name)
+
+    def _check_early_eof(self, partial: bytes) -> None:
+        if self._raw_http is not None:
+            left = self._raw_http.length
+            if left is not None and left > 0:
+                raise http.client.IncompleteRead(partial, left)
+        elif self._expected_length is not None and self._bytes_read < self._expected_length:
+            raise http.client.IncompleteRead(partial, self._expected_length - self._bytes_read)
 
     def read(self, amount=-1):
         blocks = []
@@ -229,8 +272,12 @@ class Response:
             block = self._response.read(min(remaining, 65536) if remaining > 0 else 65536)
             if not block:
                 self._finished()
+                if self.cancel is not None:
+                    self.cancel.raise_if_cancelled()
+                self._check_early_eof(b"".join(blocks))
                 break
             limiter.take(len(block), self.cancel)
+            self._bytes_read += len(block)
             if self._measurement is not None:
                 with self._measurement.lock:
                     self._measurement.bytes += len(block)

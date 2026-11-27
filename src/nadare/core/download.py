@@ -17,15 +17,17 @@ import errno
 import hashlib
 import http.client
 import json
+import math
 import os
 import random
+import re
 import socket
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
@@ -72,7 +74,17 @@ CREDENTIAL_HEADERS = frozenset({"authorization", "cookie", "proxy-authorization"
 
 
 class DownloadError(RuntimeError):
-    """A download failed after exhausting retries, or failed verification."""
+    """A download failed after exhausting retries, or failed verification.
+
+    Its text reaches the run log and the error dialog, so every URL in it is cut to
+    scheme, host and path: publisher query strings, fragments and userinfo carry secrets.
+    """
+
+    before_send: bool | None = None
+
+    def __init__(self, *args: object) -> None:
+        args = tuple(public_text(a) if isinstance(a, str) else a for a in args)
+        super().__init__(*args)
 
 
 class HTTPStatusError(DownloadError):
@@ -88,10 +100,9 @@ class HTTPStatusError(DownloadError):
     ) -> None:
         super().__init__(message)
         self.status = status
-        self.retry_after = (
-            None if retry_after is None else min(retry_after, RETRY_AFTER_MAX)
-        )
-        self.url = url
+        valid = retry_after is not None and math.isfinite(retry_after) and retry_after >= 0
+        self.retry_after = min(retry_after, RETRY_AFTER_MAX) if valid else None
+        self.url = public_url(url) if url is not None else None
 
 
 class ProxyNotSupported(DownloadError):
@@ -109,6 +120,7 @@ class DownloadResult:
     sha256: str
     sha512: str
     resumed: bool = False
+    md5: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -126,14 +138,18 @@ def _request(
 
 
 def parse_retry_after(value: str | None) -> float | None:
-    """A numeric ``Retry-After`` in seconds, capped at :data:`RETRY_AFTER_MAX`."""
+    """A numeric ``Retry-After`` in seconds, capped at :data:`RETRY_AFTER_MAX`.
+
+    A non-finite (``NaN``/``inf``) or negative value is treated as absent, so a broken
+    header means the normal backoff instead of no wait at all.
+    """
     if not value:
         return None
     try:
         seconds = float(value.strip())
     except ValueError:  # the HTTP-date form; fall back to normal backoff
         return None
-    if seconds < 0:
+    if not math.isfinite(seconds) or seconds < 0:
         return None
     return min(seconds, RETRY_AFTER_MAX)
 
@@ -152,12 +168,39 @@ def wait(seconds: float, cancel: Cancel | None) -> None:
     _sleep(seconds, cancel)
 
 
+def usable_retry_after(exc: BaseException) -> float | None:
+    """The server's wait carried by ``exc``, capped, or None when it is absent or broken.
+
+    The constructor of ``HTTPStatusError`` already checks it, but a wrapper or a subclass can set
+    the attribute later: NaN, infinity, a negative number or text must mean the normal backoff
+    (#1853), never a crash or a wait of no time at all.
+    """
+    raw = getattr(exc, "retry_after", None)
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        seconds = float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return min(seconds, RETRY_AFTER_MAX)
+
+
 def retry_delay(
     base: float, attempt: int = 1, *, rand: Callable[[], float] = random.random
 ) -> float:
     """Exponential backoff for ``attempt`` with bounded jitter, capped."""
     delay = min(base * (2 ** max(0, attempt - 1)), MAX_BACKOFF)
     return min(delay * (1.0 + BACKOFF_JITTER * rand()), MAX_BACKOFF)
+
+
+class RedirectRefused(DownloadError):
+    """A redirect the policy refuses (insecure, unparsable or not on the allow-list).
+
+    Asking again gets the same redirect and the same answer, so retry loops fail at once
+    instead of waiting out their backoff (2026-11-27).
+    """
 
 
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -187,7 +230,7 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
             with contextlib.closing(fp):
                 with contextlib.suppress(Exception):
                     fp.read(REDIRECT_DRAIN_BYTES)  # bounded: the body is untrusted
-        raise DownloadError(message)
+        raise RedirectRefused(message)
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         target = urllib.parse.urljoin(req.full_url, newurl)
@@ -209,16 +252,129 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         return new
 
 
+def _make_tracked_connection(
+    base: type[http.client.HTTPConnection], state: dict[str, bool]
+) -> type[http.client.HTTPConnection]:
+    """Connection subclass that marks ``state['sent']`` only after connect/TLS completes."""
+
+    class _TrackedConnection(base):  # type: ignore[valid-type, misc]
+        def send(self, data: Any) -> None:
+            if self.sock is None:
+                if self.auto_open:
+                    self.connect()
+                else:
+                    raise http.client.NotConnected()
+            state["sent"] = True
+            super().send(data)
+
+    return _TrackedConnection
+
+
+class _TrackedHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, state: dict[str, bool]) -> None:
+        super().__init__()
+        self._state = state
+        self._conn_cls = _make_tracked_connection(http.client.HTTPConnection, state)
+
+    def http_open(self, req: urllib.request.Request) -> Any:
+        self._state["tracked"] = True
+        return self.do_open(self._conn_cls, req)
+
+
+class _TrackedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, state: dict[str, bool], *, context: Any) -> None:
+        super().__init__(context=context)
+        self._state = state
+        self._conn_cls = _make_tracked_connection(http.client.HTTPSConnection, state)
+
+    def https_open(self, req: urllib.request.Request) -> Any:
+        self._state["tracked"] = True
+        return self.do_open(
+            self._conn_cls, req, context=self._context
+        )
+
+
 def _build_opener(redirect_allowed: Callable[[str], bool] | None) -> Any:
     """An opener with the safe redirect guard and Nadare's pinned CA context."""
     guard = _SafeRedirectHandler(redirect_allowed)
-    handler = urllib.request.HTTPSHandler(context=tls.ssl_context())
+    state = {"tracked": False, "sent": False}
+    https_handler = _TrackedHTTPSHandler(state, context=tls.ssl_context())
+    http_handler = _TrackedHTTPHandler(state)
     try:
-        return urllib.request.build_opener(guard, handler)
-    except TypeError as exc:  # a one-handler stub in older tests
+        opener = urllib.request.build_opener(guard, https_handler, http_handler)
+    except TypeError as exc:  # a one- or two-handler stub in older tests
         if "argument" not in str(exc):
             raise
-    return urllib.request.build_opener(guard)
+        try:
+            opener = urllib.request.build_opener(guard, https_handler)
+        except TypeError as inner:
+            if "argument" not in str(inner):
+                raise
+            opener = urllib.request.build_opener(guard)
+    with contextlib.suppress(AttributeError):
+        opener._nadare_send_state = state
+    return opener
+
+
+_URL_IN_TEXT_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
+
+
+def public_text(text: str) -> str:
+    """``text`` with every URL in it reduced to :func:`public_url` (no query, fragment, login)."""
+    return _URL_IN_TEXT_RE.sub(lambda match: public_url(match.group(0)), text)
+
+
+def public_url(url: str) -> str:
+    """``url`` as it may be logged or shown: scheme, host and path only.
+
+    A publisher URL carries keys and passwords in its query string, and the final error
+    text of a failed fetch ends up in the run log and the error dialog.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:  # a malformed IPv6 bracket
+        return "<invalid url>"
+    host = parts.netloc.rpartition("@")[2]
+    if not host:
+        return parts.path or "<invalid url>"
+    if not parts.scheme:
+        return f"{host}{parts.path}"
+    return f"{parts.scheme}://{host}{parts.path}"
+
+
+def scrub_exception(exc: BaseException) -> BaseException:
+    """Scrub URL secrets from ``exc`` and every chained cause/context in place (#1853)."""
+    seen: set[int] = set()
+    stack: list[BaseException | None] = [exc]
+    while stack:
+        cur = stack.pop()
+        if cur is None or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        stack.append(cur.__cause__)
+        stack.append(cur.__context__)
+        if isinstance(cur, urllib.error.HTTPError):
+            if isinstance(getattr(cur, "url", None), str):
+                cur.url = public_url(cur.url)
+            if isinstance(getattr(cur, "filename", None), str):
+                cur.filename = public_url(cur.filename)
+            if isinstance(getattr(cur, "msg", None), str):
+                cur.msg = public_text(cur.msg)
+        elif isinstance(cur, urllib.error.URLError):
+            if isinstance(cur.reason, BaseException):
+                stack.append(cur.reason)
+            elif isinstance(cur.reason, str):
+                cur.reason = public_text(cur.reason)
+        if isinstance(cur, OSError):
+            if isinstance(cur.strerror, str):
+                cur.strerror = public_text(cur.strerror)
+            if isinstance(cur.filename, str):
+                cur.filename = public_text(cur.filename)
+            if isinstance(cur.filename2, str):
+                cur.filename2 = public_text(cur.filename2)
+        if cur.args:
+            cur.args = tuple(public_text(a) if isinstance(a, str) else a for a in cur.args)
+    return exc
 
 
 def http_open(
@@ -237,6 +393,7 @@ def http_open(
     ``redirect_allowed`` allow-list is enforced per hop.
     """
     opener = _build_opener(redirect_allowed)
+    send_state = getattr(opener, "_nadare_send_state", None)
     try:
         response = opener.open(_request(url, headers, data), timeout=timeout)  # noqa: S310
         final_url = getattr(response, "geturl", lambda: url)()
@@ -244,16 +401,21 @@ def http_open(
     except DownloadError:
         raise
     except urllib.error.HTTPError as exc:
-        raise HTTPStatusError(
-            f"HTTP {exc.code} for {url}",
+        err = HTTPStatusError(
+            f"HTTP {exc.code} for {public_url(url)}",
             status=exc.code,
             retry_after=parse_retry_after(
                 exc.headers.get("Retry-After") if exc.headers else None
             ),
             url=url,
-        ) from exc
+        )
+        err.before_send = False
+        raise err from scrub_exception(exc)
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise DownloadError(f"cannot reach {url}: {exc}") from exc
+        err = DownloadError(f"cannot reach {public_url(url)}: {exc}")
+        if isinstance(send_state, dict) and send_state.get("tracked"):
+            err.before_send = not send_state["sent"]
+        raise err from scrub_exception(exc)
 
 
 def _pool_can_serve(url: str) -> bool:
@@ -293,7 +455,7 @@ def _open_pooled(
     except DownloadError:
         raise
     except (http.client.HTTPException, OSError, ValueError) as exc:
-        raise DownloadError(f"cannot reach {url}: {exc}") from exc
+        raise DownloadError(f"cannot reach {url}: {exc}") from scrub_exception(exc)
     if not 200 <= response.status < 300:
         # Read a small declared error body so the connection can serve the next file. Anything
         # else is not read (it could block until the timeout); closing then drops the connection.
@@ -311,6 +473,104 @@ def _open_pooled(
     return response
 
 
+#: How often a read waiting for body bytes looks at the cancel token (seconds).
+_CANCEL_POLL = 0.05
+
+
+def _response_socket(response: Any) -> Any:
+    """The socket under a urllib response, when it can be found."""
+    sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+    return sock if hasattr(sock, "shutdown") else None
+
+
+@contextlib.contextmanager
+def _stop_shuts_the_socket(sock: Any, cancel: Cancel | None) -> Iterator[None]:
+    """Let Stop end a read that is blocked on the network.
+
+    A blocked read cannot be interrupted from the thread that is inside it: a stalled or
+    slow-dripping response holds it until the socket timeout. A tiny watcher shuts the
+    socket down as soon as Stop is pressed, so the read returns at once and the caller
+    turns that into ``Cancelled``.
+    """
+    if sock is None or cancel is None:
+        yield
+        return
+    stop = threading.Event()
+
+    def watch() -> None:
+        while not stop.wait(_CANCEL_POLL):
+            if cancel.cancelled:
+                with contextlib.suppress(OSError):
+                    sock.shutdown(socket.SHUT_RDWR)
+                return
+
+    watcher = threading.Thread(target=watch, name="nadare-fetch-stop", daemon=True)
+    watcher.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        watcher.join(timeout=1.0)
+
+
+def _read_body(response: Any, amount: int, cancel: Cancel | None) -> bytes:
+    """Read up to ``amount`` bytes, ending at once when Stop is pressed.
+
+    With a token the body is read in blocks that check it, and the socket watcher ends a
+    block that is still waiting for bytes.
+    """
+    if cancel is None:
+        return response.read(amount)
+    blocks: list[bytes] = []
+    total = 0
+    with _stop_shuts_the_socket(_response_socket(response), cancel):
+        while total < amount:
+            cancel.raise_if_cancelled()
+            try:
+                block = response.read(min(65536, amount - total))
+            except (OSError, ValueError, http.client.HTTPException):
+                # Stop shut the socket: TLS can report that as ValueError ("Read on
+                # closed or unwrapped SSL socket") as well as OSError.
+                if cancel.cancelled:
+                    raise _cancelled() from None
+                raise
+            if not block:
+                break
+            blocks.append(block)
+            total += len(block)
+    cancel.raise_if_cancelled()  # a Stop during the last block is not a short body
+    return b"".join(blocks)
+
+
+def _read_bounded(
+    resp: Any, url: str, max_bytes: int, cancel: Cancel | None
+) -> bytes:
+    """Read a bounded HTTP body, turning early EOF or short Content-Length into DownloadError."""
+    if cancel is not None and hasattr(resp, "cancel"):
+        resp.cancel = cancel
+    try:
+        data = _read_body(resp, max_bytes + 1, cancel)
+    except http.client.IncompleteRead as exc:
+        if cancel is not None and cancel.cancelled:
+            raise _cancelled() from None
+        err = DownloadError(f"incomplete response for {public_url(url)}: {exc}")
+        err.before_send = False
+        raise err from scrub_exception(exc)
+    if len(data) > max_bytes:
+        raise DownloadError(
+            f"response too large (over {max_bytes} bytes) for {public_url(url)}"
+        )
+    expected = transfer._declared_length(resp)
+    if expected is not None and len(data) < expected:
+        short = http.client.IncompleteRead(data, expected - len(data))
+        err = DownloadError(
+            f"incomplete response for {public_url(url)}: {len(data)} of {expected} bytes"
+        )
+        err.before_send = False
+        raise err from short
+    return data
+
+
 def http_get(
     url: str,
     *,
@@ -318,14 +578,35 @@ def http_get(
     timeout: int = DEFAULT_TIMEOUT,
     redirect_allowed: Callable[[str], bool] | None = None,
     max_bytes: int = MAX_TEXT_BYTES,
+    cancel: Cancel | None = None,
 ) -> bytes:
+    _check_cancel(cancel)  # an already-stopped call opens no connection
     with http_open(
         url, headers=headers, timeout=timeout, redirect_allowed=redirect_allowed
     ) as resp:
-        data = resp.read(max_bytes + 1)
-    if len(data) > max_bytes:
-        raise DownloadError(f"response too large (over {max_bytes} bytes) for {url}")
-    return data
+        return _read_bounded(resp, url, max_bytes, cancel)
+
+
+def http_post(
+    url: str,
+    body: bytes,
+    *,
+    headers: Mapping[str, str] | None = None,
+    timeout: int = DEFAULT_TIMEOUT,
+    redirect_allowed: Callable[[str], bool] | None = None,
+    max_bytes: int = MAX_TEXT_BYTES,
+    cancel: Cancel | None = None,
+) -> bytes:
+    """POST ``body`` and return the reply, with the same bounds and Stop as :func:`http_get`."""
+    _check_cancel(cancel)  # an already-stopped call opens no connection
+    with http_open(
+        url,
+        headers=headers,
+        timeout=timeout,
+        redirect_allowed=redirect_allowed,
+        data=body,
+    ) as resp:
+        return _read_bounded(resp, url, max_bytes, cancel)
 
 
 def fetch_json(
@@ -444,6 +725,21 @@ def _emit_progress(emit: Emitter, stage: str, done: int, total: int) -> None:
     )
 
 
+class _BeforeWriteRefused(BaseException):
+    """Sentinel carrying an exception raised by a ``before_write`` guard past retry loops."""
+
+    def __init__(self, inner: BaseException) -> None:
+        self.inner = inner
+
+
+def _run_before_write(before_write: Callable[[Path], None] | None, target: Path) -> None:
+    if before_write is not None:
+        try:
+            before_write(target)
+        except BaseException as exc:
+            raise _BeforeWriteRefused(exc) from None
+
+
 def _download_once(
     url: str,
     part: Path,
@@ -457,8 +753,11 @@ def _download_once(
     expected_size: int | None = None,
     redirect_allowed: Callable[[str], bool] | None = None,
     pool: HttpClientPool | None = None,
+    digests_out: dict[str, str] | None = None,
+    before_write: Callable[[Path], None] | None = None,
 ) -> bool:
     """One attempt. Returns True if the server resumed, False if it restarted."""
+    _run_before_write(before_write, part)
     _drop_symlinked_part(part)
     offset = part.stat().st_size if (resume and part.exists()) else 0
     req_headers = dict(headers or {})
@@ -520,15 +819,37 @@ def _download_once(
         if total > limit:
             raise IntegrityError(f"download larger than expected: {total} > {limit} bytes")
 
+        _run_before_write(before_write, part)
         part.parent.mkdir(parents=True, exist_ok=True)
+        hashers = (
+            {alg: hashlib.new(alg) for alg in ("sha256", "sha512", "md5")}
+            if digests_out is not None and not resumed
+            else None
+        )
         with open(part, mode) as fh:
             while True:
                 if cancel is not None and cancel.cancelled:
                     raise _cancelled()
-                block = resp.read(chunk)
+                try:
+                    block = resp.read(chunk)
+                except http.client.IncompleteRead as exc:
+                    if cancel is not None and cancel.cancelled:
+                        raise _cancelled() from None
+                    # Keep what arrived before the drop: the retry resumes after it.
+                    if exc.partial and done + len(exc.partial) <= limit:
+                        fh.write(exc.partial)
+                        fh.flush()
+                    raise DownloadError(
+                        f"incomplete download for {public_url(url)}: {exc}"
+                    ) from scrub_exception(exc)
                 if not block:
+                    if cancel is not None and cancel.cancelled:
+                        raise _cancelled()
                     break
                 fh.write(block)
+                if hashers is not None:
+                    for hasher in hashers.values():
+                        hasher.update(block)
                 done += len(block)
                 if done > limit:
                     raise IntegrityError(f"download exceeded {limit} bytes for {url}")
@@ -538,6 +859,9 @@ def _download_once(
 
         if total >= 0 and done != total:
             raise DownloadError(f"incomplete download: {done} of {total} bytes")
+        if hashers is not None and digests_out is not None:
+            for alg, hasher in hashers.items():
+                digests_out[alg] = hasher.hexdigest()
         return resumed
 
 
@@ -564,15 +888,21 @@ def _clear_ranges(part: Path, workers: int) -> None:
 
 
 def _download_ranges(url, part, *, expected_size, workers, headers, timeout,
-                     emit, cancel, chunk, redirect_allowed, pool):
+                     emit, cancel, chunk, redirect_allowed, pool, digests_out=None,
+                     before_write=None):
     """Return None for a server without Range support; otherwise join verified spans."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
+    from concurrent.futures import wait as wait_futures
 
     own_pool = pool is None
     clients = pool or HttpClientPool(timeout)
     stop = threading.Event()
 
     class RangeCancel:
+        @property
+        def cancelled(self):
+            return stop.is_set() or (cancel is not None and cancel.cancelled)
+
         def raise_if_cancelled(self):
             _check_cancel(cancel)
             if stop.is_set():
@@ -597,6 +927,10 @@ def _download_ranges(url, part, *, expected_size, workers, headers, timeout,
             response.cancel = combined
             if len(response.read(2)) != 1:
                 return None
+        release_thread = None if own_pool else getattr(clients, "release_thread", None)
+        if release_thread is not None:
+            release_thread(reuse=True)
+        _run_before_write(before_write, metadata)
         if metadata.is_symlink():
             metadata.unlink()
         try:
@@ -605,6 +939,7 @@ def _download_ranges(url, part, *, expected_size, workers, headers, timeout,
             saved_identity = None
         if saved_identity != identity:
             _clear_ranges(part, workers)
+            _run_before_write(before_write, metadata)
             metadata.parent.mkdir(parents=True, exist_ok=True)
             metadata.write_text(identity)
         resumed = any(p.exists() or p.with_name(p.name + ".done").exists() for p in paths)
@@ -612,76 +947,132 @@ def _download_ranges(url, part, *, expected_size, workers, headers, timeout,
         amounts = [0] * workers
 
         def fetch(index):
-            start = expected_size * index // workers
-            end = expected_size * (index + 1) // workers - 1
-            path = paths[index]
-            done_path = path.with_name(path.name + ".done")
-            _drop_symlinked_part(path)
-            _drop_symlinked_part(done_path)
-            if done_path.exists() and done_path.stat().st_size == end - start + 1:
-                with progress_lock:
-                    amounts[index] = end - start + 1
-                return
-            done_path.unlink(missing_ok=True)
-            combined.raise_if_cancelled()
-            offset = path.stat().st_size if path.exists() else 0
-            # Only .done proves that EOF was checked. A full unfinished span
-            # may have been interrupted before that check, so fetch it again.
-            if offset >= end - start + 1:
-                path.unlink()
-                offset = 0
-            if offset < end - start + 1:
-                with _open_pooled(
-                    clients, url, headers={**req_headers, "Range": f"bytes={start + offset}-{end}"},
-                                  timeout=timeout, redirect_allowed=redirect_allowed) as response:
-                    response.cancel = combined
-                    if (response.status != 206
-                            or _parse_content_range(response.headers.get("Content-Range", ""))
-                            != (start + offset, end, expected_size)):
-                        raise _RangeUnsupported("server stopped honouring download ranges")
-                    with open(path, "ab" if offset else "wb") as output:
-                        done = offset
-                        while True:
-                            combined.raise_if_cancelled()
-                            block = response.read(min(chunk, end - start + 2 - done))
-                            if not block:
-                                break
-                            done += len(block)
-                            if done > end - start + 1:
-                                path.unlink(missing_ok=True)
-                                raise DownloadError("range body is larger than requested")
-                            output.write(block)
-                            with progress_lock:
-                                amounts[index] = done
-                                _emit_progress(emit, "download", sum(amounts), expected_size)
-                        output.flush()
-                        os.fsync(output.fileno())
-                    if done != end - start + 1:
-                        raise DownloadError("incomplete range body")
-            os.replace(path, done_path)
-            emit(Event("log", "Download part finished", data={"range_finished": index}))
-
-        with ThreadPoolExecutor(max_workers=workers, initializer=transfer.inherit_transfer,
-                                initargs=(transfer.current_transfer(),)) as executor:
-            futures = [executor.submit(fetch, i) for i in range(workers)]
+            ok = False
             try:
-                for future in as_completed(futures):
-                    future.result()
-            except BaseException:
-                stop.set()
-                for future in futures:
-                    future.cancel()
-                raise
+                start = expected_size * index // workers
+                end = expected_size * (index + 1) // workers - 1
+                path = paths[index]
+                done_path = path.with_name(path.name + ".done")
+                _run_before_write(before_write, path)
+                _run_before_write(before_write, done_path)
+                _drop_symlinked_part(path)
+                _drop_symlinked_part(done_path)
+                if done_path.exists() and done_path.stat().st_size == end - start + 1:
+                    with progress_lock:
+                        amounts[index] = end - start + 1
+                    ok = True
+                    return
+                done_path.unlink(missing_ok=True)
+                combined.raise_if_cancelled()
+                offset = path.stat().st_size if path.exists() else 0
+                # Only .done proves that EOF was checked. A full unfinished span
+                # may have been interrupted before that check, so fetch it again.
+                if offset >= end - start + 1:
+                    path.unlink()
+                    offset = 0
+                if offset < end - start + 1:
+                    span_headers = {**req_headers, "Range": f"bytes={start + offset}-{end}"}
+                    with _open_pooled(
+                        clients, url, headers=span_headers, timeout=timeout,
+                        redirect_allowed=redirect_allowed,
+                    ) as response:
+                        response.cancel = combined
+                        if (response.status != 206
+                                or _parse_content_range(response.headers.get("Content-Range", ""))
+                                != (start + offset, end, expected_size)):
+                            raise _RangeUnsupported("server stopped honouring download ranges")
+                        _run_before_write(before_write, path)
+                        with open(path, "ab" if offset else "wb") as output:
+                            done = offset
+                            while True:
+                                combined.raise_if_cancelled()
+                                try:
+                                    block = response.read(min(chunk, end - start + 2 - done))
+                                except http.client.IncompleteRead as exc:
+                                    combined.raise_if_cancelled()
+                                    # Keep what arrived: the retry resumes after it.
+                                    if exc.partial and done + len(exc.partial) <= end - start + 1:
+                                        output.write(exc.partial)
+                                        output.flush()
+                                    raise DownloadError("incomplete range body") from exc
+                                if not block:
+                                    combined.raise_if_cancelled()
+                                    break
+                                done += len(block)
+                                if done > end - start + 1:
+                                    path.unlink(missing_ok=True)
+                                    raise DownloadError("range body is larger than requested")
+                                output.write(block)
+                                with progress_lock:
+                                    amounts[index] = done
+                                    _emit_progress(emit, "download", sum(amounts), expected_size)
+                            output.flush()
+                            os.fsync(output.fileno())
+                        if done != end - start + 1:
+                            raise DownloadError("incomplete range body")
+                _run_before_write(before_write, path)
+                _run_before_write(before_write, done_path)
+                os.replace(path, done_path)
+                emit(Event("log", "Download part finished", data={"range_finished": index}))
+                ok = True
+            finally:
+                if release_thread is not None:
+                    release_thread(reuse=ok)
+
+        executor = ThreadPoolExecutor(
+            max_workers=workers,
+            initializer=transfer.inherit_transfer,
+            initargs=(transfer.current_transfer(),),
+        )
+        futures = []
+        try:
+            futures = [executor.submit(fetch, i) for i in range(workers)]
+            pending = set(futures)
+            poll_timeout = 0.05 if cancel is not None else None
+            while pending:
+                combined.raise_if_cancelled()
+                done_set, pending = wait_futures(
+                    pending, timeout=poll_timeout, return_when=FIRST_COMPLETED
+                )
+                if done_set:
+                    for future in futures:
+                        if future in done_set:
+                            future.result()
+        except BaseException:
+            stop.set()
+            for future in futures:
+                future.cancel()
+            if own_pool:
+                # Close sockets before waiting on workers so a stalled read wakes at once (#1854).
+                clients.close()
+            raise
+        finally:
+            executor.shutdown(wait=True)
         _check_cancel(cancel)
+        # All parts are on disk and the bar says 100%; joining and hashing the whole file
+        # takes a while on a large runner, so name it instead of leaving a finished bar.
+        emit(Event("step", "Checking the download…", data={"stage": "verify"}))
+        _run_before_write(before_write, part)
         _drop_symlinked_part(part)
+        hashers = (
+            {alg: hashlib.new(alg) for alg in ("sha256", "sha512", "md5")}
+            if digests_out is not None
+            else None
+        )
         with open(part, "wb") as output:
             for path in paths:
                 with open(path.with_name(path.name + ".done"), "rb") as source:
                     while block := source.read(chunk):
                         _check_cancel(cancel)
                         output.write(block)
+                        if hashers is not None:
+                            for hasher in hashers.values():
+                                hasher.update(block)
             output.flush()
             os.fsync(output.fileno())
+        if hashers is not None and digests_out is not None:
+            for alg, hasher in hashers.items():
+                digests_out[alg] = hasher.hexdigest()
         return resumed
     except ProxyNotSupported:
         # A redirect may reach a proxy the pool cannot use; urllib handles it.
@@ -712,6 +1103,7 @@ def download(
     redirect_allowed: Callable[[str], bool] | None = None,
     pool: HttpClientPool | None = None,
     range_workers: int | None = None,
+    before_write: Callable[[Path], None] | None = None,
 ) -> DownloadResult:
     """Download ``url`` to ``dest`` atomically.
 
@@ -720,10 +1112,56 @@ def download(
     before ``os.replace`` puts it in place; a mismatch raises
     :class:`IntegrityError` and leaves no partial file at ``dest``.
     """
+    try:
+        return _download_guarded(
+            url,
+            dest,
+            expected_sha256=expected_sha256,
+            expected_sha512=expected_sha512,
+            expected_size=expected_size,
+            headers=headers,
+            retries=retries,
+            backoff=backoff,
+            timeout=timeout,
+            chunk=chunk,
+            resume=resume,
+            emit=emit,
+            cancel=cancel,
+            redirect_allowed=redirect_allowed,
+            pool=pool,
+            range_workers=range_workers,
+            before_write=before_write,
+        )
+    except _BeforeWriteRefused as refusal:
+        raise refusal.inner from None
+
+
+def _download_guarded(
+    url: str,
+    dest: str | os.PathLike[str],
+    *,
+    expected_sha256: str | None = None,
+    expected_sha512: str | None = None,
+    expected_size: int | None = None,
+    headers: Mapping[str, str] | None = None,
+    retries: int = DEFAULT_RETRIES,
+    backoff: float = DEFAULT_BACKOFF,
+    timeout: int = DEFAULT_TIMEOUT,
+    chunk: int = DEFAULT_CHUNK,
+    resume: bool = True,
+    emit: Emitter | None = None,
+    cancel: Cancel | None = None,
+    redirect_allowed: Callable[[str], bool] | None = None,
+    pool: HttpClientPool | None = None,
+    range_workers: int | None = None,
+    before_write: Callable[[Path], None] | None = None,
+) -> DownloadResult:
     say = emitter(emit)
     destination = Path(dest).expanduser()
-    destination.parent.mkdir(parents=True, exist_ok=True)
     part = destination.with_name(destination.name + ".part")
+    _run_before_write(before_write, destination)
+    _run_before_write(before_write, part)
+    destination.parent.mkdir(parents=True, exist_ok=True)
     _drop_symlinked_part(part)
 
     if (
@@ -735,8 +1173,10 @@ def download(
         )
     ):
         _check_cancel(cancel)  # a cancelled call never promotes a cached part (#1469)
+        _run_before_write(before_write, part)
+        _run_before_write(before_write, destination)
         os.replace(part, destination)
-        digests = hash_file(destination, ("sha256", "sha512"))
+        digests = hash_file(destination, ("sha256", "sha512", "md5"), cancel=cancel)
         say(Event("log", f"reused verified download: {destination.name}"))
         return DownloadResult(
             destination,
@@ -744,6 +1184,7 @@ def download(
             digests["sha256"],
             digests["sha512"],
             resumed=True,
+            md5=digests.get("md5", ""),
         )
 
     measurement = transfer.current_transfer()
@@ -762,11 +1203,18 @@ def download(
     while attempt < attempts:
         completed = False
         try:
+            inline_digests: dict[str, str] = {}
             ranged = None
+            write_extra: dict[str, Any] = (
+                {"before_write": before_write} if before_write is not None else {}
+            )
             if use_ranges:
-                ranged = _download_ranges(url, part, expected_size=expected_size, workers=count,
-                                          headers=headers, timeout=timeout, emit=say, cancel=cancel,
-                                          chunk=chunk, redirect_allowed=redirect_allowed, pool=pool)
+                ranged = _download_ranges(
+                    url, part, expected_size=expected_size, workers=count,
+                    headers=headers, timeout=timeout, emit=say, cancel=cancel,
+                    chunk=chunk, redirect_allowed=redirect_allowed, pool=pool,
+                    digests_out=inline_digests, **write_extra,
+                )
                 if ranged is None:
                     use_ranges = False
             resumed = ranged if ranged is not None else _download_once(
@@ -781,10 +1229,15 @@ def download(
                 expected_size=expected_size,
                 redirect_allowed=redirect_allowed,
                 pool=pool,
+                digests_out=inline_digests,
+                **write_extra,
             )
             completed = True
             size = part.stat().st_size
-            digests = hash_file(part, ("sha256", "sha512"), cancel=cancel)
+            if "sha256" in inline_digests and "sha512" in inline_digests:
+                digests = inline_digests
+            else:
+                digests = hash_file(part, ("sha256", "sha512", "md5"), cancel=cancel)
             if expected_size is not None and size != expected_size:
                 raise IntegrityError(
                     f"size mismatch for {destination.name}: {size} != {expected_size}"
@@ -795,6 +1248,8 @@ def download(
                 raise IntegrityError(f"sha512 mismatch for {destination.name}")
             # The commit point: once renamed, the download is done, Cancel or not (#1469).
             _check_cancel(cancel)
+            _run_before_write(before_write, part)
+            _run_before_write(before_write, destination)
             os.replace(part, destination)
             _fsync_dir(destination.parent)
             _clear_ranges(part, count)
@@ -806,7 +1261,12 @@ def download(
                 )
             )
             return DownloadResult(
-                destination, size, digests["sha256"], digests["sha512"], resumed=resumed
+                destination,
+                size,
+                digests["sha256"],
+                digests["sha512"],
+                resumed=resumed,
+                md5=digests.get("md5", ""),
             )
         except IntegrityError:
             # A corrupt transfer (bad hash/size after the bytes arrived) is not
@@ -833,6 +1293,9 @@ def download(
                 # the final hash check still guards the finished file.
                 _remove_if_empty(part)
                 raise
+            if isinstance(exc, RedirectRefused):
+                _remove_if_empty(part)  # the same redirect would be refused again
+                raise
             if isinstance(exc, OSError) and exc.errno in _FATAL_WRITE_ERRNOS:
                 # A full/read-only/unwritable destination will fail the same way
                 # on every retry; tell the user what to fix instead.
@@ -840,8 +1303,8 @@ def download(
                 if exc.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", -1)):
                     raise DownloadError(
                         f"not enough disk space to download {destination.name}"
-                    ) from exc
-                raise DownloadError(f"cannot write to {destination}") from exc
+                    ) from scrub_exception(exc)
+                raise DownloadError(f"cannot write to {destination}") from scrub_exception(exc)
             status = getattr(exc, "status", None)
             if status is not None and 400 <= status < 500 and not transient_status(status):
                 # A 403/404 (etc.) is permanent: re-requesting it only wastes
@@ -853,7 +1316,7 @@ def download(
             attempt += 1
             if attempt >= attempts:
                 break
-            delay = getattr(exc, "retry_after", None)
+            delay = usable_retry_after(exc)
             if delay is None:
                 delay = retry_delay(backoff, attempt)
             say(
@@ -866,7 +1329,8 @@ def download(
             _sleep(delay, cancel)
 
     _remove_if_empty(part)  # a network failure keeps what arrived, so a retry resumes
-    raise DownloadError(f"download failed for {url}: {last_error}") from last_error
+    cause = scrub_exception(last_error) if last_error is not None else None
+    raise DownloadError(f"download failed for {url}: {last_error}") from cause
 
 
 def remote_size(
@@ -1008,6 +1472,8 @@ class HttpResponse:
         # connection would read as its own response (#767), so drop the connection;
         # http.client reconnects on the next request.
         unread = not getattr(self._response, "isclosed", lambda: True)()
+        # A body that ended early (``length`` still owed) leaves a dead socket: drop it too.
+        unread = unread or bool(getattr(self._response, "length", None))
         try:
             self._response.close()
         except OSError:
@@ -1042,6 +1508,8 @@ class HttpClientPool:
         self._local = threading.local()
         self._lock = threading.Lock()
         self._all: list[http.client.HTTPConnection] = []
+        self._idle: dict[tuple[str, str, int], list[http.client.HTTPConnection]] = {}
+        self._closed = False
 
     def __enter__(self):
         return self
@@ -1058,13 +1526,45 @@ class HttpClientPool:
         return store
 
     def _connection(
-        self, scheme: str, host: str, port: int, timeout: int
+        self,
+        scheme: str,
+        host: str,
+        port: int,
+        timeout: int,
+        reuse_idle: bool = True,
     ) -> http.client.HTTPConnection:
+        if self._closed:
+            # Stop closed the pool: a worker its socket shutdown woke must not dial again
+            # and wait out a fresh timeout (Neon r1, packsec).
+            raise OSError("download pool is closed")
         key = (scheme, host, port)
         store = self._store()
         conn = store.get(key)
         if conn is not None:
             return conn
+        if reuse_idle:
+            while True:
+                with self._lock:
+                    bucket = self._idle.get(key)
+                    recycled = bucket.pop() if bucket else None
+                if recycled is None:
+                    break
+                sock = getattr(recycled, "sock", None)
+                if sock is not None:
+                    try:
+                        recycled.timeout = timeout
+                        sock.settimeout(timeout)
+                        store[key] = recycled
+                        return recycled
+                    except OSError:
+                        pass
+                try:
+                    recycled.close()
+                except OSError:
+                    pass
+                with self._lock:
+                    if recycled in self._all:
+                        self._all.remove(recycled)
         proxy = _proxy_for(scheme, host)
         if scheme == "https":
             if proxy is None:
@@ -1080,9 +1580,11 @@ class HttpClientPool:
             conn = http.client.HTTPConnection(host, port, timeout=timeout)
         else:
             conn = http.client.HTTPConnection(proxy[0], proxy[1], timeout=timeout)
-        store[key] = conn
         with self._lock:
+            if self._closed:
+                raise OSError("download pool is closed")
             self._all.append(conn)
+        store[key] = conn
         return conn
 
     def _forget(self, scheme: str, host: str, port: int) -> None:
@@ -1096,6 +1598,28 @@ class HttpClientPool:
         with self._lock:
             if conn in self._all:
                 self._all.remove(conn)
+
+    def release_thread(self, *, reuse: bool = True) -> None:
+        """Hand this thread's connections back to the shared idle pool, or close them."""
+        store = self._store()
+        if not store:
+            return
+        items = list(store.items())
+        store.clear()
+        to_close: list[http.client.HTTPConnection] = []
+        with self._lock:
+            for key, conn in items:
+                if reuse and not self._closed and getattr(conn, "sock", None) is not None:
+                    self._idle.setdefault(key, []).append(conn)
+                else:
+                    if conn in self._all:
+                        self._all.remove(conn)
+                    to_close.append(conn)
+        for conn in to_close:
+            try:
+                conn.close()
+            except OSError:
+                pass
 
     def open(
         self,
@@ -1144,10 +1668,11 @@ class HttpClientPool:
                 raise
             except (http.client.HTTPException, OSError):
                 # A pooled keep-alive connection may have been closed by the
-                # peer; drop it and retry once on a fresh socket.
+                # peer; drop only this failed socket (not healthy idle siblings)
+                # and retry once on a fresh connection.
                 self._forget(scheme, host, port)
-                conn = self._connection(scheme, host, port, deadline)
-                opened = True
+                conn = self._connection(scheme, host, port, deadline, False)
+                opened = getattr(conn, "sock", None) is None
                 conn.request("GET", path, headers=send_headers)
                 response = conn.getresponse()
             if response.status in (301, 302, 303, 307, 308):
@@ -1166,7 +1691,7 @@ class HttpClientPool:
                 target = urllib.parse.urljoin(current, location)
                 tscheme, thost, tport, _ = _split_url(target)
                 if origin[0] == "https" and tscheme != "https":
-                    raise DownloadError(
+                    raise RedirectRefused(
                         f"refusing insecure redirect from {current} to {target}"
                     )
                 if (tscheme, thost, tport) != origin:
@@ -1177,7 +1702,7 @@ class HttpClientPool:
                         if k.lower() not in CREDENTIAL_HEADERS
                     }
                 if redirect_allowed is not None and not redirect_allowed(target):
-                    raise DownloadError(f"redirect to disallowed URL: {target}")
+                    raise RedirectRefused(f"redirect to disallowed URL: {target}")
                 current = target
                 continue
             return transfer.Response(HttpResponse(response, conn), current, opened)
@@ -1185,8 +1710,18 @@ class HttpClientPool:
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
+            self._idle.clear()
             connections, self._all = self._all, []
         for conn in connections:
+            sock = getattr(conn, "sock", None)
+            if sock is not None:
+                # Wake a worker blocked in a stalled response read: close() alone leaves it
+                # waiting for the socket timeout (Neon 2, cancel while a pack stalls).
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
             try:
                 conn.close()
             except OSError:
@@ -1238,7 +1773,7 @@ def _split_url(url: str) -> tuple[str, str, int, str]:
     try:
         host = parsed.hostname
     except ValueError as exc:
-        raise DownloadError(f"invalid URL host: {url!r}") from exc
+        raise DownloadError(f"invalid URL host: {url!r}") from scrub_exception(exc)
     if not host:
         raise DownloadError(f"URL has no host: {url!r}")
     try:
@@ -1246,7 +1781,7 @@ def _split_url(url: str) -> tuple[str, str, int, str]:
     except ValueError as exc:
         # A malformed port (e.g. ``https://host:abc/``) must not escape as a
         # raw ``ValueError`` from the redirect path (N4).
-        raise DownloadError(f"invalid port in URL: {url!r}") from exc
+        raise DownloadError(f"invalid port in URL: {url!r}") from scrub_exception(exc)
     path = parsed.path or "/"
     if parsed.query:
         path = f"{path}?{parsed.query}"
@@ -1360,7 +1895,20 @@ def stream_download(
             while True:
                 if cancel is not None and cancel.cancelled:
                     raise _cancelled()
-                block = response.read(chunk)
+                try:
+                    block = response.read(chunk)
+                except http.client.IncompleteRead as exc:
+                    if cancel is not None and cancel.cancelled:
+                        raise _cancelled() from None
+                    # Keep what arrived before the drop: a resumed run continues after it.
+                    if exc.partial and done + len(exc.partial) <= limit:
+                        fh.write(exc.partial)
+                        fh.flush()
+                        if hasher is not None:
+                            hasher.update(exc.partial)
+                    raise DownloadError(
+                        f"incomplete download for {public_url(url)}: {exc}"
+                    ) from scrub_exception(exc)
                 if not block:
                     break
                 fh.write(block)

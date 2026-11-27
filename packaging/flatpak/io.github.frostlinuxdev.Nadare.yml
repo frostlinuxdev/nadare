@@ -6,8 +6,8 @@
 # as /app; build_repo.sh exports, signs and bundles that (#104: the old
 # flatpak-builder script that pulled the SDK live is gone).
 #
-# Not a full sandbox: it sees ~/Games, /mnt, /media and /run/media (games can live
-# there) but not the rest of the home folder (#1244), and Lepton (FGO)
+# Not a full sandbox: it sees ~/Games, /mnt, /media, /run/media (games can live
+# there) and Steam's folders, but not the rest of the home folder (#1244), and Lepton (FGO)
 # and gamescope run on the host through flatpak-spawn --host. Proton runs inside the sandbox with the
 # 32-bit compat extensions.
 #
@@ -46,6 +46,12 @@ finish-args:
   - --filesystem=/run/media
   # Steam's Flatpak keeps its libraries here, which "home" does not reach.
   - --filesystem=~/.var/app/com.valvesoftware.Steam
+  # Native Steam (#1594): Steam Set up writes DW-Proton into compatibilitytools.d and one
+  # CompatToolMapping entry into config.vdf, and Steam games' folders live in steamapps.
+  # Debian's package keeps the real folder under ~/.steam (debian-installation). Like the
+  # Flatpak Steam folder above, this also exposes Steam's sign-in files to the sandbox.
+  - --filesystem=~/.local/share/Steam
+  - --filesystem=~/.steam
   # umu keeps its Steam Runtime in ~/.local/share/umu whatever XDG_DATA_HOME says; without this
   # its container cannot see the runtime it downloaded (VMs, 2026-11-14). Lutris/Bottles do the same.
   - --filesystem=xdg-data/umu:create

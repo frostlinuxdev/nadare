@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
 
 from ..core import steamsetup
 from ..core.steamrun import ActionResult
+from .dialog_layout import fit_dialog, make_scroll_body
 from .theme import set_state_property
 
 #: What each planner state looks like in the left-hand column.
@@ -194,36 +195,40 @@ class SteamSetupDialog(QDialog):
         self._signals.progress.connect(self._on_progress)
 
         self.setWindowTitle("Set up")
-        self.resize(620, 560)
+        self.setMinimumWidth(620)
+        self._shown_once = False
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 18)
-        layout.setSpacing(10)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
 
         self.title_label = QLabel("Set up")
         self.title_label.setObjectName("Title")
+        self.title_label.setWordWrap(True)
         layout.addWidget(self.title_label)
+
+        self._scroll, _body, body_layout = make_scroll_body(spacing=10)
 
         self.status_label = QLabel("")
         self.status_label.setObjectName("Accent")
         self.status_label.setWordWrap(True)
         self.status_label.setVisible(False)
-        layout.addWidget(self.status_label)
+        body_layout.addWidget(self.status_label)
 
         intro = QLabel("Steam stays the downloader; nothing changes before you confirm a step.")
         intro.setObjectName("Hint")
         intro.setWordWrap(True)
-        layout.addWidget(intro)
+        body_layout.addWidget(intro)
 
         self.note_label = QLabel("")
         self.note_label.setObjectName("Muted")
         self.note_label.setWordWrap(True)
-        layout.addWidget(self.note_label)
+        body_layout.addWidget(self.note_label)
 
         self._rows_layout = QVBoxLayout()
         self._rows_layout.setSpacing(8)
-        layout.addLayout(self._rows_layout)
-        layout.addStretch(1)
+        body_layout.addLayout(self._rows_layout)
+        layout.addWidget(self._scroll, 1)
 
         self.next_button = QPushButton("Do next step")
         self.next_button.setObjectName("Primary")
@@ -357,6 +362,15 @@ class SteamSetupDialog(QDialog):
                 next_item.action_label or f"Do next step: {next_item.label}"
             )
         self._apply_enabled()
+        self._fit_height(keep_width=self._shown_once)
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        self._fit_height(keep_width=self._shown_once)
+        self._shown_once = True
+
+    def _fit_height(self, *, keep_width: bool = False) -> None:
+        fit_dialog(self, min_width=620, scroll=self._scroll, keep_width=keep_width)
 
     def _note_text(self) -> str:
         if self._plan is None:
@@ -378,12 +392,13 @@ class SteamSetupDialog(QDialog):
         row.marker_label = QLabel(MARKERS.get(item.state, "•"))
         marker_name = "Accent" if item.state == steamsetup.STATE_RECOMMENDED else "Muted"
         row.marker_label.setObjectName(marker_name)
-        row.marker_label.setFixedWidth(18)
+        row.marker_label.setMinimumWidth(18)
         row_layout.addWidget(row.marker_label, 0)
 
         text_layout = QVBoxLayout()
         text_layout.setSpacing(2)
         row.text_label = QLabel(item.label)
+        row.text_label.setWordWrap(True)
         text_layout.addWidget(row.text_label)
         row.detail_label = QLabel(item.detail)
         row.detail_label.setObjectName("Dim" if item.state == steamsetup.STATE_BLOCKED else "Muted")

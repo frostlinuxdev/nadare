@@ -42,7 +42,14 @@ _FOLDER_BACKENDS: dict[str, frozenset[str]] = {
     "wine": frozenset({"wine"}),
     # WineGameBackend.cache_dir() is one folder for every Yostar/launcher kind.
     "arknights-yostar": frozenset(
-        {"arknights-yostar", "stellasora-yostar", "launcher", "launcher-nikke"}
+        {
+            "arknights-yostar",
+            "stellasora-yostar",
+            "hbr-yostar",
+            "azurpromilia-jp-yostar",
+            "launcher",
+            "launcher-nikke",
+        }
     ),
 }
 

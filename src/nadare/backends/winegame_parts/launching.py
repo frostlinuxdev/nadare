@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 from ...core import (
+    gamesandbox,
     graphics,
     launch_window,
     monitors,
@@ -28,6 +29,7 @@ from ...core import (
     runners,
     runtimewatch,
     sandbox,
+    sandboxjoin,
     shadercache,
     stopstate,
     vcredist,
@@ -39,6 +41,7 @@ from ...core.backends import (
 )
 from ...core.config import as_bool
 from ...core.events import Event
+from .. import wine
 from ..wine import (
     cmdline_argv,
     first_wine,
@@ -84,6 +87,75 @@ def _wine_helper(pid: int) -> bool:
         return True
     # Wine's desktop shell is a helper too; explorer.exe without /desktop is not used.
     return name == "explorer" and any(arg.lower().startswith("/desktop") for arg in argv[1:])
+
+
+#: Serialises the temporary DISPLAY/XAUTHORITY borrow: ``os.environ`` is process-global.
+_DISPLAY_BORROW_LOCK = threading.Lock()
+
+
+def environ_of(pid: int) -> dict[str, str]:
+    """The environment ``pid`` was started with, looked up on :mod:`nadare.backends.wine`.
+
+    The lookup happens here, at call time, so both ``launching.environ_of`` and
+    ``nadare.backends.wine.environ_of`` can stand in for it in tests.
+    """
+    return wine.environ_of(pid)
+
+
+@contextlib.contextmanager
+def _game_display(pids: list[int]):
+    """The game's ``DISPLAY`` and ``XAUTHORITY``, for a Stop that has none of its own.
+
+    ``nadare stop`` can run from a terminal or a service without DISPLAY, while the game
+    still has a window on its session's X server. Its own environment names that display
+    and, when needed, the authority file; only those two values are read from it. A
+    container-only ``XAUTHORITY`` (bwrap's private ``/tmp``) is not borrowed: libXau cannot
+    open it here and would not fall back to ``~/.Xauthority``, so trying would break the
+    request. An already-set DISPLAY or XAUTHORITY always wins, and the borrow is restored
+    even when a helper raises.
+    """
+    if os.environ.get("DISPLAY"):
+        yield False
+        return
+    display: str | None = None
+    xauthority: str | None = None
+    has_xauthority = bool(os.environ.get("XAUTHORITY"))
+    for pid in pids:
+        env = environ_of(pid)
+        candidate = str(env.get("DISPLAY") or "")
+        if not candidate:
+            continue
+        if display is None:
+            display = candidate
+        if has_xauthority or xauthority:
+            break
+        authority = str(env.get("XAUTHORITY") or "")
+        if authority and os.path.isfile(authority):
+            xauthority = authority
+            break
+    if display is None:
+        yield False
+        return
+    borrowed = {"DISPLAY": display}
+    if xauthority:
+        borrowed["XAUTHORITY"] = xauthority
+    with _DISPLAY_BORROW_LOCK:
+        # The environment is process-global; check it again under the lock.
+        if os.environ.get("DISPLAY"):
+            yield False
+            return
+        if os.environ.get("XAUTHORITY"):
+            borrowed.pop("XAUTHORITY", None)
+        previous = {key: os.environ.get(key) for key in borrowed}
+        os.environ.update(borrowed)
+        try:
+            yield True
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
 
 #: Kept names: the shared versions live in :mod:`nadare.core.protoncmd` (#1449).
@@ -253,12 +325,17 @@ class LaunchingMixin:
         if target is None or not target.is_file():
             raise BackendError(f"game executable not found: {target}")
         self._run_vcredist(created=False)
+        if not (self.prefix() / "drive_c").is_dir():
+            # Proton creates a missing prefix inside stream() and says nothing; the page would
+            # sit on the step before it for the first minute of a Play.
+            self.ctx.emit(Event("step", "Preparing the Wine prefix…"))
         direct_argv = self._direct_argv(target)
         argv, env = self._prefix_command(
             direct_argv,
             self.launch_extra_env() or None,
             sandboxed=self.secure_mode_enabled(),
         )
+        process.apply_first_frame_env(env)  # the game only, not its setup helpers
         try:
             argv, env = self._secure_wrap(argv, env)
             # After the wrap: Stop asks with a taskkill only when the game really runs
@@ -634,6 +711,7 @@ class LaunchingMixin:
         argv, env = self._prefix_command(
             [str(target), *self._extra_args("launch_args")], sandboxed=self.secure_mode_enabled()
         )
+        process.apply_first_frame_env(env)  # the game only, not its setup helpers
         argv, env = self._secure_wrap(argv, env)
         return argv, env, target
 
@@ -734,17 +812,31 @@ class LaunchingMixin:
             wrapped = self._sandbox_wrapped
             if wrapped is None:
                 wrapped = self.secure_mode_enabled()
+            inside = None
             if wrapped:
                 # A taskkill outside the Sandbox would start a second wineserver on the
-                # prefix. Stop asks the game's own windows to close instead.
-                stopstate.save(prefix, kind="x11")
-                _remember_stop_request(prefix)
-                return
+                # prefix: Stop runs the command as the game runs it, inside (#1766). Where
+                # the Sandbox cannot be joined, it asks the game's own windows to close.
+                inside = getattr(self, "_sandbox_inside", None)
+                if inside is not None and list(argv[-len(inside[0]) :]) != inside[0]:
+                    inside = None
+                if inside is None:
+                    stopstate.save(prefix, kind="x11")
+                    _remember_stop_request(prefix)
+                    return
+                argv, env = inside
             if game_argc <= 0 or game_argc > len(argv):
                 stopstate.save(prefix, kind="none")
                 _remember_stop_request(prefix)
                 return
             head = list(argv[: len(argv) - game_argc])
+            if inside is not None:
+                # nsenter runs on the host, as bwrap does: the loader variables bwrap passed
+                # with --setenv are given to `env`, which runs inside.
+                loader = [f"{k}={v}" for k, v in env.items() if gamesandbox.is_loader_env(k)]
+                env = {k: v for k, v in env.items() if not gamesandbox.is_loader_env(k)}
+                if loader:
+                    head = ["env", *loader, *head]
             names = self._stop_exe_names()
             commands = [[*head, "taskkill", "/IM", name] for name in names]
             stopstate.save(
@@ -752,6 +844,7 @@ class LaunchingMixin:
                 kind="taskkill" if commands else "none",
                 commands=commands,
                 env=env,
+                inside=inside is not None,
             )
             _remember_stop_request(prefix)
         except Exception as exc:  # noqa: BLE001 - a saved request must never break Play
@@ -841,6 +934,16 @@ class LaunchingMixin:
         try:
             if saved["kind"] == "x11":
                 return self._ask_sandboxed_to_close(pids, deadline)
+            commands = saved["commands"]
+            if saved["inside"]:
+                enter = sandboxjoin.enter_argv(pids)
+                if enter is None:
+                    self.info(
+                        "Nadare could not join the game's Sandbox to ask it to close; "
+                        "asking its windows instead"
+                    )
+                    return self._ask_sandboxed_to_close(pids, deadline)
+                commands = [[*enter, *argv] for argv in commands]
             helper_deadline = min(deadline, started + _STOP_HELPER_TIMEOUT)
             # The launch's own environment, rebuilt the way Play built it, plus the
             # difference it saved. Not this process's environment: that would hand the
@@ -848,12 +951,20 @@ class LaunchingMixin:
             helper_env = process.build_env(self.ctx.profile)
             helper_env.update(saved["env"])
             asked = False
-            for argv in saved["commands"]:
+            for argv in commands:
                 # A launcher-only session also knows the game exe, which is not running: one
                 # missing name must not throw away the grace another name just earned.
                 asked = self._run_stop_helper(argv, helper_env, helper_deadline) or asked
                 if self._stop_was_repeated():
                     return pids
+            if not asked and saved["inside"]:
+                # Joining failed at runtime, or the taskkill inside hung: the request never
+                # ran. Ask the game's own windows before escalating, as when joining was
+                # impossible (#1766 follow-up: nsenter EPERM, helper timeout).
+                self.info(
+                    "the Sandbox's own close request did not run; asking the game's windows instead"
+                )
+                return self._ask_sandboxed_to_close(pids, deadline)
             if not asked or time.monotonic() >= helper_deadline:
                 return pids
             return self._wait_for_game_exit(deadline)
@@ -866,32 +977,50 @@ class LaunchingMixin:
         """Ask a Sandboxed game's own windows to close; never start a Wine helper outside.
 
         No window is not a failure: a Wayland-native game, a session without X11 or a
-        missing libX11 just means the existing signals end it at once.
+        missing libX11 just means the existing signals end it at once. A Stop without a
+        display (``nadare stop`` in a terminal) borrows the game's own display, so it can
+        still ask politely instead of killing at once.
         """
-        if not os.environ.get("DISPLAY"):
-            self.info("no X display here, so the game was not asked to close; ending it now")
-            return pids
-        try:
-            windows = x11windows.list_windows_owned()
-        except Exception:  # noqa: BLE001 - reading windows is optional
-            windows = None
-        if windows is None:
-            self.info(
-                "X11 is not available here, so the game was not asked to close; ending it now"
-            )
-            return pids
-        game = [pid for pid in pids if not _wine_helper(pid)]
-        owned = launch_window.WindowEvidence(set()).owned_windows(game, dict(windows))
-        if not owned:
-            self.info(
-                "no X11 window was found for the game, so it was not asked to close; "
-                "ending it now"
-            )
-            return pids
-        sent = x11windows.request_close(owned)
-        if not sent:
-            self.info("the X close request could not be sent; ending it now")
-            return pids
+        with _game_display(pids) as borrowed:
+            if borrowed:
+                self.info(
+                    "Stop has no display here; using the game's own display to ask it to close"
+                )
+            if not os.environ.get("DISPLAY"):
+                self.info("no X display here, so the game was not asked to close; ending it now")
+                return pids
+            try:
+                windows = x11windows.list_windows_owned()
+            except Exception:  # noqa: BLE001 - reading windows is optional
+                windows = None
+            if windows is None:
+                self.info(
+                    "X11 is not available here, so the game was not asked to close; ending it now"
+                )
+                return pids
+            game = [pid for pid in pids if not _wine_helper(pid)]
+            windows = dict(windows)
+            try:
+                clients = x11windows.client_pids(windows)
+            except Exception:  # noqa: BLE001 - the X server's view is optional
+                clients = None
+            evidence = launch_window.WindowEvidence(set())
+            # The X server's own owner first: a host pid, so a Sandboxed game's window counts
+            # even though it carries a namespace pid. The rest only by a host-tree _NET_WM_PID.
+            owned = evidence.owned_by_client(game, clients) if clients else {}
+            rest = {w: p for w, p in windows.items() if not clients or w not in clients}
+            owned.update(evidence.owned_windows(game, rest))
+            if not owned:
+                self.info(
+                    "no X11 window was found for the game, so it was not asked to close; "
+                    "ending it now"
+                )
+                return pids
+            sent = x11windows.request_close(owned)
+            if not sent:
+                self.info("the X close request could not be sent; ending it now")
+                return pids
+        # The borrow ends with the request; waiting does not need the display.
         return self._wait_for_game_exit(deadline)
 
     def _wait_for_game_exit(self, deadline: float) -> list[int]:

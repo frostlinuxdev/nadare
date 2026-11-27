@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -19,6 +20,20 @@ from nadare.core import yostar
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO_ROOT / "ci" / "yostar-manifests" / "generate.py"
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_yostar_credentials(monkeypatch):
+    """No SALT_*/VERSION_* of any known game leaks in from the runner environment.
+
+    ``main()`` iterates every tag in ``GAME_TAGS``; a test that configures one game
+    must not accidentally also generate another because the host has its secret set.
+    Tests that want a game set the variable themselves after this fixture runs.
+    """
+    for tag in yostar.GAME_TAGS:
+        key = re.sub(r"[^A-Z0-9]", "_", tag.upper())
+        monkeypatch.delenv(f"SALT_{key}", raising=False)
+        monkeypatch.delenv(f"VERSION_{key}", raising=False)
 
 
 def _load_generator():
@@ -149,6 +164,98 @@ class TestGenerate:
         monkeypatch.setattr(gen, "_http_get", fake, raising=False)
         result = gen.generate_game("StellaSora_EN", "1", "test-salt")
         assert all(isinstance(f["crc64"], int) for f in result["files"])
+
+
+# ---------------------------------------------------------------------------
+# per-game API host
+# ---------------------------------------------------------------------------
+EN_API = "https://api-launcher-en.yo-star.com"
+JP_API = "https://api-launcher-jp.yo-star.com"
+
+
+def _game_routes(api: str, tag: str):
+    cfg_url = api + "/api/launcher/game/config"
+    info_url = api + "/api/launcher/game/config/json?version=7&file_path=pc/manifest.json"
+    raw_url = f"https://cdn.yo-star.com/{tag}/manifest.json"
+    raw = {
+        "source": f"game/{tag}",
+        "file": [{"path": "Game.exe", "hash": str(yostar.crc64(b"MZ")), "size": 2}],
+    }
+    routes = {
+        cfg_url: {
+            "data": {"game_latest_version": 7, "game_latest_file_path": "pc/manifest.json"}
+        },
+        info_url: {"data": {"url": raw_url}},
+        raw_url: raw,
+    }
+    return routes, cfg_url, info_url
+
+
+class TestPerGameApiHost:
+    def test_azupro_game_calls_use_the_jp_host(self, gen, monkeypatch):
+        routes, cfg_url, info_url = _game_routes(JP_API, "AZUPRO_JP")
+        fake = FakeHttp(routes)
+        monkeypatch.setattr(gen, "_http_get", fake, raising=False)
+        result = gen.generate_game("AZUPRO_JP", "1.8.1", "test-salt")
+
+        assert result["game_tag"] == "AZUPRO_JP"
+        assert fake.requests[0][0] == cfg_url
+        assert fake.requests[1][0] == info_url
+        signed = [url for url, headers in fake.requests if "Authorization" in headers]
+        assert signed == [cfg_url, info_url]
+        assert all(url.startswith(JP_API + "/api/launcher/") for url in signed)
+        assert not any("api-launcher-en" in url for url in signed)
+
+    def test_azupro_media_calls_use_the_jp_host(self, gen, monkeypatch):
+        fake = FakeHttp(
+            {
+                JP_API + "/api/launcher/base/config": {"data": {"launcher_background_img": ""}},
+                JP_API + "/api/launcher/operations/resource": {
+                    "data": {"operations_banner_list": []}
+                },
+            }
+        )
+        monkeypatch.setattr(gen, "_http_get", fake, raising=False)
+        gen.generate_media("AZUPRO_JP", "1.8.1", "test-salt")
+
+        assert {url for url, _h in fake.requests} == {
+            JP_API + "/api/launcher/base/config",
+            JP_API + "/api/launcher/operations/resource",
+        }
+
+    @pytest.mark.parametrize("tag", ["Arknights_EN", "StellaSora_EN", "HBR_EN"])
+    def test_other_games_keep_the_en_host(self, gen, monkeypatch, tag):
+        routes, cfg_url, info_url = _game_routes(EN_API, tag)
+        fake = FakeHttp(routes)
+        monkeypatch.setattr(gen, "_http_get", fake, raising=False)
+        gen.generate_game(tag, "1.8.1", "test-salt")
+
+        expected = [
+            EN_API + "/api/launcher/game/config",
+            EN_API + "/api/launcher/game/config/json?version=7&file_path=pc/manifest.json",
+        ]
+        signed = [url for url, headers in fake.requests if "Authorization" in headers]
+        assert signed == expected == [cfg_url, info_url]
+        assert all(url.startswith(EN_API + "/api/launcher/") for url in signed)
+
+    @pytest.mark.parametrize("tag", ["Arknights_EN", "StellaSora_EN", "HBR_EN"])
+    def test_other_games_media_keeps_the_en_host(self, gen, monkeypatch, tag):
+        fake = FakeHttp(
+            {
+                EN_API + "/api/launcher/base/config": {"data": {}},
+                EN_API + "/api/launcher/operations/resource": {"data": {}},
+            }
+        )
+        monkeypatch.setattr(gen, "_http_get", fake, raising=False)
+        gen.generate_media(tag, "1.8.1", "test-salt")
+
+        urls = [url for url, _h in fake.requests]
+        assert urls
+        assert set(urls) == {
+            EN_API + "/api/launcher/base/config",
+            EN_API + "/api/launcher/operations/resource",
+        }
+        assert all(url.startswith(EN_API + "/api/launcher/") for url in urls)
 
 
 # ---------------------------------------------------------------------------

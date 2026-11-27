@@ -21,6 +21,11 @@ from . import events, paths, pending, process, runlog, runners, sessionfiles
 from .gameversion import read_czn_version, read_install_version
 
 MAX_REPORT_BYTES = 300_000
+
+#: Where the distro is read. Inside Flatpak ``/etc/os-release`` names the runtime
+#: (Freedesktop SDK), so the host's copy that Flatpak exposes wins (#1875 review).
+OS_RELEASE = Path("/etc/os-release")
+HOST_OS_RELEASE = Path("/run/host/os-release")
 STUB_SHIPPED_SHA256 = ("0a8cc27d2b6a7eb5097d65ca04214de997693da34483e11bc5d76211caddbdf7",)
 
 
@@ -84,8 +89,16 @@ def redact(
     ``mask`` also collapses token-like strings (``events.mask``), which would shorten hashes and
     long file names, so the report applies it to free-form log text only.
     """
-    username = username if username is not None else os.environ.get("USER", "")
     home = str(home if home is not None else Path.home())
+    if username is None:
+        # USER is unset in some service and sandbox environments: the redaction must not
+        # quietly stop then (#1875 review). The home folder's name is the last guess.
+        username = (
+            os.environ.get("USER")
+            or os.environ.get("LOGNAME")
+            or _login_name()
+            or Path(home).name
+        )
     hostname = hostname if hostname is not None else socket.gethostname()
     out = text
     if home:
@@ -153,7 +166,9 @@ _TAIL_BYTES = 256 * 1024
 #: A cut log also shows its first lines, where a launch log says what ran (the ``$`` command
 #: line, the runner): a crash loop would push them out of the tail (#1725).
 _HEAD_BYTES = 8 * 1024
-_HEAD_LINES = 10
+#: Enough for the setup lines a launch writes before ``runner:``/``exec:``/``env:``; the byte
+#: bound above still holds.
+_HEAD_LINES = 40
 
 
 def _tail(path: Path, lines: int = 200, *, head: bool = True) -> str:
@@ -215,7 +230,7 @@ def build_report(
     proc_root: str | Path = "/proc",
     max_bytes: int = MAX_REPORT_BYTES,
     doctor_text: str | None = None,
-    os_release_path: str | Path = "/etc/os-release",
+    os_release_path: str | Path | None = None,
     sys_root: str | Path = "/sys",
     config_path: str | Path | None = None,
 ) -> str:
@@ -236,27 +251,20 @@ def build_report(
     ]
     from nadare import __version__
 
-    from . import channel
+    from . import channel, sandbox
 
-    appimage = os.environ.get("APPIMAGE")
+    flatpak = sandbox.in_flatpak()
     lines += [
         # An unstable build says so: its bugs may come from research code (core/channel.py).
         f"Nadare: {channel.title(__version__)}",
         # Not the path: a file name can say more about a person than the problem needs.
-        "Run kind: AppImage" if appimage else "Run kind: source/pip",
+        f"Run kind: {_run_kind(flatpak)}",
     ]
-    try:
-        release = Path(os_release_path).read_text(encoding="utf-8")
-        pretty = next(
-            (
-                x.partition("=")[2].strip().strip('"')
-                for x in release.splitlines()
-                if x.startswith("PRETTY_NAME=")
-            ),
-            "unknown",
-        )
-    except OSError as exc:
-        pretty = f"unavailable: {exc}"
+    if os_release_path is not None:
+        releases: tuple[Path, ...] = (Path(os_release_path),)
+    else:
+        releases = (HOST_OS_RELEASE, OS_RELEASE) if flatpak else (OS_RELEASE,)
+    pretty = _pretty_name(releases)
     lines += [f"Distro: {pretty}", f"Kernel: {_command(run_command, ['uname', '-srmo'])}"]
     virt = _detect_virtualisation(run_command, proc, Path(sys_root))
     lines += [
@@ -293,7 +301,7 @@ def build_report(
         if installed_version is None and "czn" in str(profile.get("backend", "")).lower():
             installed_version = read_czn_version(profile.get("prefix") or profile.get("wineprefix"))
         game_dir = Path(str(install_dir or ""))
-        runner_value = runners.profile_runner_value(profile) or "unknown"
+        runner_value = _runner_label(profile)
         lines += [
             f"Installed version: {installed_version or 'unknown'}",
             # Top level or ``extra``, as the backends read it; redacted like every other line.
@@ -340,25 +348,13 @@ def build_report(
             lines += _game_folder_notes(game_dir)
     lines += ["", "## Unfinished operations", *_unfinished_lines(profs, name, config_path)]
     lines += ["", "## Logs"]
-    log_files = (
-        sorted(
-            logs.glob("*.log"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True
-        )
-        if logs.exists()
-        else []
-    )
+    log_files = sorted(logs.glob("*.log"), key=_mtime, reverse=True) if logs.exists() else []
     if not logs.exists():
         lines.append(f"unavailable: logs directory missing ({logs})")
     for path in log_files:
+        # The longest known name owns a flat log: "wuwa-2-launch.log" is not wuwa's (#1875).
         if path.name == "nadare.log" or (
-            name
-            and path.name.startswith(name + "-")
-            and (
-                "-launch" in path.name
-                or "-install" in path.name
-                or "-czn-stub" in path.name
-                or path.name.endswith(".log")
-            )
+            name and _flat_log_owner(path, profs) == name
         ):
             # The app log's first lines are just older app lines; a run log's say what ran.
             lines += [f"### {path.name}", _tail(path, head=path.name != "nadare.log")]
@@ -384,7 +380,10 @@ def build_report(
     # report can still be encoded and written as UTF-8.
     encoded = result.encode("utf-8", errors="replace")
     limit = max(0, min(max_bytes, MAX_REPORT_BYTES))
-    if len(encoded) > limit:
+    kept = _cut_logs_only(encoded, limit)
+    if kept is not None:
+        result = kept
+    elif len(encoded) > limit:
         note = "\n".join(session_note).strip()
         head = "# Nadare support report (truncated; newest content kept)\n\n"
         prefix = (head + (note + "\n\n" if note else "")).encode("utf-8")
@@ -397,6 +396,129 @@ def build_report(
     else:
         result = encoded.decode("utf-8")
     return result
+
+
+def _login_name() -> str:
+    try:
+        import pwd
+
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (ImportError, KeyError, OSError):
+        return ""
+
+
+def _cut_logs_only(encoded: bytes, limit: int) -> str | None:
+    """The report cut inside ``## Logs`` only, or None when that cannot fit ``limit``.
+
+    The tail used to win, so a busy game's logs pushed out the version, distro, doctor verdict
+    and profile, the part a triager reads first (#1875 review). The sections above the logs stay
+    whole and the newest log lines fill what is left.
+    """
+    if len(encoded) <= limit:
+        return None
+    marker = b"\n## Logs\n"
+    at = encoded.find(marker)
+    if at < 0:
+        return None
+    title = b"# Nadare support report"
+    preamble = encoded[: at + len(marker)]
+    if preamble.startswith(title):
+        preamble = title + b" (truncated; newest log lines kept)" + preamble[len(title) :]
+    room = limit - len(preamble)
+    if room < 512:  # too small to say anything useful about the logs: the old cut
+        return None
+    body = encoded[at + len(marker) :]
+    parts = re.split(rb"(?=^### )", body, flags=re.M)
+    return (preamble + b"".join(_fair_cut(parts, room))).decode("utf-8", errors="ignore")
+
+
+def _fair_cut(parts: list[bytes], room: int) -> list[bytes]:
+    """Each log section cut to its share of ``room``; a short one leaves its share to the rest.
+
+    The sections are in report order (the app log, then the game's runs, newest first), so a
+    cut at the report's end would drop the newest run. Each keeps its header and newest lines.
+    """
+    note = "… (older lines cut to fit) …\n".encode()
+    budget = dict.fromkeys(range(len(parts)), 0)
+    left, open_ = room, sorted(range(len(parts)), key=lambda i: len(parts[i]))
+    while open_:
+        share = left // len(open_)
+        index = open_.pop(0)
+        budget[index] = min(len(parts[index]), share)
+        left -= budget[index]
+    out = []
+    for index, part in enumerate(parts):
+        size = budget[index]
+        if size >= len(part):
+            out.append(part)
+            continue
+        header, _, text = part.partition(b"\n")
+        keep = size - len(header) - 1 - len(note)
+        if keep <= 0:
+            continue
+        tail = text[-keep:]
+        newline = tail.find(b"\n")
+        out.append(header + b"\n" + note + (tail[newline + 1 :] if newline >= 0 else b""))
+    return out
+
+
+def _run_kind(flatpak: bool) -> str:
+    if flatpak:
+        return "Flatpak"
+    return "AppImage" if os.environ.get("APPIMAGE") else "source/pip"
+
+
+def _pretty_name(candidates: Iterable[Path]) -> str:
+    """``PRETTY_NAME`` from the first readable os-release file."""
+    error: OSError | None = None
+    for candidate in candidates:
+        try:
+            release = candidate.read_text(encoding="utf-8")
+        except OSError as exc:
+            error = error or exc
+            continue
+        return next(
+            (
+                x.partition("=")[2].strip().strip('"')
+                for x in release.splitlines()
+                if x.startswith("PRETTY_NAME=")
+            ),
+            "unknown",
+        )
+    return f"unavailable: {error}" if error else "unknown"
+
+
+def _runner_label(profile: dict[str, Any]) -> str:
+    """The runner a launch uses: the setting, else what the backend takes by default."""
+    value = runners.profile_runner_value(profile)
+    if value:
+        return value
+    wine = str(runners.profile_value(profile, "wine_binary") or "").strip()
+    if wine:
+        return f"wine_binary {wine}"
+    backend = profile.get("backend")
+    if backend in runners.PROTON_DEFAULT_BACKENDS:
+        if backend in runners.GE_DEFAULT_KINDS:
+            return "default (GE-Proton or DW-Proton, by Vulkan support)"
+        tag = runners.pinned_tag(runners.DEFAULT_FAMILY)
+        return f"default ({runners.DEFAULT_FAMILY} {tag})" if tag else "default"
+    return "unknown"
+
+
+def _flat_log_owner(path: Path, profiles: Any) -> str | None:
+    """The profile an old ``<profile>-<operation>.log`` belongs to (the longest name wins)."""
+    from . import logview
+
+    known = list(profiles) if isinstance(profiles, dict) else []
+    owner, operation = logview._parse_name(path.stem, known)
+    return owner if operation and owner in known else None
+
+
+def _mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _unfinished_lines(

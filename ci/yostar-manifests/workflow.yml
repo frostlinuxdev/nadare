@@ -12,6 +12,8 @@
 # Required repository secrets:
 #   SALT_STELLASORA_EN   signed API salt for StellaSora_EN
 #   SALT_ARKNIGHTS_EN    signed API salt for Arknights_EN
+#   SALT_HBR_EN          signed API salt for HBR_EN
+#   SALT_AZUPRO_JP       signed API salt for AZUPRO_JP
 #   MANIFESTS_TOKEN      HTTPS token allowed to clone/push the manifests repo
 #                        (optional: with an SSH MANIFESTS_REPO the URL's own
 #                        deploy key is used and the token is ignored)
@@ -21,6 +23,8 @@
 # `head`; they only need to look like a real launcher build):
 #   VERSION_STELLASORA_EN  (default "1.0.0")
 #   VERSION_ARKNIGHTS_EN   (default "1.0.0")
+#   VERSION_HBR_EN         (default "1.4.1")
+#   VERSION_AZUPRO_JP      (default "1.8.1")
 
 name: yostar-manifests
 
@@ -52,8 +56,12 @@ jobs:
         env:
           SALT_STELLASORA_EN: ${{ secrets.SALT_STELLASORA_EN }}
           SALT_ARKNIGHTS_EN: ${{ secrets.SALT_ARKNIGHTS_EN }}
+          SALT_HBR_EN: ${{ secrets.SALT_HBR_EN }}
+          SALT_AZUPRO_JP: ${{ secrets.SALT_AZUPRO_JP }}
           VERSION_STELLASORA_EN: ${{ vars.VERSION_STELLASORA_EN || '1.0.0' }}
           VERSION_ARKNIGHTS_EN: ${{ vars.VERSION_ARKNIGHTS_EN || '1.0.0' }}
+          VERSION_HBR_EN: ${{ vars.VERSION_HBR_EN || '1.4.1' }}
+          VERSION_AZUPRO_JP: ${{ vars.VERSION_AZUPRO_JP || '1.8.1' }}
           MANIFESTS_REPO: ${{ secrets.MANIFESTS_REPO }}
           MANIFESTS_TOKEN: ${{ secrets.MANIFESTS_TOKEN }}
         run: |

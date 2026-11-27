@@ -42,7 +42,8 @@ class TestCIWorkflow:
         workflow = _REPO_ROOT / rel
         assert workflow.is_file(), "no CI workflow for the repository itself"
         text = workflow.read_text(encoding="utf-8")
-        assert "python -m pytest tests -q" in text
+        # The whole suite unless the PR is docs-only (scripts/ci_pick_tests.py).
+        assert "python -m pytest ${{ steps.pick.outputs.targets || 'tests' }} -q" in text
         assert "ruff check src tests packaging scripts" in text
         assert '"3.12"' in text and '"3.13"' in text
         assert "QT_QPA_PLATFORM: offscreen" in text
@@ -263,7 +264,6 @@ class TestAppImageReleaseHardening:
         assert "LICENSE" in _text("packaging/flatpak/io.github.frostlinuxdev.Nadare.yml")
 
     def test_other_packagers_do_not_fall_back_to_a_fake_version(self):
-        assert "|| echo 0.1.0" not in _text("scripts/build_deb.sh")
         assert "|| echo 0.1.0" not in _text("scripts/build_appimage.sh")
 
 

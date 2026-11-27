@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QPixmap,
 )
@@ -113,6 +113,78 @@ class ElidedLabel(QLabel):
         display = "\n".join(lines) if lines else text
         if display != self.text():
             super().setText(display)
+
+
+class OneLineLabel(QLabel):
+    """A label that stays on one line: it elides with "…" to the width it is given.
+
+    Wrapping used to make this kind of label as wide as its text and then draw two
+    lines inside one line of height (#1737). Here the label's ``sizeHint`` comes from
+    the whole text, so the layout can hand it either the room it asks for or less;
+    whatever does not fit is elided. ``text()`` stays the whole text (that is what
+    the code and the tests talk about) and ``display_text()`` is what is drawn.
+    """
+
+    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWordWrap(False)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self._full_text = ""
+        self.setText(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt naming
+        self._full_text = str(text or "")
+        self._apply_elide()
+
+    def text(self) -> str:
+        """The whole text; :meth:`display_text` is what the pill draws."""
+        return self._full_text
+
+    def display_text(self) -> str:
+        """The text actually drawn: the whole text when it fits, else elided."""
+        return QLabel.text(self)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+        return self._text_hint()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+        hint = self._text_hint()
+        # The layout may be narrower than the text: that is what the elide is for.
+        hint.setWidth(0)
+        return hint
+
+    def _text_hint(self) -> QSize:
+        metrics = self.fontMetrics()
+        margins = self.contentsMargins()
+        return QSize(
+            # A couple of pixels of slack: a scrollbar or a border rounding must not
+            # turn a text that just fits into an elided one.
+            metrics.horizontalAdvance(self._full_text) + margins.left() + margins.right() + 2,
+            metrics.height() + margins.top() + margins.bottom(),
+        )
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        self._apply_elide()
+
+    def changeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().changeEvent(event)
+        # A stylesheet or desktop font change can finish without a resize; the elide
+        # must follow the new fontMetrics all the same (#b29).
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            self._apply_elide()
+
+    def _apply_elide(self) -> None:
+        width = self.contentsRect().width()
+        shown = self._full_text
+        if self._full_text and width > 0:
+            shown = self.fontMetrics().elidedText(
+                self._full_text, Qt.TextElideMode.ElideRight, width
+            )
+        if shown != QLabel.text(self):
+            QLabel.setText(self, shown)
+        # The whole text stays readable on hover, but only when it does not fit.
+        self.setToolTip(self._full_text if shown != self._full_text else "")
 
 
 class _ThumbnailLabel(QLabel):
@@ -251,6 +323,13 @@ _SANDBOX_TIP = (
     "Hides your home folder from the game, so it cannot read your files. The game can "
     "still use the network. Needs bubblewrap, which comes with the game runtime."
 )
+
+_PATCH_TIP = (
+    "Swaps the game's Japanese text files for KiboTL's community English translation. "
+    "Turning it off puts the original files back. A game update or Repair files undoes it."
+)
+
+_PATCH_UPDATE_TIP = "A newer copy of the English patch is available."
 
 
 class _QrPanel(QFrame):

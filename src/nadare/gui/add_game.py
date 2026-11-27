@@ -21,14 +21,12 @@ from PyQt6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFormLayout,
-    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -40,6 +38,7 @@ from ..core.config import MAX_PROFILE_NAME, Config, valid_profile_name
 from ..core.directkinds import (
     CATALOG_KINDS,
     DIRECT_WIZARD,
+    HELD_BACK_KINDS,
     HOYO_KINDS,
     LAUNCHER_KINDS,
     LAUNCHER_WIZARD,
@@ -50,6 +49,7 @@ from ..core.directkinds import (
 from ..core.paths import inside as _inside
 from ..core.profilenames import short_name
 from ..core.shortcuts import command_hint
+from .dialog_layout import fit_dialog, make_scroll_body
 from .theme import apply_theme
 from .workers import CallTask
 
@@ -101,6 +101,22 @@ _CATALOG: tuple[GameType, ...] = (
         "stellasora-yostar",
         install_subdir="StellaSora_EN",
         exes=("StellaSora.exe",),
+    ),
+    GameType(
+        "Heaven Burns Red",
+        "hbr-yostar",
+        install_subdir="HeavenBurnsRed_EN",
+        exes=("HeavenBurnsRed.exe",),
+        badge="Experimental",
+        badge_help=TIER_HELP["Experimental"],
+    ),
+    GameType(
+        "Azur Promilia (JP)",
+        "azurpromilia-jp-yostar",
+        install_subdir="AZUPRO_JP",
+        exes=("AzurPromiliaJP.exe",),
+        badge="Experimental",
+        badge_help=TIER_HELP["Experimental"],
     ),
     *(
         GameType(
@@ -156,7 +172,14 @@ def __getattr__(name: str) -> Any:
 
 #: Kinds that run through a Wine/Proton prefix (so the wizard offers a prefix).
 PREFIX_KINDS = frozenset(
-    {"arknights-yostar", "stellasora-yostar", "stove-czn", *CATALOG_KINDS}
+    {
+        "arknights-yostar",
+        "stellasora-yostar",
+        "hbr-yostar",
+        "azurpromilia-jp-yostar",
+        "stove-czn",
+        *CATALOG_KINDS,
+    }
 )
 
 #: Prefix kinds whose whole install lives inside the Wine prefix (no separate
@@ -169,8 +192,8 @@ LEPTON_KINDS = frozenset({"fgo-lepton"})
 
 
 def available_catalog() -> tuple[GameType, ...]:
-    """The catalog minus kinds this build could not load (e.g. no FGO) and the HoYo games."""
-    missing = set(backends.unavailable())
+    """The catalog minus kinds this build could not load (e.g. no FGO), held-back and HoYo games."""
+    missing = set(backends.unavailable()) | HELD_BACK_KINDS
     if not hoyo_visible():
         missing |= HOYO_KINDS
     return tuple(g for g in _catalog() if g.kind not in missing)
@@ -367,24 +390,21 @@ class AddGameDialog(QDialog):
 
         self.setWindowTitle("Add game")
         self.setMinimumWidth(560)
+        self._shown_once = False
 
-        # The form scrolls on a small screen; the Cancel / Add game buttons stay put.
+        # The form scrolls on a small screen; the heading and buttons stay put.
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 14)
-        outer.setSpacing(8)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        body = QWidget()
-        scroll.setWidget(body)
-        outer.addWidget(scroll, 1)
-        root = QVBoxLayout(body)
-        root.setContentsMargins(26, 22, 26, 8)
-        root.setSpacing(14)
+        outer.setContentsMargins(22, 20, 22, 20)
+        outer.setSpacing(14)
 
         heading = QLabel("Add game")
         heading.setObjectName("Title")
-        root.addWidget(heading)
+        heading.setWordWrap(True)
+        outer.addWidget(heading)
+
+        self._scroll, _body, root = make_scroll_body(spacing=14)
+        outer.addWidget(self._scroll, 1)
+
         subtitle = QLabel(
             "Choose your game. Nadare can install the games above; the options under "
             "Advanced need files you already have."
@@ -439,6 +459,7 @@ class AddGameDialog(QDialog):
         form.addRow(self.folder_label, folder_field)
         self.folder_free = QLabel("")
         self.folder_free.setObjectName("Muted")
+        self.folder_free.setWordWrap(True)
         form.addRow("", self.folder_free)
 
         self.prefix_row = QWidget()
@@ -459,6 +480,7 @@ class AddGameDialog(QDialog):
         form.addRow("Wine prefix", self.prefix_row)
         self.prefix_free = QLabel("")
         self.prefix_free.setObjectName("Muted")
+        self.prefix_free.setWordWrap(True)
         form.addRow("", self.prefix_free)
         # A prefix-only kind has no install-folder row to hang the usual summary on, and its
         # picked folder is only a library: this line says where the prefix will really go.
@@ -487,7 +509,6 @@ class AddGameDialog(QDialog):
         self.error_label.setWordWrap(True)
         # Above the buttons, outside the scrolling form: on a short screen the form's end is
         # out of view, and a refused Add game looked like it did nothing.
-        self.error_label.setContentsMargins(26, 0, 26, 0)
         outer.addWidget(self.error_label)
 
         footer = QHBoxLayout()
@@ -507,7 +528,6 @@ class AddGameDialog(QDialog):
         self.create_button = create
         footer.addWidget(cancel)
         footer.addWidget(create)
-        footer.setContentsMargins(26, 0, 26, 0)
         outer.addLayout(footer)
         for button in self.findChildren(QPushButton):
             button.setAutoDefault(False)
@@ -519,14 +539,16 @@ class AddGameDialog(QDialog):
             # The store already chose the game; an unknown kind keeps the full list.
             self.game_list.hide()
         self._apply_location_visibility()
-        self._fit_to_screen(body)
+        self._fit_height()
 
-    def _fit_to_screen(self, body: QWidget) -> None:
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        self._fit_height(keep_width=self._shown_once)
+        self._shown_once = True
+
+    def _fit_height(self, *, keep_width: bool = False) -> None:
         """Open tall enough to show the whole form, but never taller than the screen."""
-        want = body.sizeHint().height() + 80  # footer buttons and margins
-        screen = self.screen()
-        limit = screen.availableGeometry().height() - 80 if screen is not None else want
-        self.resize(max(self.minimumWidth(), self.sizeHint().width()), max(300, min(want, limit)))
+        fit_dialog(self, min_width=560, scroll=self._scroll, keep_width=keep_width)
 
     # ---- construction helpers ---------------------------------------------
     def _populate_games(self) -> None:
@@ -783,7 +805,7 @@ class AddGameDialog(QDialog):
             self.size_hint.setVisible(False)
             return
         text = "Adds the game to your library. Press INSTALL on its page to download it"
-        size = backends.install_size_hint(game.kind)
+        size = backends.download_size_hint(game.kind)
         if size:
             from ..core import diskspace
 
@@ -813,9 +835,12 @@ class AddGameDialog(QDialog):
         if not text:
             return ""
         try:
-            from nadare.core import diskspace
+            from nadare.core import diskspace, execmount
 
             free = diskspace.human_size(diskspace.free_bytes(text))
+            mount = execmount.noexec_mount(text)
+            if mount is not None:  # #1861: games stop at once with "exit code 5" there
+                return f"{free} free on {mount}, but it is mounted noexec: games can't run there"
             return f"{free} free on {diskspace.mount_point(text)}"
         except (OSError, BackendError):
             return ""

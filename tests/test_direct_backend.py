@@ -21,6 +21,9 @@ from nadare.core import directkinds as dk
 from nadare.core.backends import BackendError, get, kinds
 from nadare.core.events import Cancelled
 
+# The live 6.4.3 feed's game exe (a Res row).
+TOF_EXE = "Client/WindowsNoEditor/Hotta/Binaries/Win64/QRSL.exe"
+
 
 def _zip(files: dict[str, bytes]) -> bytes:
     buf = io.BytesIO()
@@ -480,7 +483,10 @@ def test_tiers_mark_only_the_launched_games_as_verified():
     # were retired, 2026-11-10; a new game starts Experimental).
     not_verified = sorted(k for k in dk.CATALOG_KINDS if dk.tier_of(k) != dk.TIER_VERIFIED)
     # New Experimental games: list each here on purpose.
-    assert not_verified == ["direct-dna", "direct-snowbreak"]
+    assert not_verified == [
+        "direct-bpsr", "direct-dna", "direct-r1999", "direct-snowbreak", "direct-strinova",
+        "direct-tof",
+    ]
     assert dk.tier_of("direct-bd2") == "Verified"
     assert dk.tier_of("direct-endfield") == "Verified"
     assert dk.tier_of("direct-nte") == "Verified"
@@ -683,7 +689,7 @@ def _wuwa_env(tmp_path, monkeypatch, profile=None):
 
 def test_wuwa_runs_under_its_umu_id_so_the_runner_fixes_apply(tmp_path, monkeypatch):
     # DW-Proton 11.0-17 fixes 3.8's white web pages in gamefixes-umu/umu-3513350.py; with
-    # GAMEID=0 that fix never ran (2026-11-14, flxpc).
+    # GAMEID=0 that fix never ran (2026-11-14, an NVIDIA PC).
     env = _wuwa_env(tmp_path, monkeypatch)
     assert env["GAMEID"] == "umu-3513350" and env["UMU_ID"] == "umu-3513350"
 
@@ -693,7 +699,7 @@ def test_dna_runs_under_its_umu_id_so_the_cef_fix_applies(tmp_path, monkeypatch,
     # DW-Proton's gamefixes-umu/umu-3950020.py -> gamefixes-steam/3950020.py disables dcomp
     # ("CEF tries to use dcomp by default which only has stubs") and sets the INT3 hack. Without
     # an id DNA ran as umu-default, the fix never loaded and its CEF window stayed white
-    # (2026-11-17, flxpc, RTX 3060). DNA always runs in the Sandbox, so both paths count.
+    # (2026-11-17, an NVIDIA PC, RTX 3060). DNA always runs in the Sandbox, so both paths count.
     from nadare.backends import direct
 
     ctx = make_context(tmp_path, "direct-dna", {"prefix": str(tmp_path / "pfx")})
@@ -729,3 +735,107 @@ def test_a_hand_edited_numeric_gameid_zero_still_wins(tmp_path, monkeypatch):
 def test_an_empty_gameid_falls_back_to_the_game_default(tmp_path, monkeypatch):
     env = _wuwa_env(tmp_path, monkeypatch, {"extra_env": {"GAMEID": "  "}})
     assert env["GAMEID"] == "umu-3513350"
+
+
+def test_tof_registration_and_source(tmp_path):
+    from nadare.core import artindex, profilenames
+    from nadare.core.sources import tof
+
+    cls = get("direct-tof")
+    assert cls is direct.TofBackend
+    assert cls.plan_factory is tof.resolve
+    assert cls.game_tag == "tof" and cls.display_name == "Tower of Fantasy"
+    assert cls.direct_exe == TOF_EXE and cls.launcher_names == (TOF_EXE,)
+    assert cls.install_subdir == Path("drive_c/Games/TowerOfFantasy")
+    assert cls.install_size_hint == 129_327_413_971
+    assert cls.download_size_hint == int(132.8 * direct.GB)
+    assert dk.ART["direct-tof"] == 2064650
+    assert dk.RETIRED_KINDS["launcher-tower-of-fantasy"] == ("Tower of Fantasy", "direct-tof")
+    assert dk.tier_of("direct-tof") == "Experimental"
+    assert "direct-tof" in artindex.ALLOWED_HOSTS
+    assert profilenames.SHORT_NAMES["direct-tof"] == "tof"
+
+
+def test_tof_install_update_verify_and_removal_paths(tmp_path, monkeypatch):
+    import test_tof_source as fixture
+
+    plan, _ = fixture.resolve()
+    state = {"plan": plan}
+    objects = {
+        plan.files[0].url.removeprefix(fixture.ROOT): b"MZ",
+        plan.archives[0].source.url.removeprefix(fixture.ROOT): b"PADhelloxbye",
+    }
+    transport = fixture.MemoryTransport(objects, monkeypatch)
+    monkeypatch.setattr(
+        direct.TofBackend, "plan_factory",
+        staticmethod(lambda fetch=None, **kwargs: fixture.local_plan(state["plan"], transport)),
+    )
+    monkeypatch.setattr(WineGameBackend, "_ensure_default_runner", lambda self, strict: None)
+    monkeypatch.setattr(WineGameBackend, "_ensure_direct_prefix", lambda self: None)
+    backend = direct.TofBackend(make_context(
+        tmp_path, "direct-tof", {"prefix": str(tmp_path / "pfx")}
+    ))
+    assert backend.status().state == "not_installed"
+    backend.install()
+    assert backend.status().state == "installed" and backend.status().version == "6.4.3"
+    install_dir = backend.install_dir()
+    assert (install_dir / "data/a.bin").read_bytes() == b"hello"
+    assert (install_dir / "data/b.bin").read_bytes() == b"bye"
+    assert backend.verify()["verified"] is True
+    changed = fixture.XML.replace(hashlib.md5(b"MZ").hexdigest(), hashlib.md5(b"NZ").hexdigest())
+    state["plan"], _ = fixture.resolve(changed, fixture.CFG.replace(b"6.4.3", b"6.4.4"))
+    path = state["plan"].files[0].url.removeprefix(fixture.ROOT)
+    transport.objects[path] = b"NZ"
+    count = len(transport.requests)
+    backend.update()
+    assert transport.requests[count:] == [path]
+    assert backend.status().version == "6.4.4"
+    assert (backend.install_dir() / TOF_EXE).read_bytes() == b"NZ"
+    # The unchanged Pak was reused, not re-extracted or lost.
+    assert (install_dir / "data/a.bin").read_bytes() == b"hello"
+    assert (install_dir / "data/b.bin").read_bytes() == b"bye"
+    assert backend.verify()["verified"] is True
+    backend.repair()
+    from nadare.core import removal
+
+    trees = removal.removable_trees(backend.ctx.config, backend.ctx.name)
+    assert any(tree.key == "prefix" and tree.path == backend.prefix() for tree in trees)
+    assert backend.install_dir().is_relative_to(backend.prefix())
+
+
+def test_hbr_reuses_direct_backend():
+    cls = get("hbr-yostar")
+    assert issubclass(cls, direct.DirectBackend)
+    assert cls.game_tag == "HBR_EN"
+    assert cls.direct_exe == "HeavenBurnsRed.exe"
+
+
+def test_azupro_reuses_direct_backend():
+    cls = get("azurpromilia-jp-yostar")
+    assert issubclass(cls, direct.DirectBackend)
+    assert cls.game_tag == "AZUPRO_JP"
+    assert cls.direct_exe == "AzurPromiliaJP.exe"
+
+
+@pytest.mark.parametrize("installed", [None, "1.11.5.10"])
+def test_strinova_backend(tmp_path, monkeypatch, installed):
+    from nadare.core import artindex, profilenames
+    from nadare.core.sources import strinova
+
+    cls = get("direct-strinova")
+    assert cls is direct.StrinovaBackend
+    assert cls.plan_factory is strinova.resolve
+    backend = cls(make_context(tmp_path, cls.kind, {"prefix": str(tmp_path / "pfx")}))
+    monkeypatch.setattr(backend, "_read_version_file",
+                        lambda: {"version": installed} if installed else None)
+    assert backend.plan_kwargs() == {"installed": installed}
+    assert backend.install_subdir == Path("drive_c/Games/Strinova")
+    assert backend.direct_exe == "Strinova.exe"
+    assert backend.launcher_names == ("Strinova.exe",)
+    assert backend.install_size_hint == int(61.5 * direct.GB)
+    assert dk.ART[cls.kind] == 1282270
+    assert artindex.ALLOWED_HOSTS[cls.kind] == artindex.STEAM_HOSTS
+    assert profilenames.SHORT_NAMES[cls.kind] == "strinova"
+    assert dk.tier_of(cls.kind) == "Experimental"
+    assert "launcher-strinova" not in dk.CATALOG_KINDS
+    assert dk.RETIRED_KINDS["launcher-strinova"] == ("Strinova", "direct-strinova")

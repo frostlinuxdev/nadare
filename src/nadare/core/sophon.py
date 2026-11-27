@@ -741,8 +741,12 @@ def sync_package(
     cancel: Cancel | None = None,
     workers: int = 4,
     chunk_cache: Path | None = None,
+    changed: threading.Event | None = None,
 ) -> None:
     """Install ``pkg`` into ``root``, fetching only missing or damaged chunks.
+
+    ``changed`` is set just before the first file of the install is created or replaced, so a
+    failure before that (manifest, local hash scan, disk space) leaves the game as it was (#1826).
 
     Every sync reloads the manifest and verifies the local chunks even when the
     ``.done`` marker matches; re-sync is also the repair path for damaged files.
@@ -922,6 +926,8 @@ def sync_package(
         fresh_tasks: list[
             tuple[FileEntry, tuple[ChunkEntry, ...], Path, Path | None, set[ChunkEntry]]
         ] = []
+        if fresh_entries and changed is not None:
+            changed.set()
         for entry in fresh_entries:
             target = _target_path(root, entry.path)
             with open(target, "w+b") as fh:
@@ -954,6 +960,8 @@ def sync_package(
             with open(temporary, "r+b") as fh:
                 fh.flush()
                 os.fsync(fh.fileno())
+            if changed is not None:
+                changed.set()
             os.replace(temporary, target)
     finally:
         pool.close()

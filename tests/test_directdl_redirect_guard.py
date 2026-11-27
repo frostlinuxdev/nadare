@@ -267,3 +267,19 @@ def test_yostar_install_through_directdl_refuses_an_off_list_hop(server, tmp_pat
     with pytest.raises(directdl.DirectError):
         directdl.sync(narrowed, tmp_path / "refused")
     assert "/real/a.bin" not in hits
+
+
+def test_a_refused_hop_is_not_retried(server, tmp_path: Path) -> None:
+    """The guard's answer cannot change on a second try: fail at once, ask the server once.
+
+    Every refusal used to go round the download retry loop with backoff, so the user waited
+    about half a minute for the same "refused" several times over (2026-11-27).
+    """
+    import time
+
+    base, hits = server
+    start = time.monotonic()
+    with pytest.raises(directdl.DirectError):
+        directdl.sync(_file_plan(base, _no_localhost), tmp_path / "game")
+    assert hits.count("/a.bin") == 1, hits
+    assert time.monotonic() - start < 3

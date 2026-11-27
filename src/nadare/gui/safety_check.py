@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
 
 from ..core import safetycheck
 from . import i18n
+from .dialog_layout import fit_dialog, make_scroll_body
 from .theme import MUTED, TEXT, WARN
 
 log = logging.getLogger(__name__)
@@ -101,16 +102,22 @@ class SafetyResultDialog(QDialog):
     def __init__(self, parent, result: safetycheck.SafetyResult, title: str = "") -> None:
         super().__init__(parent)
         self.result = result
+        self._shown_once = False
         self.setWindowTitle(i18n.tr("Safety check"))
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
         heading, colour = _HEADINGS.get(result.level, (result.level, TEXT))
         self.heading = QLabel(heading)
-        self.heading.setStyleSheet(f"color: {colour}; font-size: 18px; font-weight: 700;")
+        self.heading.setObjectName("Title")
+        self.heading.setWordWrap(True)
+        self.heading.setStyleSheet(f"color: {colour};")
         self.heading.setVisible(bool(heading))
         layout.addWidget(self.heading)
+        self._scroll, _body, body_layout = make_scroll_body(spacing=12)
         self.summary = QLabel(safetycheck.result_summary(result))
         self.summary.setWordWrap(True)
-        layout.addWidget(self.summary)
+        body_layout.addWidget(self.summary)
         details = []
         for match in result.matches:
             noun = "file" if match.count == 1 else "files"
@@ -118,12 +125,13 @@ class SafetyResultDialog(QDialog):
         self.details = QLabel("\n".join(details))
         self.details.setWordWrap(True)
         self.details.setVisible(bool(details))
-        layout.addWidget(self.details)
+        body_layout.addWidget(self.details)
         self.when = QLabel(_when_text(result, title))
         self.when.setObjectName("Muted")
+        self.when.setWordWrap(True)
         self.when.setStyleSheet(f"color: {MUTED};")
-        layout.addWidget(self.when)
-        layout.addStretch(1)  # content stays at the top if the user enlarges the window
+        body_layout.addWidget(self.when)
+        layout.addWidget(self._scroll, 1)
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         close = QPushButton(i18n.tr("Close"))
@@ -132,12 +140,14 @@ class SafetyResultDialog(QDialog):
         layout.addLayout(buttons)
         self._fit_to_contents()
 
-    def _fit_to_contents(self) -> None:
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        self._fit_to_contents(keep_width=self._shown_once)
+        self._shown_once = True
+
+    def _fit_to_contents(self, *, keep_width: bool = False) -> None:
         """Size the window to its answer instead of a fixed box with empty space (#b28)."""
-        layout = self.layout()
-        layout.activate()
-        height = layout.heightForWidth(_CONTENT_WIDTH)
-        self.resize(_CONTENT_WIDTH, height if height > 0 else self.sizeHint().height())
+        fit_dialog(self, min_width=_CONTENT_WIDTH, scroll=self._scroll, keep_width=keep_width)
 
 
 __all__ = ["SafetyCheckSignals", "SafetyCheckTask", "SafetyResultDialog"]

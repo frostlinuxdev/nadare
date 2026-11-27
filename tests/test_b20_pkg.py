@@ -26,8 +26,6 @@ class TestMaintainerUnits:
         assert "EnvironmentFile=-/etc/nadare-pin-publisher.env" in service
         assert "WantedBy=default.target" not in service
 
-    def test_the_deb_does_not_ship_the_maintainer_units(self):
-        assert "systemd" not in _text("scripts/build_deb.sh")
 
 
 # ---------------------------------------------------------------------------
@@ -76,15 +74,7 @@ class TestDependencyAudit:
 # #599 — packaging artefacts match what they ship
 # ---------------------------------------------------------------------------
 class TestPackagingArtefacts:
-    def test_deb_fetches_the_bundled_7zip_before_pyinstaller(self):
-        deb = _text("scripts/build_deb.sh")
-        assert "bash scripts/fetch_7zip.sh" in deb
-        assert deb.index("fetch_7zip.sh") < deb.index("-m PyInstaller")
 
-    def test_deb_derives_the_glibc_floor_from_the_bundle(self):
-        deb = _text("scripts/build_deb.sh")
-        assert "readelf" in deb
-        assert re.search(r"libc6 \(>= \$?\{?glibc", deb)
 
     def test_metainfo_has_the_appstream_identity_fields(self):
         meta = _text("packaging/flatpak/io.github.frostlinuxdev.Nadare.metainfo.xml")
@@ -103,8 +93,11 @@ class TestPackagingArtefacts:
 class TestPackagingDoc:
     def test_doc_exists_with_the_channel_table(self):
         doc = _text("docs/PACKAGING.md")
-        for channel in ("AppImage", "Flatpak", "AUR", ".deb"):
+        for channel in ("AppImage", "Flatpak", "AUR"):
             assert channel in doc
+        # Only Flatpak, AppImage and AUR ship (user 2026-11-23): no .deb channel, no builder.
+        assert "| `.deb` |" not in doc and "build_deb" not in doc
+        assert not (_REPO_ROOT / "scripts/build_deb.sh").exists()
         assert "NADARE_MANAGED_UPDATES" in doc
         assert "docs/PACKAGING.md" not in _text("docs/PACKAGING.md")  # no self-link
 
@@ -123,16 +116,7 @@ def test_aur_recipe_version_is_consistent_across_pkgbuild_and_srcinfo():
 # review wave 3: findings fixed in b20
 # ---------------------------------------------------------------------------
 class TestReviewFixes:
-    def test_the_deb_launcher_marks_updates_as_package_managed(self):
-        deb = _text("scripts/build_deb.sh")
-        assert "NADARE_MANAGED_UPDATES=1" in deb
-        assert 'ln -sf /opt/nadare/nadare "$pkg/usr/bin/nadare"' not in deb
 
-    def test_the_glibc_probe_cannot_abort_the_build(self):
-        deb = _text("scripts/build_deb.sh")
-        start = deb.index("glibc_found=")
-        block = deb[start : deb.index("\nfi\n", start)]
-        assert "|| true" in block
 
     def test_both_scheduled_jobs_can_be_started_by_hand(self):
         for rel in (".github/workflows/ci.yml", ".forgejo/workflows/ci.yml"):

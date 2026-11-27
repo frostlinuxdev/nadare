@@ -1,15 +1,18 @@
 # Yostar manifest generator
 
 `generate.py` publishes **plain, normalized Yostar manifests** so the Nadare
-client can install/update Arknights and Stella Sora directly. Yostar's launcher
-calls need a per-game value that is not shipped in the client: a scheduled job
-makes those calls and commits plain JSON that anyone can use.
+client can install/update Arknights, Stella Sora, Heaven Burns Red (EN) and
+Azur Promilia (JP) directly. Yostar's launcher calls need a per-game value that
+is not shipped in the client: a scheduled job makes those calls and commits
+plain JSON that anyone can use.
 
 ## What it produces
 
 For every configured game tag:
 
-- `<GameTag>.json` — a manifest:
+- `<IndexKey>.json` — a manifest (the key equals the API tag for Arknights and
+  Stella Sora; HBR uses `hbr-yostar` and Azur Promilia uses
+  `azurpromilia-jp-yostar`, with `HBR_EN` / `AZUPRO_JP` inside the document):
 
   ```json
   {
@@ -38,7 +41,8 @@ For every configured game tag:
 
 ## The three launcher calls
 
-Base: `https://api-launcher-en.yo-star.com`.
+Base: `https://api-launcher-en.yo-star.com`, except Azur Promilia (JP), whose
+signed calls go to `https://api-launcher-jp.yo-star.com`.
 
 1. `GET /api/launcher/game/config` → `data.game_latest_version`,
    `data.game_latest_file_path`.
@@ -59,7 +63,10 @@ failure and the code/message is surfaced.
 | `VERSION_<TAG>` | launcher version string used in the signed `head` |
 
 `<TAG>` is the game tag upper-cased with non-alphanumerics replaced by `_`, so
-`StellaSora_EN` → `SALT_STELLASORA_EN`, `Arknights_EN` → `SALT_ARKNIGHTS_EN`.
+`StellaSora_EN` → `SALT_STELLASORA_EN`, `Arknights_EN` → `SALT_ARKNIGHTS_EN`,
+`HBR_EN` → `SALT_HBR_EN`, `AZUPRO_JP` → `SALT_AZUPRO_JP`. The generator has no
+version default; the workflow template defaults `VERSION_HBR_EN` to `1.4.1` and
+`VERSION_AZUPRO_JP` to `1.8.1`.
 Games without a salt are skipped with a warning; games without a version are
 skipped too. A tag only counts as *configured* (and is expected in the index)
 when **both** its salt and its version are present, so a half-rolled-out game
@@ -107,6 +114,10 @@ The values live only in the job's CI secrets; nothing here is committed.
 
 - `SALT_STELLASORA_EN` — per-game signing material.
 - `SALT_ARKNIGHTS_EN` — per-game signing material.
+- `SALT_HBR_EN` — signing material for Heaven Burns Red (EN).
+- `VERSION_HBR_EN` — launcher version, supplied as a CI variable (template default `1.4.1`).
+- `SALT_AZUPRO_JP` — signing material for Azur Promilia (JP).
+- `VERSION_AZUPRO_JP` — launcher version, supplied as a CI variable (template default `1.8.1`).
 - `MANIFESTS_REPO` — git URL of the repository that hosts the published JSON.
 - `MANIFESTS_TOKEN` — an HTTPS token allowed to clone/push `MANIFESTS_REPO`
   (optional). When set it is handed to git as a credential helper via the

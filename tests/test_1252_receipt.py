@@ -99,3 +99,20 @@ def test_a_repair_cleans_up_but_writes_no_update_receipt(tmp_path, monkeypatch, 
     backend._sync_direct()
     assert not any("update 3.8.0" in e.message for e in events)
     assert not (backend.install_dir() / "old.pak").exists()
+
+
+def test_a_streamed_pack_counts_the_bytes_the_sync_measured(tmp_path, monkeypatch):
+    """A streamed zip reports its progress as ``install``, never ``download``: Endfield's 52 GiB
+    update logged "downloaded 0 B" (test desktop 2026-11-25). The sync's own transfer summary counts
+    every byte read from the network."""
+    backend, events = _backend(tmp_path, monkeypatch, downloaded=0, publisher=0)
+
+    def sync(plan, dest, *, emit=None, **kwargs):
+        emit(Event("progress", "", data={"stage": "install", "done": 9 * GB, "total": 9 * GB}))
+        emit(Event("log", "Download sync: ...", data={"download_summary": True, "bytes": 7 * GB}))
+        return {"downloaded": 1, "skipped": 0}
+
+    monkeypatch.setattr(dd, "sync", sync)
+    backend._sync_direct()
+    logs = [e.message for e in events if e.kind == "log" and "update 3.7.2" in e.message]
+    assert logs and "downloaded 6.5 GiB" in logs[0], logs

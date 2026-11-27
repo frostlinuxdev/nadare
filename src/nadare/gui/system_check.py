@@ -195,6 +195,12 @@ class SystemCheckDialog(QDialog):
         self.setWindowTitle("System check")
         self.resize(760, 540)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
+        heading = QLabel(self.windowTitle())
+        heading.setObjectName("Title")
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
         self.intro = QLabel(
             "Looks at your graphics, Vulkan, the Wine runners and a few system settings. "
             "Nothing is changed and nothing is uploaded."

@@ -11,7 +11,7 @@
 # Every pin carries its sha256 hashes from uv.lock, so pip checks each download
 # (hash-checking mode) and refuses a file that changed on the index (#1502).
 #
-# A downloaded Nadare package (AppImage/.deb) bundles these.
+# A downloaded Nadare package (AppImage, Flatpak, AUR) bundles these.
 #
 # Why some of them matter:
 #   curl-cffi   STOVE's CDN filters by TLS/JA3; Chrome impersonation is required

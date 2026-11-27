@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Final round (b23): HIGH-risk guards that no test executed or checked.
 
-Found by the rebuilt sweep (/mnt/kikyou/work/flash-audit/2026-11-11-diff-final): each guard was
+Found by the rebuilt sweep (2026-11-11): each guard was
 broken on purpose and every test that runs its line stayed green (or no test ran it at all).
-Each test here kills that mutant (18 of the 20 HIGH ones; mutation run in
-/mnt/kikyou/work/mutation-final-c). Not yet: g057 (config's disk-profile names on a damaged file)
+Each test here kills that mutant (18 of the 20 HIGH ones;
+mutation run final-c). Not yet: g057 (config's disk-profile names on a damaged file)
 and g024 (a linked steamuser folder): these tests reach them by another path, see #1207.
 Where a guard has a legitimate side, it is tested too.
 """

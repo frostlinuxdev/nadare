@@ -107,14 +107,16 @@ class PrefixToolsMixin:
         browse = self._option_browse.get("prefix")
         if browse is not None:
             browse.setEnabled(not (locked or catalog))
-        self.change_location_button.setVisible(catalog and not self._game_active)
+        self._set_widget_visible(
+            self.change_location_button, catalog and not self._game_active
+        )
         self.change_location_button.setEnabled(catalog and not self._game_active)
         if self._prefix_lock_note is not None:
             self._prefix_lock_note.setText(note or self._LOCKED_NOTE)
-            self._prefix_lock_note.setVisible(locked)
-        self.relink_button.setVisible(locked)
+            self._set_widget_visible(self._prefix_lock_note, locked)
+        self._set_widget_visible(self.relink_button, locked)
         self.relink_button.setEnabled(locked and self._game_idle)
-        self.move_button.setVisible(locked)
+        self._set_widget_visible(self.move_button, locked)
         self.move_button.setEnabled(locked and self._game_idle and not self._moving)
         self.move_button.setText(self._move_label())
         self.move_button.setToolTip(
@@ -271,8 +273,8 @@ class PrefixToolsMixin:
             return
         found = self._first_deletable_backup(self._profile)
         self._backup_label.setText(f"Old prefix backup: {found}" if found else "")
-        self._backup_label.setVisible(found is not None)
-        self._backup_button.setVisible(found is not None)
+        self._set_widget_visible(self._backup_label, found is not None)
+        self._set_widget_visible(self._backup_button, found is not None)
 
     def _delete_old_backup(self) -> None:
         """Delete one recorded old prefix, after confirmation, from the prefix field."""
@@ -444,5 +446,6 @@ class PrefixToolsMixin:
                 if "install_dir" in plan.changes:
                     self.install_dir.setText(str(plan.changes["install_dir"]))
                 self._loaded_state = self._form_state()
+                self._search_reapply_soon()  # the fields now show the new place (#1855)
             self.saved.emit(name)
         return True

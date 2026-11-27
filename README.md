@@ -96,7 +96,7 @@ bundles the GL loader and the Qt X11 platform libraries it needs. A Secret Servi
 keyring (GNOME Keyring or KWallet) is optional and only used for *Remember me*.
 
 With the Flatpak, the `glibc` version does not matter (it brings its own runtime from Flathub);
-you still need a working GPU driver. There is no `.deb` yet.
+you still need a working GPU driver. There are no `.deb` or RPM packages.
 
 New here? Read the [tester guide](docs/TESTERS.md). Something wrong? Run
 `flatpak run io.github.frostlinuxdev.Nadare doctor` (Flatpak) or `./Nadare-*.AppImage doctor`

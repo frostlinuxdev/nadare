@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 import traceback
 from collections.abc import Callable
@@ -31,6 +32,7 @@ from ..core import (
     launch_window,
     launchgate,
     operation_policy,
+    patchops,
     paths,
     runlog,
 )
@@ -53,6 +55,25 @@ _BACKGROUND_OPERATIONS = operation_policy.operations_with("background")
 
 #: Operations a worker understands.
 OPERATIONS = tuple(operation_policy.POLICIES)
+
+#: A DXVK/VKD3D ``info:`` line (optionally behind a thread id or a decimal timestamp).
+#: These are needed while the launch runs (the first-frame watch reads them) but are far
+#: too many per run for the run log and the 400-event replay (#1821). The prefix is the
+#: first-frame detector's grammar, so what the cap calls a layer line is exactly what the
+#: detector can accept (#1821 follow-up).
+_LAYER_INFO_RE = re.compile(r"^\s*" + launch_window.LOG_PREFIX + r"info:")
+
+#: How many of those lines one run keeps, for a readable start-up trace. ``err:`` and
+#: ``warn:`` lines are never dropped.
+LAYER_INFO_LINES = 20
+
+#: Presenter/swapchain lines kept per run, outside :data:`LAYER_INFO_LINES`: the one
+#: that ended the sheet, a launcher's before it, and a few resizes after.
+PRESENTER_LINES = 8
+
+#: Longest line written to the run log. Masking a longer line costs time on the thread
+#: that drains the game's output; a game that prints a 20 KB blob loses its tail.
+LOG_LINE_CHARS = 4096
 
 
 @dataclass(frozen=True)
@@ -100,6 +121,21 @@ def _game_pids(backend):
         return None
 
 
+def _game_processes(backend, pids):
+    """The game itself (not its launcher or helper), as the first-frame gate (#1821)."""
+    try:
+        game = getattr(backend, "game_processes", None)
+        if callable(game):
+            found = game()
+            if found is not None:
+                return found
+    except Exception:  # noqa: BLE001 - an optional observation, not a launch failure
+        log.debug("no game process rule for the launch monitor", exc_info=True)
+    if pids is None:
+        return None
+    return lambda: bool(pids())
+
+
 class CallTask(QRunnable):
     """Run a zero-argument callable on the global thread pool.
 
@@ -129,6 +165,21 @@ class CallTask(QRunnable):
             # Qt deleted the signal object (the app is quitting): nobody is left to tell.
             log.debug("background task finished after its receiver was gone")
 
+
+
+def mask_log_line(line: str) -> str:
+    """``mask(line)``, cut to :data:`LOG_LINE_CHARS` first.
+
+    The cut is at a whitespace boundary and a token that crosses the limit is dropped
+    whole: a secret cut short could fall under the masking length and show in part.
+    """
+    if len(line) <= LOG_LINE_CHARS:
+        return mask(line)
+    head = line[:LOG_LINE_CHARS]
+    if not line[LOG_LINE_CHARS].isspace():
+        parts = head.rsplit(None, 1)
+        head = parts[0] if len(parts) == 2 else ""
+    return f"{mask(head)} …<{len(line) - len(head)} chars cut>"
 
 class BackendWorker(QThread):
     """Run one backend operation off the main thread.
@@ -171,6 +222,11 @@ class BackendWorker(QThread):
             self._cancel_token.cancel()
         self._log = None
         self._last_progress_logged = float("-inf")
+        #: DXVK/VKD3D info lines kept in this run's log and replay (see :data:`LAYER_INFO_LINES`).
+        self._layer_info_kept = 0
+        self._presenter_lines_kept = 0
+        #: The launch's window evidence while ``launchgate.play`` runs (#1821).
+        self._window_watch = None
 
     # ---- lifecycle ---------------------------------------------------------
     @property
@@ -271,16 +327,34 @@ class BackendWorker(QThread):
             backend.install()
         elif op == "update":
             backend.update()
+            patchops.warn_if_undone(backend)
         elif op == "repair":
             backend.repair()
+            patchops.warn_if_undone(backend)
+        elif op == "apply_patch":
+            patchops.apply(backend, str(self._payload))
+        elif op == "update_patch":
+            patchops.update(backend, str(self._payload))
+        elif op == "remove_patch":
+            patchops.remove(backend, str(self._payload))
         elif op == "remake_prefix":
             backend.remake_prefix()
         elif op == "login":
             backend.login()
         elif op == "launch":
             # Every pre-Play check, then the game (#1451).
-            with launch_window.watch(_game_pids(backend), self._on_event, self._cancel_token):
-                return launchgate.play(backend)
+            pids = _game_pids(backend)
+            with launch_window.watch(
+                pids,
+                self._on_event,
+                self._cancel_token,
+                game_processes=_game_processes(backend, pids),
+            ) as watched:
+                self._window_watch = watched
+                try:
+                    return launchgate.play(backend)
+                finally:
+                    self._window_watch = None
         elif op == "stop":
             backend.stop()
         elif op == "set_remember":
@@ -434,9 +508,42 @@ class BackendWorker(QThread):
         )
 
     def _on_event(self, event: Event) -> None:
+        # The launch's own output: WindowEvidence.feed recognises only the DXVK/VKD3D
+        # swapchain line, so a RendererProbe or helper line cannot end the sheet (#1821).
+        # Read once: the monitor's ``finally`` can clear it on another thread.
+        watch = self._window_watch
+        if event.kind == "log" and watch is not None:
+            watch.feed(event.message)
+        if event.kind == "log" and self._drop_layer_info(event.message):
+            return
         if self._worth_logging(event):
             self._note(f"[{event.kind}] {event.message}")
         self.backend_event.emit(event)
+
+    def _drop_layer_info(self, line: str) -> bool:
+        """Whether this DXVK/VKD3D ``info:`` line is only noise now (#1821).
+
+        The first :data:`LAYER_INFO_LINES` non-presenter lines of a run are kept for the
+        log and the replay; after that the line has already been offered to the
+        first-frame watch, so it is dropped instead of flushing thousands of lines and
+        evicting Nadare's own ``runner:``/``exec:``/``env:`` lines from the replay. The
+        first presenter line is always kept, so a maintainer can see in the log what
+        ended the sheet; later ones (DXVK reallocates on every resize) share the cap.
+        ``err:``/``warn:`` stay.
+        """
+        if not _LAYER_INFO_RE.match(line):
+            return False
+        if launch_window.is_first_frame(line):
+            # Their own small budget: a launcher's swapchain line cannot use up the slot
+            # of the game's, and a resize loop cannot flood the log.
+            if self._presenter_lines_kept < PRESENTER_LINES:
+                self._presenter_lines_kept += 1
+                return False
+            return True
+        if self._layer_info_kept < LAYER_INFO_LINES:
+            self._layer_info_kept += 1
+            return False
+        return True
 
     def _worth_logging(self, event: Event) -> bool:
         """Progress ticks arrive per megabyte; the log keeps one every half minute and the last."""
@@ -508,7 +615,7 @@ class BackendWorker(QThread):
         if log is None:
             return
         try:
-            text = mask(line.rstrip("\n"))
+            text = mask_log_line(line.rstrip("\n"))
             if self._operation not in BACKGROUND:
                 prefix = f"+{time.monotonic() - self._log_started:6.1f}s "
                 text = "\n".join(prefix + part for part in text.split("\n"))

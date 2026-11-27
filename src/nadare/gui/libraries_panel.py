@@ -16,7 +16,6 @@ from pathlib import Path
 
 from PyQt6.QtCore import QThreadPool, pyqtSignal
 from PyQt6.QtWidgets import (
-    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -31,6 +30,7 @@ from PyQt6.QtWidgets import (
 from ..core import backends, diskspace, gamefinder, libraries, relink
 from ..core.config import Config
 from .add_game import game_specs
+from .dialog_layout import WrappedCheckBox, fit_dialog, make_scroll_body
 from .i18n import tr_n
 from .workers import CallTask
 
@@ -436,27 +436,56 @@ class LibrariesPanel(QWidget):
 
     def _choose_box(self, items: list[tuple[str, bool]]) -> list[bool] | None:
         """A list of found games with a checkbox each; ``None`` when cancelled."""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Games found")
-        layout = QVBoxLayout(dialog)
+        dialog = _FoundGamesDialog(items, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return [box.isChecked() for box in dialog.boxes]
+
+
+class _FoundGamesDialog(QDialog):
+    """Tick the discovered library games to add to the Library."""
+
+    def __init__(self, items: list[tuple[str, bool]], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Games found")
+        self._shown_once = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
+
+        heading = QLabel(self.windowTitle())
+        heading.setObjectName("Title")
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+
+        self._scroll, _body, body_layout = make_scroll_body(spacing=12)
         intro = QLabel("Nadare found these games in your libraries. Add the ticked ones?")
         intro.setWordWrap(True)
-        layout.addWidget(intro)
-        boxes = []
+        body_layout.addWidget(intro)
+        self.boxes: list[WrappedCheckBox] = []
         for label, checked in items:
-            box = QCheckBox(label)
+            box = WrappedCheckBox(label)
+            box.setToolTip(label)
             box.setChecked(checked)
-            layout.addWidget(box)
-            boxes.append(box)
+            body_layout.addWidget(box)
+            self.boxes.append(box)
+        layout.addWidget(self._scroll, 1)
+
         buttons = QDialogButtonBox()
         buttons.addButton("Add", QDialogButtonBox.ButtonRole.AcceptRole)
         buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return None
-        return [box.isChecked() for box in boxes]
+        self._fit_height()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        self._fit_height(keep_width=self._shown_once)
+        self._shown_once = True
+
+    def _fit_height(self, *, keep_width: bool = False) -> None:
+        fit_dialog(self, min_width=520, scroll=self._scroll, keep_width=keep_width)
 
 
 __all__ = ["LibrariesPanel", "LibraryRow"]

@@ -172,6 +172,9 @@ def plan_from_xml(xml: str, res_url: str, version: str) -> directdl.Plan:
                         ),
                         unwrap=("slices",),
                         members=tuple(members),
+                        # A changed Pak is a new object (pak-<md5>): the slot lets the next
+                        # version find this one's record and remove what it dropped (#1824).
+                        slot="client",
                     )
                 )
 
@@ -181,6 +184,7 @@ def plan_from_xml(xml: str, res_url: str, version: str) -> directdl.Plan:
         files=tuple(files),
         archives=tuple(archives),
         exe=EXE,
+        prune_files=True,  # #1825: the list is the whole install
     )
 
 

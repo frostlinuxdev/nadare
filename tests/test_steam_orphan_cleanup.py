@@ -69,8 +69,10 @@ def test_the_window_cleans_up_orphans_off_the_gui_thread_at_start(tmp_path, monk
     seen: list[tuple[set, bool, bool]] = []
     done = threading.Event()
 
-    def fake(profiles, argv=None, *, orphans_only=False):
+    def fake(profiles, argv=None, *, orphans_only=False, repair_stale=False):
         on_gui = threading.current_thread() is threading.main_thread()
+        # #1876: the start-up run also repairs shortcuts whose Nadare is gone.
+        assert repair_stale and argv
         seen.append((set(profiles), orphans_only, on_gui))
         done.set()
         return {"updated": [], "removed": [], "warnings": []}

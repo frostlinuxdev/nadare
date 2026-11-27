@@ -73,7 +73,10 @@ class ManageRunnersDialog(QDialog):
         self.setWindowTitle("Manage runners")
         self.setMinimumWidth(640)
         self._profiles = profiles
-        self._worker = _Worker(self)
+        # No parent: the measuring and deleting threads emit on it, and as a child it died with
+        # the dialog under a running emit (segfault in _measure, CI 2026-11-26). Each thread's
+        # bound method keeps it alive; the connections to the dialog go when the dialog does.
+        self._worker = _Worker()
         self._worker.usage_ready.connect(self._on_usage)
         self._worker.size_ready.connect(self._on_size)
         self._worker.deleted.connect(self._on_deleted)
@@ -86,9 +89,11 @@ class ManageRunnersDialog(QDialog):
         self._missing: list[Path] = []
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(12)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
         heading = QLabel("Proton runners downloaded by Nadare")
         heading.setObjectName("Title")
+        heading.setWordWrap(True)
         layout.addWidget(heading)
         note = QLabel(
             "The recommended build is the one Nadare has tested. A runner that a game "
@@ -111,14 +116,16 @@ class ManageRunnersDialog(QDialog):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for column in (1, 2, 3, 4):
             header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
-        layout.addWidget(self.table)
+        layout.addWidget(self.table, 1)
 
         self.empty_label = QLabel(EMPTY_RUNNERS_TEXT)
         self.empty_label.setObjectName("Muted")
+        self.empty_label.setWordWrap(True)
         layout.addWidget(self.empty_label)
 
         self.total_label = QLabel("")
         self.total_label.setObjectName("Muted")
+        self.total_label.setWordWrap(True)
         layout.addWidget(self.total_label)
 
         footer = QHBoxLayout()

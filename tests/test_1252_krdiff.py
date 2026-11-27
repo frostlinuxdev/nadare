@@ -173,7 +173,7 @@ def test_not_a_kuro_patch_is_refused(tree):
 
 # ---- the real thing, when the fixtures are on this machine ------------------------------------
 
-REAL = Path("/mnt/kikyou/work/b23run/krp")
+REAL = Path(os.environ.get("NADARE_KRDIFF_FIXTURES", "/nonexistent"))
 
 
 @pytest.mark.skipif(not (REAL / "selected.json").is_file(), reason="real WuWa fixtures absent")

@@ -50,10 +50,13 @@ SAIL_HOST_NAME = "nikke_sail_host.exe"
 _ASSETS = Path(__file__).resolve().parents[2] / "assets"
 INTL_HOST = _ASSETS / INTL_HOST_NAME
 SAIL_HOST = _ASSETS / SAIL_HOST_NAME
-INTL_HOST_SHA256 = "3a442d1a045d5dca04c25fec7512f591bc9e6589cb95a239f8f7984f31e8ea76"
+INTL_HOST_SHA256 = "712a74a6eb5a8e328781fff65ea0f9f3ae982a981f3dd2014cf946b7e0b13965"
 SAIL_HOST_SHA256 = "1fd8cf2c04c984346aac378088380b3f5dbc56a893daefdb3766a695d90066a4"
-INTL_SOURCE_SHA256 = "09437533adc13721e68889594fed60bc8df3980ffb091ad0b20c8c2f2f1a3990"
+INTL_SOURCE_SHA256 = "34dc98d28cab8a661d5e054955013b73e332f83a43dd7e3005de8d0f721a0a7f"
 SAIL_SOURCE_SHA256 = "3d2ff7da2f5175d7cc0578221d7bb2dd86b563d584c7ee5f9702965156128734"
+#: The INTL host's exit code when the service will not open the Google page even after the host
+#: answered its launcher-only request (launcher 0.0.6.904, 2026-11-26): sign in in the launcher.
+INTL_EXIT_LAUNCHER_SIGN_IN = 4
 
 #: Files the INTL service needs to auto-login. Logs and reports are excluded.
 #: Without this the copy is not a sign-in (a fresh Google sign-in may have no mmkv yet).

@@ -66,9 +66,17 @@ class ReportDialog(QDialog):
         self.setWindowTitle("Report a problem")
         self.resize(760, 560)
         layout = QVBoxLayout(self)
-        layout.addWidget(
-            QLabel("Nothing is uploaded. Check the text, then paste it where you are getting help.")
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
+        heading = QLabel(self.windowTitle())
+        heading.setObjectName("Title")
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+        intro = QLabel(
+            "Nothing is uploaded. Check the text, then paste it where you are getting help."
         )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
         self.text = QPlainTextEdit()
         self.text.setObjectName("Console")  # the readable monospace style the log viewer uses
         self.text.setReadOnly(True)

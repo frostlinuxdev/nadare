@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """#1362: the b22 game-folder manifest must not leave folders behind or block anything.
 
-Seen on flxpc (2026-11-14): ``profiles/brown-dust-2/`` held only ``nadare-game.json`` for a
+Seen on an NVIDIA PC (2026-11-14): ``profiles/brown-dust-2/`` held only ``nadare-game.json`` for a
 game that was never installed; Aether Gazer, which Nadare installed in
 ``profiles/aether-gazer/{prefix,install}``, had no ``owned_trees`` and so could only move its
 prefix and was described as "an existing install".
@@ -108,7 +108,7 @@ def test_a_leftover_manifest_temp_file_does_not_block_the_whole_move(env):
 
 # ---- 3: ownership for b22..b24 games in profiles/<id>/ -------------------------------------
 def _aether_gazer_b24(cfg: Config) -> Path:
-    """The exact shape on flxpc: no owned_trees, no owned_dirs, folders made by Nadare."""
+    """The exact shape on an NVIDIA PC: no owned_trees, no owned_dirs, folders made by Nadare."""
     home = paths.profiles_dir() / "aether-gazer"
     (home / "prefix" / "drive_c" / "windows").mkdir(parents=True)
     (home / "prefix" / "system.reg").write_text("reg")

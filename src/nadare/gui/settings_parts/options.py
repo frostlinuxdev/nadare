@@ -33,6 +33,7 @@ from ...core.backends import Option, config_only
 from ...core.backends import get as backend_get
 from ...core.config import as_bool, bounded_int, profile_value
 from ..i18n import tr
+from .search import SettingsSearchForm
 from .shared import (
     _fill_monitor_combo,
     _text_to_env,
@@ -125,7 +126,7 @@ class OptionsMixin:
     def _build_options(self, kind: str) -> None:
         """(Re)build the Game options card for ``kind``."""
         _clear_layout(self._options_host_layout)
-        form = QFormLayout()
+        form = SettingsSearchForm(self)
         form.setContentsMargins(0, 0, 0, 0)
         form.setHorizontalSpacing(20)
         form.setVerticalSpacing(14)
@@ -135,6 +136,7 @@ class OptionsMixin:
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
         self._options_host_layout.addLayout(form)
         self._options_form = form
+        self._search_add_options_form(form)
         self._option_rows = []
         self._option_free = {}
         self._option_browse = {}
@@ -146,7 +148,7 @@ class OptionsMixin:
         self.move_button = self._make_move_button()
         self.change_location_button = self._make_change_location_button()
         options = self._backend_options(kind)
-        self.restore_defaults.setVisible(bool(options))
+        self._set_widget_visible(self.restore_defaults, bool(options))
         has_install_dir = any(option.key == "install_dir" for option in options)
         # install_dir / runner are always edited in the Game files card.
         self._option_widgets = {"install_dir": self.install_dir, "runner": self.runner}
@@ -156,7 +158,7 @@ class OptionsMixin:
             self._files_form.setRowVisible(self._runner_row, uses_runner)
             behind = getattr(self, "runner_behind", None)
             if behind is not None and not uses_runner:
-                behind.setVisible(False)
+                self._set_widget_visible(behind, False)
         if not has_install_dir:
             # Steam/CZN/FGO never read this key; an old value must not look live.
             self.install_dir.clear()
@@ -188,8 +190,10 @@ class OptionsMixin:
                 self._speed_editors.append(speed)
                 form.addRow(tr("Download speed limit (MB/s, 0 = none)"), speed)
                 self._option_rows.append((option.advanced, form.rowCount() - 1))
-        self.open_game_button.setVisible(has_install_dir)
-        self.open_prefix_button.setVisible(any(option.key == "prefix" for option in options))
+        self._set_widget_visible(self.open_game_button, has_install_dir)
+        self._set_widget_visible(
+            self.open_prefix_button, any(option.key == "prefix" for option in options)
+        )
         self._apply_advanced(self.show_advanced.isChecked())
 
     def _restore_option_defaults(self) -> None:

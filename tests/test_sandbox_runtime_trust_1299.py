@@ -3,7 +3,7 @@
 
 Nadare records the runtime's ``srt-bwrap`` the first time the Sandbox starts and then runs only
 that exact file (#871: the folder is writable by games). umu updates its runtime every few weeks,
-which changes the file (flxpc and the KDE test desktop, checked 2026-11-16: pins from 11-07/11-09,
+which changes the file (two test PCs, checked 2026-11-16: pins from 11-07/11-09,
 runtime 0.20261110). Where the system's bubblewrap is blocked (Ubuntu 24.04+), the Sandbox then
 had no copy left: on by default the game played unsandboxed with one log line, switched on it
 refused with "the system blocks it". Now the reason is named, and start-up asks once whether to
@@ -225,7 +225,8 @@ def test_on_by_default_says_why_it_runs_without(tmp_path, rig, monkeypatch):
     assert Path(argv[0]).name != "srt-bwrap"
     said = " ".join(getattr(e, "message", str(e)) for e in events)
     assert "updated" in said and "Trust" in said
-    assert "runs without the Sandbox" in said and "doctor" not in said, "its own sentence"
+    # Not the generic "cannot start" sentence; a bare "doctor" also matches tmp paths.
+    assert "runs without the Sandbox" in said and "`nadare doctor`" not in said, "its own sentence"
 
 
 # ---- start-up -----------------------------------------------------------------------------

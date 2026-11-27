@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import logging
 import threading
+from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QMessageBox,
@@ -79,9 +80,14 @@ class CleanupMixin:
             return
         profiles = {name: dict(data) for name, data in self.config.profiles.items()}
 
+        argv = shortcuts.launcher_argv()
+
         def run() -> None:
             try:
-                result = shortcuts.refresh_steam_shortcuts(profiles, orphans_only=True)
+                # Also repairs a shortcut whose Nadare is gone (an old AppImage; #1876).
+                result = shortcuts.refresh_steam_shortcuts(
+                    profiles, argv=argv, orphans_only=True, repair_stale=True
+                )
             except Exception:  # noqa: BLE001 - a background tidy-up must never break start
                 log.debug("Steam shortcut cleanup failed", exc_info=True)
                 return
@@ -89,6 +95,42 @@ class CleanupMixin:
                 log.info("removed the Steam shortcut of a removed game: %s", item)
 
         threading.Thread(target=run, name="steam-shortcut-cleanup", daemon=True).start()
+
+    def _start_shortcut_repair(self, *, wait: bool = False) -> None:
+        """Point menu and desktop shortcuts whose Nadare is gone at this one (#1876).
+
+        An AppImage replaced by a newer file, or a removed checkout, left every shortcut made
+        from it doing nothing. Only entries whose program no longer exists change; it runs in a
+        thread because finding the Desktop folder may start ``xdg-user-dir``.
+        """
+        if self.config.notice or not self.config.profiles:
+            return
+        profiles = {name: dict(data) for name, data in self.config.profiles.items()}
+        # Resolved now, not in the thread: the environment can change before it runs.
+        applications = shortcuts.applications_dir()
+        home = Path.home()
+        argv = shortcuts.launcher_argv()
+
+        def run() -> None:
+            try:
+                desktop: Path | None = shortcuts.desktop_dir()
+                if desktop is not None and not desktop.is_relative_to(home):
+                    desktop = None  # only the player's own Desktop folder
+                result = shortcuts.repair_stale_desktop_entries(
+                    profiles, applications_dir=applications, desktop_dir=desktop, argv=argv
+                )
+            except Exception:  # noqa: BLE001 - a background tidy-up must never break start
+                log.debug("shortcut repair failed", exc_info=True)
+                return
+            for path in result.get("updated", []):
+                log.info("pointed the shortcut %s at this Nadare (its old one is gone)", path)
+            for warning in result.get("warnings", []):
+                log.info("%s", warning)
+
+        thread = threading.Thread(target=run, name="shortcut-repair", daemon=True)
+        thread.start()
+        if wait:
+            thread.join()
 
     # ---- crash leftovers and unneeded installers (#1417) ------------------------------
     def _start_leftover_sweep(self) -> None:

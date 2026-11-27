@@ -28,6 +28,7 @@ module has no file yet, add `tests/test_<module>.py` and then add it below.
 | `nadare.backends.czn.runners` | — |
 | `nadare.backends.czn.update` | — |
 | `nadare.backends.direct` | `test_direct_backend.py`, `test_direct_update_badge.py`, `test_sophon.py` |
+| `nadare.backends.direct_bpsr` | `test_bpsr_source.py` |
 | `nadare.backends.endfield_news` | — |
 | `nadare.backends.fgo` | `test_audit_remaining_mediums.py`, `test_backends_fgo.py`, `test_backends_fgo_news.py`, `test_doctor_fgo.py`, `test_fgo_account_notice.py`, `test_fgo_installer.py`, `test_fgo_readiness.py`, `test_gui_smoke.py`, `test_impl_errors.py`, `test_lazy_backends.py`, `test_optional_fgo.py`, `test_sweep_diag.py`, `test_sweep_dl.py`, `test_sweep_l1.py`, `test_sweep_policy.py`, `test_sweep_robust.py`, `test_sweep_status.py` |
 | `nadare.backends.fgo.backend` | `test_audit_remaining_mediums.py`, `test_backends_fgo.py`, `test_backends_fgo_news.py`, `test_fgo_account_notice.py`, `test_fgo_installer.py`, `test_gui_smoke.py`, `test_impl_errors.py`, `test_sweep_diag.py`, `test_sweep_robust.py` |
@@ -70,7 +71,7 @@ module has no file yet, add `tests/test_<module>.py` and then add it below.
 | `nadare.core.netmarble` | `test_netmarble.py` |
 | `nadare.core.news` | `conftest.py`, `test_artwork.py`, `test_backends_fgo_news.py`, `test_backends_hoyo_art.py`, `test_backends_hoyo_news.py`, `test_backends_publisher_news.py`, `test_gui_news_art.py`, `test_gui_resize_recursion.py`, `test_gui_smoke.py`, `test_gui_switching.py`, `test_impl2_startup.py`, `test_sweep_l2a.py` |
 | `nadare.core.notices` | — |
-| `nadare.core.nte_launcher` | `test_nte_launcher.py` |
+| `nadare.core.nte_launcher` | `test_nte_launcher.py`, `test_tof_launcher.py` |
 | `nadare.core.paths` | `conftest.py`, `test_sweep_czn.py` |
 | `nadare.core.prefixmove` | — |
 | `nadare.core.process` | `test_backends_czn.py`, `test_proc_scan.py`, `test_process.py` |
@@ -92,13 +93,18 @@ module has no file yet, add `tests/test_<module>.py` and then add it below.
 | `nadare.core.sources._aes` | `test_aes.py` |
 | `nadare.core.sources.aethergazer` | — |
 | `nadare.core.sources.bd2` | — |
+| `nadare.core.sources.bpsrglobal` | `test_bpsr_source.py` |
 | `nadare.core.sources.endfield` | — |
 | `nadare.core.sources.gfl2` | — |
 | `nadare.core.sources.hoyo` | — |
 | `nadare.core.sources.kuro` | — |
 | `nadare.core.sources.mongil` | — |
+| `nadare.core.sources.strinova` / Strinova lifecycle | `test_strinova_source.py`, `test_strinova_lifecycle.py` |
 | `nadare.core.sources.snowbreak` | `test_snowbreak_source.py` |
+| `nadare.core.sources.r1999` | `test_r1999_source.py`, `test_r1999_lifecycle.py` |
 | `nadare.core.sources.nte` | `test_nte_source.py` |
+| `nadare.core.sources.tof` | `test_tof_source.py`, `test_direct_backend.py` |
+| `nadare.core.directslices` | `test_tof_source.py` |
 | `nadare.core.sources.pgr` | — |
 | `nadare.core.sources.wuwa` | — |
 | `nadare.core.storecatalog` | `test_direct_backend.py`, `test_store.py`, `test_store_cosmetics.py`, `test_store_polish.py`, `test_store_variants.py`, `test_storecatalog.py` |
@@ -131,3 +137,11 @@ module has no file yet, add `tests/test_<module>.py` and then add it below.
 | `nadare.gui.theme` | `test_gui_library_relayout.py`, `test_gui_smoke.py`, `test_theme.py` |
 | `nadare.gui.userns_dialog` | — |
 | `nadare.gui.workers` | `test_controller_preemption.py`, `test_gui_close_with_game.py`, `test_gui_skip_step.py`, `test_impl2_lifecycle.py`, `test_pause_resume.py`, `test_r3_regressions.py`, `test_settings_lock_async.py`, `test_stale_worker_busy.py`, `test_sweep_polish.py`, `test_triage_gui.py`, `test_vcredist_retry.py` |
+
+- `test_hbr_source.py`: Heaven Burns Red identity, experimental catalog row, shared Yostar
+  generation, API/index key separation, legacy filenames, missing manifest/salt refusal,
+  trusted CDN, CRC-64 plan and malformed manifest checks (synthetic offline fixture).
+- `test_azupro_source.py`: Azur Promilia (JP) identity, default launch args, experimental
+  catalog row, the JP API host, shared Yostar generation, API/index key separation, legacy
+  filenames, missing manifest/salt refusal, trusted CDN and malformed manifest checks
+  (synthetic offline fixture).

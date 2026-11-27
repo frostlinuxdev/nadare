@@ -45,16 +45,6 @@ def test_webview2_valid_hashes_are_still_capped(index):
     assert CznBackend._webview2_index_pins() == set(many[:WEBVIEW2_INDEX_MAX_HASHES])
 
 
-# ---- #591: the .deb says what the project is licensed as ---------------------------------
-
-
-def test_the_deb_copyright_matches_the_project_licence():
-    script = (ROOT / "scripts/build_deb.sh").read_text(encoding="utf-8")
-    copyright_block = script.split("usr/share/doc/nadare/copyright", 1)[1].split("EOF", 2)[1]
-    assert "GPL-3.0-only" in copyright_block
-    assert "GPL-3.0-or-later)" not in copyright_block.split("Licensed under", 1)[1].split("\n\n")[0]
-
-
 # ---- #620: a trailing backslash must not break the .desktop file -------------------------
 
 

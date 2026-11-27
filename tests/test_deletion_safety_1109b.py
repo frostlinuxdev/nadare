@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Deletion safety, 2026-11-09 audit, batch B: removal, uninstall-all, per-game uninstall, config.
 
-Reports in /mnt/kikyou/work/briefs/deletion-1109/ (w1, w3, w4).
+Findings w1, w3 and w4.
 """
 
 from __future__ import annotations
@@ -140,7 +140,7 @@ def test_the_nikke_unpack_folder_is_never_looked_up_through_a_linked_user_folder
     (home / "AppData" / "Local" / "nikkeminiloader").mkdir(parents=True)
     users = tmp_path / "pfx" / "drive_c" / "users"
     users.mkdir(parents=True)
-    (users / "frost").symlink_to(home)
+    (users / "player").symlink_to(home)
 
     found = launcher._wine_user_dir(tmp_path / "pfx")
 

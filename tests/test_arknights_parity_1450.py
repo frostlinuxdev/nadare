@@ -20,7 +20,7 @@ from nadare.core.directkinds import DIRECT_LABEL
 from nadare.gui.game_view_parts.busy import can_pause_kind
 from nadare.gui.library import backend_label
 
-YOSTAR = ("arknights-yostar", "stellasora-yostar")
+YOSTAR = ("arknights-yostar", "stellasora-yostar", "hbr-yostar", "azurpromilia-jp-yostar")
 
 
 @pytest.fixture
@@ -29,12 +29,12 @@ def has_bwrap(monkeypatch):
     monkeypatch.setattr(gamesandbox, "works", lambda binary=gamesandbox.BINARY: (True, ""))
 
 
-def test_both_yostar_games_offer_the_sandbox():
+def test_every_yostar_game_offers_the_sandbox():
     for kind in YOSTAR:
         assert backends.supports_sandbox(kind), kind
 
 
-def test_both_yostar_games_can_pause_an_install():
+def test_every_yostar_game_can_pause_an_install():
     for kind in YOSTAR:
         assert can_pause_kind(kind), kind
 

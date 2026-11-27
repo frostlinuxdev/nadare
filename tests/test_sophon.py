@@ -772,10 +772,17 @@ def test_a_missing_zstandard_does_not_break_importing_or_the_other_games(monkeyp
     import sys
 
     monkeypatch.setitem(sys.modules, "zstandard", None)  # `import zstandard` now raises
-    for name in ("nadare.core.sophon", "nadare.core.directdl", "nadare.backends.direct"):
+    for name in [n for n in sys.modules if n.startswith("nadare.backends.direct")] + [
+        "nadare.core.sophon",
+        "nadare.core.directdl",
+    ]:  # the per-game modules too, or the cached ones skip their imports (#1601 split)
         monkeypatch.delitem(sys.modules, name, raising=False)
+        parent, _, child = name.rpartition(".")
+        if parent in sys.modules:  # `from . import x` reuses the package attribute
+            monkeypatch.delattr(sys.modules[parent], child, raising=False)
     mod = importlib.import_module("nadare.core.sophon")  # must import without it
     importlib.import_module("nadare.backends.direct")
+    assert "nadare.backends.direct_games" in sys.modules  # really re-imported without it
     with pytest.raises(mod.SophonError, match="zstandard"):
         mod._zstd()
 

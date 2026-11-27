@@ -1,0 +1,17 @@
+{
+  "game_tag": "AZUPRO_JP",
+  "version": "1.0.1",
+  "base_url": "https://launcher-pkg-azupro-jp.yo-star.com/prod/AZUPRO_JP",
+  "files": [
+    {
+      "path": "AzurPromiliaJP.exe",
+      "size": 2,
+      "crc64": 6683223467371886641
+    },
+    {
+      "path": "AzurPromiliaJP_Data/app.info",
+      "size": 3,
+      "crc64": 17181544372179898927
+    }
+  ]
+}

@@ -730,6 +730,7 @@ def _install(
     fetch: Callable[[str, int, str], bytes],
     emit: Callable[[Event], None] | None,
     cancel: Cancel | None,
+    ledger: str | None = None,
 ) -> InstallResult:
     dest = Path(dest)
     if dest.is_symlink():
@@ -842,12 +843,38 @@ def _install(
             pass
         except OSError:
             pass
+    if ledger:
+        _record_and_prune(dest, ledger, files)
     return InstallResult(
         files=total_files,
         bytes=total_bytes,
         downloaded=downloaded,
         kept=kept,
     )
+
+
+def _record_and_prune(
+    dest: Path, ledger: str, files: list[tuple[Repository, Entry, tuple[str, ...]]]
+) -> None:
+    """Remove what the previous install recorded and this one dropped, then record this one.
+
+    Runs only after every file was verified. directdl's guarded prune does the removing: a
+    file goes only while it is a plain file still at its recorded size and md5 (#1825).
+    """
+    from . import directdl  # late: directdl is the heavier module
+
+    plan = directdl.Plan(
+        ledger,
+        "",
+        files=tuple(
+            directdl.RemoteFile("/".join(parts), "", entry.size, md5=entry.md5.hex())
+            for _repo, entry, parts in files
+        ),
+    )
+    try:
+        directdl.prune_dropped_files(plan, dest)
+    except (OSError, directdl.DirectError):
+        pass  # never fails a verified install; the next one tries again
 
 
 def install(
@@ -857,10 +884,15 @@ def install(
     fetch: Callable[[str, int, str], bytes],
     emit: Callable[[Event], None] | None = None,
     cancel: Cancel | None = None,
+    ledger: str | None = None,
 ) -> InstallResult:
-    """Fetch and install every file of ``repos`` below ``dest``, verifying all bytes."""
+    """Fetch and install every file of ``repos`` below ``dest``, verifying all bytes.
+
+    With ``ledger``, the installed files are recorded under that name and a later install
+    removes the ones its manifest dropped (#1825). Leave it out for a folder not Nadare's own.
+    """
     try:
-        return _install(repos, dest, fetch, emit, cancel)
+        return _install(repos, dest, fetch, emit, cancel, ledger)
     except (RailError, Cancelled):
         _drop_empty_partial_dir(dest)
         raise

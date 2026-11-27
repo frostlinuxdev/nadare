@@ -2,7 +2,7 @@
 """#1354 (rig, 2026-11-15): a Flatpak-Sandboxed Wine game outlived a killed Nadare.
 
 ``--watch-bus`` signals only the sandbox's top process; with ``--share-pids`` Wine's processes
-live in Nadare's own PID namespace and kept running (BD2 on the flx-storage rig, Flatpak 1.16.6,
+live in Nadare's own PID namespace and kept running (BD2 on a test rig, Flatpak 1.16.6,
 portal 1.20.3; a plain ``sleep`` did end, which is why the first test passed). The sandboxed
 wrapper now watches the Nadare process that started it (PID + start time, so a reused PID never
 counts) and runs ``wineserver -k`` for the game's prefix when it is gone. It arms only when that
@@ -22,6 +22,16 @@ import pytest
 from nadare.core import gamesandbox
 
 pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc is Linux only")
+
+
+def _calls(tmp_path: Path) -> list[str]:
+    """The flag of each fake wineserver call (``-k`` or ``-w``: the last word of its log line).
+
+    A substring check on the whole log matched "-k" inside a path such as
+    ``aurora-wt-...-keyart``; compare the flags instead.
+    """
+    lines = (tmp_path / "wineserver.log").read_text().splitlines()
+    return [line.rsplit(" ", 1)[-1] for line in lines]
 
 
 def _fake_wineserver(tmp_path: Path) -> Path:
@@ -74,15 +84,15 @@ def test_a_living_nadare_never_ends_the_game(tmp_path):
     wrapper = _wrapper(tmp_path, os.getpid(), gamesandbox.process_start_time(os.getpid()),
                        ["/bin/sh", "-c", "sleep 3; exit 3"])
     assert wrapper.wait(timeout=20) == 3
-    log = (tmp_path / "wineserver.log").read_text()
-    assert "-k" not in log and "-w" in log
+    calls = _calls(tmp_path)
+    assert "-k" not in calls and "-w" in calls
 
 
 def test_not_armed_when_nadare_is_not_visible(tmp_path):
     """A wrong start time (another process, or a PID namespace Nadare is not in): no -k."""
     wrapper = _wrapper(tmp_path, os.getpid(), "1", ["/bin/sh", "-c", "sleep 3; exit 3"])
     assert wrapper.wait(timeout=20) == 3
-    assert "-k" not in (tmp_path / "wineserver.log").read_text()
+    assert "-k" not in _calls(tmp_path)
 
 
 def test_a_reused_pid_does_not_keep_the_game_alive(tmp_path):
@@ -123,6 +133,6 @@ def test_another_process_with_that_pid_is_not_nadare(tmp_path):
         other.kill()
         other.wait()
         assert wrapper.wait(timeout=20) == 3
-        assert "-k" not in (tmp_path / "wineserver.log").read_text()
+        assert "-k" not in _calls(tmp_path)
     finally:
         other.kill()

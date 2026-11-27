@@ -1,0 +1,19 @@
+{
+  "code": 200,
+  "msg": "success",
+  "data": {
+    "targetVersion": "3.9.1",
+    "forceUpdate": true,
+    "fullPackage": null,
+    "diffPackage": {
+      "packageUrls": [
+        "https://download.bluepoch.com/en/game/3.9.1/update-3.9.0/12242_3.9.0_patch_12242_3.9.0_60001_38446_total_661598354_origin_661598354_size_452086702_md5_89f43d00e3631516823e34d18137aa6f_0.7z"
+      ],
+      "packageSize": 452086702,
+      "packageRealSize": 661598354,
+      "packageMd5": "1",
+      "packageJson": null,
+      "downloadType": 0
+    }
+  }
+}

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Library and favourite cards share the smaller responsive size rule."""
 
+import time
+
 from PyQt6.QtWidgets import QApplication, QScrollArea
 
 from nadare.gui import library, theme
@@ -79,11 +81,19 @@ def test_a_drag_resize_decodes_each_cover_once_after_it_settles(monkeypatch):
             app.processEvents()
         page._art_timer.stop()
         requests.clear()
+        # The test fires the timer itself: a loaded CI host can stall between two steps for
+        # longer than the real 150 ms interval, and that pause would rightly count as settled.
+        page._art_timer.setInterval(3_600_000)
         for width in range(1300, 2600, 40):
             page.resize(width, 1000)
             app.processEvents()
-        # 33 resize steps, yet each cover is decoded once: the timer fires only after the
-        # cards stop changing size (here at the width cap), never once per step.
+            if width == 1340:
+                time.sleep(0.2)  # such a stall must not change the count below
+                app.processEvents()
+        # 33 resize steps queue no decode: each one only restarts the pending timer.
+        assert requests == []
+        assert page._art_timer.isActive()
+        # When it fires, each cover is decoded once, at the final size.
         page._art_timer.timeout.emit()
         app.processEvents()
         card = next(iter(page._cards.values()))

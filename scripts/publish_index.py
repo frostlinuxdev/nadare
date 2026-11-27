@@ -111,6 +111,12 @@ def _merge_file(new: Path, dest: Path) -> bool:
 
 
 def publish_yostar(out: Path, env: dict[str, str]) -> bool:
+    """Publish generator index keys verbatim, including HBR's ``hbr-yostar``.
+
+    The environment (including SALT_HBR_EN, VERSION_HBR_EN and the Azur
+    Promilia (JP) pair) passes only to the generator; API tags inside
+    manifest/media documents stay untouched.
+    """
     out.mkdir(parents=True, exist_ok=True)
     index_path = out / "index.json"
     index: dict[str, Any] = {}
@@ -386,6 +392,7 @@ def default_catalog_games() -> dict[str, CatalogGame]:
     from nadare.core.sources import (
         aethergazer,
         bd2,
+        bpsrglobal,
         dna,
         endfield,
         gfl2,
@@ -393,7 +400,10 @@ def default_catalog_games() -> dict[str, CatalogGame]:
         mongil,
         nte,
         pgr,
+        r1999,
         snowbreak,
+        strinova,
+        tof,
         wuwa,
     )
 
@@ -408,7 +418,11 @@ def default_catalog_games() -> dict[str, CatalogGame]:
         "endfield": endfield,
         "nte": nte,
         "dna": dna,
+        "r1999": r1999,
         "snowbreak": snowbreak,
+        "tof": tof,
+        "strinova": strinova,
+        "bpsr": bpsrglobal,
     }
     games: dict[str, CatalogGame] = {}
     for kind, steam_appid in dk.ART.items():
@@ -416,6 +430,8 @@ def default_catalog_games() -> dict[str, CatalogGame]:
             continue
         if kind in dk.HOYO_KINDS and not dk.hoyo_visible():
             continue  # NADARE_HIDE_HOYO=1 hides them, like the Add Game wizard
+        if kind in dk.HELD_BACK_KINDS:
+            continue  # cannot start yet, so not offered (like the Add Game wizard)
         tag = kind.removeprefix("direct-")
         if kind not in dk._DIRECT or (tag not in modules and tag not in _HOYO_BIZ):
             print(f"catalog {tag}: no resolver for this kind yet, skipping")

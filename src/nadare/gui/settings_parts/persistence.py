@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ...core import artwork as artwork_core
-from ...core import flatpakfs, gamefolders
+from ...core import flatpakfs, gamefolders, paths, runlog
 from ...core import runners as runners_core
 from ...core.backends import kinds, supports_remake_prefix, supports_remember_me
 from ...core.config import Config, ProfileRemovedElsewhere
@@ -74,51 +74,57 @@ class PersistenceMixin:
     # ---- load / save -------------------------------------------------------
     def load(self, config: Config, profile: str) -> None:
         """Populate the form from ``config`` for ``profile``."""
-        self._config = config
-        self._profile = profile
-        self._set_app_only(False)
-        self._pending_art = {}
-        self.tabs.setCurrentIndex(0)
-        data = config.profile(profile)
+        self._search_begin_load()
+        try:
+            self._config = config
+            self._profile = profile
+            self._set_app_only(False)
+            self._pending_art = {}
+            self.tabs.setCurrentIndex(0)
+            data = config.profile(profile)
 
-        self.profile_name.setText(profile)
-        self.heading.setText(f"Settings — {profile_title(profile, data)}")
-        self.title.setText(str(data.get("title") or ""))
-        kind = str(data.get("backend") or "")
-        self._backend_kind = kind
-        self._runner_default_applies = not bool(
-            runners_core.profile_value(data, "wine_binary")
-        )
-        self.install_dir.setText(str(data.get("install_dir") or ""))
-        self._update_free_hints()
-        runner_text = runners_core.profile_runner_value(data)
-        if not self._reload_runners(runner_text):
-            self.runner.setEditText(runner_text)
-        self._update_runner_behind()
-        self.background.setText(str(data.get("custom_background") or ""))
-        self._load_options(kind, data)
-        self._update_free_hints()
-        self._refresh_backup_row(data)
-        if self._files_form is not None:
-            self._files_form.setRowVisible(
-                # Only where the backend can do it: the generic Wine game uses the Proton
-                # default too but has no Rebuild prefix.
-                self._remake_prefix_row, supports_remake_prefix(kind)
+            self.profile_name.setText(profile)
+            self.heading.setText(f"Settings — {profile_title(profile, data)}")
+            self.title.setText(str(data.get("title") or ""))
+            kind = str(data.get("backend") or "")
+            self._backend_kind = kind
+            self._runner_default_applies = not bool(
+                runners_core.profile_value(data, "wine_binary")
             )
-        has_wine_prefix = any(
-            option.key == "prefix" and option.label == "Wine prefix"
-            for option in self._backend_options(kind)
-        )
-        self._refresh_prefix_lock(has_wine_prefix)
-        self._show_placement()
+            self.install_dir.setText(str(data.get("install_dir") or ""))
+            self._update_free_hints()
+            runner_text = runners_core.profile_runner_value(data)
+            if not self._reload_runners(runner_text):
+                self.runner.setEditText(runner_text)
+            self._update_runner_behind()
+            self.background.setText(str(data.get("custom_background") or ""))
+            self._load_options(kind, data)
+            self._update_free_hints()
+            self._refresh_backup_row(data)
+            if self._files_form is not None:
+                self._files_form.setRowVisible(
+                    # Only where the backend can do it: the generic Wine game uses the Proton
+                    # default too but has no Rebuild prefix.
+                    self._remake_prefix_row, supports_remake_prefix(kind)
+                )
+            has_wine_prefix = any(
+                option.key == "prefix" and option.label == "Wine prefix"
+                for option in self._backend_options(kind)
+            )
+            self._refresh_prefix_lock(has_wine_prefix)
+            self._show_placement()
 
-        supported = supports_remember_me(str(data.get("backend") or ""))
-        self.account_card.setVisible(supported)
-        self.remember.setChecked(bool(data.get("remember_me", False)))
+            supported = supports_remember_me(str(data.get("backend") or ""))
+            self.account_card.setVisible(supported)
+            self.remember.setChecked(bool(data.get("remember_me", False)))
 
-        self._load_app_values(config)
-        self.note.setText(f"Saved in {config.path}")
-        self._loaded_state = self._form_state()
+            self._load_app_values(config)
+            logs = paths.logs_dir() / runlog.game_id(profile)
+            self.note.setText(f"Saved in {config.path}\nLogs in {logs}")
+            self.logs_button.setToolTip(f"This game's logs, in {logs}")
+            self._loaded_state = self._form_state()
+        finally:
+            self._search_end_load()  # the query survives a profile switch
 
     def _load_app_values(self, config: Config) -> None:
         """Fill the controls that belong to Nadare itself, not to one game."""
@@ -152,15 +158,19 @@ class PersistenceMixin:
 
     def load_app_only(self, config: Config) -> None:
         """Show only Nadare's own settings, for when no game is open."""
-        self._config = config
-        self._profile = ""
-        self._set_app_only(True)
-        self._pending_art = {}
-        self.tabs.setCurrentIndex(self._app_tab)
-        self.heading.setText("Nadare settings")
-        self._load_app_values(config)
-        self.note.setText(f"Saved in {config.path}")
-        self._loaded_state = self._form_state()
+        self._search_begin_load()
+        try:
+            self._config = config
+            self._profile = ""
+            self._set_app_only(True)
+            self._pending_art = {}
+            self.tabs.setCurrentIndex(self._app_tab)
+            self.heading.setText("Nadare settings")
+            self._load_app_values(config)
+            self.note.setText(f"Saved in {config.path}\nLogs in {paths.logs_dir()}")
+            self._loaded_state = self._form_state()
+        finally:
+            self._search_end_load()
 
     def _save_app_only(self) -> None:
         config = self._config

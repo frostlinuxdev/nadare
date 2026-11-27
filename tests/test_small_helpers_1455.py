@@ -35,6 +35,7 @@ INSIDE = [
 SHA = {
     "core.journal": "_sha256_file",
     "core.nte_launcher": "_sha256",
+    "core.strinova_launcher": "_sha256",
     "core.vcredist": "_sha256_file",
     "core.gamesandbox": "_sha256",
     "core.selfupdate": "_sha256_file",

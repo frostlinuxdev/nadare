@@ -37,15 +37,19 @@ def _connections(data: dict) -> int:
     return int(count) if isinstance(count, (int, float)) and count > 0 else 0
 
 
-def _transfer_text(rate: float | None, data: dict, eta: str = "") -> str:
-    """``85.0 MiB/s · 4 connections · about 2 min left``, with only what is known."""
+def _transfer_text(rate: float | None, data: dict, eta: str = "", connections: int = 0) -> str:
+    """``85.0 MiB/s · 4 connections · about 2 min left``, with only what is known.
+
+    ``connections`` is the last count this download reported: a tick that momentarily has
+    no speed must not make the connections part disappear and come back (the text jiggled).
+    """
     parts: list[str] = []
     speed = format_speed(rate)
     if speed:
         parts.append(speed)
-        count = _connections(data)
-        if count:
-            parts.append(tr_n("{n} connections", count))
+    count = _connections(data) or connections
+    if count:
+        parts.append(tr_n("{n} connections", count))
     if eta:
         parts.append(eta)
     return " · ".join(parts)
@@ -83,6 +87,7 @@ class _RunnerDownload:
     eta: str = ""
     total: float = 0
     done: float = 0
+    connections: int = 0  # last known count: kept while a tick has no fresh one
     meter: SpeedMeter = field(default_factory=lambda: SpeedMeter(SPEED_WINDOW))
 
     def row(self) -> DownloadRow:
@@ -114,6 +119,7 @@ class RunnerDownloadsMixin:
         self._runner_ignored: dict[str, set[str | Cancel]] = {}
         self._download_speed: dict[str, SpeedMeter] = {}
         self._download_totals: dict[str, float] = {}
+        self._download_connections: dict[str, int] = {}
         self._download_eta_text: dict[str, str] = {}
         self._runner_prefetch_cancel: Cancel | None = None
         self._runner_prefetch_thread = None
@@ -184,11 +190,15 @@ class RunnerDownloadsMixin:
         if event.kind in ("status", "progress"):
             entry.detail = self._runner_detail(event, entry, done)
             if data.get("stage") == "extract":
+                entry.fraction = None  # busy: extracting has no percentage of its own
                 entry.eta = ""
                 entry.meter.reset()
             elif done is not None:
+                entry.connections = _connections(data) or entry.connections
                 rate = entry.meter.update(done, time.monotonic())
-                entry.eta = _transfer_text(rate, data, _eta_text(entry.total - done, rate))
+                entry.eta = _transfer_text(
+                    rate, data, _eta_text(entry.total - done, rate), entry.connections
+                )
             self._runner_changed(entry, structural=structural)
         elif structural:
             self._runner_changed(entry)
@@ -321,7 +331,12 @@ class RunnerDownloadsMixin:
             return eta
         meter = self._download_speed.setdefault(profile, SpeedMeter(SPEED_WINDOW))
         rate = meter.update(done, time.monotonic())
-        speed = _transfer_text(rate, data)
+        count = _connections(data)
+        if count:
+            self._download_connections[profile] = count
+        speed = _transfer_text(
+            rate, data, connections=self._download_connections.get(profile, 0)
+        )
         if eta and speed:
             return f"{speed} · {eta}"
         return speed or eta
@@ -329,4 +344,5 @@ class RunnerDownloadsMixin:
     def _reset_download_speed(self, profile: str) -> None:
         self._download_speed.pop(profile, None)
         self._download_totals.pop(profile, None)
+        self._download_connections.pop(profile, None)
         self._download_eta_text.pop(profile, None)

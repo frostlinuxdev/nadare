@@ -109,5 +109,6 @@ def _plan(raw: bytes, base: str) -> directdl.Plan:
         version=version,
         files=tuple(files),
         exe=EXE,
+        prune_files=True,  # #1825: the manifest is the whole install
         extra={"workers": WORKERS},
     )

@@ -14,6 +14,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QLabel,
     QListWidget,
     QListWidgetItem,
     QVBoxLayout,
@@ -21,6 +22,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core import libraries
+from .dialog_layout import fit_dialog, make_scroll_body
 from .libraries_panel import _free_text
 
 #: The last row: open the ordinary folder dialog instead of using a listed library.
@@ -44,22 +46,37 @@ class LibraryPicker(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
+        self._shown_once = False
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
+        heading = QLabel(title)
+        heading.setObjectName("Title")
+        heading.setWordWrap(True)
+        heading.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(heading)
+        self._scroll, _body, body_layout = make_scroll_body(spacing=12)
         self.list = QListWidget()
-        self.list.setMinimumWidth(520)
-        layout.addWidget(self.list)
+        self.list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body_layout.addWidget(self.list, 1)
+        layout.addWidget(self._scroll, 1)
         default = libraries.default_root()
         for root in libraries.library_roots(config):
             is_default = root == default
             if is_default and not include_default:
                 continue  # Move / Change location: profiles/<name> cannot take a moved game
             if is_default:
-                text = f"Default library  ({root})  · {_free_text(root, must_exist=False)}"
+                free = _free_text(root, must_exist=False)
+                text = f"Default library  ({root})  · {free}"
+                tooltip = f"Default library ({root}) · {free}"
             else:
-                text = f"{libraries.display_path(root)}  · {_free_text(root)}"
+                free = _free_text(root)
+                text = f"{libraries.display_path(root)}  · {free}"
+                tooltip = f"{root} · {free}"
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, root)
-            item.setToolTip(str(root))
+            item.setToolTip(tooltip)
             # Shown so the user sees where it was, but an unplugged library cannot be moved to.
             # Nadare's own library is made on demand, so its missing folder is not unplugged.
             if not is_default and not root.is_dir():
@@ -67,6 +84,7 @@ class LibraryPicker(QDialog):
             self.list.addItem(item)
         another = QListWidgetItem(ANOTHER_FOLDER)
         another.setData(Qt.ItemDataRole.UserRole, None)
+        another.setToolTip(ANOTHER_FOLDER)
         self.list.addItem(another)
         first = next(
             (
@@ -83,6 +101,15 @@ class LibraryPicker(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self._fit_height()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        self._fit_height(keep_width=self._shown_once)
+        self._shown_once = True
+
+    def _fit_height(self, *, keep_width: bool = False) -> None:
+        fit_dialog(self, min_width=520, scroll=self._scroll, keep_width=keep_width)
 
     def chosen(self) -> Path | None:
         """The picked library, or ``None`` for "Another folder…" (or no selection)."""

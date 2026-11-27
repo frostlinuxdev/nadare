@@ -45,6 +45,7 @@ def test_a_corrupt_nadare_managed_nikke_client_fails_verify_and_can_be_repaired(
     # Repair is the button for a damaged Nadare-managed client; it must be offered.
     backend._sync_direct = lambda: {}
     backend._missing_entries = lambda **kw: []
+    backend._update_launcher_direct = lambda folder: None  # Repair syncs it too (#1838)
     try:
         backend.repair()
     except BackendUnsupported as exc:

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Deletion safety, 2026-11-09 audit: nothing Nadare did not make may be deleted or overwritten.
 
-Each test names the finding it covers; reports in /mnt/kikyou/work/briefs/deletion-1109/.
+Each test names the finding it covers.
 """
 
 from __future__ import annotations

@@ -5,7 +5,7 @@ On a first run the publisher's sign-in program (PcUsdkexe) builds its save folde
 parent folders of the game's path. From ``Z:\\home\\...`` (any game folder outside ``drive_c``,
 which is what Add Game makes) Wine fails one of those checks, the program crashes on the error
 text and the game waits forever: a black screen with a cursor. With the game folder as its own
-drive (``D:\\EM\\...``) the same first run reaches the game (amdnode, 2026-11-18, Sandbox on).
+drive (``D:\\EM\\...``) the same first run reaches the game (an AMD PC, 2026-11-18, Sandbox on).
 """
 
 from __future__ import annotations

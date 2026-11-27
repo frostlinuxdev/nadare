@@ -9,7 +9,7 @@ from pathlib import Path
 import conftest
 
 GUI = Path(__file__).resolve().parents[1] / "src" / "nadare" / "gui"
-DELETES = re.compile(r"\b(sweep|delete|remove|rmtree|unlink|cleanup)\b", re.I)
+DELETES = re.compile(r"\b(sweep|delete|remove|rmtree|unlink|cleanup|repair)\b", re.I)
 
 
 def test_every_deleting_thread_is_joined():

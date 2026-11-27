@@ -433,3 +433,44 @@ def test_clearing_a_linked_cache_root_removes_only_the_link(tmp_path, monkeypatc
     backend._clear_predownload_cache()
     assert not (state / "predownload").is_symlink()
     assert (outside / "precious.txt").read_text() == "keep me"
+
+
+# ---- #1828: a predownload the update could not use is not left behind ----------------------
+def test_an_update_past_the_predownload_removes_the_unused_cache(tmp_path, monkeypatch, calls):
+    """A hotfix released after the predownload: Sophon uses only the exact version's cache."""
+    backend = _zzz(tmp_path, monkeypatch)
+    backend.predownload()
+    monkeypatch.setattr(
+        direct.ZenlessBackend, "plan_factory", staticmethod(lambda fetch=None: _plan("3.4.1"))
+    )
+    backend.update()
+    assert calls.sync[-1] == {"version": "3.4.1"}
+    assert not (backend.install_dir() / ".nadare" / "predownload").exists()
+    assert not (backend.install_dir() / ".nadare" / "predownload.json").exists()
+    assert "predownload_version" not in backend.status().data
+
+
+def test_a_cache_for_another_build_of_the_same_version_goes_too(tmp_path, monkeypatch, calls):
+    backend = _zzz(tmp_path, monkeypatch)
+    backend.predownload()
+    rebuilt = dd.Plan(
+        "zzz", "3.4.0", exe="ZenlessZoneZero.exe",
+        sophon=(sophon.SophonPackage("zzz-3.4.0", "https://x/m", "https://x/c", "m-rebuilt", 1),),
+    )
+    monkeypatch.setattr(
+        direct.ZenlessBackend, "plan_factory", staticmethod(lambda fetch=None: rebuilt)
+    )
+    backend.update()
+    # Sophon checks every cached chunk itself, so the folder is offered, then removed.
+    assert "chunk_cache" in calls.sync[-1]
+    assert not (backend.install_dir() / ".nadare" / "predownload").exists()
+
+
+def test_an_update_before_the_release_keeps_the_newer_cache_and_its_state(
+    tmp_path, monkeypatch, calls
+):
+    backend = _zzz(tmp_path, monkeypatch, main="3.3.1")
+    backend.predownload()
+    backend.update()
+    assert (backend.install_dir() / ".nadare" / "predownload" / "3.4.0").is_dir()
+    assert (backend.install_dir() / ".nadare" / "predownload.json").is_file()

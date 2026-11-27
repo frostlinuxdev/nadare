@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
 )
 
 from . import i18n
+from .dialog_layout import fit_dialog, make_scroll_body
 
 #: Exact wording of the acknowledgement checkbox.
 NOTICE_ACK_TEXT = "I have read this notice and understand the risks"
@@ -39,6 +40,7 @@ class AccountNoticeDialog(QDialog):
         layout.setContentsMargins(22, 20, 22, 20)
         layout.setSpacing(14)
 
+        self._scroll, _body, body_layout = make_scroll_body(spacing=12)
         self.notice_label = QLabel(notice)
         self.notice_label.setObjectName("Hint")
         self.notice_label.setWordWrap(True)
@@ -47,7 +49,8 @@ class AccountNoticeDialog(QDialog):
         self.notice_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        layout.addWidget(self.notice_label)
+        body_layout.addWidget(self.notice_label)
+        layout.addWidget(self._scroll, 1)
 
         self.checkbox = QCheckBox(NOTICE_ACK_TEXT)
         self.checkbox.toggled.connect(self._on_toggled)
@@ -62,6 +65,16 @@ class AccountNoticeDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self._shown_once = False
+        self._fit_height()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        self._fit_height(keep_width=self._shown_once)
+        self._shown_once = True
+
+    def _fit_height(self, *, keep_width: bool = False) -> None:
+        fit_dialog(self, min_width=560, scroll=self._scroll, keep_width=keep_width)
 
     def _on_toggled(self, checked: bool) -> None:
         self.continue_button.setEnabled(checked)
@@ -86,6 +99,7 @@ class HoldDialog(QDialog):
         heading.setWordWrap(True)
         layout.addWidget(heading)
 
+        self._scroll, _body, body_layout = make_scroll_body(spacing=12)
         self.reason_label = QLabel(hold.reason)
         self.reason_label.setObjectName("Hint")
         self.reason_label.setWordWrap(True)
@@ -93,7 +107,7 @@ class HoldDialog(QDialog):
         self.reason_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        layout.addWidget(self.reason_label)
+        body_layout.addWidget(self.reason_label)
 
         if hold.link:
             report = escape(i18n.tr("Read the report"))
@@ -102,10 +116,11 @@ class HoldDialog(QDialog):
             self.link_label.setTextInteractionFlags(
                 Qt.TextInteractionFlag.TextBrowserInteraction
             )
-            layout.addWidget(self.link_label)
+            body_layout.addWidget(self.link_label)
         else:
             self.link_label = QLabel("")
             self.link_label.hide()
+        layout.addWidget(self._scroll, 1)
 
         buttons = QDialogButtonBox()
         self.start_button = buttons.addButton(
@@ -117,6 +132,16 @@ class HoldDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self._shown_once = False
+        self._fit_height()
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        self._fit_height(keep_width=self._shown_once)
+        self._shown_once = True
+
+    def _fit_height(self, *, keep_width: bool = False) -> None:
+        fit_dialog(self, min_width=560, scroll=self._scroll, keep_width=keep_width)
 
 
 __all__ = ["AccountNoticeDialog", "HoldDialog", "NOTICE_ACK_TEXT"]

@@ -19,22 +19,45 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
+from .game_view_parts.shared import OneLineLabel
 from .i18n import tr_n
 from .images import ImageLoader
-from .theme import cover_pixmap, scaled
+from .theme import badge_style, cover_pixmap, scaled, set_state_property
 
-_KIND_LABELS = {
-    "install": "Installing",
-    "update": "Updating",
-    "repair": "Repairing",
-    "runner": "Proton runner",
-    "elsewhere": "Busy elsewhere",
+#: The operation a running row names in its one badge; any other state names itself (#b29).
+_BADGE_OPERATIONS = {
+    "install": "installing",
+    "update": "updating",
+    "repair": "repairing",
+    "runner": "runner",
 }
+
+#: The operation a waiting or paused row names in its line, under the WAITING/PAUSED badge.
+_OPERATION_WORDS = {
+    "install": "Install",
+    "update": "Update",
+    "repair": "Repair",
+    "runner": "Runner",
+}
+
+
+def _operation_word(operation: str) -> str:
+    return _OPERATION_WORDS.get(operation, operation.capitalize())
+
+
+def row_badge(state: str, operation: str) -> tuple[str, str]:
+    """``(pill state, label)`` for a row's single badge.
+
+    A running row says what it runs; a waiting, paused, finished or elsewhere row says that
+    instead, so a queued install never claims to be installing while it waits.
+    """
+    key = _BADGE_OPERATIONS.get(operation, operation) if state == "running" else state
+    return badge_style(key)
+
 
 #: A game whose operation lock another Nadare window or command holds (C5, r3b05 F2).
 _ELSEWHERE_TEXT = (
@@ -117,35 +140,37 @@ class DownloadRowWidget(QFrame):
         left.setSpacing(4)
         head = QHBoxLayout()
         head.setSpacing(10)
-        self.title_label = QLabel()
+        self.title_label = OneLineLabel()
         self.title_label.setTextFormat(Qt.TextFormat.PlainText)
         self.title_label.setStyleSheet("font-weight: 700; font-size: 14px;")
-        # A long custom title is clipped (the full text is the tooltip), never the reason the
-        # row grows past the window and pushes its buttons out of sight (#855).
-        self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        head.addWidget(self.title_label, 1)
-        self.kind_label = QLabel()
-        self.kind_label.setObjectName("Muted")
-        head.addWidget(self.kind_label)
+        # A long custom title is elided with the full text in the tooltip, never the reason
+        # the row grows past the window and pushes its buttons out of sight (#855, #b29).
+        # Stretch 0 keeps a short title's width, so the badge sits right beside it; the
+        # trailing stretch takes the rest and a long title still elides.
+        head.addWidget(self.title_label)
+        # The one state badge: what the row does while it runs, what it waits on otherwise.
+        self.badge = QLabel()
+        self.badge.setObjectName("Pill")
+        self.badge.setTextFormat(Qt.TextFormat.PlainText)
+        head.addWidget(self.badge)
         head.addStretch(1)
         left.addLayout(head)
-        self.status_label = QLabel()
+        self.status_label = OneLineLabel()
         self.status_label.setObjectName("Muted")
         self.status_label.setTextFormat(Qt.TextFormat.PlainText)
-        # One line, clipped: a long file name must not make the row taller (the list would
+        # One line, elided: a long file name must not make the row taller (the list would
         # jump under the pointer). The whole text stays in the tooltip.
-        self.status_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         left.addWidget(self.status_label)
-        bar_row = QHBoxLayout()
-        bar_row.setSpacing(10)
         self.bar = QProgressBar()
         self.bar.setRange(0, 100)
         self.bar.setTextVisible(False)
-        bar_row.addWidget(self.bar, 1)
-        self.eta_label = QLabel()
+        left.addWidget(self.bar)
+        # The transfer text gets its own line: its changing width must not resize the bar
+        # from tick to tick (the user saw it jiggle, 11-24). It elides like the others.
+        self.eta_label = OneLineLabel()
         self.eta_label.setObjectName("Muted")
-        bar_row.addWidget(self.eta_label)
-        left.addLayout(bar_row)
+        self.eta_label.setTextFormat(Qt.TextFormat.PlainText)
+        left.addWidget(self.eta_label)
         outer.addLayout(left, 1)
 
         buttons = QHBoxLayout()
@@ -189,14 +214,16 @@ class DownloadRowWidget(QFrame):
             f"font-weight: 700; font-size: {12 if runner else 14}px;"
         )
         self._seed = row.title or row.profile
-        self.title_label.setText(row.title)
-        self.title_label.setToolTip(row.title)
+        self.title_label.setText(row.title)  # OneLineLabel owns its elided-only tooltip
         self.setAccessibleName(
             f"{row.title}: runner download"
             if runner
             else f"{row.title}: open the game page"
         )
-        self.kind_label.setText(_KIND_LABELS.get(row.operation, row.operation.capitalize()))
+        pill_state, badge_text = row_badge(row.state, row.operation)
+        self.badge.setText(badge_text)
+        if self.badge.property("state") != pill_state:
+            set_state_property(self.badge, pill_state)
         running = row.state == "running"
         waiting = row.state == "waiting"
         paused = row.state == "paused"
@@ -208,12 +235,16 @@ class DownloadRowWidget(QFrame):
         elif running:
             self._set_status(row.detail or "Starting…")
         elif waiting:
+            word = _operation_word(row.operation)
             if row.ahead <= 0:
-                self._set_status("Next in line")
+                self._set_status(f"{word} · Next in line")
             else:
-                self._set_status(tr_n("Waiting · {n} installs ahead of this one", row.ahead))
+                self._set_status(f"{word} · {tr_n('{n} installs ahead', row.ahead)}")
         else:
-            self._set_status("Paused. Everything downloaded so far is kept.")
+            self._set_status(
+                f"{_operation_word(row.operation)} · "
+                "Paused. Everything downloaded so far is kept."
+            )
         self.bar.setVisible(running)
         self.eta_label.setVisible(running)
         if running:
@@ -230,8 +261,7 @@ class DownloadRowWidget(QFrame):
         )
 
     def _set_status(self, text: str) -> None:
-        self.status_label.setText(text)
-        self.status_label.setToolTip(text)
+        self.status_label.setText(text)  # OneLineLabel owns its elided-only tooltip
 
     def set_progress(self, fraction: float | None, detail: str, eta: str) -> None:
         if fraction is None:

@@ -202,4 +202,8 @@ def test_the_space_check_counts_the_diff_and_its_files_together():
     from nadare.backends.direct import DnaBackend
 
     doc = json.loads((FIX / "catalog/dna_hpatch_md5.json").read_bytes())
-    assert DnaBackend.install_size_hint >= doc["hdiff_file"]["size"] + doc["new_size"]
+    # The Store and the sheets show the download and the finished install; the space check
+    # needs both on disk while the diff unpacks.
+    assert DnaBackend.download_size_hint < DnaBackend.install_size_hint
+    assert DnaBackend.install_size_hint < DnaBackend.install_space_hint
+    assert DnaBackend.install_space_hint >= doc["hdiff_file"]["size"] + doc["new_size"]

@@ -111,10 +111,14 @@ def test_a_failed_probe_keeps_the_prefix_locked_and_says_so(tmp_path, qapp, monk
 def test_a_late_answer_for_a_previous_profile_is_ignored(tmp_path, qapp, monkeypatch):
     answers = iter([SimpleNamespace(state="installed"), SimpleNamespace(state="not_installed")])
     gate = threading.Event()
+    blocked = threading.Event()
+    lock = threading.Lock()
 
     def status():
-        answer = next(answers)
+        with lock:
+            answer = next(answers)
         if answer.state == "installed":
+            blocked.set()
             gate.wait(5)
         return answer
 
@@ -123,6 +127,9 @@ def test_a_late_answer_for_a_previous_profile_is_ignored(tmp_path, qapp, monkeyp
     try:
         config = _config(tmp_path, backend="wine")  # a catalog prefix never unlocks (#1293)
         page.load(config, "sample")
+        # The first load's probe must take the "installed" answer: under CI load the second
+        # probe could otherwise ask first and the late answer would be the newest one.
+        assert blocked.wait(5), "the first probe never started"
         page.load(config, "sample")  # a second load while the first probe is still blocked
         gate.set()
         _settle(qapp)

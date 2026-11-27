@@ -64,15 +64,28 @@ WEBVIEW2_MISSING_AT_PLAY = (
 #: (a crash handler can linger after the game has exited) but Stop kills them.
 GAME_HELPER_EXES = frozenset({"crashpad_handler.exe"})
 
+#: The process table a test can point at a fake tree.
+PROC_ROOT = Path("/proc")
 
-def _cmdline_has_exe(raw: bytes, prefix: str, *, exclude: frozenset[str] = frozenset()) -> bool:
-    """Whether any NUL-separated argv token names an exe under ``prefix``.
+
+def _cmdline_has_exe(
+    raw: bytes,
+    prefix: str,
+    *,
+    exclude: frozenset[str] = frozenset(),
+    own_exe: bool = False,
+) -> bool:
+    """Whether a NUL-separated argv token names an exe under ``prefix``.
 
     Matching whole argv tokens instead of the raw cmdline stops an unrelated
     process that merely mentions the path inside one argument (an editor, a
     log, ``ps``) from being mistaken for the game. Tokens whose file name is in
-    ``exclude`` are ignored."""
-    for token in raw.split(b"\0"):
+    ``exclude`` are ignored. With ``own_exe`` only ``argv[0]`` counts, so the
+    stub's arguments (the shield path) cannot pass the first-frame gate."""
+    tokens = raw.split(b"\0")
+    if own_exe:
+        tokens = tokens[:1]
+    for token in tokens:
         if not token:
             continue
         text = token.decode("utf-8", "replace").lower()
@@ -84,9 +97,13 @@ def _cmdline_has_exe(raw: bytes, prefix: str, *, exclude: frozenset[str] = froze
     return False
 
 
-def game_pids(game_dir: Path, *, helpers: bool = True) -> list[int]:
+def game_pids(
+    game_dir: Path, *, helpers: bool = True, own_exe: bool = False, proc_root: Path | None = None
+) -> list[int]:
     """This user's processes running an exe from ``game_dir``'s ``bin`` (Wine shows it as
     ``Z:\\<unix path with backslashes>``); ``helpers=False`` leaves out the crash handler.
+    ``own_exe`` counts only a process whose own program is that exe, so the stub's
+    arguments do not match; ``proc_root`` points tests at a fake process table.
 
     CZN's one process check: the backend and the updater (``update.py``) both ask here (#1557).
     """
@@ -102,7 +119,8 @@ def game_pids(game_dir: Path, *, helpers: bool = True) -> list[int]:
     uid = os.getuid()
     pids: list[int] = []
     exclude = frozenset() if helpers else GAME_HELPER_EXES
-    for d in Path("/proc").iterdir():
+    root = Path(proc_root) if proc_root is not None else PROC_ROOT
+    for d in root.iterdir():
         if not d.name.isdigit():
             continue
         try:
@@ -113,7 +131,10 @@ def game_pids(game_dir: Path, *, helpers: bool = True) -> list[int]:
             raw = (d / "cmdline").read_bytes()
         except OSError:
             continue
-        if any(_cmdline_has_exe(raw, prefix, exclude=exclude) for prefix in prefixes):
+        if any(
+            _cmdline_has_exe(raw, prefix, exclude=exclude, own_exe=own_exe)
+            for prefix in prefixes
+        ):
             pids.append(int(d.name))
     return pids
 
@@ -139,6 +160,18 @@ class LaunchingMixin:
     def _game_running(self) -> bool:
         """The game itself is running (a lingering crash handler is not)."""
         return bool(self._game_pids(helpers=False))
+
+    def _game_processes(self) -> bool:
+        """The game's own process: a stub that names the shield in its arguments is not it.
+
+        Unlike :meth:`_game_running` (Stop and the install checks), the first-frame gate
+        needs this narrower rule: the launch stub starts before the game and would
+        otherwise dismiss the sheet from millisecond 0 (#1821 round 3)."""
+        return bool(game_pids(self.game_dir(), helpers=False, own_exe=True))
+
+    def game_processes(self):
+        """The game itself, so a vcredist/WebView2 presenter line cannot end the sheet (#1821)."""
+        return self._game_processes
 
     def _running_elsewhere(self) -> bool:
         """Another Flatpak instance launched this prefix's game."""
@@ -374,6 +407,7 @@ class LaunchingMixin:
                 self._win_cwd(self.game_dir()),
             ]
             full, env = self._prefix_command(cmd, sandboxed=sandboxed)
+            process.apply_first_frame_env(env)  # the game command, not vcredist/WebView2
             # Set after _prefix_command: its env cleanup drops every CZN_* name, and
             # without this path the stub never logs, so the game never looks started.
             env["CZN_STUB_LOG"] = self._win(log)

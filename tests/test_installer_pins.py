@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""The installer canary warns when a pinned NTE or Endfield installer goes stale."""
+"""The installer canary warns when a pinned NTE, ToF, Strinova or Endfield pin goes stale."""
 
 from __future__ import annotations
 
@@ -26,11 +26,16 @@ def _no_deep_check(monkeypatch: pytest.MonkeyPatch, canary) -> None:
     monkeypatch.setattr(canary, "check_endfield_games_exe", lambda *a, **k: [])
 
 
-def fake_head(status: int = 200, length: int | None = None):
+def fake_head(status: int = 200, length: int | None = None, *, tof=None, strinova=None):
+    """Answer for NTE; ``tof``/``strinova`` ``(status, length)`` answer their own URLs."""
     calls: list[str] = []
 
     def head(url: str) -> tuple[int, int | None]:
         calls.append(url)
+        if tof is not None and "wmupd.com" in url:
+            return tof
+        if strinova is not None and "strinova" in url:
+            return strinova
         return status, length
 
     return head, calls
@@ -106,6 +111,75 @@ def test_an_nte_network_error_is_only_a_note(capsys: pytest.CaptureFixture[str])
     assert "installer pins" in capsys.readouterr().err
 
 
+def test_the_tof_installer_size_is_a_positive_int() -> None:
+    canary = _canary()
+    assert isinstance(canary.nte_launcher.TOF_INSTALLER_SIZE, int)
+    assert canary.nte_launcher.TOF_INSTALLER_SIZE > 0
+
+
+def test_an_unchanged_tof_installer_is_ok() -> None:
+    canary = _canary()
+    head, calls = fake_head(200, canary.nte_launcher.TOF_INSTALLER_SIZE)
+    assert canary.check_tof(head) == []
+    assert calls == [canary.nte_launcher.TOF_INSTALLER_URL]
+
+
+def test_a_changed_tof_installer_size_is_a_problem() -> None:
+    canary = _canary()
+    pinned = canary.nte_launcher.TOF_INSTALLER_SIZE
+    head, _calls = fake_head(200, pinned + 1)
+    problems = canary.check_tof(head)
+    assert len(problems) == 1
+    assert "Tower of Fantasy" in problems[0] and "changed size" in problems[0]
+    assert str(pinned + 1) in problems[0] and str(pinned) in problems[0]
+
+
+@pytest.mark.parametrize("code", [404, 410])
+def test_a_gone_tof_installer_url_is_a_problem(code: int) -> None:
+    canary = _canary()
+    head, _calls = fake_head(code, None)
+    problems = canary.check_tof(head)
+    assert len(problems) == 1
+    assert "Tower of Fantasy" in problems[0] and "gone" in problems[0]
+    assert "TOF_INSTALLER_SHA256" in problems[0] and "TOF_INSTALLER_SIZE" in problems[0]
+
+
+def test_the_strinova_installer_size_is_a_positive_int() -> None:
+    canary = _canary()
+    assert isinstance(canary.strinova_launcher.INSTALLER_SIZE, int)
+    assert canary.strinova_launcher.INSTALLER_SIZE > 0
+
+
+def test_an_unchanged_strinova_installer_is_ok() -> None:
+    canary = _canary()
+    pinned = canary.strinova_launcher.INSTALLER_SIZE
+    # The other URLs answer badly on purpose: only the Strinova branch may answer here.
+    head, calls = fake_head(503, None, strinova=(200, pinned))
+    assert canary.check_strinova(head) == []
+    assert calls == [canary.strinova_launcher.INSTALLER_URL]
+
+
+def test_a_changed_strinova_installer_size_is_a_problem() -> None:
+    canary = _canary()
+    pinned = canary.strinova_launcher.INSTALLER_SIZE
+    head, _calls = fake_head(strinova=(200, pinned + 1))
+    problems = canary.check_strinova(head)
+    assert len(problems) == 1
+    assert "Strinova" in problems[0] and "changed size" in problems[0]
+    assert str(pinned + 1) in problems[0] and str(pinned) in problems[0]
+
+
+@pytest.mark.parametrize("code", [404, 410])
+def test_a_gone_strinova_installer_url_is_a_problem(code: int) -> None:
+    canary = _canary()
+    head, _calls = fake_head(strinova=(code, None))
+    problems = canary.check_strinova(head)
+    assert len(problems) == 1
+    assert "Strinova" in problems[0] and "gone" in problems[0]
+    assert f"HTTP {code}" in problems[0]
+    assert "INSTALLER_SHA256" in problems[0] and "INSTALLER_SIZE" in problems[0]
+
+
 def test_an_endfield_installer_on_an_allowed_host_is_ok() -> None:
     canary = _canary()
     get_json, calls = fake_json({"exe_url": "https://launcher.gryphline.com/setup.exe"})
@@ -151,12 +225,17 @@ def test_an_endfield_json_error_is_only_a_note(capsys: pytest.CaptureFixture[str
     assert "installer pins" in capsys.readouterr().err
 
 
-def test_main_is_ok_when_both_installers_match(
+def test_main_is_ok_when_every_installer_matches(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     canary = _canary()
     _no_deep_check(monkeypatch, canary)
-    head, _calls = fake_head(200, canary.nte_launcher.INSTALLER_SIZE)
+    head, _calls = fake_head(
+        200,
+        canary.nte_launcher.INSTALLER_SIZE,
+        tof=(200, canary.nte_launcher.TOF_INSTALLER_SIZE),
+        strinova=(200, canary.strinova_launcher.INSTALLER_SIZE),
+    )
     get_json, _jcalls = fake_json({"exe_url": "https://hg-cdn.com/setup.exe"})
     monkeypatch.setattr(canary, "_head", head)
     monkeypatch.setattr(canary, "_get_json", get_json)
@@ -169,7 +248,12 @@ def test_main_exits_4_for_a_gone_nte_installer(
 ) -> None:
     canary = _canary()
     _no_deep_check(monkeypatch, canary)
-    head, _calls = fake_head(404, None)
+    head, _calls = fake_head(
+        404,
+        None,
+        tof=(200, canary.nte_launcher.TOF_INSTALLER_SIZE),
+        strinova=(200, canary.strinova_launcher.INSTALLER_SIZE),
+    )
     get_json, _jcalls = fake_json({"exe_url": "https://hg-cdn.com/setup.exe"})
     monkeypatch.setattr(canary, "_head", head)
     monkeypatch.setattr(canary, "_get_json", get_json)
@@ -179,12 +263,38 @@ def test_main_exits_4_for_a_gone_nte_installer(
     assert "NTE installer" in lines[0]
 
 
+def test_main_exits_4_for_a_changed_tof_installer(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    canary = _canary()
+    _no_deep_check(monkeypatch, canary)
+    pinned = canary.nte_launcher.TOF_INSTALLER_SIZE
+    head, _calls = fake_head(
+        200,
+        canary.nte_launcher.INSTALLER_SIZE,
+        tof=(200, pinned + 1),
+        strinova=(200, canary.strinova_launcher.INSTALLER_SIZE),
+    )
+    get_json, _jcalls = fake_json({"exe_url": "https://hg-cdn.com/setup.exe"})
+    monkeypatch.setattr(canary, "_head", head)
+    monkeypatch.setattr(canary, "_get_json", get_json)
+    assert canary.main([]) == 4
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("CANARY:")]
+    assert len(lines) == 1
+    assert "Tower of Fantasy" in lines[0]
+
+
 def test_main_exits_4_for_a_moved_endfield_installer(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     canary = _canary()
     _no_deep_check(monkeypatch, canary)
-    head, _calls = fake_head(200, canary.nte_launcher.INSTALLER_SIZE)
+    head, _calls = fake_head(
+        200,
+        canary.nte_launcher.INSTALLER_SIZE,
+        tof=(200, canary.nte_launcher.TOF_INSTALLER_SIZE),
+        strinova=(200, canary.strinova_launcher.INSTALLER_SIZE),
+    )
     get_json, _jcalls = fake_json({"exe_url": "https://evil.example/setup.exe"})
     monkeypatch.setattr(canary, "_head", head)
     monkeypatch.setattr(canary, "_get_json", get_json)
@@ -336,10 +446,15 @@ def test_a_corrupt_state_file_just_means_the_check_runs(tmp_path):
 def test_main_runs_the_deep_check_and_reports_its_problem(tmp_path, monkeypatch, capsys):
     canary = _canary()
     monkeypatch.setattr(canary, "check_nte", lambda head: [])
+    monkeypatch.setattr(canary, "check_tof", lambda head: [])
+    monkeypatch.setattr(canary, "check_strinova", lambda head: [])
     monkeypatch.setattr(canary, "check_endfield", lambda get_json: [])
     monkeypatch.setattr(canary, "check_endfield_games_exe", lambda *a, **k: ["Games.exe is gone"])
+    # Every pinned installer is patched out, so main() must not reach the network here.
+    monkeypatch.setattr(canary, "_head", lambda url: pytest.fail(f"network call to {url}"))
     assert canary.main(["--state", str(tmp_path / "s.json")]) == canary.PROBLEM
-    assert "CANARY: Games.exe is gone" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert out.splitlines() == ["CANARY: Games.exe is gone"]
 
 
 def test_an_unreachable_download_stays_blind_while_the_hour_is_waited_out(tmp_path):

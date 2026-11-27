@@ -86,3 +86,59 @@ def test_a_status_failure_for_a_removed_game_does_not_bring_its_state_back(windo
     window._on_failed("g", "status", "offline")
     assert "g" not in window._snapshots
     assert "g" not in window._status_errors
+
+
+def _installed(window):
+    from nadare.core.backends import Status
+
+    window.game.set_status(Status("installed"))
+    assert window.game._primary_op() == "launch"
+
+
+def test_play_waits_for_the_status_after_an_update_check(window):
+    """A Play pressed between the update check and its status refresh launched an outdated
+    game (Strinova, 2026-11-27): the page waits for the refreshed status instead."""
+    _installed(window)
+    window._on_succeeded("g", "check_update", 0)
+    assert window.game._awaiting_status
+    assert window.game._primary_op() is None
+    window.game.set_status(window.game._status)  # the refreshed status arrives
+    assert window.game._primary_op() == "launch"
+
+
+@pytest.mark.parametrize("ending", ["cancelled", "failed"])
+def test_a_status_refresh_that_never_answers_does_not_leave_the_page_waiting(window, ending):
+    _installed(window)
+    window._on_succeeded("g", "check_update", 0)
+    if ending == "cancelled":
+        window._on_cancelled("g", "status")
+    else:
+        window._on_failed("g", "status", "offline")
+    assert not window.game._awaiting_status
+    assert window.game._primary_op() == ("launch" if ending == "cancelled" else "retry")
+
+
+def test_a_queued_operation_cancelled_behind_the_refresh_frees_the_page(window):
+    """The controller detaches the status worker when a queued job is cancelled, so its own
+    cancel never arrives; the queued job's start ends the wait instead (Neon, 2026-11-27)."""
+    _installed(window)
+    window._on_succeeded("g", "check_update", 0)
+    window.game.set_busy("update")
+    window.game.cancelled()
+    assert not window.game._awaiting_status
+    assert window.game._primary_op() == "launch"
+
+
+def test_the_refresh_is_not_awaited_when_it_could_not_start(window):
+    _installed(window)
+    window.controller.start = lambda profile, op, payload=None: False
+    window._on_succeeded("g", "check_update", 0)
+    assert not window.game._awaiting_status
+    assert window.game._primary_op() == "launch"
+
+
+def test_an_update_check_for_another_game_leaves_this_page_alone(window):
+    _installed(window)
+    window.config.add_profile("h", backend="wine", title="H")
+    window._on_succeeded("h", "check_update", 0)
+    assert not window.game._awaiting_status

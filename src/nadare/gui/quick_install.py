@@ -19,16 +19,13 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from ..core import libraries
+from .dialog_layout import fit_dialog, make_scroll_body
 from .theme import apply_theme
-
-#: Qt's QWIDGETSIZE_MAX: no maximum size.
-_UNLIMITED = 16_777_215
 
 #: ``exec()`` result when the user picked another version of the game: the caller opens the
 #: dialog again for :attr:`QuickInstallDialog.variant_kind` (its size and folder differ).
@@ -149,22 +146,14 @@ class QuickInstallDialog(QDialog):
 
         heading = QLabel(f"Install {title}?")
         heading.setObjectName("Title")
+        heading.setWordWrap(True)
         layout.addWidget(heading)
 
-        # Account notices can be long. Keep the action buttons outside the scrolling
-        # content so the combined sheet remains usable on a short display.
+        # Keep the heading and action buttons outside the scrolling body so long
+        # notices or large text sizes scroll cleanly on a small screen.
         outer_layout = layout
-        self._content_scroll: QScrollArea | None = None
-        if account_notice:
-            self._content_scroll = QScrollArea()
-            self._content_scroll.setWidgetResizable(True)
-            self._content_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-            content = QWidget()
-            layout = QVBoxLayout(content)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(12)
-            self._content_scroll.setWidget(content)
-            outer_layout.addWidget(self._content_scroll)
+        self._content_scroll, _content, layout = make_scroll_body(spacing=12)
+        outer_layout.addWidget(self._content_scroll, 1)
 
         self._add_facts(layout, facts or StoreFacts())
         self.variant_kind = current_kind
@@ -181,12 +170,14 @@ class QuickInstallDialog(QDialog):
         if notice:
             head = QLabel("Nadare is an unofficial launcher")
             head.setStyleSheet("font-weight: 600;")
+            head.setWordWrap(True)
             layout.addWidget(head)
             layout.addWidget(self._label(_reflow(notice)))
 
         if account_notice:
             head = QLabel("Account notice")
             head.setStyleSheet("font-weight: 600;")
+            head.setWordWrap(True)
             layout.addWidget(head)
             layout.addWidget(self._label(_reflow(account_notice)))
 
@@ -227,6 +218,7 @@ class QuickInstallDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         outer_layout.addWidget(buttons)
+        self._fit_height()
 
     def _add_facts(self, layout: QVBoxLayout, facts: StoreFacts) -> None:
         """Tier, delivery and the game's notice (with its link): what the Store detail page
@@ -355,30 +347,9 @@ class QuickInstallDialog(QDialog):
 
         The size hint is worked out at the layout's preferred width; shown narrower, the
         notice wraps to more lines and its first lines were cut off under the heading.
+        Fixing the resulting size is also what keeps KDE Wayland from maximising the sheet.
         """
-        layout = self.layout()
-        if layout is None:
-            return
-        # Free the size the last fit fixed, fit again, then fix it: a fixed size is what keeps
-        # the dialog from being maximised on KDE Wayland (2026-11-20 user simulation).
-        self.setMinimumSize(520, 0)
-        self.setMaximumSize(_UNLIMITED, _UNLIMITED)
-        try:
-            layout.activate()
-            if self._content_scroll is not None:
-                scroll = self._content_scroll
-                content = scroll.widget()
-                need = content.layout().totalHeightForWidth(scroll.viewport().width())
-                content.setMinimumHeight(need)
-                screen = self.screen()
-                available = screen.availableGeometry().height() - 60
-                self.resize(self.width(), min(need + layout.minimumSize().height(), available))
-                return
-            need = layout.totalHeightForWidth(self.width())
-            if need > self.height():
-                self.resize(self.width(), need)
-        finally:
-            self.setFixedSize(self.size())
+        fit_dialog(self, min_width=520, scroll=self._content_scroll, fixed_size=True)
 
     @staticmethod
     def _label(text: str) -> QLabel:
@@ -396,7 +367,7 @@ class QuickInstallDialog(QDialog):
         self.folder_label.setToolTip(self.folder_text if shown != self.folder_text else "")
         self.summary_label.setText(self.summary_text)
         self.summary_label.setVisible(bool(self.summary_text))
-        if self.isVisible():
+        if hasattr(self, "install_button"):
             self._fit_height()
 
     def change_location(self) -> None:

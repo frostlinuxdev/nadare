@@ -67,6 +67,25 @@ def test_store_install_makes_one_profile_and_starts_one_install(tmp_path, qapp, 
         window.close()
 
 
+def test_the_store_sheet_names_the_download_and_the_peak_free_space(tmp_path, qapp, monkeypatch):
+    """BPSR downloads 40 GiB and keeps the 40 GiB zip while it unpacks to 45 GiB: say both."""
+    from nadare.core import backends, diskspace
+    from nadare.core.diskspace import human_size
+
+    window, cfg, started, shown, _ = _window(tmp_path, monkeypatch)
+    try:
+        window._store_install("direct-bpsr")
+        assert len(shown) == 1
+        summary = shown[0].summary_text
+        download = human_size(backends.download_size_hint("direct-bpsr"))
+        peak = human_size(diskspace.free_needed(backends.install_space_hint("direct-bpsr")))
+        assert f"downloads about {download}" in summary
+        assert f"needs about {peak} free space" in summary
+        assert started and started[0][1] == "install"
+    finally:
+        window.close()
+
+
 def test_cancelling_creates_nothing(tmp_path, qapp, monkeypatch):
     window, cfg, started, shown, answer = _window(tmp_path, monkeypatch)
     answer[0] = False
@@ -215,5 +234,42 @@ def test_the_store_install_button_goes_to_the_one_step_path(tmp_path, qapp, monk
     try:
         window.store.install_requested.emit(KIND)
         assert seen == [KIND]
+    finally:
+        window.close()
+
+
+def test_a_game_whose_download_fits_its_space_says_so(tmp_path, qapp, monkeypatch):
+    """No separate peak: the sheet says "needs about as much free space"."""
+    window, cfg, started, shown, _ = _window(tmp_path, monkeypatch, acked=["direct-pgr"])
+    try:
+        window._store_install("direct-pgr")
+        assert len(shown) == 1
+        summary = shown[0].summary_text
+        assert "downloads about" in summary
+        assert "needs about as much free space" in summary
+        assert started and started[0][1] == "install"
+    finally:
+        window.close()
+
+
+def test_picking_a_smaller_quality_updates_the_space_figure(tmp_path, qapp, monkeypatch):
+    """WuWa's picked quality is both the download and what must fit (space_need)."""
+    window, cfg, started, shown, _ = _window(tmp_path, monkeypatch, acked=["direct-wuwa"])
+    seen = []
+
+    def pick_sd_then_accept(dialog):
+        seen.append(dialog.summary_text)
+        dialog.choice_combo.setCurrentIndex(0)  # SD, 58 GiB
+        seen.append(dialog.summary_text)
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QuickInstallDialog, "exec", pick_sd_then_accept)
+    try:
+        window._store_install("direct-wuwa")
+        assert "80 GiB" in seen[0]  # the default HD quality
+        assert "58 GiB" in seen[1]
+        assert "needs about 58 GiB free space" not in seen[1]
+        assert "needs about as much free space" in seen[1]
+        assert started and started[0][1] == "install"
     finally:
         window.close()

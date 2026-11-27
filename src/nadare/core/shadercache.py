@@ -4,8 +4,8 @@
 
 Mesa is shared by every game (``<root>/mesa``); VKD3D is per profile
 (``<root>/games/<profile>/vkd3d``); DXVK stays in the prefix; NVIDIA's driver
-cache is only reported, never moved or cleared. Mesa keeps its own default size
-limit: no ``MESA_SHADER_CACHE_MAX_SIZE`` is set. Sizes are logical bytes, or
+cache is only reported, never moved or cleared. Mesa is capped at 2 GB unless
+the profile overrides ``MESA_SHADER_CACHE_MAX_SIZE``. Sizes are logical bytes, or
 ``None`` when the bounded scan did not finish.
 """
 
@@ -112,6 +112,7 @@ def prepare(
     different DXVK or VKD3D build than the last Play gets one note (see
     :func:`note_runner_change`).
     """
+    env["MESA_SHADER_CACHE_MAX_SIZE"] = "2G"
     for key, folder in (
         ("MESA_SHADER_CACHE_DIR", mesa_dir()),
         ("VKD3D_SHADER_CACHE_PATH", vkd3d_dir(profile)),

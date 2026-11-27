@@ -113,15 +113,18 @@ class StoreActionsMixin:
                 and not self._unofficial_accepted()
             )
             notice = self._account_notice_for_kind(kind)
-            size = core_backends.install_size_hint(kind)
+            size = core_backends.download_size_hint(kind)
+            space_need = core_backends.install_space_hint(kind)
             asked = core_backends.install_choice(kind)  # e.g. WuWa's quality (#990)
             sizes = asked[1] if asked else {}
             if asked and sizes.get(str(asked[0].default)):
                 size = sizes[str(asked[0].default)]
+                space_need = size  # the quality picked decides what must fit too
 
             def pick(value: str) -> None:
-                nonlocal size
+                nonlocal size, space_need
                 size = sizes.get(value, size)
+                space_need = size
 
             def describe(chosen: str | None) -> tuple[str, str, str]:
                 # Shows what create_profile will really store (the picked folder is a library).
@@ -148,11 +151,20 @@ class StoreActionsMixin:
                         "and the install fetches only what is missing or changed."
                     )
                 elif size:
-                    summary = (
-                        f"Installing {game.title} downloads about "
-                        f"{diskspace.human_size(size)} and needs about as much free "
-                        f"space ({free})."
-                    )
+                    need = space_need or size
+                    if need > size and diskspace.human_size(need) != diskspace.human_size(size):
+                        summary = (
+                            f"Installing {game.title} downloads about "
+                            f"{diskspace.human_size(size)} and needs about "
+                            f"{diskspace.human_size(diskspace.free_needed(need))} free space "
+                            f"({free})."
+                        )
+                    else:
+                        summary = (
+                            f"Installing {game.title} downloads about "
+                            f"{diskspace.human_size(size)} and needs about as much free "
+                            f"space ({free})."
+                        )
                 return where, free, summary
 
             dialog = None

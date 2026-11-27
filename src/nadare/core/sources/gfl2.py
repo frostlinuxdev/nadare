@@ -130,6 +130,8 @@ def resolve(
         files=tuple(files),
         archives=(archive,),
         exe="GF2_Exilium.exe",
+        # #1825: Version.txt is the whole asset set; a client-only plan lists none of it.
+        prune_files=not client_only,
     )
 
 

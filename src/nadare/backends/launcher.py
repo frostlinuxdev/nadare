@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core import (
+    directdl,
     endfield_shim,
     gamefacts,
     graphics,
@@ -53,6 +54,7 @@ from ..core.backends import (
     Status,
 )
 from ..core.config import as_bool, valid_profile_name
+from ..core.diskspace import human_size
 from ..core.events import Cancelled, Event
 from ..core.process import process_age_seconds
 from ..core.sandboxed import SANDBOX_EXEMPTION_OPTIONS
@@ -92,6 +94,13 @@ def _stage_quiet_helper(folder: Path) -> Path | None:
 
 #: About what the silent NIKKE launcher install writes (#1000): the scale for its progress bar.
 _SILENT_LAUNCHER_BYTES = 700 * 10**6
+
+#: What Nadare fetches itself for NIKKE: the launcher and the game program.
+NIKKE_LAUNCHER_BYTES = 400 * 10**6
+NIKKE_GAME_CLIENT_BYTES = int(1.1 * 10**9)
+NIKKE_INSTALL_BYTES = NIKKE_LAUNCHER_BYTES + NIKKE_GAME_CLIENT_BYTES
+#: What NIKKE's own launcher then downloads for the game itself.
+NIKKE_GAME_RESOURCES_BYTES = 23 * 10**9
 #: How often the launcher folder is measured while the hidden downloader runs.
 _SILENT_POLL_SECONDS = 2.0
 
@@ -395,6 +404,10 @@ TRAY_HINT_AFTER_SECONDS = 20.0
 _LAUNCHER_STOP_WAIT = 15.0
 
 
+#: The record the launcher sync keeps of what it installed (``nikke_source.install_launcher``).
+LAUNCHER_LEDGER = "nikke-launcher"
+
+
 class NikkeBackend(LauncherBackend):
     kind = "launcher-nikke"
     supports_login = True
@@ -407,6 +420,8 @@ class NikkeBackend(LauncherBackend):
     install_subdir = _subdir("drive_c", "NIKKE")
     launcher_names = ("nikke_launcher.exe",)
     direct_exe = "nikke_launcher.exe"
+    #: The Sail host starts before the game in a launcherless Play and is windowless (#1821).
+    game_process_exclude = (nikke_sail.SAIL_HOST_NAME,)
     default_installer_url = nikke_source.MINILOADER_URL
     installer_pin_tag = "nikke-installer"
     trusted_hosts = ("nikke-en.com", "nikke-kr.com", "jupiterlauncher.com")
@@ -446,11 +461,13 @@ class NikkeBackend(LauncherBackend):
     )
     page_notice = (
         "Nadare installs the NIKKE launcher and the game program for you, without opening any "
-        "window (about 1.5 GB). Press Play to open the launcher and sign in there: it downloads "
-        "the rest of the game (about 23 GB). Or press Log in with Google and turn on \"Start "
-        "the game without the NIKKE launcher\" in Settings. Closing the launcher: pick Exit "
-        "launcher and tick Save selection; its default, Minimize, keeps it in the tray (press "
-        "the x next to PLAYING to end it). If the silent install fails, Nadare opens the NIKKE "
+        f"window (about {human_size(NIKKE_INSTALL_BYTES)}). Press Play to open the launcher and "
+        "sign in there: it downloads the rest of the game "
+        f"(about {human_size(NIKKE_GAME_RESOURCES_BYTES)}). Or press Log in with Google and turn "
+        "on \"Start the game without the NIKKE launcher\" in Settings. Closing the launcher: "
+        "pick Exit launcher and tick Save selection; its default, Minimize, keeps it in the "
+        "tray (press the x next to PLAYING to end it). If the silent install fails, Nadare "
+        "opens the NIKKE "
         "miniloader: click INSTALL (also in a second installer window, if one opens), then "
         "LAUNCH. Tencent's anti-cheat (ACE) may stop the game "
         "after an update. NIKKE uses X11 by default: on native Wayland its sign-in and captcha "
@@ -720,13 +737,28 @@ class NikkeBackend(LauncherBackend):
             )
         return report
 
+    def _refuse_while_running(self, doing: str) -> None:
+        """Files are replaced one by one: never under the running game or launcher (#933)."""
+        if (
+            scan_pids(self._patterns())
+            or scan_pids(ProcessQuery(prefix=str(self.prefix())))
+            or self._running_elsewhere()  # another Flatpak instance's game (run lock)
+        ):
+            raise BackendError(f"Stop the game before {doing} NIKKE", 8)
+
     def repair(self) -> None:
         if not self._launcherless_wanted():
             return super().repair()
         if not self._client_exe().is_file():
             raise BackendNotInstalled("NIKKE is not installed yet")
+        self._refuse_while_running("repairing")  # #1832: Repair replaces files too
         self.ctx.emit(Event("step", "Checking the NIKKE game client"))
         self._sync_direct()
+        folder = self._launcher_dir()
+        if folder is not None:
+            # The launcher folder holds the sign-in service the game start uses: Repair puts
+            # its files back too; only what differs is fetched (#1838).
+            self._update_launcher_direct(folder)
         try:
             missing = self._missing_entries(verify=False)
         except (railrepo.RailError, OSError) as exc:
@@ -803,7 +835,8 @@ class NikkeBackend(LauncherBackend):
         ``missing``: there is no client yet (a launcher-only install), so all of it comes now.
         """
         what = (
-            "downloading the game client (about 1.1 GB); the launcher is not needed"
+            "downloading the game client "
+            f"(about {human_size(NIKKE_GAME_CLIENT_BYTES)}); the launcher is not needed"
             if missing
             else "updating the game client"
         )
@@ -833,15 +866,19 @@ class NikkeBackend(LauncherBackend):
         self.ctx.cancel.raise_if_cancelled()
         if not self._client_exe().is_file():
             raise BackendNotInstalled("NIKKE is not installed yet")
-        # Files are replaced one by one: never under the running game or launcher (#933).
-        if (
-            scan_pids(self._patterns())
-            or scan_pids(ProcessQuery(prefix=str(self.prefix())))
-            or self._running_elsewhere()  # another Flatpak instance's game (run lock)
-        ):
-            raise BackendError("Stop the game before updating NIKKE", 8)
+        self._refuse_while_running("updating")
         self._update_client_direct()
-        self._update_launcher_if_needed(fetch=True)
+        problem = self._update_launcher_if_needed(fetch=True, thorough=True)
+        if problem:
+            # The client is current, but the sign-in service may not be: say so (#1838).
+            self.ctx.emit(
+                Event(
+                    "step",
+                    f"Warning: the game client is updated, but the NIKKE launcher could not be "
+                    f"checked ({problem}). Its sign-in files may be out of date; press Update "
+                    "again later.",
+                )
+            )
 
     def _update_before_play(self) -> None:
         """A launcherless Play on an outdated client updates it first (a fresh check).
@@ -925,10 +962,17 @@ class NikkeBackend(LauncherBackend):
     # they differ, install_launcher over the folder (only changed files are fetched).
 
     def _launcher_dir(self) -> Path | None:
-        """The launcher folder Nadare manages (``<root>/Launcher``); ``None`` if elsewhere."""
+        """The launcher folder Nadare manages (``<root>/Launcher``); ``None`` if elsewhere.
+
+        Launcher-free, the folder counts even without ``nikke_launcher.exe``: a missing launcher
+        program is a file to put back, not a reason to stop keeping the folder current (#1838).
+        """
         launcher = self.find_launcher()
         if launcher is None:
-            return None
+            folder = self._launcher_root() / "Launcher"
+            if not self._launcherless_wanted() or folder.is_symlink() or not folder.is_dir():
+                return None
+            return folder
         folder = launcher.parent
         try:
             if folder.resolve() != (self._launcher_root() / "Launcher").resolve():
@@ -1017,26 +1061,66 @@ class NikkeBackend(LauncherBackend):
         except (railrepo.RailError, OSError, ValueError) as exc:
             log.debug("NIKKE: could not refresh the launcher version: %s", exc)
 
-    def _update_launcher_if_needed(self, *, fetch: bool) -> None:
-        """Bring the launcher folder current (launcher-free only; the caller holds the guards)."""
+    def _launcher_files_changed(self, folder: Path, *, hashes: bool) -> list[str]:
+        """Launcher files the last launcher sync recorded that are now missing or changed.
+
+        Local only: the sync's own record (#1825) has each file's size and MD5. ``hashes``
+        also reads every file (Update); without it only presence and size count (before Play).
+        No record (a folder from an older Nadare or the launcher's own installer): nothing.
+        """
+        recorded = directdl._read_file_ledger(directdl.Plan(LAUNCHER_LEDGER, ""), folder)
+        changed: list[str] = []
+        for rel, entry in sorted(recorded.items()):
+            path = folder / rel
+            try:
+                info = path.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_size != entry["size"]:
+                    changed.append(rel)
+                    continue
+                if not hashes:
+                    continue
+                digest = hashlib.md5()
+                with open(path, "rb") as handle:
+                    for block in iter(lambda: handle.read(1 << 20), b""):
+                        digest.update(block)
+            except OSError:
+                changed.append(rel)
+                continue
+            if digest.hexdigest() != entry["md5"]:
+                changed.append(rel)
+        return changed
+
+    def _update_launcher_if_needed(self, *, fetch: bool, thorough: bool = False) -> str:
+        """Bring the launcher folder current (launcher-free only; the caller holds the guards).
+
+        Returns why the launcher could not be checked, or ``""``. ``thorough`` (Update) reads
+        every recorded launcher file; before Play only their presence and size count.
+        """
         if not self._launcherless_wanted():
-            return
+            return ""
         folder = self._launcher_dir()
         if folder is None:
-            return
+            return ""
         if self._launcher_update_marker().exists():
             self.info("finishing the interrupted NIKKE launcher update first")
             self._update_launcher_direct(folder)
-            return
+            return ""
+        changed = self._launcher_files_changed(folder, hashes=thorough)
+        if changed:
+            shown = ", ".join(changed[:3]) + (" and more" if len(changed) > 3 else "")
+            self.info(f"some NIKKE launcher files are missing or changed ({shown}); fetching them")
+            self._update_launcher_direct(folder)
+            return ""
         if not fetch:
-            return
+            return ""
         try:
             latest = self._fetch_launcher_latest()
         except (railrepo.RailError, OSError, ValueError) as exc:
             self.info(f"could not check the NIKKE launcher ({exc}); using it as it is")
-            return
+            return str(exc) or type(exc).__name__
         if self._launcher_outdated(latest):
             self._update_launcher_direct(folder)
+        return ""
 
     # ------------------------------------------------------------- launcherless
 
@@ -1106,6 +1190,15 @@ class NikkeBackend(LauncherBackend):
             argv, env = self._secure_wrap(argv, env, subject="sign-in")
             self.info("exec: " + " ".join(shlex.quote(part) for part in argv))
             code = stream(argv, env, on_line=self._on_line, cancel=self.ctx.cancel)
+            if code == nikke_sail.INTL_EXIT_LAUNCHER_SIGN_IN:
+                # The service still waits for its own launcher after the host answered it
+                # (seen with 0.0.6.904): trying again cannot help, the launcher's window can.
+                raise BackendError(
+                    "NIKKE's sign-in service would not open the Google sign-in for Nadare. "
+                    "Sign in once in the launcher instead: turn off \"Start the "
+                    "game without the NIKKE launcher\" in this game's settings, press Play and "
+                    "sign in there. Then you can turn the setting back on."
+                )
             if (
                 code != 0
                 or not enc.is_file()
@@ -1455,6 +1548,7 @@ class NikkeBackend(LauncherBackend):
         argv, env = self._prefix_command(
             sail, extra_env=extra_env, sandboxed=self.secure_mode_enabled()
         )
+        process.apply_first_frame_env(env)  # the game command, not the sign-in helper
         argv, env = self._secure_wrap(argv, env)  # the game, like a launcher launch
         # After the wrap, so a Sandbox that was skipped records the unsandboxed game it is.
         self._record_polite_stop(argv, env, len(sail))
@@ -1564,14 +1658,18 @@ class NikkeBackend(LauncherBackend):
     def _install_launcher_directly(self) -> bool:
         """Download the launcher, then the game program; no installer runs.
 
-        The launcher still downloads the ~23 GB of game resources itself (and does it
-        again after a game patch); only the launcher and the game program come from here.
+        The launcher still downloads the game resources itself (and does it again after a
+        game patch); only the launcher and the game program come from here.
         """
         self._direct_done = False
         if not self._direct_wanted():
             return False
         self.ctx.emit(
-            Event("step", "Downloading the NIKKE launcher (about 400 MB); no installer runs")
+            Event(
+                "step",
+                "Downloading the NIKKE launcher "
+                f"(about {human_size(NIKKE_LAUNCHER_BYTES)}); no installer runs",
+            )
         )
         try:
             nikke_source.install_launcher(
@@ -1587,7 +1685,11 @@ class NikkeBackend(LauncherBackend):
             self.info("the direct launcher download left no launcher; using the installer")
             return False
         self.ctx.emit(
-            Event("step", "Downloading the NIKKE game client (about 1.1 GB); no installer runs")
+            Event(
+                "step",
+                "Downloading the NIKKE game client "
+                f"(about {human_size(NIKKE_GAME_CLIENT_BYTES)}); no installer runs",
+            )
         )
         # Like an update: until every file is in, nikke.exe alone cannot tell a complete client
         # (a cut download may already have written it). A launcherless Play finishes it first.
@@ -1642,7 +1744,8 @@ class NikkeBackend(LauncherBackend):
         if getattr(self, "_silent_done", False) or getattr(self, "_direct_done", False):
             return (
                 f"{self.display_name} launcher installed. Press Play to open it and sign in; "
-                "it downloads the rest of the game (about 23 GB)."
+                "it downloads the rest of the game "
+                f"(about {human_size(NIKKE_GAME_RESOURCES_BYTES)})."
             )
         return super().install_done_message()
 
@@ -1672,7 +1775,11 @@ class NikkeBackend(LauncherBackend):
         argv, env = self._prefix_command(command, sandboxed=self.secure_mode_enabled())
         argv, env = self._secure_wrap(argv, env, subject="installer", links=False)
         self.ctx.emit(
-            Event("step", f"Installing the {self.display_name} launcher (no window, about 700 MB)")
+            Event(
+                "step",
+                f"Installing the {self.display_name} launcher "
+                f"(no window, about {human_size(_SILENT_LAUNCHER_BYTES)})",
+            )
         )
         self.ctx.emit(
             Event(

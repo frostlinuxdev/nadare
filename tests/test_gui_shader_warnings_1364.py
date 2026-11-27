@@ -24,7 +24,10 @@ except Exception:  # noqa: BLE001
 from nadare.core import storagecard
 from nadare.gui.disk_space_panel import DiskSpacePanel
 
-GAME_TEXT = "Large: over 1 GB. Clearing is safe; the game may stutter while it rebuilds."
+GAME_TEXT = (
+    f"Large: over {storagecard.diskspace.human_size(storagecard.GAME_WARN_BYTES)}. "
+    "Clearing is safe; the game may stutter while it rebuilds."
+)
 NOTE_TEXT = "Safe to delete. Games rebuild them, and may stutter for a while after."
 
 

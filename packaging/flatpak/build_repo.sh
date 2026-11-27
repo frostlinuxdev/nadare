@@ -31,8 +31,14 @@ files="$staged/files"
 [[ -f "$staged/finish-argv.json" ]] || { echo "[!] $staged is not staged (run stage_repo.py)" >&2; exit 1; }
 
 # The store catalogue (name, description, screenshots, icons) for software centres.
-appstreamcli compose --prefix=/ --origin="$app_id" --result-root="$files" \
-    --data-dir="$files/share/app-info/xmls" "$files"
+# appstream 1.1+ writes JPEG XL icons by default, which flatpak never exports: ask for PNG.
+# (1.0 has no --image-format and writes PNG anyway.)
+compose_args=(--prefix=/ --origin="$app_id" --result-root="$files"
+              --data-dir="$files/share/app-info/xmls")
+if appstreamcli compose --help 2>/dev/null | grep -q -- '--image-format'; then
+    compose_args+=(--image-format=png)
+fi
+appstreamcli compose "${compose_args[@]}" "$files"
 # appstream 1.x writes icons to swcatalog/; flatpak's export reads app-info/icons/flatpak/.
 for size in 64x64 128x128; do
     icon="$files/share/swcatalog/icons/$app_id/$size/$app_id.png"
@@ -40,6 +46,9 @@ for size in 64x64 128x128; do
         install -Dm644 "$icon" "$files/share/app-info/icons/flatpak/$size/$app_id.png"
     fi
 done
+# Without it the bundle and the repo carry no icon (software centres show a generic one).
+[[ -f "$files/share/app-info/icons/flatpak/64x64/$app_id.png" ]] || {
+    echo "[!] appstream compose wrote no 64x64 PNG icon for $app_id" >&2; exit 1; }
 
 # build-finish writes the permissions into metadata ([Context]); run it only once.
 if ! grep -q '^\[Context\]' "$staged/metadata"; then

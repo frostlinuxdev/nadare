@@ -145,7 +145,7 @@ def test_worker_monitors_existing_launch_gate(monkeypatch):
     order = []
 
     @contextmanager
-    def watch(actual, emit, cancel):
+    def watch(actual, emit, cancel, **kwargs):
         assert actual is pids and cancel is worker._cancel_token
         order.append("watch")
         emit(workers.Event("window_seen"))
@@ -230,12 +230,21 @@ def test_monitor_does_not_report_a_window_after_the_launch_ended(monkeypatch):
     assert emitted == []
 
 
-def test_monitor_without_a_process_rule_does_nothing(monkeypatch):
+def test_monitor_without_a_process_rule_watches_the_presenter_only(monkeypatch):
     calls = []
+    emitted = []
     monkeypatch.setattr(launch_window, "x11_windows", lambda: calls.append("windows") or {})
-    no_rule = wine.game_pids(SimpleNamespace())
-    with launch_window.watch(no_rule, lambda _event: calls.append("event"), Cancel()):
-        pass
+    monkeypatch.setattr(launch_window, "POLL_INTERVAL", 0.01)
+    with launch_window.watch(None, emitted.append, Cancel()) as watched:
+        assert watched is not None
+        watched.feed("info:  DXVK: v3.1.1")
+        time.sleep(0.05)
+        assert emitted == []
+        watched.feed("info:  Presenter: Actual swapchain properties:")
+        deadline = time.monotonic() + 2
+        while not emitted and time.monotonic() < deadline:
+            time.sleep(0.01)
+    assert [event.kind for event in emitted] == ["window_seen"]
     assert calls == []
 
 
@@ -285,7 +294,7 @@ def test_play_runs_when_the_backend_cannot_offer_pids(monkeypatch):
     seen = []
 
     @contextmanager
-    def watch(actual, emit, cancel):
+    def watch(actual, emit, cancel, **kwargs):
         seen.append(actual)
         yield
 

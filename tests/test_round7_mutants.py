@@ -2,7 +2,7 @@
 # ruff: noqa: F811 - pytest fixtures imported from sibling test modules
 """Round 7 (b23): guards whose tests stayed green when the guard was broken on purpose.
 
-Method (/mnt/kikyou/work/mutation-b23): Flash named guards it thought untested; each was turned
+Method (mutation round b23): Flash named guards it thought untested; each was turned
 into a real mutant and run against the tests of its module. Every test here kills one mutant that
 had survived, and where a guard has a legitimate side, that side is tested too (a lock keeps the
 wrong case out AND lets the right case in).

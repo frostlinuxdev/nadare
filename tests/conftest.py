@@ -12,6 +12,7 @@ import os
 import sys
 import threading
 import time
+import weakref
 from pathlib import Path
 
 import pytest
@@ -391,6 +392,23 @@ def _no_startup_leftover_sweep(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _no_startup_shortcut_repair(monkeypatch, request):
+    """A real window's shortcut repair (#1876) does nothing in unit tests.
+
+    Its thread runs ``xdg-user-dir`` and rewrites menu entries: one left running reads the
+    real HOME once the test has restored it, or the next test's patched ``shortcuts``. Tests
+    of the repair call ``CleanupMixin`` directly; the lifecycle lane keeps the real one.
+    """
+    if _production_lane(request):
+        return
+    try:
+        from nadare.gui.main_window import MainWindow
+    except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
+        return
+    monkeypatch.setattr(MainWindow, "_start_shortcut_repair", lambda self, **_k: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_automatic_runner_prefetch(monkeypatch, request):
     """A real window's 20 s runner prefetch (#1425) does nothing in unit tests.
 
@@ -407,6 +425,24 @@ def _no_automatic_runner_prefetch(monkeypatch, request):
     real = MainWindow._start_runner_prefetch
     monkeypatch.setattr(MainWindow, "_real_start_runner_prefetch", real, raising=False)
     monkeypatch.setattr(MainWindow, "_start_runner_prefetch", lambda self: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_automatic_patch_index_refresh(monkeypatch, request):
+    """Window tests never start the background patch index refresh on open_game (#1866).
+
+    Opening a game that offers a patch queues a ``CallTask`` on ``QThreadPool``; tests of the
+    refresh itself restore ``_real_start_patch_index_refresh``.
+    """
+    if _production_lane(request):
+        return
+    try:
+        from nadare.gui.main_window import MainWindow
+    except Exception:  # noqa: BLE001 - PyQt6 may be missing; GUI tests skip themselves
+        return
+    real = MainWindow._start_patch_index_refresh
+    monkeypatch.setattr(MainWindow, "_real_start_patch_index_refresh", real, raising=False)
+    monkeypatch.setattr(MainWindow, "_start_patch_index_refresh", lambda self, profile: None)
 
 
 @pytest.fixture(autouse=True)
@@ -469,7 +505,7 @@ _BACKGROUND_THREAD_NAMES = frozenset(
 #: folder of test_leftovers_umu before that test took umu's lock (CI 3.12, twice, 2026-11-16).
 _DELETING_THREAD_NAMES = frozenset(
     {"leftover-sweep", "nadare-spare-delete", "profile-folders-delete",
-     "steam-shortcut-cleanup", "quality-cleanup"}
+     "steam-shortcut-cleanup", "quality-cleanup", "shortcut-repair"}
 )
 
 
@@ -529,7 +565,7 @@ def _no_real_session_bus(monkeypatch):
     """No test may reach the desktop's session bus (a real "hello" notification, 2026-11-15).
 
     Qt caches the session bus per process, so a test that set DBUS_SESSION_BUS_ADDRESS still
-    talked to the real desktop when the suite ran inside one (a worker on flxpc). Every test
+    talked to the real desktop when the suite ran inside one (a worker on an NVIDIA PC). Every test
     gets a connection that is never connected; a test that wants a bus patches
     ``sessionBus`` itself (its monkeypatch runs after this one), and test_notify_dbus_real
     starts its own private bus in a subprocess.
@@ -747,3 +783,72 @@ def _no_live_steam_metadata(monkeypatch):
         return get_json(url, **kwargs)
 
     monkeypatch.setattr(artwork, "_get_json", offline)
+
+
+@pytest.fixture(autouse=True)
+def _flush_deferred_deletes():
+    """Run the deleteLater() calls a test made before the next test starts.
+
+    ``processEvents`` does not run DeferredDelete, so pages a test "deleted" stayed alive:
+    the Settings search tests left ~11k widgets, and the next test that changed the
+    application font sent a FontChange to every one through the wheel guard's filter;
+    the gate then ran out of time (2026-11-26).
+    """
+    yield
+    flush_deferred_deletes()
+
+
+_started_qthreads: weakref.WeakSet | None = None
+
+
+def _qthreads_to_check(qtcore):
+    """The QThreads that may still run, without walking the heap after the first call.
+
+    Scanning gc.get_objects() after every test cost ~23 ms a call on a 250k-object heap,
+    a third of the run; GitHub CI 3.13 hit its 25-minute limit on b27-rc1 (2026-11-26).
+    The first call scans once (threads started before Qt was hooked) and wraps
+    QThread.start; later calls only look at the threads started since.
+    """
+    global _started_qthreads
+    if _started_qthreads is not None:
+        return _started_qthreads
+    import gc
+
+    started = weakref.WeakSet(obj for obj in gc.get_objects() if isinstance(obj, qtcore.QThread))
+    real_start = qtcore.QThread.start
+
+    def start(self, *args, **kwargs):
+        started.add(self)
+        return real_start(self, *args, **kwargs)
+
+    qtcore.QThread.start = start
+    _started_qthreads = started
+    return started
+
+
+def flush_deferred_deletes(timeout_ms: int = 10_000) -> None:
+    """Run pending deleteLater() calls now (the autouse fixture above, callable from tests)."""
+    # Never import here: a test may still have Qt's import faked to fail at teardown.
+    qtcore = sys.modules.get("PyQt6.QtCore")
+    if qtcore is None or "PyQt6.QtWidgets" not in sys.modules:
+        return
+    app = qtcore.QCoreApplication
+    if app.instance() is None:
+        return
+    # Deleting the owner of a QThread that still runs aborts the process ("QThread: Destroyed
+    # while thread is still running", CI 3.13, 2026-11-26). Let such threads end first; if one
+    # will not, keep the deletes pending rather than kill the worker.
+    sip = sys.modules.get("PyQt6.sip")
+    if sip is None:
+        return
+    for obj in list(_qthreads_to_check(qtcore)):
+        if not sip.isdeleted(obj) and obj.isRunning():
+            if not obj.wait(timeout_ms):
+                return
+    # The same goes for pool workers (QRunnable): the Store's art fetches emit on a signals
+    # object their page owns, and deleting the page under them segfaulted CI 3.12 (#1863).
+    # Some tests still have globalInstance() patched to a fake pool here; only a real one runs work.
+    pool = qtcore.QThreadPool.globalInstance()
+    if isinstance(pool, qtcore.QThreadPool) and not pool.waitForDone(timeout_ms):
+        return
+    app.sendPostedEvents(None, qtcore.QEvent.Type.DeferredDelete)

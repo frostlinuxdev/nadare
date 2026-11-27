@@ -1,0 +1,38 @@
+{
+ "code": 200,
+ "msg": "success",
+ "data": {
+  "targetVersion": "3.9.1",
+  "forceUpdate": true,
+  "fullPackage": {
+   "packageUrls": [
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1526706130_size_1344034891_md5_0d76c696279bed513bc99db24745cf72_12.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1553999981_size_1374375425_md5_6f6f51431efa8ccb95480a86e33343f8_4.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1594966695_size_1392611987_md5_99eaf80ff500d473e44dcf428f350be3_18.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1605454157_size_1400836044_md5_3c15b9488a8adbc9ba5211d6861957fb_10.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1608510690_size_1427624681_md5_05658d3a5fc9f221eb21c345bf20a09b_1.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1635272099_size_1456836117_md5_e7e2c89697b64f387621ef31cb321e74_8.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1660556721_size_1465519706_md5_8c274cd0aad000c2b612863fc628deb8_16.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1662381438_size_1456340874_md5_fd59daabb38dd13fd3835241608f6fb2_11.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1697175133_size_1464694297_md5_4885cc60147fc963a2b79315698e505e_2.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1701519958_size_1519081627_md5_61042c10953433d289aba5c41774ae9b_15.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1702738962_size_1500554911_md5_5ea7b701e9028f3455e3ed30bbc5ffe6_7.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1714322353_size_1510998748_md5_cc1c5a482e03c379100d440cf665c009_9.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1725178005_size_1517974693_md5_a21cd4da13d052f9c79e557961f1d599_5.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1725901362_size_1543999418_md5_22a771d66f3dd944cd053a8fc4fccfdc_14.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1758377303_size_1579598893_md5_186930cbdea8a22d79bf1fbc262d7d8c_13.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1765547831_size_1575065537_md5_83b0c9dd8c23ccee413c92766cb2d21f_6.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1872468093_size_1674217408_md5_a8b955e42c145e260c142a3a04a4aa1d_3.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1906108647_size_1683069114_md5_8241590f45132bd9080ee03f98c56778_19.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_1992976120_size_1771297013_md5_e4bd01a70b44a6660d5b6f80f2bcbdf1_17.7z",
+    "https://download.bluepoch.com/en/game/3.9.1/122420_gameId_60001_pid_38400_res_111.0.1065_app_3.9.0_total_33174670153_origin_764508475_size_479365425_md5_d86557769e68f569c809737f4c7a91a5_0.7z"
+   ],
+   "packageSize": 29625760647,
+   "packageRealSize": 33174670153,
+   "packageMd5": null,
+   "packageJson": null,
+   "downloadType": 0
+  },
+  "diffPackage": null
+ }
+}

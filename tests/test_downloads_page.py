@@ -12,7 +12,7 @@ import pytest
 try:
     from PyQt6.QtCore import QPoint, Qt
     from PyQt6.QtTest import QTest
-    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtWidgets import QApplication, QLabel
 except Exception:  # pragma: no cover - optional GUI dependencies
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
@@ -37,6 +37,11 @@ def page(qapp):
 
 def shown(widget) -> bool:
     return widget.isVisibleTo(widget.window())
+
+
+def pills(row) -> list[QLabel]:
+    """The state badges a row actually shows (exactly one, #b29)."""
+    return [w for w in row.findChildren(QLabel) if w.objectName() == "Pill" and w.isVisibleTo(row)]
 
 
 def running(profile="a", **kw):
@@ -131,13 +136,58 @@ def test_the_operation_is_named_in_plain_words(page):
     page.set_rows(
         [
             running("a", operation="update"),
-            waiting("b", operation="repair"),
-            paused("c", operation="install"),
+            running("b", operation="repair"),
+            waiting("c", operation="install"),
+            paused("d", operation="install"),
         ]
     )
-    assert "Updating" in page.row("a").kind_label.text()
-    assert "Repairing" in page.row("b").kind_label.text()
-    assert "Installing" in page.row("c").kind_label.text()
+    # One state badge per row: what runs names its operation, a waiting or paused row
+    # says that instead of claiming an install is going on (#b29).
+    assert page.row("a").badge.text() == "UPDATING"
+    assert page.row("b").badge.text() == "REPAIRING"
+    assert page.row("c").badge.text() == "WAITING"
+    assert page.row("d").badge.text() == "PAUSED"
+
+
+@pytest.mark.parametrize(
+    ("operation", "word"),
+    [("install", "Install"), ("update", "Update"), ("repair", "Repair")],
+)
+def test_a_waiting_row_names_its_operation_in_the_row_text(page, operation, word):
+    page.set_rows([running("a"), waiting("b", ahead=2, operation=operation)])
+    row = page.row("b")
+    # The badge still says only the state; the operation is named in the line below.
+    assert row.badge.text() == "WAITING"
+    assert row.status_label.text() == f"{word} · 2 installs ahead"
+
+
+@pytest.mark.parametrize(
+    ("operation", "word"),
+    [("install", "Install"), ("update", "Update"), ("repair", "Repair")],
+)
+def test_a_paused_row_names_its_operation_in_the_row_text(page, operation, word):
+    page.set_rows([paused("c", operation=operation)])
+    row = page.row("c")
+    assert row.badge.text() == "PAUSED"
+    assert row.status_label.text().startswith(f"{word} · Paused")
+
+
+def test_the_queue_line_counts_one_and_many(page):
+    page.set_rows([running("a"), waiting("b", ahead=1), waiting("c", ahead=2)])
+    assert page.row("b").status_label.text() == "Install · 1 install ahead"
+    assert page.row("c").status_label.text() == "Install · 2 installs ahead"
+
+
+def test_the_queue_line_falls_back_to_the_english_other_form_without_a_catalogue(
+    page, monkeypatch, tmp_path
+):
+    """No catalogue: the source key itself must be the English ``other`` form (#b29)."""
+    from nadare.core import i18n
+
+    monkeypatch.setattr(i18n, "locale_dir", lambda: tmp_path)
+    monkeypatch.setattr(i18n, "_cache", {})
+    page.set_rows([running("a"), waiting("c", ahead=2)])
+    assert page.row("c").status_label.text() == "Install · 2 installs ahead"
 
 
 @pytest.mark.parametrize(
@@ -230,6 +280,9 @@ def test_a_long_step_text_does_not_make_the_row_taller(page, qapp):
     qapp.processEvents()
     assert page.row("a").height() == short
     assert page.row("a").status_label.toolTip() == long_name  # the full text stays reachable
+    # Not cut mid-letter either: the line ends in an ellipsis (#b29).
+    assert page.row("a").status_label.display_text().endswith("…")
+    assert page.row("a").status_label.text() == long_name
 
 
 def test_cancel_says_what_is_downloaded_stays_on_disk_where_that_is_true(page):
@@ -240,3 +293,225 @@ def test_cancel_says_what_is_downloaded_stays_on_disk_where_that_is_true(page):
     assert "stays on disk" in tips["a"] and "Resume" in tips["a"]
     assert "stays on disk" in tips["c"]
     assert "stays on disk" not in tips["b"]
+
+
+# ---- b29: one state badge per row, and rows that fit at the normal width -------------
+
+
+def test_a_waiting_row_says_waiting_instead_of_installing(page):
+    page.set_rows([running("a"), waiting("b", ahead=1)])
+    row = page.row("b")
+    assert [label.text() for label in pills(row)] == ["WAITING"]
+    # The badge carries the state, so the line under it does not repeat "Waiting".
+    assert "waiting" not in row.status_label.text().lower()
+    # The jump-the-queue offer is the waiting row's, and it must read as a waiting row.
+    assert shown(row.now_btn)
+
+
+@pytest.mark.parametrize(
+    ("row", "text", "state"),
+    [
+        (running("a"), "INSTALLING", "info"),
+        (waiting("b", ahead=0), "WAITING", "muted"),
+        (waiting("c", ahead=2), "WAITING", "muted"),
+        (paused("d"), "PAUSED", "muted"),
+        (DownloadRow(profile="e", title="E", operation="install", state="finished"),
+         "FINISHED", "good"),
+        (DownloadRow(profile="f", title="F", operation="install", state="elsewhere"),
+         "BUSY ELSEWHERE", "muted"),
+        (DownloadRow(profile="g", title="G", operation="runner", state="running"),
+         "PROTON RUNNER", "info"),
+    ],
+    ids=["running", "waiting-next", "waiting-behind", "paused", "finished", "elsewhere", "runner"],
+)
+def test_every_row_shows_exactly_one_state_badge(page, row, text, state):
+    page.set_rows([row])
+    labels = pills(page.row(row.profile))
+    assert len(labels) == 1
+    assert labels[0].text() == text
+    assert labels[0].property("state") == state
+
+
+def test_one_row_widget_carries_every_state_without_a_stale_badge(page, qapp):
+    """The same DownloadRowWidget goes waiting -> running -> waiting -> paused -> running."""
+    page.set_rows([running("a"), waiting("b", ahead=1, title="Strinova")])
+    qapp.processEvents()
+    row = page.row("b")
+
+    def expecting(text: str, state: str, now: bool) -> None:
+        assert page.row("b") is row  # reused, not rebuilt
+        labels = pills(row)
+        assert len(labels) == 1
+        assert labels[0].text() == text
+        assert labels[0].property("state") == state
+        assert shown(row.now_btn) is now
+        if text == "WAITING":
+            visible = [w.text() for w in row.findChildren(QLabel) if w.isVisibleTo(row)]
+            assert not any("Installing" in one for one in visible)
+
+    expecting("WAITING", "muted", True)
+    assert not shown(row.bar)
+
+    page.set_rows([running("a"), running("b", title="Strinova")])  # swap: b runs
+    expecting("INSTALLING", "info", False)
+    assert shown(row.bar)
+
+    page.set_rows([running("a"), waiting("b", ahead=0, title="Strinova")])  # swap back
+    expecting("WAITING", "muted", True)
+    assert not shown(row.bar)
+
+    page.set_rows([paused("b", title="Strinova")])
+    expecting("PAUSED", "muted", False)
+    assert shown(row.resume_btn) and not shown(row.bar)
+
+    page.set_rows([running("b", title="Strinova")])
+    expecting("INSTALLING", "info", False)
+    assert shown(row.bar)
+
+    page.set_rows([])  # cancelled: the row leaves the list with its badge
+    assert page.row("b") is None
+
+
+def test_download_now_is_only_offered_by_a_waiting_row(page):
+    page.set_rows(
+        [
+            running("a", can_now=True),
+            waiting("b", ahead=0, can_now=True),
+            paused("c", can_now=True),
+            DownloadRow(
+                profile="d", title="D", operation="install", state="finished", can_now=True
+            ),
+        ]
+    )
+    assert not shown(page.row("a").now_btn)  # nothing to jump while it installs
+    assert shown(page.row("b").now_btn)
+    assert not shown(page.row("c").now_btn)
+    assert not shown(page.row("d").now_btn)
+
+
+LONG_TITLE = (
+    "Blue Protocol: Star Resonance - Global Release, Deluxe Edition, with the "
+    "pre-registration bonus pack, the founder's weapon set and the launch soundtrack "
+    "collection"
+)
+
+
+@pytest.mark.parametrize("width", [1280, 1024])
+def test_the_title_is_never_cut_off_without_an_ellipsis(page, qapp, width):
+    page.resize(width, 700)
+    page.set_rows([running("a", title=LONG_TITLE)])
+    qapp.processEvents()
+    label = page.row("a").title_label
+    assert label.toolTip() == LONG_TITLE
+    assert label.display_text().endswith("…")
+    assert label.display_text() != LONG_TITLE
+    assert (
+        label.fontMetrics().horizontalAdvance(label.display_text())
+        <= label.contentsRect().width()
+    )
+
+
+@pytest.mark.parametrize("width", [1280, 1024])
+def test_the_queue_line_is_shown_in_full(page, qapp, width):
+    page.resize(width, 700)
+    page.set_rows([running("a"), waiting("b", ahead=0), waiting("c", ahead=2)])
+    qapp.processEvents()
+    status = page.row("c").status_label
+    assert "2 installs ahead" in status.text()
+    assert status.display_text() == status.text()  # nothing was elided
+    assert (
+        status.fontMetrics().horizontalAdvance(status.display_text())
+        <= status.contentsRect().width()
+    )
+
+
+def test_a_title_that_fits_again_is_shown_in_full_after_the_window_widens(page, qapp):
+    title = "Blue Protocol: Star Resonance Deluxe Edition with the bonus pack"
+    page.resize(700, 700)
+    page.set_rows([running("a", title=title)])
+    qapp.processEvents()
+    label = page.row("a").title_label
+    assert label.display_text().endswith("…")
+    assert label.toolTip() == title
+    page.resize(1280, 700)
+    qapp.processEvents()
+    assert label.display_text() == title
+    # It fits now: no leftover tooltip from the narrow state.
+    assert label.toolTip() == ""
+
+
+def test_the_badge_sits_beside_a_short_title(page, qapp):
+    page.set_rows([waiting("b", title="Strinova")])
+    qapp.processEvents()
+    row = page.row("b")
+    title, badge = row.title_label, row.badge
+    assert title.display_text() == "Strinova"
+    # The title only takes the room its text needs, so the badge follows it instead of
+    # being pushed to the far edge of the row (#b29).
+    assert title.width() <= title.sizeHint().width()
+    assert badge.x() - (title.x() + title.width()) == 10
+    assert badge.x() + badge.width() < row.width() // 2
+
+
+def test_a_long_title_still_elides_beside_its_badge(page, qapp):
+    page.set_rows([waiting("c", title=LONG_TITLE, ahead=1)])
+    qapp.processEvents()
+    row = page.row("c")
+    label = row.title_label
+    assert label.display_text().endswith("…")
+    assert label.display_text() != LONG_TITLE
+    assert label.toolTip() == LONG_TITLE
+    assert (
+        label.fontMetrics().horizontalAdvance(label.display_text())
+        <= label.contentsRect().width()
+    )
+    assert row.badge.x() >= label.x() + label.width()
+
+
+def test_a_title_that_fits_has_no_tooltip_after_apply_and_update_progress(page, qapp):
+    page.set_rows([running("a", title="Strinova")])
+    qapp.processEvents()
+    row = page.row("a")
+    row.apply(running("a", title="Strinova"))
+    # OneLineLabel owns the tooltip: it only appears when the text is elided.
+    assert row.title_label.toolTip() == ""
+    page.update_progress("a", 0.5, "Downloading 1 GiB", "about 2 min left")
+    qapp.processEvents()
+    assert row.title_label.toolTip() == ""
+    assert row.status_label.toolTip() == ""
+
+
+def test_a_one_line_label_re_elides_when_its_font_grows_without_a_resize(qapp):
+    from nadare.gui.game_view_parts.shared import OneLineLabel
+
+    label = OneLineLabel("Blue Protocol: Star Resonance")
+    label.setStyleSheet("font-size: 9px;")
+    label.setFixedWidth(200)
+    label.show()
+    qapp.processEvents()
+    assert label.display_text() == label.text()
+    width = label.width()
+
+    label.setStyleSheet("font-size: 24px;")  # no resize follows
+    qapp.processEvents()
+    assert label.width() == width
+    assert label.display_text().endswith("…")
+    assert label.display_text() != label.text()
+    assert label.toolTip() == label.text()
+    label.deleteLater()
+
+
+def test_the_progress_bar_does_not_jiggle_with_the_transfer_text(page, qapp):
+    page.set_rows([running("a", eta="1 MiB/s")])
+    qapp.processEvents()
+    row = page.row("a")
+    before = row.bar.geometry()
+    page.update_progress(
+        "a", 0.5, "Downloading 1 GiB", "53.0 MiB/s · 32 connections · about 10 min left"
+    )
+    qapp.processEvents()
+    assert row.bar.geometry() == before
+    page.update_progress("a", 0.6, "Downloading 1 GiB", "1.2 GiB/s")
+    qapp.processEvents()
+    assert row.bar.geometry() == before
+

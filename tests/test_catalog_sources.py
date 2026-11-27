@@ -99,6 +99,7 @@ def test_mongil_plan():
     assert arc.source.url == b["buildDownloadUrl"]
     assert arc.source.md5.lower() == b["buildFileHash"].lower()
     assert arc.source.size == b["buildFileSizeByte"]
+    assert arc.slot == "client"  # the zip is named per build (#1822)
     hdrs = f.calls[0][1]
     assert hdrs["X-NM-LAUNCHER-CH"] == "ypWjRL2aNi" and hdrs["X-NM-LAUNCHER-LANG"] == "en"
     all_paths_safe(plan)

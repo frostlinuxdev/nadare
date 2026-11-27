@@ -6,6 +6,7 @@ from __future__ import annotations
 from _backend_helpers import make_context
 
 from nadare.backends import direct
+from nadare.core.diskspace import human_size
 
 GB = 10**9
 
@@ -21,9 +22,11 @@ def test_the_size_hint_is_the_full_data_set(tmp_path):
 
 
 def test_the_page_notice_gives_the_full_size_not_the_old_estimate(tmp_path):
-    text = _backend(tmp_path).page_notice[0]
+    backend = _backend(tmp_path)
+    text = backend.page_notice[0]
     assert "60 GB" not in text
-    assert "about 94 GB" in text
+    assert f"about {human_size(backend.install_size_hint)}" in text
+    assert not any(token.endswith("GB") for token in text.split())
 
 
 def test_the_notice_says_other_voice_packs_make_it_bigger(tmp_path):

@@ -12,7 +12,7 @@ import html
 from collections.abc import Callable
 from typing import Any
 
-from PyQt6.QtCore import QThreadPool, QUrl, pyqtSignal
+from PyQt6.QtCore import Qt, QThreadPool, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QDialog,
@@ -79,6 +79,13 @@ class TermsDialog(QDialog):
         buttons.addWidget(self.cancel_button)
         buttons.addWidget(self.agree_button)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(14)
+        heading = QLabel(f"{game_title}: terms of service")
+        heading.setObjectName("Title")
+        heading.setWordWrap(True)
+        heading.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(heading)
         intro = QLabel(
             f"{html.escape(game_title)} needs this STOVE account to agree to its terms of "
             "service before the game can start. Read them below. Nadare only tells STOVE you "

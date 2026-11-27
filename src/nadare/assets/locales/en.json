@@ -3,6 +3,8 @@
   "NADARE": "NADARE",
   "Library": "Library",
   "Settings": "Settings",
+  "Search settings": "Search settings",
+  "Nothing matches “{query}”": "Nothing matches “{query}”",
   "Your games": "Your games",
   "Add game": "Add game",
   "Open logs": "Open logs",
@@ -60,6 +62,10 @@
     "one": "Waiting · {n} install ahead of this one",
     "other": "Waiting · {n} installs ahead of this one"
   },
+  "{n} installs ahead": {
+    "one": "{n} install ahead",
+    "other": "{n} installs ahead"
+  },
   "Safe to delete. Games rebuild them, and may stutter for a while after.": "Safe to delete. Games rebuild them, and may stutter for a while after.",
   "Launch blocked": "Launch blocked",
   "Nadare has marked this game as dangerous to start": "Nadare has marked this game as dangerous to start",
@@ -104,5 +110,17 @@
   "Launcher web caches": "Launcher web caches",
   "Shader caches": "Shader caches",
   "Steam prefix backups": "Steam prefix backups",
-  "This game was removed by another Nadare window or command while its settings were open, so nothing was saved. Add it again to use it.": "This game was removed by another Nadare window or command while its settings were open, so nothing was saved. Add it again to use it."
+  "This game was removed by another Nadare window or command while its settings were open, so nothing was saved. Add it again to use it.": "This game was removed by another Nadare window or command while its settings were open, so nothing was saved. Add it again to use it.",
+  "Add to app menu": "Add to app menu",
+  "Add to Steam": "Add to Steam",
+  "Update patch": "Update patch",
+  "Remove from app menu": "Remove from app menu",
+  "Remove from Steam": "Remove from Steam",
+  "As a non-Steam game; Steam must be closed": "As a non-Steam game; Steam must be closed",
+  "More: move or remove this game, add it to the app menu or Steam": "More: move or remove this game, add it to the app menu or Steam",
+  "Shortcuts": "Shortcuts",
+  "The version of the game files Nadare downloads. The game can show a different build on its own screen.": "The version of the game files Nadare downloads. The game can show a different build on its own screen.",
+  "{title} did not start": "{title} did not start",
+  "Open Nadare for details.": "Open Nadare for details.",
+  "Open Nadare and accept the account notice first.": "Open Nadare and accept the account notice first."
 }

@@ -165,8 +165,8 @@ def test_tester_guide_and_testing_agree_about_fuse() -> None:
     assert "libfuse2" in testers and "fusermount" in testers
     assert "libfuse2" in testing and "fusermount" in testing
     # #340 F-07: pages the artifacts the project actually publishes.
-    assert "single x86_64 AppImage" in testers
-    assert "no Flatpak or" in testers and "`.deb` release yet" in testers
+    assert "an x86_64 AppImage and a Flatpak" in testers
+    assert "no Flatpak or" not in testers
 
 
 # ---------------------------------------------------------------------------

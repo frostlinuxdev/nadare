@@ -78,6 +78,7 @@ _SECURITY_DOWNLOAD_MARKERS = (
 
 __all__ = [
     "GAME_TAGS",
+    "index_key",
     "ALLOWED_HOST_SUFFIX",
     "ManifestError",
     "ManifestRefused",
@@ -116,7 +117,21 @@ __all__ = [
 GAME_TAGS: dict[str, str] = {
     "StellaSora_EN": "stellasora-yostar",
     "Arknights_EN": "arknights-yostar",
+    "HBR_EN": "hbr-yostar",
+    "AZUPRO_JP": "azurpromilia-jp-yostar",
 }
+
+#: Published keys that differ from the API tag. Existing filenames stay stable.
+INDEX_KEYS: dict[str, str] = {
+    "HBR_EN": "hbr-yostar",
+    "AZUPRO_JP": "azurpromilia-jp-yostar",
+}
+
+
+def index_key(game_tag: str) -> str:
+    """Published index key for an API tag; manifest payloads keep the API tag."""
+    return INDEX_KEYS.get(game_tag, game_tag)
+
 
 #: Hosts under this suffix are always trusted Yostar CDNs.
 ALLOWED_HOST_SUFFIX = ".yo-star.com"
@@ -430,7 +445,7 @@ def load_manifest(source: str, *, game_tag: str | None = None, timeout: int = 60
     while _looks_like_index(payload):
         if not game_tag:
             raise ManifestError("manifest index needs a game_tag to select an entry")
-        entry = payload.get(game_tag)
+        entry = payload.get(index_key(game_tag))
         if not isinstance(entry, dict) or not entry.get("url"):
             raise ManifestError(f"manifest index has no entry for {game_tag!r}")
         if _depth >= 4:
@@ -537,7 +552,7 @@ def load_media(
     if _looks_like_index(payload):
         if not game_tag:
             raise MediaError("media index needs a game_tag to select an entry")
-        entry = payload.get(game_tag)
+        entry = payload.get(index_key(game_tag))
         if not isinstance(entry, dict):
             raise MediaError(f"media index has no entry for {game_tag!r}")
         target = entry.get("media")

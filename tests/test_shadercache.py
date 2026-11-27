@@ -45,7 +45,7 @@ def test_root():
 
 
 def test_launch_defaults_survive_toggle_and_relaunch(backend):
-    kwargs = {} if isinstance(backend, CznBackend) else {"sandboxed": False}
+    kwargs = {"sandboxed": False}
     _, env = backend._prefix_command(["game.exe"], **kwargs)
     root = paths.cache_dir() / "sandbox-cache/shader-cache"
     mesa, vkd3d = root / "mesa", root / "games/test/vkd3d"
@@ -60,7 +60,8 @@ def test_launch_defaults_survive_toggle_and_relaunch(backend):
     assert again["MESA_SHADER_CACHE_DIR"] == str(mesa)
     assert again["VKD3D_SHADER_CACHE_PATH"] == str(vkd3d)
     assert marker.read_bytes() == b"warm"
-    assert "MESA_SHADER_CACHE_MAX_SIZE" not in env
+    assert env["MESA_SHADER_CACHE_MAX_SIZE"] == "2G"
+    assert again["MESA_SHADER_CACHE_MAX_SIZE"] == "2G"
 
 
 def test_host_replaced_profile_override_wins_and_is_logged(backend, monkeypatch):
@@ -74,11 +75,13 @@ def test_host_replaced_profile_override_wins_and_is_logged(backend, monkeypatch)
     assert any("MESA_SHADER_CACHE_DIR" in m and "host" in m for m in messages)
     assert any("VKD3D_SHADER_CACHE_PATH" in m and "host" in m for m in messages)
     backend.ctx.profile["extra_env"] = {
+        "MESA_SHADER_CACHE_MAX_SIZE": "512M",
         "MESA_SHADER_CACHE_DIR": "/custom/mesa",
         "VKD3D_SHADER_CACHE_PATH": "/custom/vkd3d",
     }
     messages.clear()
     _, env = backend._prefix_command(["game.exe"])
+    assert env["MESA_SHADER_CACHE_MAX_SIZE"] == "512M"
     assert env["MESA_SHADER_CACHE_DIR"] == "/custom/mesa"
     assert env["VKD3D_SHADER_CACHE_PATH"] == "/custom/vkd3d"
     lines = [m for m in messages if m.startswith("shader caches:")]
@@ -190,7 +193,10 @@ def test_owned_paths_allow_spaces(cachemod, tmp_path, monkeypatch):
     assert Path(env["VKD3D_SHADER_CACHE_PATH"]) == (
         paths.shader_cache_dir() / "games/My Game/vkd3d"
     )
-    assert all(Path(value).is_dir() for value in env.values())
+    assert all(Path(env[key]).is_dir() for key in (
+        "MESA_SHADER_CACHE_DIR", "VKD3D_SHADER_CACHE_PATH"
+    ))
+    assert env["MESA_SHADER_CACHE_MAX_SIZE"] == "2G"
 
 
 def test_remove_deletes_only_owned_vkd3d_even_when_data_kept(tmp_path):
@@ -206,6 +212,7 @@ def test_remove_deletes_only_owned_vkd3d_even_when_data_kept(tmp_path):
     for directory in [own, *kept]:
         directory.mkdir(parents=True)
         (directory / "keep").write_bytes(b"123")
+    (own.parent / "other-cache").write_bytes(b"disposable")
     result = removal.remove_game(
         ctx.config,
         "gone",
@@ -213,7 +220,7 @@ def test_remove_deletes_only_owned_vkd3d_even_when_data_kept(tmp_path):
         save=False,
         applications_dir=tmp_path / "apps",
     )
-    assert not result.profile_kept and not own.exists()
+    assert not result.profile_kept and not own.parent.exists()
     assert all((directory / "keep").exists() for directory in kept)
 
 
@@ -256,3 +263,30 @@ def test_native_script_uses_owned_caches_before_profile_env(tmp_path, monkeypatc
     ctx.profile["extra_env"] = {"MESA_SHADER_CACHE_DIR": "/custom/mesa"}
     assert backend.launch() == 0
     assert captured[-1]["MESA_SHADER_CACHE_DIR"] == "/custom/mesa"
+
+
+@pytest.mark.parametrize("name", ["..", "/", "../sibling", "a/b", "a\\b"])
+def test_unsafe_profile_ids_cannot_escape_owned_cache(cachemod, name):
+    root = paths.shader_cache_dir()
+    root.mkdir(parents=True)
+    marker = root / "keep"
+    marker.write_bytes(b"safe")
+    with pytest.raises(ValueError, match="invalid profile name"):
+        cachemod.vkd3d_dir(name)
+    with pytest.raises(ValueError, match="invalid profile name"):
+        cachemod.prepare(name, {}, lambda line: None)
+    assert list(root.iterdir()) == [marker]
+
+
+def test_launch_log_has_current_owned_sizes_once(backend, monkeypatch):
+    root = paths.shader_cache_dir()
+    for folder, content in ((root / "mesa", b"123"), (root / "games/test/vkd3d", b"12345")):
+        folder.mkdir(parents=True)
+        (folder / "cache").write_bytes(content)
+    messages = []
+    monkeypatch.setattr(backend, "info", messages.append)
+    backend._prefix_command(["game.exe"])
+    lines = [line for line in messages if line.startswith("shader caches:")]
+    assert len(lines) == 1
+    assert f"Mesa={root / 'mesa'} (3 bytes)" in lines[0]
+    assert f"VKD3D={root / 'games/test/vkd3d'} (5 bytes)" in lines[0]

@@ -17,6 +17,7 @@ except Exception:  # noqa: BLE001
     pytest.skip("PyQt6 is not importable in this interpreter", allow_module_level=True)
 
 from nadare.core.config import Config
+from nadare.core.diskspace import human_size
 from nadare.gui.add_game import AddGameDialog
 
 
@@ -40,6 +41,24 @@ def test_install_new_uses_defaults_under_the_data_root(tmp_path, qapp):
         assert profile["backend"] == "arknights-yostar"
         assert profile["install_dir"] == folder
         assert profile["prefix"] == str(tmp_path / "data" / "arknights" / "prefix")
+    finally:
+        dialog.deleteLater()
+        qapp.processEvents()
+
+
+def test_the_size_hint_is_the_download_not_the_unpacking_peak(tmp_path, qapp):
+    """BPSR's fresh install downloads the 40 GiB zip before it needs 85 GiB free."""
+    from nadare.backends.direct import BpsrBackend
+
+    dialog = AddGameDialog(
+        Config.load(tmp_path / "config.json"), data_root=tmp_path / "data"
+    )
+    try:
+        dialog.set_backend("direct-bpsr")
+        text = dialog.size_hint.text()
+        assert f"about {human_size(BpsrBackend.download_size_hint)}" in text
+        assert f"about {human_size(BpsrBackend.install_size_hint)}" not in text
+        assert f"about {human_size(BpsrBackend.install_space_hint)}" not in text
     finally:
         dialog.deleteLater()
         qapp.processEvents()

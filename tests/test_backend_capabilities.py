@@ -227,7 +227,10 @@ def test_real_resumable_operations_keep_partial_downloads(
     )
     backend = backends.get(kind)(ctx)
     write_exe(backend.direct_target(), "MZ")
-    plan = directdl.Plan(backend.game_tag, "2.0", exe=backend.direct_exe)
+    # Strinova checks the tree against the source's row list; an empty list keeps it neutral.
+    plan = directdl.Plan(
+        backend.game_tag, "2.0", exe=backend.direct_exe, extra={"verification_files": ()}
+    )
     monkeypatch.setattr(backend, "plan", lambda: plan)
     monkeypatch.setattr(backend, "_ensure_default_runner", lambda **kw: None)
     monkeypatch.setattr(backend, "_ensure_direct_prefix", lambda: None)

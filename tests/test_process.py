@@ -44,7 +44,7 @@ def test_build_env_profile_prefix_and_runner() -> None:
     env = process.build_env({"prefix": "/games/pfx", "runner": "/opt/proton/GE"}, base={})
     assert env["WINEPREFIX"] == "/games/pfx"
     assert env["PROTONPATH"] == "/opt/proton/GE"
-    assert env["WINEDEBUG"] == "-all"
+    assert env["WINEDEBUG"] == "fixme-all"
 
 
 def test_build_env_extra_overrides_everything_except_the_declared_prefix() -> None:

@@ -51,7 +51,7 @@ def test_outside_a_flatpak_every_folder_is_reachable(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "where", ["~/Games", "/mnt/izuna/Games", "/media/usb/Games", "/run/media/me/disk/Games"]
+    "where", ["~/Games", "/mnt/games2/Games", "/media/usb/Games", "/run/media/me/disk/Games"]
 )
 def test_the_usual_game_places_are_reachable(flatpak, where):
     home = flatpak()
@@ -165,6 +165,10 @@ def test_the_manifest_no_longer_grants_the_whole_host():
         "--filesystem=/media",
         "--filesystem=/run/media",
         "--filesystem=~/.var/app/com.valvesoftware.Steam",
+        # native Steam (#1594): Steam Set up writes its compat tool and one config entry there,
+        # and Debian's package keeps the real folder under ~/.steam
+        "--filesystem=~/.local/share/Steam",
+        "--filesystem=~/.steam",
     ):
         assert needed in args, needed
     # every place the manifest grants is one the folder check accepts

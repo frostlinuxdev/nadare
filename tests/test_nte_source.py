@@ -256,3 +256,75 @@ def test_a_damaged_branch_resconfig_fails_cleanly():
     )
     with pytest.raises(dd.DirectError):
         nte.resolve(FakeFetch(chain_routes(bad)))
+
+
+@pytest.mark.parametrize(
+    ("legacy", "no_paks"),
+    [(False, False), (True, False), (False, True)],
+    ids=["slotted", "record-before-the-fix", "next-version-all-loose"],
+)
+def test_an_update_removes_members_of_a_pak_it_replaced(tmp_path, legacy, no_paks):
+    """#1824: each changed Pak is a new object (pak-<md5>); its dropped members must go.
+
+    ``legacy``: the first version was installed before Paks had a slot (its records have none).
+    ``no_paks``: the next version ships every file loose, so its plan has no archive at all.
+    """
+    import dataclasses
+    import hashlib
+
+    from _httpserver import Server
+
+    def md5(b):
+        return hashlib.md5(b).hexdigest()
+
+    def pak(entries):
+        blob = b"HDR!" + b"".join(entries.values())
+        rows, offset = [], 4
+        for name, data in entries.items():
+            rows.append(
+                f'<Entry name="{name}" start="0" offset="{offset}" size="{len(data)}" '
+                f'md5="{md5(data)}"/>'
+            )
+            offset += len(data)
+        return blob, f'<Pak md5="{md5(blob)}" filesize="{len(blob)}">{"".join(rows)}</Pak>'
+
+    exe = b"MZ"
+    unchanged = {"b/same.pak": b"same"}
+    dest = tmp_path / "game"
+    later = {"a/keep.pak": b"keep", "a/new.pak": b"new!"}
+    for n, changing in enumerate(({"a/keep.pak": b"keep", "a/old.pak": b"old!"}, later)):
+        blobs = {}
+        xml = ['<?xml version="1.0" ?>\n<ResList version="9" tag="baseTag">',
+               f'<Res filename="{nte.EXE}" filesize="2" md5="{md5(exe)}"/>', "<Package>"]
+        for entries in (unchanged, changing) if n == 0 or not no_paks else ():
+            blob, row = pak(entries)
+            blobs[md5(blob)] = blob
+            xml.append(row)
+        xml.append("</Package>")
+        if n and no_paks:  # every file loose: the plan has no archive (and no slot) at all
+            for name, data in {**unchanged, **later}.items():
+                xml.append(f'<Res filename="{name}" filesize="{len(data)}" md5="{md5(data)}"/>')
+                blobs[md5(data)] = data
+        xml.append("</ResList>")
+        plan = nte.plan_from_xml("\n".join(xml), RES, str(9 + n))
+        s = Server({**{f"/{k}": v for k, v in blobs.items()}, f"/{md5(exe)}": exe})
+        try:
+            local = dataclasses.replace(
+                plan,
+                files=tuple(dataclasses.replace(f, url=f"{s.url}/{f.md5}") for f in plan.files),
+                archives=tuple(
+                    dataclasses.replace(
+                        a,
+                        source=dataclasses.replace(a.source, url=f"{s.url}/{a.source.md5}"),
+                        slot="" if legacy and n == 0 else a.slot,
+                    )
+                    for a in plan.archives
+                ),
+            )
+            dd.sync(local, dest)
+        finally:
+            s.close()
+    assert (dest / "a/new.pak").read_bytes() == b"new!"
+    assert (dest / "a/keep.pak").read_bytes() == b"keep"
+    assert (dest / "b/same.pak").read_bytes() == b"same"
+    assert not (dest / "a/old.pak").exists()

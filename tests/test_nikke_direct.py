@@ -289,7 +289,10 @@ def test_install_downloads_the_launcher_and_game_client_and_runs_nothing(tmp_pat
     ]
     assert backend.find_launcher() == launcher_dir / "nikke_launcher.exe"
     steps = [e.message for e in events if e.kind == "step"]
-    assert any("game client" in message and "1.1 GB" in message for message in steps)
+    from nadare.core.diskspace import human_size
+
+    client = human_size(launcher.NIKKE_GAME_CLIENT_BYTES)
+    assert any("game client" in message and client in message for message in steps)
     done = [e.message for e in events if e.kind == "done"]
     assert done and "Play" in done[-1]
     assert any(e.kind == "progress" for e in events)

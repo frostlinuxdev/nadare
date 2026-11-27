@@ -197,7 +197,8 @@ if {through_process_run!r}:
 else:
     subprocess.Popen(argv, stdout=subprocess.DEVNULL)
     deadline = time.monotonic() + 10
-    while not Path({str(pidfile)!r}).exists():
+    # Wait for the pid itself: write_text creates the file before it writes to it.
+    while not (Path({str(pidfile)!r}).exists() and Path({str(pidfile)!r}).read_text().strip()):
         assert time.monotonic() < deadline
         time.sleep(.01)
     {CHECKPOINT}

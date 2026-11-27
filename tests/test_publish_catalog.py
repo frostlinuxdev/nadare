@@ -177,7 +177,7 @@ def test_the_default_table_covers_every_visible_catalog_game_with_a_resolver(pi,
 
     monkeypatch.delenv("NADARE_HIDE_HOYO", raising=False)
     table = pi.default_catalog_games()
-    kinds = {k for k in dk.ART if not k.startswith("launcher-")}
+    kinds = {k for k in dk.ART if not k.startswith("launcher-")} - dk.HELD_BACK_KINDS
     assert {f"direct-{tag}" for tag in table} == kinds
     for tag, game in table.items():
         assert callable(game.resolve) and game.title

@@ -142,6 +142,9 @@ def test_today_policy_sets_and_notice_operations():
         "repair",
         "remake_prefix",
         "remove_qualities",
+        "apply_patch",  # the English patch (#1866) swaps game files under the install lock
+        "update_patch",
+        "remove_patch",
     }
     assert workers.PAUSABLE == workers.CAPPED == {"install", "update", "repair"}
     assert workers.MUTATING == workers.LOCKED_OPERATIONS | {
@@ -249,13 +252,17 @@ def test_gui_lifecycle_sets_match_characterized_table():
         == workers.BACKGROUND
         == {"status", "news", "media", "check_update"}
     )
-    assert operations.UNCANCELLABLE_OPERATIONS == {"verify", "remove_qualities"}
+    # Removing a patch restores files from backups: stopping half way helps nobody (#1866).
+    assert operations.UNCANCELLABLE_OPERATIONS == {"verify", "remove_qualities", "remove_patch"}
     assert operations.REPROBE_OPERATIONS == {
         "install",
         "update",
         "launch",
         "verify",
         "remove_qualities",
+        "apply_patch",
+        "update_patch",
+        "remove_patch",
     }
     assert busy._STATE_CHANGING == {"install", "update", "repair", "remake_prefix", "uninstall"}
     assert busy._ANNOUNCED_ON_SUCCESS == {"install", "update", "repair", "verify", "remake_prefix"}

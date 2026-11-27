@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 
-from ...core import friendly, hostlibs, userns
+from ...core import friendly, gamelogs, hostlibs, userns
 from ..logs_dialog import LogsDialog
 from ..userns_dialog import UsernsDialog
 
@@ -153,7 +153,11 @@ class ConsoleMixin:
         return "logs" if clicked is logs else "close"
 
     def _open_logs(self) -> None:
-        self._logs_dialog = LogsDialog([self._profile], profile=self._profile, parent=self)
+        # The game's own logs (Unity, Unreal, DXVK) go in the zip too, as from the main window.
+        folders = {self._profile: gamelogs.folders(self._profile_data, name=self._profile)}
+        self._logs_dialog = LogsDialog(
+            [self._profile], profile=self._profile, parent=self, game_folders=folders
+        )
         self._logs_dialog.report_requested.connect(self.report_requested.emit)
         self._logs_dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self._logs_dialog.show()

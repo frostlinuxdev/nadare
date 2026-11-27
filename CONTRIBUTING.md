@@ -166,15 +166,14 @@ with the backend excluded, and tests must not assume it is present — see
 
 - `packaging/nadare.spec` is the PyInstaller recipe (onedir by default); it
   honours `NADARE_WITHOUT_FGO=1` to drop `nadare.backends.fgo`.
-- `scripts/build_appimage.sh` builds the AppImage with `appimagetool`, and
-  `scripts/build_deb.sh` builds the `.deb`.
+- `scripts/build_appimage.sh` builds the AppImage with `appimagetool`.
 - `packaging/flatpak/` and `scripts/build_flatpak.sh` build a Flatpak bundle,
   but Flatpak is deferred and would ship without FGO.
 - `scripts/build_stub_go.sh` builds the shipped CZN PCSDK stub (Go). The C
   fallback was retired after 0.1.0b25.
 
 If your change affects what is bundled (a new data file, a new hidden import),
-update the spec **and** the `.deb` staging in the same PR.
+update the spec in the same PR (the Flatpak and AUR package reuse the AppImage's files).
 
 ## Commits and pull requests
 
