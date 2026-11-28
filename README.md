@@ -129,6 +129,8 @@ is covered by tests but has not been played end to end, or needs a workaround.
 | Arknights: Endfield, Neverness to Everness (direct install), Mongil: Star Dive | Verified |
 | Epic Seven, Umamusume: Pretty Derby, Blue Archive | Verified (installed through Steam) |
 | Snowbreak: Containment Zone, Duet Night Abyss | Experimental (direct download) |
+| Reverse: 1999, Tower of Fantasy, Blue Protocol: Star Resonance (global) | Experimental (direct download) |
+| Heaven Burns Red (EN), Azur Promilia (JP, optional community English patch) | Experimental (direct download through the Yostar platform) |
 | Fate/Grand Order (NA) | Experimental, source checkouts only, needs podman and an NVIDIA GPU |
 
 How the catalog works, and how to add a game, is in [docs/CATALOG.md](docs/CATALOG.md).
